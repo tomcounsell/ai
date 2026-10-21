@@ -36,14 +36,14 @@ class Repo:
     def __init__(self, tmp_path: Path):
         tmp_path = tmp_path.resolve()
         self.origin, self.dev, self.co = tmp_path / "origin.git", tmp_path / "dev", tmp_path / "co"
-        subprocess.run(["git", "init", "-q", "--bare", str(self.origin)], check=True)
+        subprocess.run([settings.git_bin, "init", "-q", "--bare", str(self.origin)], check=True)
         scripted.git(self.origin, "symbolic-ref", "HEAD", "refs/heads/main")
-        subprocess.run(["git", "init", "-q", "-b", "main", str(self.dev)], check=True)
+        subprocess.run([settings.git_bin, "init", "-q", "-b", "main", str(self.dev)], check=True)
         commit(self.dev, "README.md", "the kernel\n", "base")
         self.base = commit(self.dev, "core/a.py", "A = 1\n", "core")
         scripted.git(self.dev, "remote", "add", "origin", str(self.origin))
         scripted.git(self.dev, "push", "-q", "origin", "main")
-        subprocess.run(["git", "clone", "-q", str(self.origin), str(self.co)], check=True)
+        subprocess.run([settings.git_bin, "clone", "-q", str(self.origin), str(self.co)], check=True)
         self.url = git.push_url(self.co)
 
     def land(self, path: str, text: str = "x\n", branch: str = "main") -> str:
@@ -210,7 +210,7 @@ LAYOUT = {
 
 def layout(tmp_path: Path) -> tuple[Path, str]:
     co = tmp_path / "co"
-    subprocess.run(["git", "init", "-q", "-b", "main", str(co)], check=True)
+    subprocess.run([settings.git_bin, "init", "-q", "-b", "main", str(co)], check=True)
     for path, text in LAYOUT.items():
         sha = commit(co, path, text, path)
     return co, sha

@@ -392,8 +392,10 @@ class Emulator:
         raise RuntimeError("the emulator did not start")
 
     def stop(self) -> None:
+        """Killed, not terminated: its state is the test's and needs no
+        saving, and a graceful exit waits out the bridge's long poll."""
         if self.proc:
-            self.proc.terminate()
+            self.proc.kill()
             self.proc.wait(10)
 
     def call(self, name: str, **body):

@@ -12,6 +12,8 @@ test marks its live spend with `@pytest.mark.spend(usd=...)`.
 import atexit
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -94,6 +96,14 @@ os.close(_fd)
 # default; where it is absent (the verification VM), Debian's PostgreSQL 18.
 if "VALOR_PG_BIN" not in os.environ and not Path("/opt/homebrew/opt/postgresql@18/bin/initdb").exists():
     os.environ["VALOR_PG_BIN"] = "/usr/lib/postgresql/18/bin"
+
+# On macOS `/usr/bin/git` is xcrun's shim, which finds the developer
+# directory again on every call and doubles what each of the suite's
+# thousands of git calls costs; the tests run the git it runs.
+if sys.platform == "darwin" and "VALOR_GIT" not in os.environ and shutil.which("git") == "/usr/bin/git":
+    _found = subprocess.run(["xcrun", "-f", "git"], capture_output=True, text=True, check=False)
+    if _found.stdout.strip():
+        os.environ["VALOR_GIT"] = _found.stdout.strip()
 
 from core import db, memory  # settings read VALOR_WORK on import
 from core.settings import settings

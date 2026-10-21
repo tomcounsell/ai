@@ -24,11 +24,12 @@ from pathlib import Path
 from core import broker, db, judgement_sites, ledger, machine, router, session, tasks, verdicts
 from core.__main__ import _performers
 from core.machine import Check, State
+from core.settings import settings
 from harnesses import claude_code
 from tests import judgement_upstream
 
 SCRIPT = r"""
-import json, pathlib, re, subprocess, sys
+import json, os, pathlib, re, subprocess, sys
 prompt, resume, brief = sys.argv[1], sys.argv[2], sys.argv[3]
 g = pathlib.Path(".git")
 cfg_path = g / "valor-script.json"
@@ -66,7 +67,7 @@ if "turns" in cfg:  # the steering lasts this many turns, then the defaults play
     cfg_path.write_text(json.dumps(cfg if cfg["turns"] else {}))
 v = pathlib.Path(".valor")
 (v / "effects").mkdir(parents=True, exist_ok=True)
-git = ["git", "-c", "user.name=Valor", "-c", "user.email=valor@example.com"]
+git = [os.environ["VALOR_GIT"], "-c", "user.name=Valor", "-c", "user.email=valor@example.com"]
 if stage is None and cfg.get("chat"):  # a chat session's turn: the next entry's requests
     for name, effect in cfg["chat"].pop(0).items():
         if name.endswith(".md"):  # a signal: compact.md, stop.md
@@ -83,7 +84,7 @@ def commit(path, text, message):
     subprocess.run(git + ["commit", "-qm", message], check=True)
 
 def head():
-    return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    return subprocess.run([git[0], "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 
 act = cfg.get(stage, "default")
 asks = cfg.get("advise") or []
@@ -123,7 +124,7 @@ elif stage == "plan":
                 (v / "verdict.json").write_text(json.dumps({"verdict": "sound", "findings": []}))
             subprocess.run(git + ["add", "-f", ".valor"], check=True)
             commit("docs/plan.md", f"plan {n}\n", "Plan")
-            subprocess.run(["git", "rm", "-q", "-r", "--cached", ".valor"], check=True)
+            subprocess.run([git[0], "rm", "-q", "-r", "--cached", ".valor"], check=True)
             for p in (v / "inputs" / "request.md", v / "verdict.json"):
                 if p.is_symlink() or p.exists():
                     p.unlink()
@@ -156,7 +157,7 @@ print(json.dumps({"result": "ok", "session_id": resume or "00000000-0000-4000-80
 
 def git(cwd, *args) -> str:
     return subprocess.run(
-        ["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True
+        [settings.git_bin, "-C", str(cwd), *args], capture_output=True, text=True, check=True
     ).stdout.strip()
 
 
@@ -173,9 +174,9 @@ def workspace(tmp_path: Path) -> tuple[Path, Path]:
     """A work branch at the base commit and a bare origin with `main` at the
     base and HEAD naming `main`."""
     origin, ws = tmp_path / "origin.git", tmp_path / "ws"
-    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run([settings.git_bin, "init", "-q", "--bare", str(origin)], check=True)
     git(origin, "symbolic-ref", "HEAD", "refs/heads/main")
-    subprocess.run(["git", "init", "-q", "-b", "valor/work", str(ws)], check=True)
+    subprocess.run([settings.git_bin, "init", "-q", "-b", "valor/work", str(ws)], check=True)
     commit(ws, "README.md", "a toy repository\n", "base")
     git(ws, "remote", "add", "origin", str(origin))
     git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
@@ -191,7 +192,8 @@ def turn_for(prompt, resume, b):
     def build(url, brief, turn_id):
         return claude_code.TurnCommand(
             argv=[sys.executable, "-c", SCRIPT, prompt, resume or "", brief], harness="script",
-            env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]}, cwd=b.workspace,
+            env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "VALOR_GIT": settings.git_bin},
+            cwd=b.workspace,
             parse=claude_code.parse,
         )  # fmt: skip
 
