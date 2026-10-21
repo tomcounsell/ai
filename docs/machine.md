@@ -371,7 +371,10 @@ sandbox profile denies it. libpq reads the password file for every kernel
 connection, so no kernel process holds the password in a string or its
 environment. `python -m core secure-login` makes it, adds `valor_memory`'s
 lines when it lacks them (written to a file beside it and renamed over it),
-and is the only code that writes it. Tom's own `psql` reaches the kernel databases by
+and is the only code that writes it. An update runs `db.migrate` alone, never
+`secure-login`, so a Mac whose password file predates `valor_memory` runs it
+by hand once; until then memory's logins fail with `fe_sendauth: no password
+supplied`. Tom's own `psql` reaches the kernel databases by
 `export PGPASSFILE=~/.config/valor-kernel/pgpass` in his shell, which no
 turn inherits: `workspace_turn` drops the `PG*` password variables.
 
