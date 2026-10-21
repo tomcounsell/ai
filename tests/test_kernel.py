@@ -136,9 +136,9 @@ def test_a_stop_fences_the_grandchild_and_refuses_a_new_child(dsn):
         gateway = await bridges.gateway(dsn, upstream="http://127.0.0.1:9")  # never reached
         body = {"model": "claude-haiku-4-5", "max_tokens": 1000}
         body["messages"] = [{"role": "user", "content": "hi"}]
-        async with aiohttp.ClientSession() as http:
-            async with http.post(gateway.issue(grandchild, "turn-1") + "/v1/messages", json=body) as r:
-                refused = r.status, await r.json()
+        url = gateway.issue(grandchild, "turn-1") + "/v1/messages"
+        async with aiohttp.ClientSession() as http, http.post(url, json=body) as r:
+            refused = r.status, await r.json()
         await gateway.close()
         return grandchild, fence, refused
 
