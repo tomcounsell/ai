@@ -98,7 +98,10 @@ def test_import_twice_appends_once_and_only_what_is_served_here(dsn, specs):
     asyncio.run(go())
 
 
-def test_prep_chooses_maps_and_collapses(tmp_path, specs, monkeypatch):
+@pytest.fixture
+def prep(specs, monkeypatch):
+    """The prep script, with cyndra and valor specs and nothing judged not
+    worth recalling unless a test says so."""
     (pathlib.Path(specs.projects_dir) / "cyndra.toml").write_text(
         'name = "cyndra"\nclient = "cyndra"\nrepo = "https://example.test/cyndra.git"\nkind = "plain"\nsuite = "true"\n'
     )
@@ -108,16 +111,22 @@ def test_prep_chooses_maps_and_collapses(tmp_path, specs, monkeypatch):
     )
     prep = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(prep)
+    monkeypatch.setattr(prep, "worth", lambda batch: [])
+    return prep
+
+
+def rec(i, content, source="human", agent="Tom", project="valor", superseded=""):
+    return {
+        "memory_id": i, "source": source, "superseded_by": superseded, "project_key": project,
+        "agent_id": agent, "content": content, "title": "", "metadata": {}, "relevance": 0.0,
+    }  # fmt: skip
+
+
+def test_prep_chooses_maps_and_collapses(tmp_path, prep, monkeypatch):
     judged = []
     monkeypatch.setattr(
         prep, "judge", lambda group: judged.append(group) or [[r["memory_id"] for r in group]]
     )
-
-    def rec(i, content, source="human", agent="Tom", project="valor", superseded=""):
-        return {
-            "memory_id": i, "source": source, "superseded_by": superseded, "project_key": project,
-            "agent_id": agent, "content": content, "title": "", "metadata": {}, "relevance": 0.0,
-        }  # fmt: skip
 
     monday = "every Monday morning the weekly status report goes out to the client by email"
     near = "the deploy goes out on Fridays after the client signs off on the release notes"
@@ -157,3 +166,34 @@ def test_prep_chooses_maps_and_collapses(tmp_path, specs, monkeypatch):
                   "| session summaries dropped | 1 |", "| no project dropped | 1 |", "| after paraphrase | 3 |"):  # fmt: skip
         assert stage in report
     assert "`lost`" in report and near + " today" in report
+
+
+def test_prep_drops_what_is_not_worth_recalling_and_lists_it(tmp_path, prep, monkeypatch):
+    chatter = {"Continue", "Agent session initialized with bypassPermissions mode enabled"}
+    batches = []
+    monkeypatch.setattr(prep, "BATCH", 2)
+    monkeypatch.setattr(
+        prep,
+        "worth",
+        lambda b: batches.append(len(b)) or [n for n, r in enumerate(b, 1) if r["text"] in chatter],
+    )
+    monkeypatch.setattr(prep, "judge", lambda group: [])
+    fact = "Twenty CRM provides native HTTP/SSE MCP server at POST /mcp endpoint"
+    export = [
+        rec("go", "Continue"),
+        rec("crm", fact, source="agent", agent="valor"),
+        rec(
+            "init", "Agent session initialized with bypassPermissions mode enabled", source="agent", agent="x"
+        ),
+    ]
+    (tmp_path / "a.jsonl").write_text("".join(json.dumps(r) + "\n" for r in export))
+    prep.main([str(tmp_path / "a.jsonl"), str(tmp_path / "out")])
+    rows = [
+        json.loads(line)["memory_id"] for line in (tmp_path / "out/import.jsonl").read_text().splitlines()
+    ]
+    assert rows == ["crm"] and batches == [2, 1]
+    report = (tmp_path / "out/report.md").read_text()
+    assert "| not worth recalling dropped | 2 |" in report and "| valor | 3 | 3 | 2 | 1 |" in report
+    assert "## Dropped, not worth recalling (2)" in report
+    assert "- (valor, by tom): Continue" in report
+    assert "- (valor, by valor): Agent session initialized with bypassPermissions mode enabled" in report

@@ -55,9 +55,11 @@ Mac's own kernel database, as memory's role.
   skipped too, and its rows are taken by the next ingest that reaches it.
 - **The old system's memory.** `scripts/memory_import_prep.py EXPORT...
   OUT/` chooses the old records Tom kept (human and agent, not superseded,
-  no session summaries), maps each to its project, and deduplicates them
+  no session summaries), maps each to its project, drops by `claude -p`
+  those not worth recalling on a future task, and deduplicates the rest
   (near-exact by word overlap, paraphrases by `claude -p`), writing
-  `import.jsonl` and a `report.md` Tom reads first. `python -m core memory
+  `import.jsonl` and a `report.md`, listing every drop, that Valor reviews
+  first. `python -m core memory
   import FILE` then appends one `memory.imported` row per line on the
   `memory` stream for the projects this Mac serves, once per old
   `memory_id`; ingest makes each a record of origin `imported` in the

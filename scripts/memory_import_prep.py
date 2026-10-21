@@ -7,11 +7,12 @@ session summaries. Each record's project is the `<name>` of an
 `extraction-tg_<name>_...` agent id, else its `project_key`, matched to a
 project spec by name for its `repo` and `client`; a record with neither is
 dropped and listed. Within a project, records whose content shares at least
-0.8 of its words (token Jaccard) collapse into one; groups sharing 0.4 to
-0.8 go to `claude -p`, which names one keeper per real duplicate group.
+0.8 of its words (token Jaccard) collapse into one; `claude -p` then drops,
+40 records at a time, those not worth recalling on a future task, and of
+the groups sharing 0.4 to 0.8 names one keeper per real duplicate group.
 A keeper is an existing record's text, Tom's own when he wrote one. Writes
-OUT/import.jsonl and OUT/report.md for Tom to read before the import. Run
-from the kernel checkout:
+OUT/import.jsonl and OUT/report.md, which Valor reviews before the import.
+Run from the kernel checkout:
   PYTHONPATH=. .venv/bin/python scripts/memory_import_prep.py EXPORT.jsonl... OUT/
 """
 
@@ -29,6 +30,7 @@ from core.workspace import Spec
 SUMMARY = re.compile(r"^In an? \d+-event session")
 LABEL = re.compile(r"^extraction-tg_([^_]+)_")
 NEAR, CANDIDATE = 0.8, 0.4
+BATCH = 40
 
 
 def words(text: str) -> frozenset[str]:
@@ -65,6 +67,30 @@ def keeper(group: list[dict]) -> dict:
     return min(group, key=lambda r: (r["by"] != "tom", -len(r["text"])))
 
 
+def ask(prompt: str) -> dict:
+    """Claude Code's JSON answer to `prompt`."""
+    out = subprocess.run(["claude", "-p", prompt], capture_output=True, text=True, check=True).stdout
+    return json.loads(out[out.index("{") : out.rindex("}") + 1])
+
+
+def worth(batch: list[dict]) -> list[int]:
+    """Claude Code's answer for one batch: the 1-based numbers of the
+    records not worth recalling on a future task."""
+    listing = "\n\n".join(f"[{n}] (by {r['by']})\n{r['text']}" for n, r in enumerate(batch, 1))
+    prompt = (
+        "These records are an AI engineer's memory of past work and chats. Name the ones NOT worth "
+        'recalling on a future task: chatter and acknowledgements ("Continue", "2", "Yeah good '
+        'luck with that"), bare references with no fact ("SDLC issue 152"), and notes about the '
+        "agent's own sessions or tooling with no lasting fact (\"The response contains no "
+        'substantive observations", "Agent session initialized with bypassPermissions", notes on '
+        "deferred tools or pending MCP servers). Keep real facts, even short ones or ones about "
+        'tools ("Twenty CRM provides native HTTP/SSE MCP server at POST /mcp endpoint"), and '
+        "people's instructions, preferences and corrections. Answer with JSON only: "
+        '{"drop": [number, ...]}.\n\n' + listing
+    )
+    return ask(prompt)["drop"]
+
+
 def judge(group: list[dict]) -> list[list[str]]:
     """Claude Code's answer for one candidate group: the ids of each set of
     records that say the same thing."""
@@ -74,8 +100,7 @@ def judge(group: list[dict]) -> list[list[str]]:
         "or preference (paraphrases), leaving out any record that says something the others do "
         'not. Answer with JSON only: {"duplicates": [[id, id, ...], ...]}.\n\n' + listing
     )
-    out = subprocess.run(["claude", "-p", prompt], capture_output=True, text=True, check=True).stdout
-    return json.loads(out[out.index("{") : out.rindex("}") + 1])["duplicates"]
+    return ask(prompt)["duplicates"]
 
 
 def merge(group: list[dict]) -> dict:
@@ -91,6 +116,16 @@ def collapse(recs: list[dict]) -> tuple[list[dict], list[dict]]:
     merged = [merge(g) for g in groups(recs, NEAR, 2.0)]
     gone = {id(r) for k in merged for r in k["merged"]}
     return [r for r in recs if id(r) not in gone], merged
+
+
+def sift(recs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """`recs` split by Claude Code, `BATCH` at a time, into those worth
+    recalling and those not."""
+    batches = [recs[i : i + BATCH] for i in range(0, len(recs), BATCH)]
+    with ThreadPoolExecutor(8) as pool:
+        answers = list(pool.map(worth, batches))
+    gone = {id(b[n - 1]) for b, a in zip(batches, answers, strict=True) for n in a if 0 < n <= len(b)}
+    return [r for r in recs if id(r) not in gone], [r for r in recs if id(r) in gone]
 
 
 def paraphrases(recs: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -151,13 +186,18 @@ def main(argv: list[str]) -> None:
             }
             by_project.setdefault(name, []).append(rec)
     stage["no project dropped"] = len(dropped)
-    rows, merges = [], []
-    table = ["| project | chosen | after near-exact | after paraphrase |", "|---|---|---|---|"]
+    rows, merges, unworthy = [], [], []
+    table = [
+        "| project | chosen | after near-exact | not worth recalling | after paraphrase |",
+        "|---|---|---|---|---|",
+    ]
     for name, recs in sorted(by_project.items()):
         near, m1 = collapse(recs)
-        kept, m2 = paraphrases(near)
-        merges += m1 + m2
-        table.append(f"| {name} | {len(recs)} | {len(near)} | {len(kept)} |")
+        worthy, gone = sift(near)
+        kept, m2 = paraphrases(worthy)
+        merges += [m for m in m1 if not any(m is r for r in gone)] + m2
+        unworthy += [(name, r) for r in gone]
+        table.append(f"| {name} | {len(recs)} | {len(near)} | {len(gone)} | {len(kept)} |")
         spec = specs[name]
         rows += [
             {
@@ -172,6 +212,7 @@ def main(argv: list[str]) -> None:
         ]
         stage["chosen"] += len(recs)
         stage["after near-exact"] += len(near)
+        stage["not worth recalling dropped"] += len(gone)
         stage["after paraphrase"] += len(kept)
     Path(out).mkdir(parents=True, exist_ok=True)
     with open(Path(out) / "import.jsonl", "w") as f:
@@ -180,6 +221,8 @@ def main(argv: list[str]) -> None:
     report += [f"| {k} | {v} |" for k, v in stage.items()]
     report += ["", "## Per project", "", *table, "", f"## Dropped, no project ({len(dropped)})", ""]
     report += [f"- `{i}` ({n or 'none'}): {cell(c)}" for i, n, c in dropped]
+    report += ["", f"## Dropped, not worth recalling ({len(unworthy)})", ""]
+    report += [f"- ({n}, by {r['by']}): {cell(r['text'])}" for n, r in unworthy]
     sample = random.Random(0).sample(merges, min(20, len(merges)))
     report += [
         "",

@@ -108,7 +108,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
      prep runs over this Mac's export and the Pirate's together, so
      duplicates across the two collapse,
      `PYTHONPATH=. $PY scripts/memory_import_prep.py $CUT/memory.jsonl PIRATE_EXPORT.jsonl $CUT/memory-import/`;
-     Tom reads `report.md`, and only then
+     Valor reviews `report.md` itself, and only then
      `$PY -m core memory import $CUT/memory-import/import.jsonl` imports this Mac's projects.
    - Its bridges and worker stopped:
      `for L in com.valor.bridge-watchdog com.valor.worker-watchdog com.valor.bridge com.valor.email-bridge com.valor.worker com.valor.reflection-worker; do launchctl disable $D/$L; launchctl bootout $D/$L; done`.

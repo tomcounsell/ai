@@ -47,15 +47,20 @@ records, make them (rule 4).
    a spec by name (`Spec.all`, `core/workspace.py:219-228`) and takes its
    `repo` and `client`; collapses exact and near-exact duplicates within a
    project (token Jaccard >= 0.8 on content: 92 records); then the
+   keep-or-drop pass: every remaining record goes to `claude -p` (Claude
+   Code itself, rule 10), 40 at a time, which names those not worth
+   recalling on a future task (chatter, bare references with no fact, notes
+   on Valor's own sessions or tooling with no lasting fact) and keeps real
+   facts, instructions, preferences and corrections; then the
    paraphrase pass: within each project, candidate groups (Jaccard 0.4 to
-   0.8, up to about 320 more) go to `claude -p` (Claude Code itself, rule
-   10), which returns one keeper id per real duplicate group and leaves the
+   0.8, up to about 320 more) go to the same `claude -p` call, which returns one keeper id per real duplicate group and leaves the
    rest. The keeper is an existing record's text, never rewritten (raw
    entries, `docs/memory.md:36-37`); Tom's own record is preferred as
    keeper. Writes
    `OUT/import.jsonl` (keeper text, project repo, client, `by`, old
    `memory_id`, `merged_from` ids) and `OUT/report.md`: counts per stage and
-   per project, and 20 sampled merges side by side. Expected 2,000 to 2,300.
+   per project, every record dropped as not worth recalling (text, project,
+   `by`), and 20 sampled merges side by side.
 2. **`python -m core memory import FILE`** beside `memory mark`
    (`core/__main__.py:752-759,993-995`): appends one `memory.imported` row per
    line on the `memory` stream (`core/memory.py:57`, as `mark` does at
@@ -73,16 +78,16 @@ records, make them (rule 4).
    rows have none (`core/memory.py:238-239`). Its record is recalled by that
    project's later tasks like any other.
 
-**Order.** Prep runs on the Pirate; Tom reads `report.md` in chat; only then
-does `memory import` run, on that same `import.jsonl` (prep is not run
-again after his review: the model pass need not repeat its groups). Rows
+**Order.** Prep runs on the Pirate; Valor reviews `report.md` itself; only
+then does `memory import` run, on that same `import.jsonl` (prep is not run
+again after the review: the model pass need not repeat its groups). Rows
 on the ledger are permanent; the export stays in `~/valor-retired`, so
 `merged_from` ids still resolve. Each Mac imports its own projects: the
 Pirate now (yudame, mondayflowers); the Cowboy (valor) by copying
 `import.jsonl` there; the Bald (cyndra) and the Captain (cuttlefish) at
 their installs, where step 7 exports that Mac's own old memory and prep
 runs over it and the Pirate's export together, so duplicates across the
-two collapse, and Tom reads that report first (rollout.md step 7 gains
+two collapse, and Valor reviews that report first (rollout.md step 7 gains
 the line). Once `memory_dsn` names the shared store, each Mac's next ingest
 takes every row that store has not taken (`core/memory.py:183-207`,
 `memory/ingest.py:33-36`), so the import is run once per ledger and reaches
@@ -95,8 +100,8 @@ gate, hook, validator, review round, approval step, isolation, sandbox rule,
 denial, allowlist, refusal, capability removal, or verification layer is
 added, the change names the mission item it serves and the incident that
 already happened without it; missing either, it is not added. This plan
-adds none: Tom's review of `report.md` is his ask, done by hand, not a gate
-in code.
+adds none: Valor's review of `report.md` is done by hand, not a gate in
+code.
 
 - The 2,413 knowledge records (Tom: skip).
 - [ORDERED] cyndra (1,609) and cuttlefish (4) wait for the Bald's and the
@@ -114,12 +119,13 @@ in code.
 - Prep on a small fixture: summary dropped, superseded and knowledge
   skipped, cyndra-labelled `valor` record mapped to cyndra, 0.8 duplicate
   collapsed (the model pass is stubbed), a human record by `agent_id`
-  `Tom` written `by` `tom`.
+  `Tom` written `by` `tom`; records the stubbed model judges not worth
+  recalling dropped, counted per stage and project, and each listed.
 - Full suite under 5 minutes; `tests/test_bloat.py` passes.
 
 ## Done
 
-Tom has read the report, the Pirate's and the Cowboy's rows are imported,
+Valor has reviewed the report, the Pirate's and the Cowboy's rows are imported,
 and the Brief of a later valor task on the Cowboy, whose instruction
 shares words with a named imported record, shows it under Remembered;
 recorded here with the date, the task id and the record's ref (rule 5).
@@ -134,7 +140,12 @@ Cyndra's 1,609 are used only once the Bald runs.
 - The Bald's and the Captain's own old memory (Tom, 2026-10-21: "Yes, same
   rules"): each Mac's own export comes across at its install, through the
   same filters, deduplicated together with the Pirate's export, and is
-  imported only after Tom reviews that report.
+  imported only after that report is reviewed.
+- Review (Tom, 2026-10-21: "i will not do a review. you'll have to self
+  review. so yes drop first to save yourself the hassle."): Tom does not
+  read the report; Valor reviews it itself before importing, by hand. Prep
+  first drops the records not worth recalling, through the same `claude -p`
+  call as the paraphrase pass, and lists every one in the report.
 
 ## Open questions
 
