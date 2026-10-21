@@ -329,8 +329,13 @@ agent.
 dispatched Brief, corrections included, through Valor's SubagentStart hook (`docs/harnesses.md`,
 Corrections reaching subagents); Pi starts none.
 
-**Design.** A later row naming a correction withdraws or replaces it. A scope beyond `global`, and rendering by relevance, arrive when one is needed or length measurably
-costs a turn.
+**Built.** A later `correction.withdrawn` row naming a correction's number withdraws it (`python -m
+core withdraw N`); a replacement is a new correction recorded with `--replaces N`, whose withdrawn
+row names it. The ledger is never edited: the number stays taken, the row stays, and no turn renders
+it again.
+
+**Design.** A scope beyond `global`, and rendering by relevance, arrive when one is needed or length
+measurably costs a turn.
 
 ## The attention log
 

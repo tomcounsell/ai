@@ -15,8 +15,13 @@ the next turn of every task, including tasks started before it.
 filter in `in_force`. `source_class` is `direct` for a correction Tom gave
 (`python -m core correct`) and `exemplar` for work Tom loved and why
 (`python -m core exemplar`): the exemplar ledger shares this store and its
-numbering, and renders in its own section after the corrections. Withdrawing
-or superseding either is not built yet.
+numbering, and renders in its own section after the corrections.
+
+Tom withdraws either with a `correction.withdrawn` row naming its number
+(`python -m core withdraw`), or replaces it with a new one whose withdrawn
+row names the replacement as `replaced_by` (`--replaces` on `correct` or
+`exemplar`), both rows in one transaction. A withdrawn number stays taken
+and its row stays in the ledger; it is no longer in force.
 
 `record` names a memory record (`<ledger>/<key>`, as its Remembered label
 shows) a correction is about: a fact about one client that turned up in
@@ -94,8 +99,10 @@ async def record(
     scope: str = "global",
     source_class: str = "direct",
     record: str | None = None,
+    replaces: int | None = None,
 ) -> dict[str, Any]:
-    """Append the next numbered correction. Returns its ledger id and payload."""
+    """Append the next numbered correction, withdrawing `replaces` in its
+    favour. Returns its ledger id and payload."""
     async with conn.transaction():
         await ledger.lock(conn, STREAM)
         row = await (
@@ -109,15 +116,36 @@ async def record(
             row[0] + 1, text, by=by, via=via, scope=scope, source_class=source_class, record=record
         )
         event_id = await ledger.append(conn, STREAM, "correction.recorded", recorded)
+        if replaces is not None:
+            await _withdraw(conn, replaces, by=by, via=via, replaced_by=recorded["number"])
     return {"event_id": event_id, **recorded}
+
+
+async def withdraw(conn, number: int, *, by: str, via: str) -> int:
+    """Append a `correction.withdrawn` row for correction `number`. Returns
+    its ledger id."""
+    async with conn.transaction():
+        await ledger.lock(conn, STREAM)
+        return await _withdraw(conn, number, by=by, via=via)
+
+
+async def _withdraw(conn, number: int, *, by: str, via: str, replaced_by: int | None = None) -> int:
+    if number not in {c["number"] for c in await in_force(conn)}:
+        raise ValueError(f"no correction {number} is in force")
+    withdrawn = {"number": number, "provenance": ledger.provenance(by, via, False)}
+    if replaced_by is not None:
+        withdrawn["replaced_by"] = replaced_by
+    return await ledger.append(conn, STREAM, "correction.withdrawn", withdrawn)
 
 
 async def in_force(conn) -> list[dict[str, Any]]:
     """Every correction that applies to a turn, in number order. With only
-    the global scope, that is all of them."""
+    the global scope, that is every one not withdrawn."""
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT id, payload FROM events WHERE task_id = %s AND type = 'correction.recorded' "
+            "SELECT id, payload FROM events c WHERE task_id = %s AND type = 'correction.recorded' "
+            "AND NOT EXISTS (SELECT 1 FROM events w WHERE w.task_id = c.task_id "
+            "AND w.type = 'correction.withdrawn' AND w.payload->>'number' = c.payload->>'number') "
             "ORDER BY (payload->>'number')::int",
             (STREAM,),
         )

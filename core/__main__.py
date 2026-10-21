@@ -101,14 +101,19 @@ used TASK_ID --by B [--delivery EVENT_ID] [--note TEXT] [--via V] [--role-played
 ledger TASK_ID                 every ledger row of the task
 stop TASK_ID [--reason TEXT]   stop the task and every task under it now,
                                wherever their turns run
-correct TEXT [--by] [--via] [--record RECORD]
+correct TEXT [--by] [--via] [--record RECORD] [--replaces N]
                                record Tom's next correction (global, direct);
                                `--record` names the memory record a client
                                fact in another client's Brief came from, which
-                               memory then recalls for its own client only
-exemplar TEXT [--by] [--via]   record work Tom loved, and why (global,
+                               memory then recalls for its own client only;
+                               `--replaces` withdraws correction N in its
+                               favour
+exemplar TEXT [--by] [--via] [--replaces N]
+                               record work Tom loved, and why (global,
                                exemplar), numbered with the corrections and
                                rendered after them in every turn
+withdraw N [--by] [--via]      withdraw correction or exemplar N: no turn
+                               renders it again; its row stays in the ledger
 corrections                    every correction and exemplar, in force for
                                every turn
 serve [--plist]                the resident kernel: binds Tom's messages, owes
@@ -863,18 +868,26 @@ async def _run(args) -> None:
                 print("stopped" + (f" (and {written - 1} descendants)" if written > 1 else ""))
         elif args.command == "correct":
             try:
-                c = await corrections.record(conn, args.text, by=args.by, via=args.via, record=args.record)
+                c = await corrections.record(
+                    conn, args.text, by=args.by, via=args.via, record=args.record, replaces=args.replaces
+                )
             except ValueError as exc:
                 raise SystemExit(f"correct refused: {exc}") from None
             print(f"correction {c['number']} recorded, ledger row {c['event_id']}")
         elif args.command == "exemplar":
             try:
                 c = await corrections.record(
-                    conn, args.text, by=args.by, via=args.via, source_class="exemplar"
+                    conn, args.text, by=args.by, via=args.via, source_class="exemplar", replaces=args.replaces
                 )
             except ValueError as exc:
                 raise SystemExit(f"exemplar refused: {exc}") from None
             print(f"exemplar {c['number']} recorded, ledger row {c['event_id']}")
+        elif args.command == "withdraw":
+            try:
+                event_id = await corrections.withdraw(conn, args.number, by=args.by, via=args.via)
+            except ValueError as exc:
+                raise SystemExit(f"withdraw refused: {exc}") from None
+            print(f"{args.number} withdrawn, ledger row {event_id}")
         elif args.command == "corrections":
             print(corrections.render(await corrections.in_force(conn)))
         elif args.command == "update":
@@ -1058,10 +1071,16 @@ def main() -> None:
     correct.add_argument("--by", default="tom")
     correct.add_argument("--via", default="the command line")
     correct.add_argument("--record", help="the memory record (<ledger>/<key>) the correction confines")
+    correct.add_argument("--replaces", type=int, help="the correction this one withdraws")
     exemplar = sub.add_parser("exemplar")
     exemplar.add_argument("text")
     exemplar.add_argument("--by", default="tom")
     exemplar.add_argument("--via", default="the command line")
+    exemplar.add_argument("--replaces", type=int, help="the exemplar this one withdraws")
+    withdraw = sub.add_parser("withdraw")
+    withdraw.add_argument("number", type=int)
+    withdraw.add_argument("--by", default="tom")
+    withdraw.add_argument("--via", default="the command line")
     sub.add_parser("corrections")
     sub.add_parser("secure-login")
     memory_cmd = sub.add_parser("memory").add_subparsers(dest="memory_command", required=True)

@@ -187,7 +187,8 @@ force from the ledger as it starts. A correction is read as a lasting
 change in what Valor does: the test of one is that the next task behaves
 differently. An exemplar is read the same way in the other direction. The
 current kernel records both from the command line (`python -m core correct`
-and `python -m core exemplar`), and every turn renders exemplars in their
+and `python -m core exemplar`) and withdraws or replaces either
+(`python -m core withdraw`, `--replaces`), and every turn renders exemplars in their
 own section after the corrections. How the
 store is laid out is `docs/architecture.md`; this doc owns what the two
 ledgers count as evidence of.

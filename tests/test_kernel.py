@@ -1050,6 +1050,55 @@ def test_exemplars_are_recorded_numbered_with_corrections_and_reach_a_turn_once(
     assert core("corrections").stdout == listed
 
 
+def test_a_withdrawn_or_replaced_correction_leaves_the_next_turn_and_stays_in_the_ledger(dsn):
+    env = {**os.environ, "VALOR_DB": settings.test_database}
+
+    def core(*argv):
+        argv = [sys.executable, "-m", "core", *argv]
+        return subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            old = await corrections.record(conn, "Write tabs.", by="tom", via="test")
+            gone = await corrections.record(conn, "Use emoji.", by="tom", via="test")
+            new = await corrections.record(
+                conn, "Write spaces.", by="tom", via="test", replaces=old["number"]
+            )
+            await corrections.withdraw(conn, gone["number"], by="tom", via="test")
+            with pytest.raises(ValueError, match=f"no correction {gone['number']} is in force"):
+                await corrections.withdraw(conn, gone["number"], by="tom", via="test")
+            turn = await tasks.dispatch(conn, await tasks.start(conn, tasks.Brief(instruction="test")))
+            assert new["number"] in turn["corrections"]
+            assert not {old["number"], gone["number"]} & set(turn["corrections"])
+            assert "Write spaces." in turn["text"]
+            assert "Write tabs." not in turn["text"] and "Use emoji." not in turn["text"]
+            rows = [
+                r
+                for r in await ledger.read(conn, corrections.STREAM)
+                if r["payload"]["number"] >= old["number"]
+            ]
+            withdrawn = {
+                r["payload"]["number"]: r["payload"].get("replaced_by")
+                for r in rows
+                if r["type"] == "correction.withdrawn"
+            }
+            assert withdrawn == {old["number"]: new["number"], gone["number"]: None}
+            assert sum(r["type"] == "correction.recorded" for r in rows) == 3
+            return await corrections.record(conn, "One page.", by="tom", via="t", source_class="exemplar")
+
+    exemplar = run(go())
+    made = core("exemplar", "Half a page.", "--replaces", str(exemplar["number"]), "--via", "test")
+    assert made.returncode == 0, made.stderr
+    listed = core("corrections").stdout
+    assert "Half a page." in listed and "One page." not in listed
+    number = made.stdout.split()[1]
+    out = core("withdraw", number, "--via", "test")
+    assert out.returncode == 0 and out.stdout.startswith(f"{number} withdrawn, ledger row ")
+    assert "Half a page." not in core("corrections").stdout
+    again = core("withdraw", number)
+    assert again.returncode != 0 and f"withdraw refused: no correction {number} is in force" in again.stderr
+
+
 # -- a team chat: one long-lived chat session, every message a steer ------------
 
 

@@ -55,7 +55,8 @@ and a GIN index over `payload` (`jsonb_path_ops`) for containment queries
 
 A **stream** is the set of rows sharing a `task_id`. A task's stream holds
 everything that happened to it. The `corrections` stream holds every
-correction Tom has given, numbered from one, and applies to every task.
+correction Tom has given, numbered from one, and applies to every task
+until a later row withdraws it.
 The `guards` stream holds the seeded guards, and the `judgement` stream
 every calibration record.
 
@@ -144,6 +145,7 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/broker.py` | `effect.intent` | `effect_id`, idempotency key, the action (`action_type`, target, payload, `payload_sha256`, `effect_class`), and `request_id` when the request had one. Older rows also hold an `approval_id`. A merge's also carries `landed`: `before` (the task's previous done merge's head, or the Brief's base), `commits` (its own, oldest first), `paths` (those they change, both paths of a rename), and `why`. They are read from the kernel mirror with the target cache's objects borrowed, leaving out every earlier done merge head on the url and branch and the cache's tip of the branch. A task with no kernel mirror records null `commits` and `paths` with `why` "no kernel copy"; a failed read records nulls with the exception's type; a value jsonb refuses is cut to `before` with Postgres's reason. Recording it never stops the merge. Older rows hold the first three only, and older merges no `landed` | Recovery: a kill between intent and outcome leaves a row that says what to look up |
 | `core/broker.py` | `effect.outcome` | `effect_id`, idempotency key, kind (`done`, `failed`), result, error; a performer's answer jsonb refuses is written with an empty result and an error naming Postgres's reason | Legibility |
 | `core/corrections.py` | `correction.recorded` | number, scope, source class, text, provenance, and `memory_record` when it confines a memory record to its client | Corrections are first-class and carry provenance |
+| `core/corrections.py` | `correction.withdrawn` | the withdrawn number, provenance, and `replaced_by` when a new correction replaces it; no turn renders that number again | Tom can take a correction back without editing the ledger |
 | `core/memory.py` | `memory.marked` | on the `memory` stream: `record` (`<ledger>/<key>`), provenance | Valor's judgement that a record is a standard of working, kept through a rebuild of the store |
 | `core/memory.py` | `memory.imported` | on the `memory` stream: `text`, `project` (the spec's `repo`), `client`, the old `memory_id`, `merged_from` (the old ids it stands for), provenance (`via` "the old system's memory") | One record of the old system's memory, written by `python -m core memory import`, kept through a rebuild of the store |
 | `core/intake.py` | `message.received` | on the stream named for the channel: `received_id`, `verified`, and the bridge's record whole (`channel`, `chat_id`, `chat_kind`, `message_id`, `sender_id`, `sender_name`, `sent_at`, `kind`, `text`, `reply_to`, `thread`, `topic_id`, `attachments`, `headers`) | Mission item 1; one row per inbound message |
