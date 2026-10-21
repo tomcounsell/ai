@@ -146,7 +146,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    bridge's audio; about 1.7 GB resident once used), `core backup` (into `~/valor-backups`, made first, or `VALOR_BACKUP_DIR` on an external disk),
    `ui` (`com.valor.ui`, the dashboard; stop a hand-started one on port
    8790 first, `lsof -ti tcp:8790 | xargs kill`, or the job crash-loops),
-   and `core routine NAME` for each routine, `update` included: `$PY -m ... --plist > $LA/<label>.plist`
+   and `core routine NAME` for each routine, `update` and `invoices` included (a `task` routine starts work only on the Mac its project is placed on, so it is installed on every Mac): `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
    A plist takes only `PLIST_ENV` from the shell, so when regenerating a
    job that ran before, export its recorded plist's variables except

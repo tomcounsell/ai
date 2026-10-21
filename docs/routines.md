@@ -19,7 +19,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 
 | Key | Holds | Serves |
 |---|---|---|
-| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`, `update`) | Mac native (launchd for scheduling) |
+| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`, `update`, `task`) | Mac native (launchd for scheduling) |
 | `ceiling`, `model` | the effect class every run's tree is capped at, and the model seat | Bounded authority, metered spending |
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
@@ -41,8 +41,18 @@ names no script and carries no secret. launchd starts a job missed during sleep 
 on wake and coalesces several missed intervals into one run, so a laptop
 that sleeps through a schedule gets one late run, never a burst.
 
-A run that needs a credential reaches it through a tool that reads Keychain,
-inside a performer the broker calls (Mac native: Keychain for secrets).
+A run that needs a credential of the business's reads it from the shared
+1Password vaults at use time, as any turn does ([machine.md](machine.md),
+Keychain): the `invoices` routine's Mercury token is the worked example.
+
+The `task` runner is the routine whose work is one task: it starts an SDLC
+task (`{"sdlc": 1}`) on the routine's project with the routine's
+instruction and ceiling, and the working session ends it with `stop.md`
+when the work was only effects. It starts nothing, returning
+`nothing_due`, on a Mac the project is not placed on, so a routine
+installed on every Mac runs on one. `invoices` (Mondays 09:00) is its
+first: the week's reminders for Yudame's unpaid Mercury invoices
+(`skills/valor/skills/mercury-invoicing`).
 
 ## How a run starts
 
@@ -181,8 +191,8 @@ decision's conditions on its schedule:
   runner reads the figure through that source's adapter (`Source.read`,
   returning the value, where it was read, and when), recorded as a
   `condition.read` row on the run. Adapters live in `tools/` and reach their
-  credential the way any routine's tool does, reading Keychain inside a
-  performer; the composition root passes the granted ones to the runner.
+  credential the way any routine's tool does, from the shared 1Password
+  vaults at use time; the composition root passes the granted ones to the runner.
   None is built yet: Stripe and Google Analytics are not granted.
 - **Where a condition has no number, the run records what Valor observes.**
   The condition is checked against its written text by the observer its

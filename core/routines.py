@@ -31,7 +31,7 @@ from typing import Any
 
 from psycopg.rows import dict_row
 
-from core import backup, guards, ledger, machine, tasks
+from core import backup, guards, ledger, machine, tasks, workspace
 from core.settings import resolve_model, settings
 
 STREAM = "routines"
@@ -705,6 +705,35 @@ def render(found: dict[str, list[dict[str, Any]]], r: Routine) -> str:
         )
 
     return "\n".join([r.instruction.strip(), "", "Due now:", *(entry(i) for i in found["items"])])
+
+
+async def task_runner(ctx: Context) -> Ran:
+    """A routine whose work is one task: start it on the routine's project,
+    an SDLC task (`{"sdlc": 1}`) the working session runs with the routine's
+    instruction and ceiling, which ends it with `stop.md` when the work was
+    only effects. A Mac the project is not placed on starts nothing, so the
+    work happens once, on one Mac."""
+    r = ctx.routine
+    if ctx.start_project is None or not r.project:
+        raise Refused(f"routine {r.name} starts a project task; none is given")
+    spec = workspace.Spec.load(r.project)
+    placed = spec.machine or settings.default_machine
+    if placed != settings.machine:
+        return Ran(
+            None, "nothing_due", f"not placed here: {r.project} is on {placed}, this is {settings.machine}"
+        )
+    run_id = await ctx.start_project(
+        ctx.conn,
+        parent=ctx.objective,
+        instruction=r.instruction,
+        routine=r.name,
+        ceiling=r.ceiling,
+        model=r.model,
+        project=r.project,
+        branch=r.branch,
+        marker={"sdlc": 1},
+    )
+    return Ran(run_id, "started", f"started {run_id}")
 
 
 async def expiry_runner(ctx: Context) -> Ran:

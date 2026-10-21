@@ -1,0 +1,20 @@
+name = "invoices"
+runner = "task"
+ceiling = "act"
+model = "frontier"
+mission_item = "Tom's ask (rule 2): reminders to Yudame's clients who haven't paid"
+need = [
+    "Tom, 2026-10-21 (Telegram 11674, 11676): send reminders to those that haven't paid, from Valor's Google account",
+    "Mercury deletes an API token unused for 45 days; this weekly call is its use",
+]
+created = 2026-10-21
+project = "valor"
+branch = "main"
+instruction = """Send this week's reminders for Yudame's unpaid Mercury invoices (skills/valor/skills/mercury-invoicing/SKILL.md).
+
+Run `python3 skills/valor/skills/mercury-invoicing/mercury.py remind`. Write each item of its `send` list, unchanged, as `.valor/effects/remind-<invoice number>.json`. Once every send's outcome is known, write `.valor/stop.md`: `Done:`, then each invoice reminded and to whom, then each invoice in `for_tom` (past its fourth reminder) with its customer, amount and days overdue. With nothing to send, `Done: no reminders due`. If the script fails, send nothing and stop with `Done: no reminders sent`, then its error."""
+
+[schedule]
+weekday = 1
+hour = 9
+minute = 0

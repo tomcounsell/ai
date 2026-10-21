@@ -264,9 +264,21 @@ the `pg_passfile` setting (`~/.config/valor-kernel/`, mode 700), which the
 sandbox profile denies. They are not in the Keychain, because a turn
 can read the login keychain (below). A secret is read by name when the
 process that needs it starts; a missing name fails the start with the name
-in the error. No secret is in the repository or in a turn's environment.
-This serves the constraint "bounded authority, metered spending": a credential is
-authority, and a turn holds none.
+in the error. No kernel secret is in the repository or in a turn's environment.
+This serves the constraint "bounded authority, metered spending": the
+kernel's credentials (its databases, its model and judgement keys) are
+authority a turn never holds.
+
+The businesses' own credentials are another matter. Yudame shares them
+through its shared 1Password vaults: `Yudame Secrets` for company services
+(the Mercury token is item `Mercury API Token`), `m-valor` and `Valor env`
+for Valor's own accounts. A turn reads one at use time with `op read`,
+holds it in memory only, and never writes it to a file, a commit, a log or
+a message. `op` signs in with the 1Password service account,
+`OP_SERVICE_ACCOUNT_TOKEN`, which a turn's environment carries (checked
+2026-10-21) and which the vault `.env` holds for a process that lacks it
+(`scripts/deploy-site.sh`, `mercury.py`). A credential Valor makes for
+itself goes into `m-valor`.
 
 | Secret | Read by | Today |
 |---|---|---|

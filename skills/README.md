@@ -6,7 +6,7 @@ Versioned skills.
 
 A worker's skills come from three sources together:
 
-- **Valor's own plugin**, `valor/` here, loaded first in every workspace turn (`settings.plugin_dirs`): the web agent `valor:web` and its guard hook (`valor/agents/`, `valor/hooks/`), the SubagentStart hook that gives every subagent the Brief, the PreCompact hook that gives a chat session's compaction its instructions (`VALOR_COMPACT`), and Valor's own skills (`valor/skills/`: `authenticity-pass`). Each further skill is built by an ordinary task on this repository.
+- **Valor's own plugin**, `valor/` here, loaded first in every workspace turn (`settings.plugin_dirs`): the web agent `valor:web` and its guard hook (`valor/agents/`, `valor/hooks/`), the SubagentStart hook that gives every subagent the Brief, the PreCompact hook that gives a chat session's compaction its instructions (`VALOR_COMPACT`), and Valor's own skills (`valor/skills/`: `authenticity-pass`, and `mercury-invoicing`, Yudame's Mercury invoices, pay links and reminders from valor@yuda.me). Each further skill is built by an ordinary task on this repository.
 - **The yudame plugins**, from `yudame/skills` in the Agent Skills format: the `yudame` and `yudame-dev` plugins listed in `settings.plugin_dirs`, kept current by the marketplace. Codex and Pi read the same clone through `~/.agents/skills` ([docs/plans/skills-and-harnesses.md](../docs/plans/skills-and-harnesses.md)).
 - **The project's own skills**, in the repository the task works in.
 

@@ -530,6 +530,7 @@ def _routine_runners() -> dict:
         "conditions": conditions.runner({}, credential=settings.github_keyfile),
         "verify": verify.run,
         "update": update_runner,
+        "task": routines.task_runner,
     }
 
 
