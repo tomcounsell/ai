@@ -371,7 +371,7 @@ def plist(*, python: str | None = None, root: Path = ROOT) -> bytes:
     return plistlib.dumps(
         {
             "Label": LABEL,
-            "ProgramArguments": [python or sys.executable, "-m", "core", "backup"],
+            "ProgramArguments": [settings.launcher, python or sys.executable, "-m", "core", "backup"],
             "WorkingDirectory": str(root),
             "EnvironmentVariables": env,
             "StartCalendarInterval": {"Hour": 3, "Minute": 0},

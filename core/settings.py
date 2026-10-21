@@ -315,6 +315,12 @@ class Settings:
     openai_upstream: str = field(
         default_factory=lambda: _env("VALOR_OPENAI_UPSTREAM", "https://api.openai.com")
     )
+    # Valor.app's executable, which every launchd job runs its command
+    # through so macOS privacy grants hold across Python upgrades
+    # (`core/permissions.py`).
+    launcher: str = field(
+        default_factory=lambda: str(Path.home() / "Applications/Valor.app/Contents/MacOS/valor-run")
+    )
     claude: str = field(default_factory=lambda: _env("VALOR_CLAUDE", str(Path.home() / ".local/bin/claude")))
     # The plugins a workspace turn loads (`--plugin-dir`, each that exists):
     # Valor's own (`skills/valor` in the kernel's checkout: the web agent, its
@@ -381,7 +387,9 @@ class Settings:
     )
 
     # -- backups: the volume's name is the single character U+F028 ------------
-    backup_dir: str = field(default_factory=lambda: _env("VALOR_BACKUP_DIR", str(Path.home() / "valor-backups")))
+    backup_dir: str = field(
+        default_factory=lambda: _env("VALOR_BACKUP_DIR", str(Path.home() / "valor-backups"))
+    )
     backup_keep: int = field(default_factory=lambda: int(_env("VALOR_BACKUP_KEEP", "30")))
     log_dir: str = field(
         default_factory=lambda: _env("VALOR_LOG_DIR", str(Path.home() / "Library" / "Logs" / "valor"))

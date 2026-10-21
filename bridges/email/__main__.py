@@ -51,6 +51,7 @@ def plist(python: str | None = None, root: Path = ROOT) -> bytes:
         {
             "Label": LABEL,
             "ProgramArguments": [
+                settings.launcher,
                 python or str(root / ".venv" / "bin" / "python"),
                 "-m",
                 "bridges.email",

@@ -234,6 +234,14 @@ scheduler, supervisor, or watchdog on the machine.
   is a child of the routine's objective, so a routine's turn takes the turn
   slot and its spend is metered like any other. `routine NAME --plist`
   prints the plist for this Mac; see [routines.md](routines.md).
+- **Every job runs through Valor.app.** A plist's first argument is
+  `settings.launcher`, `~/Applications/Valor.app`'s `valor-run`, which runs
+  the rest as its child and exits as it did. macOS attaches a privacy grant
+  to that app instead of to the Homebrew Python's path, which changes with
+  every upgrade and was asked for each grant again. `python -m core
+  permissions` (`core/permissions.py`) builds the app once and never
+  rebuilds it, since a rebuild drops its grants, and asks for the grants at
+  the Mac ([rollout.md](rollout.md), step 9).
 - **Stop is not `launchctl`.** Stopping a task is `python -m core stop`,
   which fences it in the database, revokes its gateway token, and kills the
   turn's process group. Unloading a LaunchAgent stops a service; it is not

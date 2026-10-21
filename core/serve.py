@@ -1255,7 +1255,13 @@ def plist(*, python: str | None = None, root: Path = ROOT) -> bytes:
     return plistlib.dumps(
         {
             "Label": LABEL,
-            "ProgramArguments": [python or str(root / ".venv" / "bin" / "python"), "-m", "core", "serve"],
+            "ProgramArguments": [
+                settings.launcher,
+                python or str(root / ".venv" / "bin" / "python"),
+                "-m",
+                "core",
+                "serve",
+            ],
             "WorkingDirectory": str(root),
             "EnvironmentVariables": env,
             "KeepAlive": True,

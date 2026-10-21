@@ -125,6 +125,10 @@ update [--wait] [--by B]       ask the resident kernel to roll this Mac to its
                                or fail, printing from and to and the jobs
                                restarted, and exits 1 on a failure or when it
                                is still open (held, or no kernel)
+permissions                    at the Mac, once: build Valor.app, which every
+                               launchd job runs through, and ask for the
+                               privacy grants it needs (`--probe` is the part
+                               that runs inside the app)
 restore DUMP [--keep]          restore a dump into a scratch cluster and check
                                it against its manifest
 
@@ -942,6 +946,10 @@ def _sync(args) -> bool:
         from core import serve
 
         print(serve.plist().decode(), end="")
+    elif args.command == "permissions":
+        from core import permissions
+
+        raise SystemExit(permissions.probe() if args.probe else permissions.run())
     elif args.command == "restore":
         try:
             print(json.dumps(backup.restore(args.dump, keep=args.keep)))
@@ -1075,6 +1083,7 @@ def main() -> None:
     sub.add_parser("agenda")
     sub.add_parser("backup").add_argument("--plist", action="store_true")
     sub.add_parser("serve").add_argument("--plist", action="store_true")
+    sub.add_parser("permissions").add_argument("--probe", action="store_true")
     update = sub.add_parser("update")
     update.add_argument("--wait", action="store_true", help="wait for it to end or fail")
     update.add_argument("--by", default="tom")
