@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 API = "https://api.mercury.com/api/v1"
-TOKEN_REF = "op://Yudame Secrets/Mercury API Token/credential"
+TOKEN_REF = "op://m-valor/Mercury API Token/credential"
 PAY = "https://app.mercury.com/pay/{slug}"
 MARK = "valor"  # internalNote on every invoice Valor creates
 EVERY_DAYS = 7  # at most one reminder per invoice in this many days
@@ -32,7 +32,12 @@ SKIPPED = ("defer", "gratis", "included")
 
 
 class Failed(Exception):
-    """A plain message for the person running this; exit 1."""
+    """A plain message for the person running this; exit 1. `status` is
+    Mercury's HTTP status when Mercury refused the call."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 # -- the token --------------------------------------------------------------
@@ -60,7 +65,7 @@ def token() -> str:
     value = got.stdout.strip()
     if got.returncode != 0 or not value:
         raise Failed(
-            "no Mercury token in 1Password: vault 'Yudame Secrets', item 'Mercury API Token', field 'credential'"
+            "no Mercury token in 1Password: vault 'm-valor', item 'Mercury API Token', field 'credential'"
         )
     return "Bearer " + (value if value.startswith("secret-token:") else "secret-token:" + value)
 
@@ -96,7 +101,8 @@ def call(method: str, path: str, body: dict | None = None, *, raw: bool = False)
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:500]
         raise Failed(
-            f"Mercury {method} {path}: {e.code} {detail} (this Mac's public IP: {public_ip()})"
+            f"Mercury {method} {path}: {e.code} {detail} (this Mac's public IP: {public_ip()})",
+            e.code,
         ) from None
     except urllib.error.URLError as e:
         raise Failed(f"Mercury {method} {path}: {e.reason}") from None
@@ -354,6 +360,27 @@ def remind(today: date, now: datetime, folder: Path) -> dict:
     return {"send": send, "for_tom": for_tom}
 
 
+def accounts() -> list[dict]:
+    """The accounts payments can go to. A token without the accounts scope
+    is refused `/accounts` (403), so then each account an existing invoice
+    pays into, with the invoices that use it, since every invoice carries
+    its `destinationAccountId`."""
+    try:
+        return [
+            {k: x.get(k) for k in ("id", "name", "nickname", "kind", "type", "status")}
+            for x in call("GET", "/accounts")["accounts"]
+        ]
+    except Failed as e:
+        if e.status != 403:
+            raise
+    used: dict[str, list[str]] = {}
+    for inv in paged("/ar/invoices", "invoices"):
+        used.setdefault(inv["destinationAccountId"], []).append(inv["invoiceNumber"])
+    if not used:
+        raise Failed("the token cannot read /accounts and no invoice names an account yet")
+    return [{"id": a, "from_invoices": ns} for a, ns in used.items()]
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -397,10 +424,7 @@ def main(argv: list[str] | None = None) -> int:
             inv = call("GET", f"/ar/invoices/{a.id}")
             out = write_pdf(inv, Path(a.dir))
         else:
-            out = [
-                {k: x.get(k) for k in ("id", "name", "nickname", "kind", "type", "status")}
-                for x in call("GET", "/accounts")["accounts"]
-            ]
+            out = accounts()
     except Failed as e:
         print(f"mercury: {e}", file=sys.stderr)
         return 1

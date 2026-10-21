@@ -370,7 +370,7 @@ class Op:
         self.value, self.code, self.envs = value, code, []
 
     def __call__(self, argv, env=None, **kw):
-        assert argv == ["op", "read", "op://Yudame Secrets/Mercury API Token/credential"]
+        assert argv == ["op", "read", "op://m-valor/Mercury API Token/credential"]
         self.envs.append(env)
         return run_result(self.code, self.value + "\n" if self.code == 0 else "", "isn't an item")
 
@@ -406,7 +406,7 @@ def test_a_missing_service_sign_in_is_named(monkeypatch, tmp_path):
 def test_a_missing_item_is_named(monkeypatch):
     monkeypatch.setenv("OP_SERVICE_ACCOUNT_TOKEN", "ops_x")
     monkeypatch.setattr(mercury.subprocess, "run", Op(code=1))
-    with pytest.raises(mercury.Failed, match="vault 'Yudame Secrets', item 'Mercury API Token'"):
+    with pytest.raises(mercury.Failed, match="vault 'm-valor', item 'Mercury API Token'"):
         mercury.token()
 
 
@@ -428,6 +428,45 @@ def test_a_refused_call_names_the_ip_and_never_the_token(monkeypatch, capsys, co
     assert seen == ["Bearer " + SECRET]
     assert f"{code}" in out.err and "ip not allowed" in out.err and "203.0.113.9" in out.err
     assert "mercury-test" not in out.out + out.err
+
+
+# -- accounts ---------------------------------------------------------------------
+
+
+def test_the_token_is_tom_s_item_in_m_valor():
+    assert mercury.TOKEN_REF == "op://m-valor/Mercury API Token/credential"
+
+
+def test_accounts_lists_mercury_s_accounts_when_the_token_may_read_them(monkeypatch):
+    acct = {"id": "a-1", "name": "Checking ••1234", "kind": "checking", "type": "mercury", "status": "active"}
+    monkeypatch.setattr(mercury, "call", lambda m, path, *a, **k: {"accounts": [acct], "page": {}})
+    assert mercury.accounts() == [{**acct, "nickname": None}]
+
+
+def test_accounts_out_of_scope_come_from_the_existing_invoices(fake, monkeypatch):
+    m = fake(invoices=[inv("A", destinationAccountId="a-1"), inv("B", destinationAccountId="a-1"),
+                       inv("C", destinationAccountId="a-2")])  # fmt: skip
+    real = m.__call__
+
+    def scoped(method, path, body=None, *, raw=False):
+        if path == "/accounts":
+            raise mercury.Failed("Mercury GET /accounts: 403 tokenNotInScope", 403)
+        return real(method, path, body, raw=raw)
+
+    monkeypatch.setattr(mercury, "call", scoped)
+    assert mercury.accounts() == [
+        {"id": "a-1", "from_invoices": ["A", "B"]},
+        {"id": "a-2", "from_invoices": ["C"]},
+    ]
+
+
+def test_accounts_other_refusals_are_not_hidden(monkeypatch):
+    def down(*a, **k):
+        raise mercury.Failed("Mercury GET /accounts: 500", 500)
+
+    monkeypatch.setattr(mercury, "call", down)
+    with pytest.raises(mercury.Failed, match="500"):
+        mercury.accounts()
 
 
 # -- the weekly routine -----------------------------------------------------------

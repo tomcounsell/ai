@@ -11,7 +11,7 @@ as Yudame. It prints JSON and calls nothing it does not name.
 ## The token
 
 Yudame shares credentials through its shared 1Password vaults. The Mercury token is
-the item **Mercury API Token** (field `credential`) in the vault **Yudame Secrets**,
+the item **Mercury API Token** (field `credential`) in the vault **m-valor**,
 read with `op read` at each run and held only in memory: never write it to a file,
 a commit, a log or a message. `op` signs in with `OP_SERVICE_ACCOUNT_TOKEN`, taken
 from the vault `.env` (`~/Desktop/Valor/.env`) when the environment lacks it.
@@ -33,7 +33,9 @@ the new one to the token on Mercury's token page. Mercury deletes a token unused
    invoice is marked as Valor's (`internalNote: valor`), which is what makes it
    eligible for reminders. A number already in Mercury is printed and nothing is
    created. The customer is found by email or created. `accounts` lists the account
-   ids; payments go to Yudame's checking account.
+   ids; payments go to Yudame's checking account. The token in use has no accounts
+   scope (`/accounts` is 403 `tokenNotInScope`), so `accounts` then lists the account
+   each existing invoice pays into; use the one Tom's own invoices use.
    A spec with a discount or credit (the Cyndra budget line) becomes one services
    line priced net of it, since Mercury does not document negative prices; the PDF
    carries the detail.

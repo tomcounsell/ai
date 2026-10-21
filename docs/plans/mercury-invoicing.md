@@ -43,7 +43,7 @@ from valor@yuda.me (rule 5; the live check waits on Tom's token).
      4th reminder is listed for Tom instead.
    - `notice ID`: the same payload for the first notice of a created invoice.
    - `pdf ID -o PATH`, `accounts`.
-   Token: `op read "op://Yudame Secrets/Mercury API Token/credential"` per
+   Token: `op read "op://m-valor/Mercury API Token/credential"` per
    call, sent as `Bearer secret-token:<token>`. `op` signs in with
    `OP_SERVICE_ACCOUNT_TOKEN`; when the environment lacks it, it is read
    from the vault `.env` (`VALOR_VAULT_ENV`, default
@@ -134,6 +134,6 @@ Mercury: Settings > Tokens > Create an API Token, **Custom**, scopes for
 invoices (accounts receivable) read and write, customers read and write,
 accounts read, nothing that sends money. Write scopes need an IP allowlist:
 **171.100.191.13** (the Cowboy; a cable line, likely dynamic, and a refused
-call names the new IP). Save in 1Password vault **Yudame Secrets**, item
+call names the new IP). Saved (Tom, 2026-10-21) in 1Password vault **m-valor**, item
 **Mercury API Token** (API Credential, field `credential`). The scope labels
 are not public; the delivery says so.
