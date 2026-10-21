@@ -42,11 +42,26 @@
 <p class="kicker"><span class="n">06 ·</span> the work</p>
 <h1>One voice in every chat.</h1>
 <p class="lede">Valor works in the chats a team already uses. In each one, a single session speaks for it and hands the work to agents behind it.</p>
+<nav class="toc" aria-label="On this page">
+  <p class="toc-label">On this page</p>
+  <ol>
+    <li><a href="#sessions">Chats</a></li>
+    <li><a href="#rooms">Rooms</a></li>
+    <li><a href="#reaches-tom">Attention</a></li>
+    <li><a href="#routines">Routines</a></li>
+  </ol>
+</nav>
 
 <section id="sessions">
   <p class="sec-label">Chats</p>
   <h2>Read, then dispatch</h2>
-  <div class="split"><div><p>The session reads the chat, memory, task status and the repository itself. A quick lookup goes to a subagent, anything on the web to the web agent, and anything to deliver to a task. Tasks report back to the session, never to the chat.</p>
+  <div class="split"><div><p>The session reads the chat, memory, task status and the repository itself. Then it hands work on:</p>
+  <ul class="tight">
+    <li>a quick lookup to a subagent;</li>
+    <li>anything on the web to the web agent;</li>
+    <li>anything to deliver to a task.</li>
+  </ul>
+  <p class="callout">Tasks report back to the session, never to the chat.</p>
   <p>When Tom is still talking an idea through, the session starts nothing. It asks what only he can settle, one question per message.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/converse.md">skills/sdlc/converse.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/tools/chat_tasks.py">tools/chat_tasks.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 262" role="img" aria-label="A message reaches the chat&#x27;s session, which handles a small lookup with a subagent, the web with the web agent, and anything to deliver with a task that reports back."><defs><marker id="m8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m8b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box " x="20" y="20" width="340" height="46"/><text class="fg-title" x="190.0" y="48.0" text-anchor="middle">A message in the chat</text><line class="dg-edge" x1="190" y1="66" x2="190" y2="93" marker-end="url(#m8)"/><rect class="dg-box " x="20" y="96" width="340" height="50"/><text class="fg-title" x="190.0" y="117.0" text-anchor="middle">The chat's session</text><text class="fg-sub" x="190.0" y="135.0" text-anchor="middle">reads the chat, memory, tasks, repo</text><line class="dg-edge" x1="190" y1="146" x2="72" y2="190" marker-end="url(#m8)"/><rect class="dg-box " x="20" y="192" width="104" height="50"/><text class="fg-title" x="72.0" y="213.0" text-anchor="middle">Subagent</text><text class="fg-sub" x="72.0" y="231.0" text-anchor="middle">a quick lookup</text><line class="dg-edge" x1="190" y1="146" x2="190" y2="190" marker-end="url(#m8)"/><rect class="dg-box " x="138" y="192" width="104" height="50"/><text class="fg-title" x="190.0" y="213.0" text-anchor="middle">Web agent</text><text class="fg-sub" x="190.0" y="231.0" text-anchor="middle">search, a page</text><line class="dg-edge" x1="190" y1="146" x2="308" y2="190" marker-end="url(#m8)"/><rect class="dg-box " x="256" y="192" width="104" height="50"/><text class="fg-title" x="308.0" y="213.0" text-anchor="middle">Task</text><text class="fg-sub" x="308.0" y="231.0" text-anchor="middle">work to deliver</text><path class="dg-edge back" d="M 360 217 C 374 217, 374 121, 363 121" marker-end="url(#m8b)"/></svg></figure></div>
 </section>
@@ -54,7 +69,11 @@
 <section id="rooms">
   <p class="sec-label">Rooms</p>
   <h2>Team chats stay quiet</h2>
-  <p>In a team chat Valor waits to be mentioned, and no engineering work starts there; web search and filing a GitHub issue are fine. Engineering goes to the project's engineering chat, where every message reaches the session. Each chat's purpose is written down and rides in every turn's prompt.</p>
+  <div class="cols-2">
+    <div><h3>Team chats</h3><p>Valor waits to be mentioned, and no engineering work starts there. Web search and filing a GitHub issue are fine.</p></div>
+    <div><h3>Engineering chats</h3><p>Every message reaches the session, and engineering work starts here.</p></div>
+  </div>
+  <p>Each chat's purpose is written down and rides in every turn's prompt.</p>
   <p>A message Valor reads gets 👀 at once. When the turn finishes, the emoji changes to show what it did.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/bridges/telegram.md">docs/bridges/telegram.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/reactions.py">core/reactions.py</a></p>
 </section>
@@ -62,7 +81,14 @@
 <section id="reaches-tom">
   <p class="sec-label">Attention</p>
   <h2>What reaches Tom</h2>
-  <p>Every time Tom acts on a task is a ledger row, counted beside the money. What he gets: a question, only when the answer changes the outcome; a delivery, saying what was verified and what wasn't; a report for each merge or send; and an agenda when a committed decision's watched condition has been met. Documents come as phone-readable PDFs.</p>
+  <p>Every time Tom acts on a task is a ledger row, counted beside the money. What he gets:</p>
+  <ul class="tight">
+    <li><b>A question</b>, only when the answer changes the outcome.</li>
+    <li><b>A delivery</b>, saying what was verified and what wasn't.</li>
+    <li><b>A report</b> for each merge or send.</li>
+    <li><b>An agenda</b> when a committed decision's watched condition has been met.</li>
+  </ul>
+  <p>Documents come as phone-readable PDFs.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md#the-attention-log">docs/mission.md, The attention log</a> · <a href="https://github.com/tomcounsell/ai/blob/main/persona/delivery.md">persona/delivery.md</a></p>
 </section>
 
@@ -90,7 +116,7 @@
     <span>valor engels · how the system works</span>
     <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
     <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
-    <span>updated 2026-10-20</span>
+    <span>updated 2026-10-21</span>
   </div>
 </footer>
 </body>

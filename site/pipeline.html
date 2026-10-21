@@ -42,6 +42,15 @@
 <p class="kicker"><span class="n">04 ·</span> the SDLC pipeline</p>
 <h1>From a request to a merged result.</h1>
 <p class="lede">Each task passes the same checkpoints. The agent decides how to do the work in a stage; the kernel decides which stage comes next and what may leave the machine.</p>
+<nav class="toc" aria-label="On this page">
+  <p class="toc-label">On this page</p>
+  <ol>
+    <li><a href="#stages">The path</a></li>
+    <li><a href="#sessions">Two kinds of session</a></li>
+    <li><a href="#loops">Loops</a></li>
+    <li><a href="#merge">The merge predicate</a></li>
+  </ol>
+</nav>
 
 <section id="stages">
   <p class="sec-label">The path</p>
@@ -55,14 +64,22 @@
 <section id="sessions">
   <p class="sec-label">Two kinds of session</p>
   <h2>The builder keeps its context; the checkers never see it</h2>
-  <p>Clarify, plan, build and patch resume one session, so Valor keeps its context across a question, a send-back and Tom's feedback. Critique, review and docs each start fresh in a worktree of the exact commit they judge. The reviewer runs the suite itself rather than trust the builder's transcript.</p>
+  <div class="cols-2">
+    <div><h3>The working session</h3><p>Clarify, plan, build and patch resume one session, so Valor keeps its context across a question, a send-back and Tom's feedback.</p></div>
+    <div><h3>Fresh sessions</h3><p>Critique, review and docs each start fresh in a worktree of the exact commit they judge. The reviewer runs the suite itself rather than trust the builder's transcript.</p></div>
+  </div>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/session.py">core/session.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/fresh.py">core/fresh.py</a></p>
 </section>
 
 <section id="loops">
   <p class="sec-label">Loops</p>
   <h2>The plan sets its own loops from the stakes</h2>
-  <p>A small reversible change gets none. A change to stored data, money, authentication or the kernel gets two critique rounds and one review round. Critique can raise those counts, never lower them. Once the rounds are spent, Valor decides whether to patch once more or stop and tell Tom why, so work that doesn't converge stops instead of spending on itself.</p>
+  <ul class="tight">
+    <li><b>A small reversible change</b> gets no extra rounds.</li>
+    <li><b>Stored data, money, authentication or the kernel</b> gets two critique rounds and one review round.</li>
+  </ul>
+  <p>Critique can raise those counts, never lower them. Once the rounds are spent, Valor decides whether to patch once more or stop and tell Tom why.</p>
+  <p class="callout">Work that doesn't converge stops instead of spending on itself.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md#loops">docs/sdlc-state-machine.md, Loops</a></p>
 </section>
 
@@ -74,7 +91,8 @@
     <li><b>Test passed, or showed only breadth gaps with the rounds spent.</b></li>
     <li><b>Review passed.</b></li>
   </ol>
-  <p>The broker reads the predicate in the same transaction that writes the merge's intent. The target repository and branch were fixed when the task started, and no turn can change them. If the branch moved meanwhile, a clean move is replayed with no turn at all; otherwise the work goes back to rebase.</p>
+  <p>The broker reads the predicate in the same transaction that writes the merge's intent. The target repository and branch were fixed when the task started, and no turn can change them.</p>
+  <p>If the branch moved meanwhile, a clean move is replayed with no turn at all; otherwise the work goes back to rebase.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/machine.py">core/machine.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/broker.py">core/broker.py</a></p>
 </section>
 
@@ -90,7 +108,7 @@
     <span>valor engels · how the system works</span>
     <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
     <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
-    <span>updated 2026-10-20</span>
+    <span>updated 2026-10-21</span>
   </div>
 </footer>
 </body>

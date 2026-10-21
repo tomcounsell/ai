@@ -42,6 +42,18 @@
 <p class="kicker"><span class="n">02 ·</span> alignment, corrigibility, self-improvement</p>
 <h1>Corrigible by construction.</h1>
 <p class="lede">Corrigible means capable of being corrected. Valor can't rely on the model wanting to be corrected, so the authority to stop, bound and correct it sits in deterministic code the model can't reach.</p>
+<nav class="toc" aria-label="On this page">
+  <p class="toc-label">On this page</p>
+  <ol>
+    <li><a href="#properties">Four properties</a></li>
+    <li><a href="#stop">The off switch</a></li>
+    <li><a href="#bounded">Bounded authority</a></li>
+    <li><a href="#corrections">Correction</a></li>
+    <li><a href="#data">Steering</a></li>
+    <li><a href="#rsi">Recursive self-improvement</a></li>
+    <li><a href="#limits">Limits</a></li>
+  </ol>
+</nav>
 
 <section id="properties">
   <p class="sec-label">Four properties</p>
@@ -61,14 +73,22 @@
   <p class="sec-label">The off switch</p>
   <h2>Stop lives in the kernel</h2>
   <div class="split"><div><p>An agent's incentive to allow shutdown holds only while it is unsure what the human wants, and the research shows it is fragile. So Valor doesn't depend on it.</p>
-  <p>A stop is one ledger row. The gateway and the broker read that row before every model call and every effect, whether or not the running process ever hears about the stop. A test stops a task mid-turn and checks that nothing is left open.</p>
+  <p class="callout">A stop is one ledger row.</p>
+  <p>The gateway and the broker read that row before every model call and every effect, whether or not the running process ever hears about the stop.</p>
+  <p>A test stops a task mid-turn and checks that nothing is left open.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#stop">docs/architecture.md, Stop</a> · <a href="https://github.com/tomcounsell/ai/blob/main/tests/test_serve.py">tests/test_serve.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 414" role="img" aria-label="A stop writes one row. The gateway and the broker read it and refuse further calls and effects; the running turn is revoked, killed, drained and reaped, and ends as stopped."><defs><marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box " x="20" y="20" width="340" height="46"/><text class="fg-title" x="190.0" y="48.0" text-anchor="middle">python -m core stop</text><line class="dg-edge" x1="190" y1="66" x2="190" y2="93" marker-end="url(#m2)"/><rect class="dg-box store" x="20" y="96" width="340" height="50"/><text class="fg-title" x="190.0" y="117.0" text-anchor="middle">task.stopped: one row</text><text class="fg-sub" x="190.0" y="135.0" text-anchor="middle">the fence everything reads</text><line class="dg-edge" x1="95" y1="146" x2="95" y2="177" marker-end="url(#m2)"/><line class="dg-edge" x1="285" y1="146" x2="285" y2="177" marker-end="url(#m2)"/><line class="dg-edge" x1="190" y1="146" x2="190" y2="261" marker-end="url(#m2)"/><rect class="dg-box " x="20" y="180" width="150" height="50"/><text class="fg-title" x="95.0" y="201.0" text-anchor="middle">Gateway</text><text class="fg-sub" x="95.0" y="219.0" text-anchor="middle">refuses every call</text><rect class="dg-box " x="210" y="180" width="150" height="50"/><text class="fg-title" x="285.0" y="201.0" text-anchor="middle">Broker</text><text class="fg-sub" x="285.0" y="219.0" text-anchor="middle">refuses every effect</text><rect class="dg-box " x="20" y="264" width="340" height="50"/><text class="fg-title" x="190.0" y="285.0" text-anchor="middle">The running turn</text><text class="fg-sub" x="190.0" y="303.0" text-anchor="middle">revoked, killed, drained, reaped</text><line class="dg-edge" x1="190" y1="314" x2="190" y2="341" marker-end="url(#m2)"/><rect class="dg-box good" x="20" y="344" width="340" height="50"/><text class="fg-title" x="190.0" y="365.0" text-anchor="middle">turn.ended: stopped</text><text class="fg-sub" x="190.0" y="383.0" text-anchor="middle">every call charged, nothing lost</text></svg></figure></div>
 </section>
 
 <section id="bounded">
   <p class="sec-label">Bounded authority</p>
   <h2>Inside its ceiling, Valor is free</h2>
-  <p>Every effect has a class: <code>read</code>, <code>propose</code> (reversible: a branch, a draft) or <code>act</code> (irreversible: merge, send, pay, deploy). Every task has a ceiling, and a child task's can never exceed its parent's. One broker performs every effect and refuses anything above the ceiling.</p>
+  <p>Every effect has a class:</p>
+  <ul class="tight">
+    <li><code>read</code>: no effect.</li>
+    <li><code>propose</code>: reversible, such as a branch or a draft.</li>
+    <li><code>act</code>: irreversible, such as a merge, a send, a payment or a deploy.</li>
+  </ul>
+  <p>Every task has a ceiling, and a child task's can never exceed its parent's. One broker performs every effect and refuses anything above the ceiling.</p>
   <p>Within it, nothing waits for Tom's approval: Valor acts as itself on its own accounts, and every <code>act</code> that leaves is reported to him. Spending is metered and shown, and never stops a task.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#effect-classes-and-the-broker">docs/architecture.md, Effect classes</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md#constraints">docs/mission.md, Constraints</a></p>
 </section>
@@ -84,14 +104,24 @@
 <section id="data">
   <p class="sec-label">Steering</p>
   <h2>Everything Valor reads is data</h2>
-  <p>A file, a web page, a quoted email or a memory may inform the work. An instruction inside it is not followed, and nothing in it widens what Valor may do. Web pages are read only inside a dedicated web agent, one of five guards in force, so a page's text never reaches a working agent's context.</p>
+  <p>A file, a web page, a quoted email or a memory may inform the work. An instruction inside it is not followed, and nothing in it widens what Valor may do.</p>
+  <p>Web pages are read only inside a dedicated web agent, one of five guards in force, so a page's text never reaches a working agent's context.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#instructions-come-from-tom-and-the-brief">docs/persona.md, Instructions</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/guards.py">core/guards.py</a></p>
 </section>
 
 <section id="rsi">
   <p class="sec-label">Recursive self-improvement</p>
   <h2>Valor changes Valor the way it changes anything</h2>
-  <p>Valor's repository is one of its projects. A change to it is planned, critiqued, built, and checked by sessions that didn't write it, then merged by the same predicate as any other. When a merge lands on its own checkout, the kernel rolls itself forward: it waits for running work, backs up the database if the schema changed, migrates and restarts, and rolls back if a step fails.</p>
+  <p>Valor's repository is one of its projects. A change to it is planned, critiqued, built, and checked by sessions that didn't write it, then merged by the same predicate as any other.</p>
+  <h3>The kernel rolls itself forward</h3>
+  <p>When a merge lands on its own checkout, the kernel:</p>
+  <ol class="tight">
+    <li>waits for running work to end;</li>
+    <li>backs up the database if the schema changed;</li>
+    <li>migrates and restarts;</li>
+    <li>rolls back if a step fails.</li>
+  </ol>
+  <h3>What keeps it in check</h3>
   <dl class="def-list">
     <div class="def-row"><dt>The rules change by review</dt><dd>A turn can't edit the persona it runs under; a reviewed merge can.</dd></div>
     <div class="def-row"><dt>Limits can't grow on their own</dt><dd>A new limit needs Tom's grant and expires in ninety days.</dd></div>
@@ -104,7 +134,11 @@
 <section id="limits">
   <p class="sec-label">Limits</p>
   <h2>What this design doesn't catch</h2>
-  <p>A deceptively aligned model with a side channel leaves in the ledger only what passed the kernel; the ceiling keeps the damage survivable while Tom's reading of the work finds it. Turns run as the machine's user, so a deliberate keychain read isn't fenced, which Tom accepted on 2026-10-01. And a transcript is the agent's own account, so the reviewer reruns the suite instead of trusting it.</p>
+  <dl class="def-list">
+    <div class="def-row"><dt>A scheming model</dt><dd>A deceptively aligned model with a side channel leaves in the ledger only what passed the kernel. The ceiling keeps the damage survivable while Tom's reading of the work finds it.</dd></div>
+    <div class="def-row"><dt>The machine's user</dt><dd>Turns run as the machine's user, so a deliberate keychain read isn't fenced. Tom accepted this on 2026-10-01.</dd></div>
+    <div class="def-row"><dt>The agent's own account</dt><dd>A transcript is written by the agent, so the reviewer reruns the suite instead of trusting it.</dd></div>
+  </dl>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#limits">docs/architecture.md, Limits</a></p>
 </section>
 
@@ -120,7 +154,7 @@
     <span>valor engels · how the system works</span>
     <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
     <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
-    <span>updated 2026-10-20</span>
+    <span>updated 2026-10-21</span>
   </div>
 </footer>
 </body>
