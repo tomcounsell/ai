@@ -819,6 +819,9 @@ async def _run(args) -> None:
             except ValueError as exc:
                 raise SystemExit(str(exc)) from None
             print(f"{args.record} marked a standard of working, ledger row {row}")
+        elif args.command == "memory" and args.memory_command == "import":
+            lines = Path(args.file).read_text().splitlines()
+            print(json.dumps(await memory.import_old(conn, lines)))
         elif args.command == "memory":
             print(json.dumps(await memory.ingest(conn)))
         elif args.command == "status":
@@ -1066,6 +1069,7 @@ def main() -> None:
     mark.add_argument("record")
     mark.add_argument("--by", default="valor")
     mark.add_argument("--via", default="the command line")
+    memory_cmd.add_parser("import").add_argument("file")
     sub.add_parser("settings")
     sub.add_parser("judgement-keys")
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")

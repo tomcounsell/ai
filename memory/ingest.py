@@ -8,7 +8,8 @@ unit cut short is taken again whole and overwrites the same keys.
 
 A `memory.marked` row makes no record: it marks the record it names a
 standard of working. A correction that names a record (`memory_record`)
-confines that record to its client.
+confines that record to its client. A `memory.imported` row is one record
+of the old system's memory, carrying its own project and client.
 """
 
 import json
@@ -27,6 +28,7 @@ ORIGINS = {
     "feedback.given": "feedback",
     "correction.recorded": "correction",
     "turn.ended": "transcript",
+    "memory.imported": "imported",
 }
 
 

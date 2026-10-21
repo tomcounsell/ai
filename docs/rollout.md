@@ -106,6 +106,12 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
 7. **The handover**, when the old system is there:
    - The old memory, exported while its Redis is up:
      `$OLDPY -I scripts/cutover_export_memory.py $CUT/memory.jsonl` (`PYTHONDONTWRITEBYTECODE=1`).
+     It comes across with the Pirate's (docs/plans/memory-import.md):
+     prep runs over this Mac's export and the Pirate's together, so
+     duplicates across the two collapse,
+     `PYTHONPATH=. $PY scripts/memory_import_prep.py $CUT/memory.jsonl PIRATE_EXPORT.jsonl $CUT/memory-import/`;
+     Valor reviews `report.md` itself, and only then
+     `$PY -m core memory import $CUT/memory-import/import.jsonl` imports this Mac's projects.
    - Its bridges and worker stopped:
      `for L in com.valor.bridge-watchdog com.valor.worker-watchdog com.valor.bridge com.valor.email-bridge com.valor.worker com.valor.reflection-worker; do launchctl disable $D/$L; launchctl bootout $D/$L; done`.
    - The newest message it handled per chat, as the new bridge's start
