@@ -134,7 +134,7 @@
   <p>Valor's record stays on its machines, but some of the work doesn't:</p>
   <ul class="tight">
     <li>Each model call goes to the model provider, Anthropic by default, through the kernel's gateway, which records it.</li>
-    <li>Classification calls, such as judging whether a request is clear enough to build, go to Jev, a small hosted model, with an open-weight model on OpenRouter as the fallback.</li>
+    <li>Classification calls, such as judging whether a request is clear enough to build, go to Jev, a hosted model, with an open-weight model on OpenRouter as the fallback.</li>
     <li>Messages pass through Telegram, Slack and email, and code goes to GitHub.</li>
   </ul>
   <p>So the model provider sees each prompt it answers. The record of the work stays on Valor's Macs: who asked for what, what was done, what it cost and what Tom corrected.</p>

@@ -64,12 +64,15 @@ at files on `main`.
       (`skills/sdlc/converse.md`, `persona/delivery.md`), and **routines**
       (`docs/routines.md`, `routines/`). Placed after the pipeline in the
       nav, because Tom's list does not name it.
-2. **Research.** The article text of `research.html` and `research/*.html`
-   stays unchanged. Their shared nav and footer are swapped for the new
-   site's. Each in-text link to a deleted page is pointed at the matching
-   new page, with no change to the words around it. Each article gets one
-   dated note saying it compares the system as it was before the
-   2026-10-14 cutover.
+2. **Comparisons, replacing research.** Tom, 2026-10-21 15:07 UTC: "let's
+   replace our comparisons. the actual closest comparison is actually
+   Firstmate ... you can drop Paperclip and others like Herdr that are
+   mostly interfaces". `comparisons.html` compares Valor with Firstmate
+   first, then OpenClaw and the hosted agents (Claude Cowork, Meta Muse,
+   Grok Bot, OpenAI dots) on independence and data sovereignty, each
+   product claim sourced through the web agent. `research.html` and the
+   four `research/*.html` articles are deleted, and `src/index.js` sends
+   each old address, with or without `.html`, to `comparisons.html`.
 3. **Removed.** `runtime.html`, `memory.html`, `reflections.html`,
    `codebase.html`, `assets/graph.js` (a 36k-line snapshot of the old
    codebase), and `assets/site.js`, which only renders that graph
@@ -103,7 +106,6 @@ at files on `main`.
 
 ## Out of scope
 
-- Rewriting the research comparisons.
 - Any change to the system the site describes.
 - A build step or framework. The site stays static HTML.
 - Wiring the deploy into the merge path. It runs by hand from
