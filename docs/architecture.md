@@ -551,6 +551,12 @@ states, verdicts, loops, and the merge predicate are owned by
 - **A scheming model.** A deceptively aligned model [5, 6] with a side
   channel leaves in the ledger only what passed the kernel; the effect
   ceiling keeps the damage survivable.
+- **The kernel is in the repository Valor merges to.** A delivery that
+  changes `core/` merges itself when the merge predicate holds, and the
+  kernel rolls forward onto it (`core/rollout.py`), so the effect ceiling
+  and the stop are reachable through a merged diff. The merge predicate,
+  the suite, and a fresh reviewer from the builder's provider are the
+  only checks on that path.
 - **Tool results are the agent's account.** The transcript is written in
   the sandbox and can be falsified there, so the verifier runs the suite itself.
 - **The sandbox runs as the machine's user.** A deliberate keychain read
