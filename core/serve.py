@@ -79,7 +79,8 @@ An update request (`intake.request_update`) rolls the same way to the
 branch's tip, fetched each wake it is open and not waiting: a tip the
 started commit contains ends it `up_to_date` at once; any other is a
 merge on the `updates` stream, its effect id the request id, and a merge
-due with it is covered. A failed fetch is `rollout.failed` at `fetch`, and
+due with it is covered. A failed fetch is `rollout.failed` at `fetch` with
+no sha, so the request stays open across a start and is fetched again, and
 its notice says "I could not update my own system". A request asked in a
 chat (`/update` in Valor's engineering room) gets one reply there when it
 ends (`update:<request>`), and its failure notice goes there too.
@@ -412,7 +413,8 @@ async def restart_bridges(
 
 async def _rolled(conn, checkout: Path, running: str) -> list[tuple[str, dict[str, Any]]]:
     """The `rollout.ended` rows owed, `(task, payload)`: one for every
-    kernel merge with a `rollout.restarting` or `rollout.failed` row, or
+    kernel merge with a `rollout.restarting` row or a `rollout.failed` row
+    naming a sha (an update's failed fetch names none), or
     covered by a restarting row, that has no `rollout.ended` and whose sha
     the running commit contains, `rolled_by` the merge whose restart
     covered it, or `by: started` when no restart names it (rolled by hand,
@@ -435,7 +437,7 @@ async def _rolled(conn, checkout: Path, running: str) -> list[tuple[str, dict[st
             for c in p.get("covers") or []:
                 if not named.get(c["effect_id"], {}).get("own"):
                     named[c["effect_id"]] = {"task": c["task_id"], "sha": c["sha"], "by": p["effect_id"]}
-        else:
+        elif p["sha"]:
             named.setdefault(p["effect_id"], {"task": task_id, "sha": p["sha"]})
     open_ = {e: v for e, v in named.items() if e not in ended}
     if not open_:
@@ -602,7 +604,8 @@ class Kernel:
             try:
                 url, branch, tip = await git.threaded(rollout.tip, self.checkout, self.credential)
             except (git.GitError, credentials.CredentialError) as exc:
-                m = rollout.Merge(request_id, intake.UPDATES, row, "", "", self.started)
+                # No sha: nothing was fetched, so a start leaves the request open (`_rolled`).
+                m = rollout.Merge(request_id, intake.UPDATES, row, "", "", "")
                 await self._failed(conn, m, ["fetch"], "fetch", str(exc))
                 return
             m = rollout.Merge(request_id, intake.UPDATES, row, url, branch, tip)

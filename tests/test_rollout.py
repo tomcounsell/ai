@@ -499,6 +499,28 @@ def test_a_failed_update_fetch_waits_for_the_tick_and_tells_the_room(fresh, tmp_
     assert len(typed(updates(fresh), "rollout.failed")) == 1  # the same step and reason: one row
 
 
+def test_a_failed_update_fetch_stays_open_across_a_start_and_rolls_on_the_next_fetch(
+    fresh, tmp_path, monkeypatch
+):
+    repo = Repo(tmp_path)
+    sha = repo.land("core/b.py")
+    request = run(asked(fresh, reply={"channel": "telegram", "chat_id": ROOM, "message_id": "77"}))
+
+    def down(*a):
+        raise git.GitError("network down")
+
+    with monkeypatch.context() as m:
+        m.setattr(rollout, "tip", down)
+        run(tick(kernel(fresh, repo, "none"), fresh))
+    assert run(recovered(fresh, repo, repo.base)) == []
+    assert typed(updates(fresh), "rollout.ended") == []
+    assert run(tick(kernel(fresh, repo, "none"), fresh)) == sha and repo.head() == sha
+    assert not [n for n in typed(updates(fresh), "notice.requested") if n["text"].startswith("I run")]
+    assert run(recovered(fresh, repo, sha)) == [request]
+    (ended,) = typed(updates(fresh), "rollout.ended")
+    assert (ended["outcome"], ended["head"]) == ("done", sha)
+
+
 def test_update_wait_past_its_deadline_exits_1_writing_nothing_more(fresh, monkeypatch):
     import argparse
 
