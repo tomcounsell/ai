@@ -517,3 +517,32 @@ def test_the_invoices_routine_starts_nothing_on_another_mac(fresh, tmp_path):
     (ran,) = asyncio.run(of_type(fresh, "routine.ran"))
     assert (ran["run"], ran["outcome"]) == (None, "nothing_due")
     assert "not placed here" in ran["summary"] and "m-cowboy" in ran["summary"]
+
+
+def test_received_lists_a_client_s_incoming_payments_on_every_account_oldest_first(monkeypatch):
+    accounts = [{"id": "old", "name": "Checking ••6834"}, {"id": "new", "name": "Checking ••3031"}]
+    txs = {
+        "old": [{"amount": 10000.0, "postedAt": "2025-06-09T00:00:00Z", "counterpartyName": "USERCRO INC",
+                 "externalMemo": "Invoice: 250601DF. DeckFusion."}],
+        "new": [
+            {"amount": 6000.0, "postedAt": "2025-09-11T00:00:00Z", "counterpartyName": "USERCRO INC",
+             "externalMemo": "INVOICE: 250901DF. Fuse."},
+            {"amount": -50.0, "postedAt": "2025-09-12T00:00:00Z", "counterpartyName": "UserCRO refund"},
+            {"amount": 8000.0, "postedAt": "2025-09-08T00:00:00Z", "counterpartyName": "CYNDRA AI LLC"},
+        ],
+    }  # fmt: skip
+    seen = []
+
+    def call(method, path, *a, **k):
+        seen.append(path)
+        if path == "/accounts":
+            return {"accounts": accounts}
+        return {"transactions": txs[path.split("/")[2]]}
+
+    monkeypatch.setattr(mercury, "call", call)
+    got = mercury.received("usercro", "2024-05-01")
+    assert [(g["date"], g["amount"], g["memo"]) for g in got] == [
+        ("2025-06-09", 10000.0, "Invoice: 250601DF. DeckFusion."),
+        ("2025-09-11", 6000.0, "INVOICE: 250901DF. Fuse."),
+    ]
+    assert "/account/old/transactions?start=2024-05-01&limit=500&offset=0" in seen

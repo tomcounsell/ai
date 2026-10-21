@@ -286,6 +286,33 @@ def gws(*args: str, params: dict) -> dict:
 # -- commands ---------------------------------------------------------------
 
 
+def received(name: str, since: str) -> list[dict]:
+    """Every incoming payment since `since` (YYYY-MM-DD) on every account,
+    archived ones included, whose counterparty or memo names `name`
+    (case-insensitive), oldest first. A client's memo usually names the
+    invoice it pays, which is how a balance is reconciled."""
+    want, out = name.lower(), []
+    for a in call("GET", "/accounts")["accounts"]:
+        offset = 0
+        while True:
+            got = call("GET", f"/account/{a['id']}/transactions?start={since}&limit=500&offset={offset}")
+            txs = got.get("transactions") or []
+            for t in txs:
+                text = " ".join(
+                    str(t.get(k) or "") for k in ("counterpartyName", "bankDescription", "externalMemo")
+                )
+                if (t.get("amount") or 0) > 0 and want in text.lower():
+                    out.append({
+                        "date": (t.get("postedAt") or t.get("createdAt") or "")[:10], "amount": t["amount"],
+                        "from": t.get("counterpartyName"), "memo": t.get("externalMemo") or t.get("bankDescription"),
+                        "account": a.get("name"),
+                    })  # fmt: skip
+            if len(txs) < 500:
+                break
+            offset += 500
+    return sorted(out, key=lambda x: x["date"])
+
+
 def unpaid(today: date) -> list[dict]:
     """Every Unpaid invoice, joined to its customer."""
     customers = {c["id"]: c for c in paged("/ar/customers", "customers")}
@@ -401,6 +428,9 @@ def main(argv: list[str] | None = None) -> int:
             "--dir", default=".valor/invoices", help="where the PDFs are written (inside the workspace)"
         )
     sub.add_parser("accounts", help="the account ids payments can go to")
+    g = sub.add_parser("received", help="incoming payments naming a client, to reconcile its invoices")
+    g.add_argument("name", help="matched against counterparty and memo, e.g. USERCRO")
+    g.add_argument("--since", default="2024-01-01")
     a = p.parse_args(argv)
     now = datetime.now(timezone.utc)  # noqa: UP017
     today = now.date()
@@ -412,6 +442,8 @@ def main(argv: list[str] | None = None) -> int:
                 out = {"lineItems": items, "total": total / 100}
             else:
                 out = create(spec, a.customer_email, a.cc, a.account)
+        elif a.cmd == "received":
+            out = received(a.name, a.since)
         elif a.cmd == "unpaid":
             out = unpaid(today)
         elif a.cmd == "remind":
