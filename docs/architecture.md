@@ -180,8 +180,8 @@ per-account table, with the gaps, is [performers.md](performers.md).
   conditions).
 
 **The gap.** A turn runs as the Mac's one macOS user with Valor's own `gh` login, git credential
-helper, SSH agent, and `sentry-cli` auth, can read the login keychain through `security`, and reaches
-the public internet (Limits, below). Any account whose credential is in that keychain, or whose
+helper, SSH agent, and `sentry-cli` auth, can read the login keychain through `security`, reads the shared 1Password vaults through `op`, and reaches
+the public internet (Limits, below). Any account whose credential is in that keychain or those vaults, or whose
 session is held on the Mac, can be used by a turn around the broker and the gateway, and such a use is recorded only in the turn's transcript, which is the agent's account. The
 machine's Claude login is the known case; every business account logged in on the Mac is another.
 
