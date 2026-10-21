@@ -11,94 +11,119 @@ from valor@yuda.me (rule 5; the live check waits on Tom's token).
 
 1. **Skill `mercury-invoicing`** in Valor's own plugin,
    `skills/valor/skills/mercury-invoicing/`: `SKILL.md` plus `mercury.py`
-   (stdlib `urllib`, no new dependency). Here, not yudame/skills: the token,
-   the sender and the routine are Valor's; this repo's merges reach every
-   Mac (skills/README.md). Commands:
+   (stdlib only). Here, not yudame/skills: the token, sender and routine are
+   Valor's, and this repo's merges reach every Mac. Commands:
    - `create SPEC.json --customer-email E [--cc ...] --account ID`: reads a
-     yudame-invoice spec (the same JSON the PDF is rendered from), finds the
-     Mercury customer by email (paging `GET /ar/customers`) or creates it
-     from the spec's client, and `POST /ar/invoices` with
-     `sendEmailOption: DontSend`, `invoiceNumber` = the spec's number (a
-     reused number is refused, so a retry cannot double-invoice),
-     `internalNote: "valor"`, ACH debit on, card off. Lines: one per
-     section (`"CTO - Tom Counsell: 19.9 h"`, quantity 1, unit price the
-     section total), the budget adjustment and each adjustment as their own
-     line, so the Mercury amount equals the PDF's TOTAL DUE. Prints id,
-     amount, due date and pay link `https://app.mercury.com/pay/{slug}`.
-   - `unpaid`: every invoice (paging `GET /ar/invoices`) with status
-     `Unpaid`, joined to its customer: number, customer, email, cc, amount,
-     due date, days overdue, pay link, and whether Valor created it.
-   - `pdf ID -o PATH`: `GET /ar/invoices/{id}/pdf`, for attaching.
-   - `accounts`: `GET /accounts`, to pick the receiving account once.
-   Token: `op read "op://Yudame Secrets/Mercury API Token/credential"` at
-   each call, sent as `Bearer secret-token:<token>` (prefix added once if
-   missing). Never written to a file, argv, log or output; an HTTP error
-   prints status and Mercury's body only. A refused call names this Mac's
-   public IP, so a changed IP is visible in the error.
-   `SKILL.md` says how invoices go out (the Brief's flow): show Tom the
-   invoice (client, lines, amount, due date) in his DM, create it on his OK,
-   then send the notice by `email.send` from valor@yuda.me with the pay
-   link and the rendered PDF; reminders for invoices Valor created go out
-   without asking. Text and template for notice and reminder live there.
+     yudame-invoice spec (the JSON the PDF is rendered from). Pages
+     `GET /ar/invoices` first; an invoice with the spec's number is printed
+     and nothing is created (no reliance on Mercury's undocumented refusal
+     of reused numbers). Finds the customer by email (case-insensitive,
+     skipping any with `deletedAt` set) or creates it from the spec's
+     client. `POST /ar/invoices` with every field the reference marks
+     required (`customerId`, `invoiceDate`, `dueDate`, `ccEmails`,
+     `destinationAccountId`, `lineItems`, `achDebitEnabled: true`,
+     `creditCardEnabled: false`, `useRealAccountNumber: false`) plus
+     `sendEmailOption: DontSend`, `invoiceNumber`, `internalNote: "valor"`.
+     Lines: one per section (`"CTO - Tom Counsell: 19.9 h"`, qty 1, price
+     the section total), the budget adjustment and each adjustment as their
+     own lines, so the amount equals the PDF's TOTAL DUE.
+   - `unpaid`: every `Unpaid` invoice joined to its customer: number,
+     customer, email, cc, amount, due date, days overdue, pay link, Valor's.
+   - `remind`: the reminder set: Unpaid, Valor's (`internalNote` "valor"),
+     at least 1 day overdue, no reminder for that number in valor@yuda.me's
+     Sent mail in the last 7 days, fewer than 4 sent in all (read with
+     `gws gmail users messages list`, `in:sent subject:"Reminder: Invoice
+     <n>"`). Gmail's Sent folder is the record, so a re-fired or resumed
+     run, on any day, finds what went out. Prints each as a ready
+     `email.send` payload: to the customer's Mercury email, cc the
+     invoice's `ccEmails`, never typed by hand. An invoice past its 4th
+     reminder is listed for Tom instead.
+   - `notice ID`: the same payload for the first notice of a created invoice.
+   - `pdf ID -o PATH`, `accounts`.
+   Token: `op read "op://Yudame Secrets/Mercury API Token/credential"` per
+   call, sent as `Bearer secret-token:<token>`. `op` signs in with
+   `OP_SERVICE_ACCOUNT_TOKEN`; when the environment lacks it, it is read
+   from the vault `.env` (`VALOR_VAULT_ENV`, default
+   `~/Desktop/Valor/.env`) exactly as `scripts/deploy-site.sh` does. Missing
+   service token and missing item each fail with a plain message naming
+   what is missing. The token is never in a file, argv, log or output. A
+   refused call prints Mercury's body and this Mac's public IP.
+   Pay link `https://app.mercury.com/pay/{slug}`: the docs say only that the
+   slug builds it, so `SKILL.md` says the first live invoice's link is opened
+   before any notice leaves, and the delivery says it is unconfirmed.
+   `SKILL.md` gives the flow: Tom sees client, lines, amount, due date in his
+   DM; `create` on his OK; notice by `email.send` from valor@yuda.me with
+   pay link and PDF; reminders for Valor's invoices without asking.
 2. **Weekly routine `invoices`** (`routines/invoices/routine.toml`, Monday
-   09:00 Bangkok, ceiling `act`, project `valor`): runs `unpaid`, and for
-   each overdue invoice Valor created sends one reminder (`email.send`, pay
-   link + Mercury PDF), then ends with `stop.md` naming what went out. It is
-   also what touches the token inside Mercury's 45-day deletion window.
-   Needs a generic runner `task` (start one project task with the routine's
-   instruction, as `verify.run` does with `ctx.start_project`), about 15
-   lines beside `_routine_runners`; no runner today starts a plain task.
-3. **Cyndra wiring.** `cyndra-invoice` lives in `tomcounsell/work-vault`,
-   which this task cannot push. Add `projects/work-vault.toml` (Cowboy,
-   `merge_url` the vault; Valor's account has push) and write the
-   replacement for its steps 10-11 into `mercury-invoicing/SKILL.md`
-   ("Cyndra"): after Tom approves the PDF at step 9, `create` with
-   `--customer-email michael@cyndra.ai --cc johann@cyndra.ai jess@cyndra.ai
-   tom@cyndra.ai`, then the notice from valor@yuda.me replaces the Gmail
-   draft from tom@yuda.me. The delivery asks the chat session to start the
-   one-line work-vault task that pastes it into `cyndra-invoice`.
-4. **Docs.** `docs/machine.md`: credentials come from the shared 1Password
-   vaults (`Yudame Secrets` for company services, `m-valor`/`Valor env` for
-   Valor's own), read at use time with `op read`. `skills/README.md`,
-   `routines/README.md`, `docs/routines.md`: the new skill and runner.
+   09:00, ceiling `act`, project `valor`) with a generic runner `task`
+   beside `_routine_runners`. It starts nothing, and records `routine.ran`
+   "not placed here", unless the routine's project spec is placed on this
+   Mac (`(spec.machine or settings.default_machine) == settings.machine`),
+   so only the Cowboy (on the IP allowlist) sends. Otherwise it starts one
+   project task through `ctx.start_project` with marker
+   `{"sdlc": 1, routine objective}`, so `machine.fold` works it as an SDLC
+   task. Its instruction: run `mercury.py remind`, request each payload as
+   `email.send` with the Mercury PDF, then once outcomes are in write
+   `.valor/stop.md` (`Done:` and what went out). The work happens in the
+   clarify turn, which `stop.md` ends (skills/sdlc/clarify.md); no plan,
+   build or merge runs. The weekly call also keeps the token inside
+   Mercury's 45-day deletion window.
+3. **Cyndra.** `cyndra-invoice` lives in `tomcounsell/work-vault`. Add
+   `projects/work-vault.toml` (Cowboy, `merge_url` the vault, suite
+   `python3 -m py_compile .claude/skills/yudame-invoice/render_invoice.py`)
+   and, in `SKILL.md` ("Cyndra"), the replacement for its steps 10-11: after
+   Tom approves the PDF, `create` with customer michael@cyndra.ai, cc
+   johann@, jess@, tom@cyndra.ai, then `notice` from valor@yuda.me instead
+   of the Gmail draft from tom@yuda.me. The delivery asks the chat session
+   to start the work-vault task that pastes it in.
+4. **Docs.** `docs/machine.md` Keychain: the "a turn holds none" passage
+   is rewritten to say a turn holds the 1Password service sign-in (the
+   turn's environment carries `OP_SERVICE_ACCOUNT_TOKEN` today, checked
+   2026-10-21) and that company credentials are read from the shared vaults
+   (`Yudame Secrets` for company services, `m-valor`/`Valor env` for Valor's
+   own) at use time with `op read`. `docs/routines.md` lines 44 and 184
+   (Keychain inside a performer) say the same. `skills/README.md`,
+   `routines/README.md`: the skill and the `task` runner.
 
 ## Out of scope
 
-Card payments (Stripe), recurring invoices, cancelling or editing invoices
-(the dashboard does it), reminders for invoices Tom made in the dashboard
-(they show in `unpaid`; Mercury's own reminders may cover them), other
+Card payments, recurring invoices, cancelling or editing invoices,
+reminders for dashboard-made invoices (listed by `unpaid` only), other
 clients' invoice skills.
 
 ## Governance
 
-Adds no check, gate, hook, validator or approval step in code. "Tom OKs an
-invoice before it is created" is the Brief's flow written as skill text;
-for Cyndra it is the review the skill already has (step 9).
+No check, gate, hook, validator or approval step in code. Tom's OK before
+`create` is the Brief's flow as skill text; the placement test and the
+reminder cadence are what the job does, not limits on Valor.
 
-## Tests (`tests/test_mercury_invoicing.py`, fake HTTP, fake `op`)
+## Tests (`tests/test_mercury_invoicing.py`, fake HTTP, `op`, `gws`)
 
-- Lines from spec: 260901CA rebuilt (budget 8000, OpenAI 3.61) sums to
-  8003.61; 261001CA to 8000.00; under budget adds no adjustment;
-  `included`, `defer`, `memo` lines left out; cents exact.
-- Create body: every required field, `DontSend`, number, note, account.
-- Customer: found on page 2 by email (case-insensitive); created when absent.
-- Unpaid: only `Unpaid` (Paid, Cancelled, Processing out); pages followed
-  until no `nextPage`; days overdue from `dueDate` (due today is 0, future
-  negative); Valor-created flag from `internalNote`; pay link from slug.
-- Token: read through `op` per call, prefix added once; missing item gives a
-  plain error naming the vault and item; token never in stdout/stderr,
-  including on a 401/403.
-- Routine: `invoices` toml loads; `task` runner starts one project task with
-  the instruction and ceiling.
+- Amount: 260901CA spec gives 8003.61; 261001CA 8000.00; a spec with three
+  adjustments equals the renderer's TOTAL DUE; under budget adds no
+  adjustment; `included`, `defer`, `memo` left out.
+- Create body has every required field and `DontSend`; an existing number
+  prints that invoice and posts nothing.
+- Customer: found on page 2 by email; a deleted match is skipped and a new
+  customer created; created when absent.
+- Unpaid: Paid, Cancelled, Processing out; pages followed to the end; days
+  overdue (due today 0, future negative); pay link from slug.
+- Remind: dashboard-made overdue invoice excluded; due today excluded;
+  reminded 3 days ago excluded, 8 days ago included; 4 sent listed for Tom;
+  payload recipients are the customer's email and invoice cc.
+- Token: read per call; prefix once; service token taken from vault `.env`
+  when absent from env; missing service token, missing item each named;
+  token absent from stdout/stderr, including on 401/403.
+- Routine: toml loads; spec placed elsewhere starts no task and records why;
+  spec placed here starts one task whose `fold` is not legacy, with the
+  instruction and ceiling.
 
 ## What Tom does (sent in the delivery, one message)
 
-In Mercury: Settings > Tokens > Create an API Token, type **Custom**, scopes
-for invoices (accounts receivable) read and write, customers read and write,
-accounts read, nothing that sends money. Write scopes require an IP
-allowlist: **171.100.191.13** (the Cowboy, a True/Asianet cable line, likely
-dynamic; if it changes, a call fails naming the new IP and he edits the
-allowlist). Save it in 1Password vault **Yudame Secrets**, item
-**Mercury API Token** (type API Credential, field `credential`). The exact
-scope labels are not public; the builder names them as the docs give them
-and the delivery says so.
+Mercury: Settings > Tokens > Create an API Token, **Custom**, scopes for
+invoices (accounts receivable) read and write, customers read and write,
+accounts read, nothing that sends money. Write scopes need an IP allowlist:
+**171.100.191.13** (the Cowboy; a cable line, likely dynamic, and a refused
+call names the new IP). Save in 1Password vault **Yudame Secrets**, item
+**Mercury API Token** (API Credential, field `credential`). The scope labels
+are not public; the delivery says so.
