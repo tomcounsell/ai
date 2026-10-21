@@ -68,7 +68,9 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `mv ~/src/ai ~/src/ai-old && mv ~/src/ai-kernel-staging ~/src/ai && cd ~/src/ai && git pull --ff-only && git worktree repair && uv sync --frozen`
    (the repair re-links worktrees made from staging), step 8 is given
    `~/src/ai-old`, and step 9 regenerates every job.
-   Never commit in it afterwards: a rollout fast-forwards it.
+   Never commit in it afterwards, and leave it clean (`git status` shows
+   nothing): a rollout or an update fast-forwards it, and an edit there runs
+   unchecked. Work in a worktree instead.
 4. **The kernel database.** `$PY -m core migrate` makes the roles, the
    database and the schema, and runs `secure-login` (`pgpass`, the
    `pg_hba.conf` rules). Add `export PGPASSFILE=~/.config/valor-kernel/pgpass`
@@ -130,7 +132,9 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    (with `VALOR_EMAIL_SINCE` the rollout date), `bridges.slack` if the Mac
    reads Slack, `tools.voice` (`com.valor.voice`, which transcribes every
    bridge's audio; about 1.7 GB resident once used), `core backup` (into `~/valor-backups`, made first, or `VALOR_BACKUP_DIR` on an external disk),
-   and `core routine NAME` for each routine: `$PY -m ... --plist > $LA/<label>.plist`
+   `ui` (`com.valor.ui`, the dashboard; stop a hand-started one on port
+   8790 first, `lsof -ti tcp:8790 | xargs kill`, or the job crash-loops),
+   and `core routine NAME` for each routine, `update` included: `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
    A plist takes only `PLIST_ENV` from the shell, so when regenerating a
    job that ran before, export its recorded plist's variables except
@@ -147,6 +151,10 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    (`python -m bridges.slack manifest`); when it gained one (`search:read`
    for `valor-slack read --search`), reinstall the app to Valor's account
    and run `python -m bridges.slack keys` if the user token changed.
+   A kernel crash-looping after a rollout or an update: take the checkout
+   back to the commit it rolled from (`from` on its `rollout.restarting`
+   row), `git -C ~/src/ai reset --keep <from>`, then
+   `launchctl kickstart -k $D/com.valor.kernel`.
 10. **Check.** In a separate worktree, `VALOR_TEST_DB=<name> uv run pytest -q -n auto -p no:cacheprovider`
     passes; `$PY -m core settings` names the machine and the backup folder;
     `launchctl kickstart $D/com.valor.backup` writes a dump there;

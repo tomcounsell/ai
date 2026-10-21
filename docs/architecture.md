@@ -455,7 +455,10 @@ checkout, runs `uv sync --frozen` there when that diff changes `uv.lock` or `pyp
 the merged code's `db.migrate`, writes `rollout.restarting`, and exits; launchd starts it again on
 the merged code. That start, before it writes `rollout.ended`, restarts each bridge (`launchctl
 kickstart -k`) holding its lock on a commit whose diff to the running one reaches the bridge's code
-(`bridges/<name>/`, the `core/` it imports, the dependencies), and the row names them. An uncommitted `uv.lock`, `pyproject.toml`, or `core/schema.sql` in the checkout
+(`bridges/<name>/`, the `core/` it imports, the dependencies), then the dashboard (`com.valor.ui`),
+and the row names them. An update (`python -m core update`, `/update` in Valor's engineering room,
+the 03:00 `update` routine) is a rollout to the branch's tip on the same path, keyed by its request
+on the `updates` stream; a tip the running commit has ends it `up_to_date`. An uncommitted `uv.lock`, `pyproject.toml`, or `core/schema.sql` in the checkout
 stops the restart before the checkout moves, since the restart would run an edit nothing merged. A
 failed step steps the checkout and its dependencies back when they had moved, lifts the hold, writes
 `rollout.failed`, and is tried again on the next `serve_tick_s` wake. Once one merge's rollout has

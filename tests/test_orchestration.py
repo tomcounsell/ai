@@ -57,7 +57,12 @@ def test_the_web_guard_is_ledgered_with_its_grant_and_expiry(dsn):
     web = by_id["web.agent_only"]
     assert (web["granted_at"], web["expires"], web["mission_items"]) == ("2026-10-16", "2027-01-14", [4])
     assert "#3648" in web["incident"] and web["provenance"]["at"] == "2026-10-16"
-    assert all(by_id[g]["expires"] == guards.EXPIRES.isoformat() for g in by_id if g != "web.agent_only")
+    room = by_id["update.room"]
+    assert (room["granted_at"], room["expires"], room["mission_items"]) == ("2026-10-20", "2027-01-18", [1])
+    assert room["source"] == room["provenance"]["via"] == "docs/plans/update.md, Grant"
+    assert room["firing_record"] is False and room["provenance"]["at"] == "2026-10-20"
+    own = ("web.agent_only", "update.room")
+    assert all(by_id[g]["expires"] == guards.EXPIRES.isoformat() for g in by_id if g not in own)
 
 
 def test_a_turn_loads_valors_plugin_first_and_gives_every_subagent_the_brief():
