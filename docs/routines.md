@@ -19,7 +19,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 
 | Key | Holds | Serves |
 |---|---|---|
-| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`) | Mac native (launchd for scheduling) |
+| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`, `update`) | Mac native (launchd for scheduling) |
 | `ceiling`, `model` | the effect class every run's tree is capped at, and the model seat | Bounded authority, metered spending |
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
@@ -76,7 +76,7 @@ changes nothing. `python -m core routines` lists every routine with its last
 run and its period spending; a run stopped after its firing is listed
 `stopped`, whatever outcome the firing recorded.
 
-The three routines the kernel holds:
+The four routines the kernel holds:
 
 - **expiry** (04:00 daily): `routines.due` folds the ledger and lists the
   guards and routines past their ninety days. The list is the run's summary,
@@ -91,6 +91,10 @@ The three routines the kernel holds:
   provisions, and starts one fix task for each group of red tests that no
   task holds (Findings, below). The runner holds the session lock
   `run:<run>`.
+- **update** (03:00 daily, ceiling `act`): asks the resident kernel to roll
+  this Mac to its branch's tip (`intake.request_update`, `by: routine`), as
+  `python -m core update` does, and starts no task. Having no run task, the
+  expiry sweep lists it for Tom every ninety days.
 
 ## Metered spending and ceiling
 

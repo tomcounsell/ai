@@ -71,6 +71,7 @@ The binding table, first match wins:
 
 | The record | Bound as |
 | --- | --- |
+| In Valor's engineering room (`UPDATE_CHAT`), exactly `/update` or `/update@<bot>` | `update`: an update request (`request_update`), replied to there when it ends |
 | In a team chat, with no text or files | `none` |
 | In a team chat, waking the chat session | `steer`, to the chat session |
 | In a team chat, otherwise | `heard`, to the chat session |
@@ -89,7 +90,8 @@ The binding table, first match wins:
 | Not a reply, with text or files (a chat with no project) | `start` |
 | Not a reply, empty | `none` |
 
-"Exactly" is the whole text, trimmed and casefolded. A near miss steers
+"Exactly" is the whole text, trimmed and casefolded (`/update`: trimmed,
+any verified member of the room). A near miss steers
 and owes a notice.
 
 A chat session passes what its chat says about a task it started with
@@ -423,6 +425,35 @@ def team_spec(p: dict[str, Any]) -> workspace.Spec | None:
 MENTION = re.compile(r"(?i)(?<![\w])@?valor(?:engels)?\b")
 # How many of the chat's recorded messages a new chat session starts with.
 HISTORY = 20
+# Valor's engineering room (`projects/valor.toml`): the one chat where a
+# message updates this Mac (Tom's grant, docs/plans/update.md; guard
+# `update.room`). `Spec` has no field naming a room's job, so it is named here.
+UPDATE_CHAT = "telegram:-1003449100931"
+UPDATE_COMMAND = re.compile(r"/update(@\w+)?")
+# The stream of every update request and its `rollout.*` rows.
+UPDATES = "updates"
+# The open update request, `(row, request_id)`: no `rollout.ended` names it.
+OPEN_UPDATE = (
+    "SELECT r.id, r.payload->>'request_id' FROM events r WHERE r.task_id = 'updates' "
+    "AND r.type = 'update.requested' AND NOT EXISTS (SELECT 1 FROM events e WHERE "
+    "e.type = 'rollout.ended' AND e.payload->>'effect_id' = r.payload->>'request_id') ORDER BY r.id LIMIT 1"
+)
+
+
+async def request_update(conn, *, by: str, via: str, reply: dict[str, str] | None = None) -> str:
+    """Ask the kernel to roll this Mac to its branch's tip (`Kernel.roll`):
+    the open request's id, else a new `update.requested` row's on
+    `UPDATES`; a request made while one is open joins it, unreplied. Called
+    by `python -m core update`, the room, and the update routine."""
+    async with conn.transaction():
+        await ledger.lock(conn, UPDATES)
+        found = await (await conn.execute(OPEN_UPDATE)).fetchone()
+        if found is not None:
+            return found[1]
+        request_id = ledger.new_id()
+        payload = {"request_id": request_id, "by": by, "via": via} | ({"reply": reply} if reply else {})
+        await ledger.append(conn, UPDATES, "update.requested", payload)
+        return request_id
 
 
 def _bare(text: str) -> str:
@@ -600,6 +631,13 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     if team is None and p["channel"] == "email":
         team = _project_for(p)
     if team is not None:
+        text = (p.get("text") or "").strip()
+        if f"{p['channel']}:{p['chat_id']}" == UPDATE_CHAT and UPDATE_COMMAND.fullmatch(text):
+            as_ = await _bound(conn, p, None, "update")
+            by = "tom" if _from_operator(p) else (p.get("sender_name") or p["sender_id"])
+            reply = {"channel": p["channel"], "chat_id": p["chat_id"], "message_id": p["message_id"]}
+            await request_update(conn, by=by, via=p["channel"], reply=reply)
+            return as_
         return await _chat(conn, p, team)
     if not _from_operator(p):
         return await _bound(conn, p, None, "none")

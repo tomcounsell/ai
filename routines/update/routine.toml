@@ -1,0 +1,12 @@
+name = "update"
+runner = "update"
+ceiling = "act"
+model = "frontier"  # required by every routine; this one calls no model
+mission_item = "1; Tom's ask (rule 2)"
+need = ["Tom, 2026-10-20: \"an overnight auto rollout would also be nice\"; the old system's com.valor.update"]
+created = 2026-10-20
+instruction = "Roll this Mac's kernel to the tip of its branch overnight: one update request, which the resident kernel rolls."
+
+[schedule]
+hour = 3
+minute = 0

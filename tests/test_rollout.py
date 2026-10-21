@@ -8,6 +8,7 @@ the restart. Backup, sync, migrate and restart are stand-ins. No model call.
 import asyncio
 import os
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from unittest import mock
@@ -15,10 +16,10 @@ from unittest import mock
 import psycopg
 import pytest
 
-from core import db, git, ledger, rollout, serve
+from core import credentials, db, git, intake, ledger, rollout, serve
 from core.settings import settings
-from tests import scripted
-from tests.bridges import FakeBridge, new_task, rows, typed
+from tests import bridges, scripted
+from tests.bridges import FakeBridge, new_task, of_type, rows, typed
 from tests.conftest import TEST_DB
 from tests.scripted import commit
 
@@ -326,11 +327,12 @@ def test_a_rollouts_end_restarts_the_stale_bridges_holding_their_locks(fresh, tm
         return task, effect, done, again
 
     task, effect, done, again = run(go())
-    assert kicked == ["com.valor.kernel.telegram", "com.valor.email"]
-    assert done["bridges"] == ["com.valor.kernel.telegram"] and done["rolled"] == [effect]
+    # The dashboard last, every time: it holds no lock to read.
+    assert kicked == ["com.valor.kernel.telegram", "com.valor.email", rollout.UI]
+    assert done["bridges"] == ["com.valor.kernel.telegram", rollout.UI] and done["rolled"] == [effect]
     assert again["bridges"] == [] and again["rolled"] == []  # nothing to end: no kick
     (ended,) = typed(run(rows(fresh, task)), "rollout.ended")
-    assert ended["restarted"] == {"com.valor.kernel.telegram": base}
+    assert ended["restarted"] == {"com.valor.kernel.telegram": base, rollout.UI: None}
     assert ended["restart_failed"] == {"com.valor.email": "no such service"}
 
 
@@ -373,3 +375,232 @@ def test_a_failed_bridge_pass_still_ends_the_rollout_and_the_stamp(fresh, tmp_pa
         with pytest.raises(SystemExit):
             run(core.bridge.serve(bridge, fresh))
     assert seen == [f"valor-local@{running}", "valor-local@none"]
+
+
+# -- updates (docs/plans/update.md) ------------------------------------------------------
+
+ROOM = intake.UPDATE_CHAT.partition(":")[2]
+
+
+async def asked(dsn, **kw) -> str:
+    async with await db.connect(dsn) as conn:
+        return await intake.request_update(conn, by="tom", via="test", **kw)
+
+
+def updates(dsn) -> list[dict]:
+    return run(rows(dsn, intake.UPDATES))
+
+
+def test_an_update_to_a_tip_ahead_restarts_and_recover_ends_it_kicking_the_dashboard(fresh, tmp_path):
+    repo = Repo(tmp_path)
+    sha = repo.land("core/b.py")
+    request = run(asked(fresh))
+    assert run(asked(fresh)) == request  # one open request: a second joins it
+    assert run(tick(kernel(fresh, repo, "none"), fresh)) == sha and repo.head() == sha
+    (restarting,) = typed(updates(fresh), "rollout.restarting")
+    assert (restarting["effect_id"], restarting["sha"], restarting["from"]) == (request, sha, repo.base)
+    kicked: list[str] = []
+
+    async def go():
+        bridge = await holding(fresh, "valor-telegram", "telegram")  # unstamped: stale
+        try:
+            async with await db.connect(fresh) as conn:
+                return await serve.recover(conn, checkout=repo.co, running=sha, kick=kicked.append)
+        finally:
+            await bridge.close()
+
+    assert run(go())["rolled"] == [request]
+    assert kicked == ["com.valor.kernel.telegram", rollout.UI]
+    (ended,) = typed(updates(fresh), "rollout.ended")
+    assert (ended["outcome"], ended["head"]) == ("done", sha)
+    assert run(asked(fresh)) != request  # ended: the next request is a new one
+
+
+def test_an_update_to_the_started_commit_ends_up_to_date_that_wake(fresh, tmp_path):
+    repo = Repo(tmp_path)
+    request = run(asked(fresh))
+    assert run(tick(kernel(fresh, repo, "none"), fresh)) is None
+    (ended,) = typed(updates(fresh), "rollout.ended")
+    assert ended == {"effect_id": request, "outcome": "up_to_date", "sha": repo.base}
+
+
+def test_a_fast_forward_only_update_ends_with_from(fresh, tmp_path):
+    repo = Repo(tmp_path)
+    sha = repo.land("docs/x.md")
+    request = run(asked(fresh))
+    assert run(tick(kernel(fresh, repo, "none"), fresh)) is None
+    (ended,) = typed(updates(fresh), "rollout.ended")
+    assert ended == {
+        "effect_id": request,
+        "outcome": "done",
+        "head": sha,
+        "steps": ["fetch", "restart class", "fast-forward"],
+        "from": repo.base,
+    }
+
+
+def test_a_merge_due_with_an_update_rolls_once_by_the_request(fresh, tmp_path):
+    repo = Repo(tmp_path)
+    merged = repo.land("core/b.py")
+    task = run(new_task(fresh))
+    effect = run(landed(fresh, task, repo.url, merged))
+    tip = repo.land("core/c.py")
+    request = run(asked(fresh))
+    assert run(tick(kernel(fresh, repo, task), fresh)) == tip
+    (restarting,) = typed(updates(fresh), "rollout.restarting")
+    assert restarting["effect_id"] == request
+    assert restarting["covers"] == [{"effect_id": effect, "task_id": task, "sha": merged}]
+    assert typed(run(rows(fresh, task)), "rollout.restarting") == []
+    assert sorted(run(recovered(fresh, repo, tip))) == sorted([effect, request])
+    (ended,) = typed(run(rows(fresh, task)), "rollout.ended")
+    assert ended["rolled_by"] == request
+
+
+def test_a_judge_error_fails_the_merge_and_never_the_update(fresh, tmp_path, monkeypatch):
+    repo = Repo(tmp_path)
+    task = run(new_task(fresh))
+    run(landed(fresh, task, repo.url, repo.land("core/b.py")))
+    run(asked(fresh))
+
+    def refused(*a):
+        raise git.GitError("config refused")
+
+    monkeypatch.setattr(rollout, "judge", refused)
+    assert run(tick(kernel(fresh, repo, task), fresh)) is None
+    (failed,) = typed(run(rows(fresh, task)), "rollout.failed")
+    assert failed["step"] == "fetch"
+    assert typed(updates(fresh), "rollout.failed") == []
+
+
+@pytest.mark.parametrize("error", [git.GitError("no remote"), credentials.CredentialError("no key")])
+def test_a_failed_update_fetch_waits_for_the_tick_and_tells_the_room(fresh, tmp_path, monkeypatch, error):
+    repo = Repo(tmp_path)
+    request = run(asked(fresh, reply={"channel": "telegram", "chat_id": ROOM, "message_id": "77"}))
+    calls = []
+
+    def tip(*a):
+        calls.append(a)
+        raise error
+
+    monkeypatch.setattr(rollout, "tip", tip)
+    k = kernel(fresh, repo, "none")
+    run(tick(k, fresh))
+    run(tick(k, fresh))
+    assert len(calls) == 1  # not again before the next `serve_tick_s` wake
+    (failed,) = typed(updates(fresh), "rollout.failed")
+    assert (failed["effect_id"], failed["step"], failed["reason"]) == (request, "fetch", str(error))
+    for _ in range(rollout.NOTICE_AFTER - 1):
+        k.parked_at = float("-inf")
+        run(tick(k, fresh))
+    assert len(calls) == rollout.NOTICE_AFTER
+    (notice,) = typed(updates(fresh), "notice.requested")
+    assert notice["text"].startswith("I could not update my own system: ")
+    assert (notice["channel"], notice["chat_id"], notice["reply_to"]) == ("telegram", ROOM, "77")
+    assert len(typed(updates(fresh), "rollout.failed")) == 1  # the same step and reason: one row
+
+
+def test_a_failed_update_fetch_stays_open_across_a_start_and_rolls_on_the_next_fetch(
+    fresh, tmp_path, monkeypatch
+):
+    repo = Repo(tmp_path)
+    sha = repo.land("core/b.py")
+    request = run(asked(fresh, reply={"channel": "telegram", "chat_id": ROOM, "message_id": "77"}))
+
+    def down(*a):
+        raise git.GitError("network down")
+
+    with monkeypatch.context() as m:
+        m.setattr(rollout, "tip", down)
+        run(tick(kernel(fresh, repo, "none"), fresh))
+    assert run(recovered(fresh, repo, repo.base)) == []
+    assert typed(updates(fresh), "rollout.ended") == []
+    assert run(tick(kernel(fresh, repo, "none"), fresh)) == sha and repo.head() == sha
+    assert not [n for n in typed(updates(fresh), "notice.requested") if n["text"].startswith("I run")]
+    assert run(recovered(fresh, repo, sha)) == [request]
+    (ended,) = typed(updates(fresh), "rollout.ended")
+    assert (ended["outcome"], ended["head"]) == ("done", sha)
+
+
+def test_update_wait_past_its_deadline_exits_1_writing_nothing_more(fresh, monkeypatch):
+    import argparse
+
+    import core.__main__ as main
+
+    monkeypatch.setattr(main, "UPDATE_WAIT_S", 0.0)
+
+    async def go():
+        async with await db.connect(fresh) as conn:
+            await main._update(conn, argparse.Namespace(by="tom", wait=True))
+
+    with pytest.raises(SystemExit) as exc:
+        run(go())
+    assert "still open" in str(exc.value.code)
+    assert [r["type"] for r in updates(fresh)] == ["update.requested"]
+
+
+async def posted(dsn, text: str, chat: str = ROOM) -> dict:
+    """A Telegram group message from a member who is not Tom, received
+    and bound: its binding."""
+    mid = str(uuid.uuid4().int % 10**9)
+    inbound = intake.Inbound(
+        channel="telegram", chat_id=chat, chat_kind="group", message_id=mid, sender_id="78",
+        sender_name="Kim", sent_at="2026-10-20T09:30:00+00:00", text=text, reply_to=None,
+    )  # fmt: skip
+    async with await db.connect(dsn) as conn:
+        got = await intake.receive(conn, inbound)
+        await intake.bind(conn)
+    (bound,) = await of_type(dsn, "message.bound", received_id=got.received_id)
+    return bound | {"message_id": mid}
+
+
+def test_update_in_the_engineering_room_is_a_request_and_one_reply(fresh, tmp_path):
+    with bridges.operator(tmp_path):
+        (Path(settings.projects_dir) / "valor.toml").write_text(
+            bridges.VALOR_SPEC + f'chats = ["telegram:{ROOM}", "telegram:-1001"]\n'
+        )
+        first = run(posted(fresh, " /update "))
+        second = run(posted(fresh, "/update@valorengels_bot"))
+        assert (first["as"], second["as"]) == ("update", "update")
+        (request,) = typed(updates(fresh), "update.requested")
+        assert (request["by"], request["via"]) == ("Kim", "telegram")
+        assert request["reply"] == {"channel": "telegram", "chat_id": ROOM, "message_id": first["message_id"]}
+        for text, chat in (("/update please", ROOM), ("/update", "-1001")):
+            assert run(posted(fresh, text, chat))["as"] != "update"
+        assert len(typed(updates(fresh), "update.requested")) == 1
+
+        repo = Repo(tmp_path)
+        for _ in range(2):  # a new kernel each time, as after a restart
+            k = kernel(fresh, repo, "none")
+            run(tick(k, fresh))
+            run(tick(k, fresh))
+        (reply,) = typed(updates(fresh), "notice.requested")
+        assert (reply["about_key"], reply["kind"]) == (f"update:{request['request_id']}", "update")
+        assert (reply["chat_id"], reply["reply_to"]) == (ROOM, first["message_id"])
+        assert reply["text"] == f"I am already up to date, at {repo.base[:12]}."
+
+
+def test_the_update_routine_writes_one_request_and_no_task(fresh):
+    import core.__main__ as main
+    from core import routines
+
+    async def go():
+        async with await db.connect(fresh) as conn:
+            await routines.run(conn, "update", main._routine_runners(), directory=serve.ROOT / "routines")
+
+    run(go())
+    (request,) = typed(updates(fresh), "update.requested")
+    assert (request["by"], request["via"]) == ("routine", "routine")
+    (ran,) = run(of_type(fresh, "routine.ran"))
+    assert (ran["run"], ran["outcome"]) == (None, "started")
+    (objective,) = run(of_type(fresh, "task.started"))  # the routine's own record; no run task
+    assert objective["objective"] == "update"
+
+
+def test_python_m_ui_plist_is_the_dashboards_job():
+    import plistlib
+
+    done = subprocess.run([sys.executable, "-m", "ui", "--plist"], capture_output=True, check=True)
+    job, kernel_job = plistlib.loads(done.stdout), plistlib.loads(serve.plist())
+    assert job["Label"] == rollout.UI == "com.valor.ui"
+    assert job["ProgramArguments"] == [kernel_job["ProgramArguments"][0], "-m", "ui"]
+    assert job["StandardOutPath"].endswith("ui.log") and "ProcessType" not in job

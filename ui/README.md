@@ -8,7 +8,7 @@ The read-only dashboard.
 - What came after a task's merges: the index's counts (merges, feedback after, used, reworked by), and on the task page an After merge table (head, time, feedback, used marks, paths, later merges sharing code or only docs, revert and on-branch) and a Used list of deliveries marked with no merge.
 - The old dashboard's dark theme and header on every page: "Valor System", the page buttons, and Services (the kernel and each installed bridge, green with uptime or red when not connected; `rollout.services`).
 - Children and older routine runs collapse under a ▶ count toggle (CSS only). A click on a task row opens its metadata in a modal (`/task/ID/modal`). Ids are never printed; a row carries its task as `data-task`. `static/style.css` holds the theme; `static/app.js`, the one script, opens the modal and reloads `/live` while none is open.
-- `python -m ui` serves `127.0.0.1:8790` (`VALOR_UI_PORT`), aiohttp, GET only; `ui/app.py` holds the pages.
+- `python -m ui` serves `127.0.0.1:8790` (`VALOR_UI_PORT`), aiohttp, GET only; `ui/app.py` holds the pages. `python -m ui --plist` prints its launchd job, `com.valor.ui`, which every kernel start that ends a rollout restarts (`core.serve.restart_bridges`).
 - Read-only. Stops and replies come by message, not here.
 
 Governed by [docs/tech-stack.md](../docs/tech-stack.md) (Surfaces) and [docs/mission.md](../docs/mission.md) (The attention log).

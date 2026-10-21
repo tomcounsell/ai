@@ -118,6 +118,13 @@ serve [--plist]                the resident kernel: binds Tom's messages, owes
 backup [--plist]               dump the kernel database to the backup disk and
                                keep the newest dumps; `--plist` prints the
                                launchd job instead
+update [--wait] [--by B]       ask the resident kernel to roll this Mac to its
+                               branch's tip (the update request the room and
+                               the update routine make too); prints its id.
+                               `--wait` waits up to 15 minutes for it to end
+                               or fail, printing from and to and the jobs
+                               restarted, and exits 1 on a failure or when it
+                               is still open (held, or no kernel)
 restore DUMP [--keep]          restore a dump into a scratch cluster and check
                                it against its manifest
 
@@ -134,6 +141,7 @@ import json
 import os
 import resource
 import signal
+import time
 from pathlib import Path
 
 from core import (
@@ -147,6 +155,7 @@ from core import (
     findings,
     fresh,
     git,
+    intake,
     judgement,
     judgement_sites,
     ledger,
@@ -514,7 +523,56 @@ def _routine_runners() -> dict:
         routines.EXPIRY_RUNNER: routines.expiry_runner,
         "conditions": conditions.runner({}, credential=settings.github_keyfile),
         "verify": verify.run,
+        "update": update_runner,
     }
+
+
+async def update_runner(ctx: routines.Context) -> routines.Ran:
+    """The overnight update: one request, which the resident kernel rolls;
+    no task."""
+    request_id = await intake.request_update(ctx.conn, by="routine", via="routine")
+    return routines.Ran(None, "started", f"update {request_id} requested")
+
+
+# How long `update --wait` waits for its request to end or fail.
+UPDATE_WAIT_S = 900.0
+
+
+async def _update(conn, args) -> None:
+    """`python -m core update [--wait]`: print the request's id; with
+    `--wait`, poll the `updates` stream for its `rollout.ended` or first
+    `rollout.failed`, and exit 1 on a failure or after `UPDATE_WAIT_S`."""
+    request_id = await intake.request_update(conn, by=args.by, via="the command line")
+    print(f"update {request_id} requested")
+    if not args.wait:
+        return
+    deadline = time.monotonic() + UPDATE_WAIT_S
+    while time.monotonic() < deadline:
+        found = await (
+            await conn.execute(
+                "SELECT type, payload FROM events WHERE task_id = %s "
+                "AND type IN ('rollout.ended', 'rollout.failed', 'rollout.restarting') "
+                "AND payload->>'effect_id' = %s ORDER BY id",
+                (intake.UPDATES, request_id),
+            )
+        ).fetchall()
+        rows = dict(found[::-1])  # the first of each type
+        ended, failed = rows.get("rollout.ended"), rows.get("rollout.failed")
+        if ended is not None:
+            start = ended.get("from") or (rows.get("rollout.restarting") or {}).get("from")
+            if ended.get("outcome") == "up_to_date":
+                print(f"up to date at {ended['sha']}")
+                return
+            print(f"{ended.get('outcome')}: from {start} to {ended.get('head')}")
+            for label in sorted(ended.get("restarted") or {}):
+                print(f"restarted {label}")
+            for label, why in sorted((ended.get("restart_failed") or {}).items()):
+                print(f"not restarted {label}: {why}")
+            return
+        if failed is not None:
+            raise SystemExit(f"failed at {failed['step']}: {failed['reason']}")
+        await asyncio.sleep(2)
+    raise SystemExit(f"still open after {UPDATE_WAIT_S:g} s: held, or no kernel")
 
 
 async def _workspace(conn, args) -> str:
@@ -809,6 +867,8 @@ async def _run(args) -> None:
             print(f"exemplar {c['number']} recorded, ledger row {c['event_id']}")
         elif args.command == "corrections":
             print(corrections.render(await corrections.in_force(conn)))
+        elif args.command == "update":
+            await _update(conn, args)
 
 
 def _secure_login() -> dict:
@@ -1015,6 +1075,9 @@ def main() -> None:
     sub.add_parser("agenda")
     sub.add_parser("backup").add_argument("--plist", action="store_true")
     sub.add_parser("serve").add_argument("--plist", action="store_true")
+    update = sub.add_parser("update")
+    update.add_argument("--wait", action="store_true", help="wait for it to end or fail")
+    update.add_argument("--by", default="tom")
     restore = sub.add_parser("restore")
     restore.add_argument("dump")
     restore.add_argument("--keep", action="store_true")
