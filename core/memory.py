@@ -23,6 +23,9 @@ and a rebuild is every Mac ingesting its own again.
   reached, `Memory: recall skipped: ...`, without waiting for it.
 - `mark(conn, record, by=..., via=...)` records Valor's judgement that a
   record is a standard of working, recalled for any client's task.
+- `import_old(conn, lines)` appends one `memory.imported` row per line of
+  `scripts/memory_import_prep.py`'s `import.jsonl` whose project this Mac
+  serves, once per old `memory_id`.
 - A correction naming a record (`corrections.record(..., record=...)`)
   confines it to its own client.
 - `after_turn(dsn)` is `ingest` on a connection of its own, run by
@@ -33,6 +36,7 @@ turn.
 """
 
 import asyncio
+import json
 import socket
 import sys
 import threading
@@ -51,9 +55,11 @@ TYPES = (
     "correction.recorded",
     "turn.ended",
     "memory.marked",
+    "memory.imported",
 )
 CORRECTIONS = "corrections"
-# The stream Valor's standard-of-working marks are written on.
+# The stream Valor's standard-of-working marks, and the old system's
+# imported records, are written on.
 MARKS = "memory"
 STREAMS = (CORRECTIONS, MARKS)
 LOCK = "memory:ingest"
@@ -169,6 +175,42 @@ async def mark(conn, record: str, *, by: str = "valor", via: str = "the command 
     )
 
 
+async def import_old(conn, lines) -> dict[str, int]:
+    """Append a `memory.imported` row on the `memory` stream for each JSON
+    line (`text`, `project`, `client`, `by`, `memory_id`, `merged_from`)
+    whose project is a spec's `repo` on this Mac. A line whose old
+    `memory_id` is already on the stream appends nothing. Returns the
+    counts appended and skipped."""
+    from core.workspace import Spec
+
+    served = {s.repo for s in Spec.here()}
+    done = {
+        r[0]
+        for r in await (
+            await conn.execute(
+                "SELECT payload->>'memory_id' FROM events WHERE task_id = %s AND type = 'memory.imported'",
+                (MARKS,),
+            )
+        ).fetchall()
+    }
+    counts = {"appended": 0, "already imported": 0, "not served here": 0}
+    for line in lines:
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        if r["project"] not in served:
+            counts["not served here"] += 1
+        elif r["memory_id"] in done:
+            counts["already imported"] += 1
+        else:
+            payload = {k: r[k] for k in ("text", "project", "client", "memory_id", "merged_from")}
+            payload["provenance"] = ledger.provenance(r["by"], "the old system's memory", False)
+            await ledger.append(conn, MARKS, "memory.imported", payload)
+            done.add(r["memory_id"])
+            counts["appended"] += 1
+    return counts
+
+
 async def ingest(conn) -> dict[str, Any]:
     """Take every row memory has not taken. A task's rows are taken once
     the task has a `turn.started`, so its project is settled (a task
@@ -221,6 +263,8 @@ async def _unit(conn, ledger_id: int, projects: dict[str, tuple[str, str]]) -> d
         for f in (payload.get("transcript") or {}).get("files", []):
             files[f["name"]] = await transcripts.joined(conn, payload["turn_id"], f["name"])
     project, client = projects[task_id]
+    if type_ == "memory.imported":
+        project, client = payload["project"], payload["client"]
     return {
         "id": ledger_id,
         "task_id": task_id,
