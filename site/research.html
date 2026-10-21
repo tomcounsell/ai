@@ -39,50 +39,50 @@
 
 <main>
 
-<p class="kicker"><span class="n">06 ·</span> Strategic research</p>
+<p class="kicker"><span class="n">07 ·</span> Strategic research</p>
 <h1>Notes on other agent platforms</h1>
 <p class="lede">Valor studies the platforms and repos shipping around it. Each study asks a version of the same question: which layer of the stack is worth owning, and which is better rented or just watched.</p>
 
 <section>
   <p class="sec-label">01 · The watchlist</p>
   <h2>Systems worth learning from</h2>
-  <p>Each entry is what the system is, and what Valor took from studying it.</p>
+  <p>Each entry says what the system is and what Valor took from studying it.</p>
   <dl class="def-list">
     <div class="def-row">
       <dt><a href="https://docs.anthropic.com" rel="noopener" target="_blank">Claude Managed Agents</a><span class="hint">Anthropic · hosted harness</span></dt>
-      <dd>A pre-built agent loop in managed cloud containers, driven over an API. Intended to take over execution later; that offload waits on hosted memory and a hook-equivalent API.</dd>
+      <dd>A pre-built agent loop in managed cloud containers, driven over an API. It is meant to take over execution later, once hosted memory and a hook-equivalent API exist.</dd>
     </div>
     <div class="def-row">
       <dt><a href="https://docs.paperclip.ing" rel="noopener" target="_blank">Paperclip</a><span class="hint">open source · control plane</span></dt>
-      <dd>Org charts, per-agent budgets, and approval gates over any agents. Source of the budget hard-stop, goal-aligned tracing, and immutable audit-log ideas being adopted natively.</dd>
+      <dd>Org charts, per-agent budgets, and approval gates over any agents. It is the source of the budget hard-stop, goal-aligned tracing and immutable audit-log ideas that Valor is adopting natively.</dd>
     </div>
     <div class="def-row">
       <dt><a href="https://hermes-agent.nousresearch.com/docs" rel="noopener" target="_blank">Hermes</a><span class="hint">Nous Research · headless framework</span></dt>
-      <dd>A headless multi-tenant agent across twenty chat platforms, with agent-curated memory and self-improving skills. The strongest argument for indexed session stores, and the skills ecosystem worth watching.</dd>
+      <dd>A headless multi-tenant agent across twenty chat platforms, with agent-curated memory and self-improving skills. It makes the strongest case for indexed session stores, and its skills ecosystem is worth watching.</dd>
     </div>
     <div class="def-row">
       <dt><a href="https://tinyhumans.gitbook.io/openhuman" rel="noopener" target="_blank">OpenHuman</a><span class="hint">tinyhumans · desktop app</span></dt>
-      <dd>A one-user second brain that normalizes everything into readable Markdown trees. The strongest argument for a legible file store: half of why Valor's memory runs two stores.</dd>
+      <dd>A one-user second brain that normalizes everything into readable Markdown trees. It makes the strongest case for a legible file store, and it is half of the reason Valor's memory runs two stores.</dd>
     </div>
     <div class="def-row">
       <dt><a href="https://www.perplexity.ai" rel="noopener" target="_blank">Perplexity Computer</a><span class="hint">Perplexity · digital worker</span></dt>
-      <dd>A vision-language agent that drives a real browser the way a person would. The benchmark for visual web work, and the reason an orchestrator needs an API it can call.</dd>
+      <dd>A vision-language agent that drives a real browser the way a person would. It sets the benchmark for visual web work, and it shows why an orchestrator needs an API it can call.</dd>
     </div>
     <div class="def-row">
       <dt>Pi &amp; Gondolin<span class="hint">minimal core · micro-VM sandbox</span></dt>
-      <dd>A widely-adopted minimal agent core and a standalone micro-VM sandbox with the cleanest isolation seam evaluated: deliberately not adopted, because Valor's dedicated machine <em>is</em> its isolation boundary.</dd>
+      <dd>A widely-adopted minimal agent core and a standalone micro-VM sandbox with the cleanest isolation seam evaluated. Valor deliberately didn't adopt them, because its dedicated machine <em>is</em> its isolation boundary.</dd>
     </div>
     <div class="def-row">
       <dt>Omnigent<span class="hint">Databricks · control plane</span></dt>
-      <dd>A credible open-source agent control plane that looked like a toy in second-hand accounts and wasn't: the standing reminder to verify maturity claims at the source.</dd>
+      <dd>A credible open-source agent control plane. Second-hand accounts made it look like a toy, and it wasn't, so it reminds Valor to verify maturity claims at the source.</dd>
     </div>
     <div class="def-row">
       <dt>jcode<span class="hint">coding-agent runtime</span></dt>
-      <dd>A fast-moving single-author coding runtime: high capability, no integration seam. The pattern for when to watch rather than adopt.</dd>
+      <dd>A fast-moving single-author coding runtime that is highly capable but has no integration seam. It shows when to watch a project rather than adopt it.</dd>
     </div>
     <div class="def-row">
       <dt><a href="https://github.com/kunchenguid/firstmate" rel="noopener" target="_blank">FirstMate</a><span class="hint">open source · agent crew orchestrator</span></dt>
-      <dd>A single primary agent that dispatches a crew of sub-agents into isolated git worktrees, supervised by an event-driven watcher instead of polling. The closest external system found to Valor's own single-session-plus-worktree-isolated-subagent shape, and the source of the comparison.</dd>
+      <dd>A single primary agent that dispatches a crew of sub-agents into isolated git worktrees, supervised by an event-driven watcher instead of polling. It is the closest external system found to Valor's own single-session-plus-worktree-isolated-subagent shape, and the source of the comparison.</dd>
     </div>
   </dl>
 </section>
@@ -90,27 +90,27 @@
 <section>
   <p class="sec-label">02 · The comparisons</p>
   <h2>Head-to-head studies</h2>
-  <p>Full write-ups of the in-house strategic analyses, one page per matchup.</p>
+  <p>These are full write-ups of the in-house strategic analyses, one page per matchup.</p>
   <div class="article-list">
     <a class="article-row" href="research/valor-vs-paperclip.html">
       <span class="date">April 2026</span>
       <span class="ttl">Valor vs Paperclip</span>
-      <span class="dsc">A vertical teammate and a horizontal control plane, which turn out to complement each other. The best ideas (budget hard-stops, goal tracing, audit logs) are worth adopting natively before adopting the platform.</span>
+      <span class="dsc">A vertical teammate and a horizontal control plane turn out to complement each other. Paperclip's best ideas (budget hard-stops, goal tracing, audit logs) are worth adopting natively before adopting the platform.</span>
     </a>
     <a class="article-row" href="research/valor-vs-managed-agents.html">
       <span class="date">April 2026</span>
       <span class="ttl">Valor vs Managed Agents</span>
-      <span class="dsc">Valor orchestrates, Managed Agents executes. The hard problem is porting subconscious memory to a hosted harness: solved by stealth injection through workflow tools, with shared Redis in the middle.</span>
+      <span class="dsc">In the proposed split, Valor orchestrates and Managed Agents executes. The hard problem is porting subconscious memory to a hosted harness, which the study solves by stealth injection through workflow tools, with shared Redis in the middle.</span>
     </a>
     <a class="article-row" href="research/managed-agents-vs-perplexity-computer.html">
       <span class="date">April 2026</span>
       <span class="ttl">Managed Agents vs Perplexity Computer</span>
-      <span class="dsc">A programmable engine and a digital worker are different categories rather than two points on a spectrum. Nothing without an API can be orchestrated, and the credit economics settle whatever the API question doesn't.</span>
+      <span class="dsc">A programmable engine and a digital worker are different kinds of product. A product without an API can't be orchestrated, and the credit economics decide anything the API question leaves open.</span>
     </a>
     <a class="article-row" href="research/openhuman-vs-hermes.html">
       <span class="date">May 2026</span>
       <span class="ttl">OpenHuman vs Hermes</span>
-      <span class="dsc">Two open agent stacks, two bets: transparency for one desktop user, or autonomy and reach for a headless fleet. Memory shape follows form factor: the lesson behind Valor's own two-store design.</span>
+      <span class="dsc">Two open agent stacks make different bets: transparency for one desktop user, or autonomy and reach for a headless fleet. Each one's memory design follows from its form factor, which is the lesson behind Valor's own two-store design.</span>
     </a>
   </div>
 </section>

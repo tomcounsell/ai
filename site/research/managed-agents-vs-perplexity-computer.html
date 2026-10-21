@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Managed Agents vs Perplexity Computer · Research · Valor Engels</title>
-<meta name="description" content="Two hosted execution backends compared: Claude Managed Agents, an API-first programmable container, versus Perplexity Computer, a UI-first visual digital worker — a fork, not a spectrum, and why an orchestrator can only use one of them.">
+<meta name="description" content="Two hosted execution backends compared: Claude Managed Agents, an API-first programmable container, versus Perplexity Computer, a UI-first visual digital worker. They are different kinds of product, and an orchestrator can only use one of them.">
 <link rel="canonical" href="https://valorengels.com/research/managed-agents-vs-perplexity-computer.html">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Valor Engels">
 <meta property="og:title" content="Managed Agents vs Perplexity Computer">
-<meta property="og:description" content="A programmable engine versus a digital worker. For a system that orchestrates execution programmatically, the fork settles itself.">
+<meta property="og:description" content="A programmable engine compared with a digital worker. A system that orchestrates execution programmatically can only use the one with an API.">
 <meta property="og:url" content="https://valorengels.com/research/managed-agents-vs-perplexity-computer.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
@@ -42,7 +42,7 @@
 <p class="kicker"><span class="n">Research ·</span> April 2026</p>
 <h1>Managed Agents vs Perplexity Computer</h1>
 <p class="dated-note">Written before Valor's rebuild, which cut over on 2026-10-14. The comparison describes the earlier system (Redis, Popoto, a worker and a bridge). For how Valor works now, start at the <a href="../index.html">overview</a>.</p>
-<p class="lede">Two hosted execution backends, put side by side to choose one for Valor's pipeline. The comparison found a fork rather than a spectrum: a programmable engine you can orchestrate, versus a digital worker you can only drive by hand.</p>
+<p class="lede">Two hosted execution backends, put side by side to choose one for Valor's pipeline. The comparison found two different kinds of product: a programmable engine you can orchestrate, and a digital worker you can only drive by hand.</p>
 
 <div class="diagram-wrap">
   <svg viewBox="0 0 1000 150" role="img" aria-label="Managed Agents exposes a programmatic API an orchestrator can drive; Perplexity Computer is a visual digital worker with no equivalent API, driven only by human-style clicks">
@@ -72,20 +72,20 @@
     <text class="dg-sub" x="845" y="132" text-anchor="middle">click · type · scroll only</text>
   </svg>
 </div>
-<p class="diagram-cap">One fork, not a spectrum: an API-driven container you can orchestrate, versus a visual digital worker you can only drive by hand.</p>
+<p class="diagram-cap">Managed Agents is an API-driven container you can orchestrate; Perplexity Computer is a visual digital worker you drive by hand.</p>
 
 <section>
-  <p class="sec-label">1 · The fork</p>
+  <p class="sec-label">1 · Design</p>
   <h2>How each one sees and acts</h2>
-  <p>Managed Agents is API-first and developer-oriented: a Linux container the agent works inside — full shell, file operations, any language runtime — created, streamed, steered, and archived over a REST interface with server-sent events. It sees text, files, and structured data, and it acts by executing commands, the way a developer would.</p>
-  <p>Perplexity Computer is UI-first and end-user-oriented: an autonomous digital worker that decomposes a natural-language task, routes subtasks across nineteen-plus models, spins up a virtual browser, and interprets the rendered pages with a vision-language model. It sees pixels and acts by clicking, typing, and scrolling, the way a person would. Each approach excels at workloads where the other fails.</p>
+  <p>Managed Agents is API-first and developer-oriented: a Linux container the agent works inside, with a full shell, file operations and any language runtime. The container is created, streamed, steered and archived over a REST interface with server-sent events. It sees text, files, and structured data, and it acts by executing commands, the way a developer would.</p>
+  <p>Perplexity Computer is UI-first and end-user-oriented: an autonomous digital worker that decomposes a natural-language task, routes subtasks across nineteen-plus models, spins up a virtual browser, and interprets the rendered pages with a vision-language model. It sees pixels and acts by clicking, typing, and scrolling, the way a person would. Each approach is good at the workloads where the other fails.</p>
 </section>
 
 <section>
-  <p class="sec-label">2 · The disqualifier</p>
-  <h2>You cannot orchestrate what has no API</h2>
-  <p>For a system whose whole job is to create, monitor, steer, and harvest execution sessions programmatically, one fact settles the comparison: the Computer product exposes no API for any of it. There is no documented way to create a Computer task programmatically, stream its progress, inject steering messages, or retrieve structured results. Perplexity does sell a separate Agent API — search and tool-calling over multiple model providers — but it is a different product and does not control Computer.</p>
-  <p>The economics point the same direction. Managed Agents bills per millisecond of runtime plus standard token prices, and idle time is free — a two-hour build session is dollars, and predictable. Computer runs on an opaque credit system with no published per-task rates; one documented case saw a forty-minute codebase scan consume twice a month's credit allotment, and git workflows — the bread and butter of a development pipeline — are exactly where the visual-browser paradigm burns the most.</p>
+  <p class="sec-label">2 · API and cost</p>
+  <h2>API access and cost</h2>
+  <p>For a system whose whole job is to create, monitor, steer, and harvest execution sessions programmatically, one fact settles the comparison: the Computer product exposes no API for any of it. There is no documented way to create a Computer task programmatically, stream its progress, inject steering messages, or retrieve structured results. Perplexity does sell a separate Agent API (search and tool-calling over multiple model providers), but it is a different product and does not control Computer.</p>
+  <p>The economics point the same direction. Managed Agents bills per millisecond of runtime plus standard token prices, and idle time is free, so a two-hour build session costs dollars, and the cost is predictable. Computer runs on an opaque credit system with no published per-task rates; one documented case saw a forty-minute codebase scan consume twice a month's credit allotment. Git workflows, the everyday work of a development pipeline, are exactly where the visual-browser approach uses the most credits.</p>
   <div class="table-wrap">
     <table class="doc">
       <thead><tr><th>Criterion</th><th>Weight</th><th>Managed Agents</th><th>Perplexity Computer</th></tr></thead>
@@ -103,19 +103,19 @@
 </section>
 
 <section>
-  <p class="sec-label">3 · The one axis it wins</p>
-  <h2>The visual browser is real</h2>
-  <p>Computer's genuine advantage is the browser. A vision-language model reading rendered pages handles dynamic JavaScript apps, authenticated sessions, complex multi-step forms, and paywalled content — everything a text fetch cannot. Managed Agents' web tools return text; anything visual requires installing headless Chromium in the container yourself.</p>
-  <p>But for a development pipeline that gap matters less than it looks: frontend testing wants a <em>deterministic</em> headless browser under test-framework control, not an autonomous one improvising clicks. The recommendation follows the strengths — adopt Managed Agents as the execution backend, evaluate Perplexity's separate Agent API as a supplementary research tool for the planning and critique stages, and do not bend the Computer product into a backend it was never designed to be.</p>
+  <p class="sec-label">3 · Browsing</p>
+  <h2>Where Perplexity Computer is stronger: visual browsing</h2>
+  <p>Computer's genuine advantage is the browser. A vision-language model reading rendered pages handles dynamic JavaScript apps, authenticated sessions, complex multi-step forms, and paywalled content, none of which a text fetch can handle. Managed Agents' web tools return text; anything visual requires installing headless Chromium in the container yourself.</p>
+  <p>For a development pipeline, though, that gap matters less than it looks, because frontend testing needs a <em>deterministic</em> headless browser under test-framework control rather than an autonomous one improvising clicks. The recommendation follows from these strengths: adopt Managed Agents as the execution backend, evaluate Perplexity's separate Agent API as a supplementary research tool for the planning and critique stages, and don't try to use the Computer product as a backend, which it was never designed to be.</p>
 </section>
 
 <section>
   <p class="sec-label">4 · What to watch</p>
-  <h2>Signals that change the answer</h2>
+  <h2>What would change the recommendation</h2>
   <ul>
-    <li><strong>A programmatic Computer API</strong> — would reopen the hybrid case: containers for code, visual browser for research.</li>
-    <li><strong>A visual browser tool in Managed Agents</strong> — would close the one gap and make Computer irrelevant for this use case.</li>
-    <li><strong>Credit-pricing transparency</strong> from Perplexity — without it, sustained workloads can't be budgeted.</li>
+    <li><strong>A programmatic Computer API</strong> would reopen the hybrid case, with containers for code and the visual browser for research.</li>
+    <li><strong>A visual browser tool in Managed Agents</strong> would close the one gap and make Computer irrelevant for this use case.</li>
+    <li><strong>Credit-pricing transparency</strong> from Perplexity would matter, because without it sustained workloads can't be budgeted.</li>
   </ul>
 </section>
 

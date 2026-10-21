@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Valor vs Managed Agents · Research · Valor Engels</title>
-<meta name="description" content="How Claude Managed Agents — Anthropic's hosted agent harness — intersects with Valor: adopt the hosted hands, keep the orchestration brain local, and treat the memory system as the moat until hooks and memory ship hosted.">
+<meta name="description" content="How Claude Managed Agents, Anthropic's hosted agent harness, fits with Valor: move execution to its hosted containers, keep orchestration local, and treat the memory system as Valor's main advantage until hooks and memory ship hosted.">
 <link rel="canonical" href="https://valorengels.com/research/valor-vs-managed-agents.html">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Valor Engels">
 <meta property="og:title" content="Valor vs Managed Agents">
-<meta property="og:description" content="Valor orchestrates, Managed Agents executes. The hard problem is subconscious memory — and the answer is stealth injection through workflow tools.">
+<meta property="og:description" content="In the proposed split, Valor orchestrates and Managed Agents executes. The hard problem is subconscious memory, which the study solves by stealth injection through workflow tools.">
 <meta property="og:url" content="https://valorengels.com/research/valor-vs-managed-agents.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
@@ -42,7 +42,7 @@
 <p class="kicker"><span class="n">Research ·</span> April 2026</p>
 <h1>Valor vs Managed Agents</h1>
 <p class="dated-note">Written before Valor's rebuild, which cut over on 2026-10-14. The comparison describes the earlier system (Redis, Popoto, a worker and a bridge). For how Valor works now, start at the <a href="../index.html">overview</a>.</p>
-<p class="lede">Claude Managed Agents is Anthropic's fully hosted agent harness: a pre-built loop, managed cloud containers, session persistence, all driven over an API. The governing thought of this study: adopt it for the hands, keep the brain local.</p>
+<p class="lede">Claude Managed Agents is Anthropic's fully hosted agent harness: a pre-built loop, managed cloud containers and session persistence, all driven over an API. The study's main recommendation is to use it for execution and keep orchestration local.</p>
 
 <div class="diagram-wrap">
   <svg viewBox="0 0 1000 150" role="img" aria-label="Valor orchestrates locally while Managed Agents executes as a hosted container, joined by a delegated boundary at the build and test stages">
@@ -57,26 +57,26 @@
 
     <rect class="dg-box" x="40" y="40" width="230" height="72"/>
     <text class="dg-title" x="155" y="72" text-anchor="middle">Valor</text>
-    <text class="dg-sub" x="155" y="92" text-anchor="middle">orchestration · brain</text>
+    <text class="dg-sub" x="155" y="92" text-anchor="middle">orchestration</text>
 
     <rect class="dg-box" x="730" y="40" width="230" height="72"/>
     <text class="dg-title" x="845" y="72" text-anchor="middle">Managed Agents</text>
-    <text class="dg-sub" x="845" y="92" text-anchor="middle">execution · hands</text>
+    <text class="dg-sub" x="845" y="92" text-anchor="middle">execution</text>
 
     <line class="dg-edge" x1="270" y1="76" x2="726" y2="76" marker-end="url(#arr)"/>
     <text class="dg-lbl" x="498" y="60" text-anchor="middle">delegates: BUILD · TEST</text>
   </svg>
 </div>
-<p class="diagram-cap">Adopt the hosted execution engine for the hands; keep the orchestration brain local. Hosted Redis is the bridge between them.</p>
+<p class="diagram-cap">Execution moves to Managed Agents and orchestration stays in Valor, with both reading the same hosted Redis.</p>
 
 <section>
-  <p class="sec-label">1 · The split</p>
-  <h2>Three layers no hosted engine touches</h2>
-  <p>Managed Agents is a better execution engine than a self-maintained harness: sandboxed containers, zero ops, per-millisecond billing where idle time is free, and a battle-tested loop with caching and compaction built in. Valor is a better orchestration layer: stateful, multi-channel, and workflow-aware. Three layers of Valor stay untouched by any hosted engine:</p>
+  <p class="sec-label">1 · What stays local</p>
+  <h2>What stays in Valor</h2>
+  <p>Managed Agents is a better execution engine than a self-maintained harness: sandboxed containers, zero ops, per-millisecond billing where idle time is free, and a mature loop with caching and compaction built in. Valor is a better orchestration layer: stateful, multi-channel, and workflow-aware. Three layers of Valor stay the same whichever hosted engine runs the work:</p>
   <dl class="def-list">
     <div class="def-row">
       <dt>Orchestration</dt>
-      <dd>The PM/Dev role split within a session, the SDLC pipeline, and the steering queue — the part that knows what the work is.</dd>
+      <dd>The PM/Dev role split within a session, the SDLC pipeline, and the steering queue. This is the part that knows what the work is.</dd>
     </div>
     <div class="def-row">
       <dt>Integration</dt>
@@ -84,41 +84,41 @@
     </div>
     <div class="def-row">
       <dt>Memory</dt>
-      <dd>Persistent, ranked, decaying recall — production today, where the hosted equivalent is a research preview.</dd>
+      <dd>Persistent, ranked, decaying recall. Valor's is in production today, while the hosted equivalent is a research preview.</dd>
     </div>
   </dl>
-  <p>Where the two meet is execution. BUILD and TEST are the clear offload candidates: the longest-running stages, the most self-contained (a plan goes in, a branch comes out), and the ones that benefit most from a clean container instead of local worktree machinery. The remaining stages stay local because they need Telegram context, git credentials, or the review gate's own eyes — the study's standing rule is that a managed agent never approves its own frontend work.</p>
+  <p>The two systems meet at execution. BUILD and TEST are the clear offload candidates: the longest-running stages, the most self-contained (a plan goes in, a branch comes out), and the ones that benefit most from a clean container instead of local worktree machinery. The remaining stages stay local because they need Telegram context, git credentials, or the review gate's own inspection. The study's standing rule is that a managed agent never approves its own frontend work.</p>
 </section>
 
 <section>
-  <p class="sec-label">2 · The hard problem</p>
-  <h2>Subconscious memory doesn't port</h2>
-  <p>Valor's memory recall is subconscious by design: a hook fires as the agent works, checks a bloom filter, and injects <code>&lt;thought&gt;</code> stubs into the context. The agent never decides to remember — it just does. Managed Agents has no hook equivalent: once a model turn starts generating, there is no way to insert tokens into it.</p>
-  <p>The study worked through the alternatives in order. A conscious <code>recall</code> tool was rejected — an agent that must choose to remember will forget to, precisely under pressure. Proxying every tool through Valor was rejected — at that point the container isn't executing anything and you've rebuilt the agent loop with extra steps. The recommended pattern is <strong>stealth injection through workflow tools</strong>: the agent must call <code>run_tests</code>, <code>git_commit</code>, and <code>submit_work</code> anyway, so those are defined as custom tools that route through Valor, which executes the operation, queries memory for the current context, and returns the result <em>plus</em> recalled thoughts. The agent sees verbose tool output; it doesn't know some of it is memory. Subconscious by design — coarser than per-tool-call recall, but aimed at exactly the decision points where steering matters.</p>
+  <p class="sec-label">2 · Memory</p>
+  <h2>Porting subconscious memory</h2>
+  <p>Valor's memory recall is subconscious by design: a hook fires as the agent works, checks a bloom filter, and injects <code>&lt;thought&gt;</code> stubs into the context. The agent never decides to remember; the recall simply happens. Managed Agents has no hook equivalent: once a model turn starts generating, there is no way to insert tokens into it.</p>
+  <p>The study worked through the alternatives in order. A conscious <code>recall</code> tool was rejected, because an agent that has to choose to remember will forget to, and it forgets most when it is under pressure. Proxying every tool through Valor was rejected too, because then the container isn't executing anything and the agent loop has just been rebuilt inside Valor. The recommended pattern is <strong>stealth injection through workflow tools</strong>: the agent must call <code>run_tests</code>, <code>git_commit</code>, and <code>submit_work</code> anyway, so those are defined as custom tools that route through Valor, which executes the operation, queries memory for the current context, and returns the result <em>plus</em> recalled thoughts. The agent sees verbose tool output and doesn't know that some of it is memory, so recall stays subconscious. It is coarser than per-tool-call recall, but it is aimed at exactly the decision points where steering matters.</p>
 </section>
 
 <section>
-  <p class="sec-label">3 · The linchpin</p>
-  <h2>One Redis, shared by both halves</h2>
-  <p>The piece that makes the hybrid work is unglamorous: put Redis somewhere both halves can reach. A hosted container that can reach the same Redis gets the same memory pool, the same session records, and the same conversation history as local sessions — no code changes, because the ORM only needs a URL. Post-session extraction then writes what the hosted agent learned back into the shared pool, where every future session, local or hosted, can recall it.</p>
-  <p>Notably, this move pays off even if the hybrid never ships: hosted Redis unblocks multi-machine memory sharing on its own. The study flags it as the quick win to take first, along with its inverse: stop investing in worktree edge cases, because container isolation replaces that whole class of machinery.</p>
+  <p class="sec-label">3 · Shared Redis</p>
+  <h2>Sharing Redis between the two</h2>
+  <p>What makes the hybrid work is a plain infrastructure step: put Redis somewhere both halves can reach. A hosted container that can reach the same Redis gets the same memory pool, the same session records, and the same conversation history as local sessions, with no code changes, because the ORM only needs a URL. Post-session extraction then writes what the hosted agent learned back into the shared pool, where every future session, local or hosted, can recall it.</p>
+  <p>This step pays off even if the hybrid never ships, because hosted Redis makes multi-machine memory sharing possible on its own. The study flags it as the quick win to take first, together with a decision to stop investing in worktree edge cases, because container isolation replaces that whole class of machinery.</p>
 </section>
 
 <section>
-  <p class="sec-label">4 · The verdict</p>
-  <h2>A trigger, not a migration</h2>
-  <p>The conclusion is deliberately not "migrate." It is a trigger condition: when Managed Agents ships production memory <em>and</em> a hook-equivalent API, Valor's subconscious memory — the primary moat — becomes fully portable, and the cost/benefit of maintaining custom execution infrastructure flips. Until both land, the architecture stays hybrid: local brain, hosted hands, shared Redis between them. The study also defined a gated experiment pipeline before production adoption — environment cold-start time, tool-call cadence per turn, whether steering messages can land mid-turn, Redis latency from inside a container, and finally a full BUILD offload judged on code quality against local baselines.</p>
+  <p class="sec-label">4 · Recommendation</p>
+  <h2>When to migrate</h2>
+  <p>The study deliberately stops short of saying "migrate." Instead it sets a trigger condition: when Managed Agents ships production memory <em>and</em> a hook-equivalent API, Valor's subconscious memory, its main advantage, becomes fully portable, and the cost/benefit of maintaining custom execution infrastructure flips. Until both ship, the architecture stays hybrid, with orchestration local, execution hosted and Redis shared between them. The study also defined a gated experiment pipeline to run before production adoption, covering environment cold-start time, tool-call cadence per turn, whether steering messages can land mid-turn, Redis latency from inside a container, and finally a full BUILD offload judged on code quality against local baselines.</p>
 </section>
 
 <section>
   <p class="sec-label">5 · What to watch</p>
-  <h2>Signals that change the answer</h2>
+  <h2>What would change the recommendation</h2>
   <ul>
-    <li><strong>A hook-equivalent API</strong> — the real unlock; makes subconscious memory portable.</li>
-    <li><strong>Hosted memory reaching general availability</strong> — the other half of the re-architecture trigger.</li>
-    <li><strong>Mid-turn steering</strong> — whether a message sent during a running turn is injected or queued; it decides how fine-grained external steering can be.</li>
-    <li><strong>Multi-agent sessions</strong> — could eventually subsume the PM/Dev split itself.</li>
-    <li><strong>Pricing on long sessions</strong> — hour-scale builds at per-hour runtime rates plus tokens need monitoring at scale.</li>
+    <li><strong>A hook-equivalent API</strong> matters most, because it would make subconscious memory portable.</li>
+    <li><strong>Hosted memory reaching general availability</strong> is the other half of the re-architecture trigger.</li>
+    <li><strong>Mid-turn steering</strong>: whether a message sent during a running turn is injected or queued decides how fine-grained external steering can be.</li>
+    <li><strong>Multi-agent sessions</strong> could eventually subsume the PM/Dev split itself.</li>
+    <li><strong>Pricing on long sessions</strong> needs monitoring at scale, since hour-scale builds pay per-hour runtime rates plus tokens.</li>
   </ul>
 </section>
 

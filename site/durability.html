@@ -40,7 +40,7 @@
 <main>
 
 <p class="kicker"><span class="n">05 ·</span> durability and the data model</p>
-<h1>One ledger, and everything read from it.</h1>
+<h1>Durability: how Valor keeps its state</h1>
 <p class="lede">Every model call, turn, effect, question, correction and stop is a row in one append-only table. Everything the kernel knows about a task is computed from those rows, so a crash at any instant leaves nothing to reconcile.</p>
 <nav class="toc" aria-label="On this page">
   <p class="toc-label">On this page</p>
@@ -55,8 +55,8 @@
 
 <section id="tables">
   <p class="sec-label">The data model</p>
-  <h2>Two tables and no foreign keys</h2>
-  <div class="split"><div><p>The kernel's database role can insert and select, nothing more, so the system can't edit its own record. A trigger refuses edits even from the table's owner.</p>
+  <h2>The data model</h2>
+  <div class="split"><div><p>The kernel's database role can only insert and select, so the system can't edit its own record. A trigger refuses edits even from the table's owner.</p>
   <p>Documents, such as a task's Brief, are written once; anything that changes later is a new event.</p>
   <p>In place of foreign keys, partial unique indexes make whole classes of double-write impossible: a call charged twice, a task stopped twice, two outcomes for one effect.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/schema.sql">core/schema.sql</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md#the-tables">docs/data.md, The tables</a></p></div><figure class="fig"><svg viewBox="0 0 380 468" role="img" aria-label="Two tables: events, the append-only ledger, and documents, written once. A task&#x27;s state is folded from its rows."><defs><marker id="m6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m6b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box store" x="20" y="20" width="340" height="204"/><text class="fg-title" x="32" y="42" text-anchor="start">events</text><text class="fg-sub" x="348" y="42" text-anchor="end">the ledger</text><line class="fg-rule" x1="20" y1="54" x2="360" y2="54"/><text class="fg-mono" x="32" y="73" text-anchor="start">id</text><text class="fg-sub" x="120" y="73" text-anchor="start">the order every reader uses</text><line class="fg-rule" x1="20" y1="82" x2="360" y2="82"/><text class="fg-mono" x="32" y="101" text-anchor="start">task_id</text><text class="fg-sub" x="120" y="101" text-anchor="start">a task, or a named stream</text><line class="fg-rule" x1="20" y1="110" x2="360" y2="110"/><text class="fg-mono" x="32" y="129" text-anchor="start">type</text><text class="fg-sub" x="120" y="129" text-anchor="start">noun.verb: turn.started</text><line class="fg-rule" x1="20" y1="138" x2="360" y2="138"/><text class="fg-mono" x="32" y="157" text-anchor="start">payload</text><text class="fg-sub" x="120" y="157" text-anchor="start">the event's fields, JSONB</text><line class="fg-rule" x1="20" y1="166" x2="360" y2="166"/><text class="fg-mono" x="32" y="185" text-anchor="start">at</text><text class="fg-sub" x="120" y="185" text-anchor="start">wall time, for people</text><line class="fg-rule" x1="20" y1="194" x2="360" y2="194"/><text class="fg-lbl" x="32" y="214" text-anchor="start">insert and select only; edits refused</text><rect class="dg-box store" x="20" y="250" width="340" height="118"/><text class="fg-title" x="32" y="272" text-anchor="start">documents</text><text class="fg-sub" x="348" y="272" text-anchor="end">written once</text><line class="fg-rule" x1="20" y1="284" x2="360" y2="284"/><text class="fg-mono" x="32" y="303" text-anchor="start">kind</text><text class="fg-sub" x="120" y="303" text-anchor="start">task or transcript</text><line class="fg-rule" x1="20" y1="312" x2="360" y2="312"/><text class="fg-mono" x="32" y="331" text-anchor="start">id</text><text class="fg-sub" x="120" y="331" text-anchor="start">its id within the kind</text><line class="fg-rule" x1="20" y1="340" x2="360" y2="340"/><text class="fg-mono" x="32" y="359" text-anchor="start">body</text><text class="fg-sub" x="120" y="359" text-anchor="start">JSONB: the Brief as it started</text><line class="dg-edge" x1="190" y1="368" x2="190" y2="395" marker-end="url(#m6)"/><rect class="dg-box good" x="20" y="398" width="340" height="50"/><text class="fg-title" x="190.0" y="419.0" text-anchor="middle">A task's state</text><text class="fg-sub" x="190.0" y="437.0" text-anchor="middle">folded from its rows, never stored</text></svg></figure></div>
@@ -64,17 +64,17 @@
 
 <section id="intent">
   <p class="sec-label">Effects</p>
-  <h2>Intent before outcome</h2>
-  <div class="split"><div><p>An effect's intent commits before it runs and its outcome after.</p>
-  <p class="callout">A kill in between leaves an intent with no outcome, never a silent effect.</p>
+  <h2>How effects are recorded</h2>
+  <div class="split"><div><p>An effect's intent is committed to the ledger before the effect runs, and its outcome is committed after.</p>
+  <p>If the process is killed between the two, the ledger shows an intent with no outcome, so no effect goes unrecorded.</p>
   <p>On restart the kernel asks the target, for example whether the branch holds the commit, and writes the answer. If the target doesn't answer, nothing is written.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md#intent-before-outcome">docs/data.md, Intent before outcome</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/broker.py">core/broker.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 410" role="img" aria-label="An effect&#x27;s intent commits before it runs and its outcome after. A kill in between leaves an intent with no outcome; on restart the kernel asks the target and writes done, failed, or leaves it in flight."><defs><marker id="m7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m7b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box " x="20" y="20" width="340" height="50"/><text class="fg-title" x="190.0" y="41.0" text-anchor="middle">1. effect.intent committed</text><text class="fg-sub" x="190.0" y="59.0" text-anchor="middle">the action, written before it runs</text><line class="dg-edge" x1="190" y1="70" x2="190" y2="97" marker-end="url(#m7)"/><rect class="dg-box " x="20" y="100" width="340" height="50"/><text class="fg-title" x="190.0" y="121.0" text-anchor="middle">2. The performer runs</text><text class="fg-sub" x="190.0" y="139.0" text-anchor="middle">a push, a merge, or a send</text><line class="dg-edge" x1="100" y1="150" x2="100" y2="177" marker-end="url(#m7)"/><line class="dg-edge" x1="280" y1="150" x2="280" y2="177" marker-end="url(#m7)"/><rect class="dg-box good" x="20" y="180" width="160" height="50"/><text class="fg-title" x="100.0" y="201.0" text-anchor="middle">3. effect.outcome</text><text class="fg-sub" x="100.0" y="219.0" text-anchor="middle">committed after</text><rect class="dg-box warn" x="200" y="180" width="160" height="50"/><text class="fg-title" x="280.0" y="201.0" text-anchor="middle">Killed before 3</text><text class="fg-sub" x="280.0" y="219.0" text-anchor="middle">intent, no outcome</text><line class="dg-edge" x1="280" y1="230" x2="280" y2="257" marker-end="url(#m7)"/><rect class="dg-box " x="200" y="260" width="160" height="50"/><text class="fg-title" x="280.0" y="281.0" text-anchor="middle">On restart</text><text class="fg-sub" x="280.0" y="299.0" text-anchor="middle">ask the target</text><line class="dg-edge" x1="280" y1="310" x2="72" y2="338" marker-end="url(#m7)"/><rect class="dg-box good" x="20" y="340" width="104" height="50"/><text class="fg-title" x="72.0" y="361.0" text-anchor="middle">done</text><text class="fg-sub" x="72.0" y="379.0" text-anchor="middle">target has it</text><line class="dg-edge" x1="280" y1="310" x2="190" y2="338" marker-end="url(#m7)"/><rect class="dg-box " x="138" y="340" width="104" height="50"/><text class="fg-title" x="190.0" y="361.0" text-anchor="middle">failed</text><text class="fg-sub" x="190.0" y="379.0" text-anchor="middle">target lacks it</text><line class="dg-edge" x1="280" y1="310" x2="308" y2="338" marker-end="url(#m7)"/><rect class="dg-box " x="256" y="340" width="104" height="50"/><text class="fg-title" x="308.0" y="361.0" text-anchor="middle">in flight</text><text class="fg-sub" x="308.0" y="379.0" text-anchor="middle">no answer yet</text></svg></figure></div>
 </section>
 
 <section id="recovery">
   <p class="sec-label">The resident kernel</p>
-  <h2>Recover first, then wake on every row</h2>
-  <p>One kernel process per Mac, kept alive by launchd. On start it settles whatever a dead kernel left:</p>
+  <h2>Recovery after a crash</h2>
+  <p>Each Mac runs one kernel process, kept alive by launchd. When it starts, it settles whatever a dead kernel left:</p>
   <ul class="tight">
     <li>open model calls are charged;</li>
     <li>orphaned turns are killed and recorded;</li>
@@ -82,11 +82,11 @@
     <li>pending pushes and merges are reconciled;</li>
     <li>its own rollouts are finished.</li>
   </ul>
-  <p>Then it wakes on each new ledger row.</p>
+  <p>After that, it wakes each time a new row lands in the ledger.</p>
   <dl class="def-list">
     <div class="def-row"><dt>Retries</dt><dd>A failed step waits a minute, then twice as long each time; four failures in a row end the task with a report.</dd></div>
-    <div class="def-row"><dt>Turn slots</dt><dd>Two turns at a time per Mac by default, so 16 GB holds.</dd></div>
-    <div class="def-row"><dt>No lost answers</dt><dd>Tom's answer is spent only by a turn that finishes.</dd></div>
+    <div class="def-row"><dt>Turn slots</dt><dd>Each Mac runs two turns at a time by default, which keeps memory use within its 16 GB.</dd></div>
+    <div class="def-row"><dt>Tom's answers</dt><dd>A turn uses up Tom's answer only if the turn finishes, so a failed turn can't lose it.</dd></div>
     <div class="def-row"><dt>Backups</dt><dd>The newest 30 dumps are kept, each restorable into a scratch cluster and checked.</dd></div>
   </dl>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/README.md#entry-points">core/README.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/serve.py">core/serve.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/backup.py">core/backup.py</a></p>
@@ -94,18 +94,18 @@
 
 <section id="plumbing">
   <p class="sec-label">Harnesses and bridges</p>
-  <h2>The agent and the chats are plug-ins</h2>
+  <h2>Harnesses and bridges</h2>
   <h3>Harnesses</h3>
   <p>The kernel never knows which agent it runs. A harness hands it the command for one turn, normally <code>claude -p</code>, and a gateway meters every model call that turn makes.</p>
   <p>A turn talks back only through files it leaves under <code>.valor/</code>.</p>
   <h3>Bridges</h3>
-  <p>Telegram, Slack, email and the local chat are each a process that records inbound messages and performs the sends the broker releases. The kernel's loop is the one engine.</p>
+  <p>Telegram, Slack, email and the local chat are each a process that records inbound messages and performs the sends the broker releases. The kernel's loop drives all the work.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/harnesses.md">docs/harnesses.md</a> · <a href="https://github.com/tomcounsell/ai/tree/main/harnesses/">harnesses/</a> · <a href="https://github.com/tomcounsell/ai/tree/main/docs/bridges/">docs/bridges/</a></p>
 </section>
 
 <section id="memory">
   <p class="sec-label">Memory</p>
-  <h2>Memory reads the ledger and grants nothing</h2>
+  <h2>Memory</h2>
   <dl class="def-list">
     <div class="def-row"><dt>What goes in</dt><dd>After each turn, the new rows: instructions, Tom's answers and feedback, corrections, and turn transcripts, stored raw.</dd></div>
     <div class="def-row"><dt>What comes out</dt><dd>A later task's prompt gets up to ten matching records from its own project, plus any record Valor has judged a standard of working, from any client, all quoted as data.</dd></div>
