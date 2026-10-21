@@ -131,6 +131,10 @@ Cyndra's 1,609 are used only once the Bald runs.
   records are imported on the Mac that serves it. The Pirate takes yudame
   and mondayflowers now, the Cowboy takes valor, and cyndra and cuttlefish
   wait for the Bald and the Captain.
+- The Bald's and the Captain's own old memory (Tom, 2026-10-21: "Yes, same
+  rules"): each Mac's own export comes across at its install, through the
+  same filters, deduplicated together with the Pirate's export, and is
+  imported only after Tom reviews that report.
 
 ## Open questions
 
