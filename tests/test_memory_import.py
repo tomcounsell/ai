@@ -109,7 +109,9 @@ def test_prep_chooses_maps_and_collapses(tmp_path, specs, monkeypatch):
     prep = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(prep)
     judged = []
-    monkeypatch.setattr(prep, "judge", lambda group: judged.append(group) or [])
+    monkeypatch.setattr(
+        prep, "judge", lambda group: judged.append(group) or [[r["memory_id"] for r in group]]
+    )
 
     def rec(i, content, source="human", agent="Tom", project="valor", superseded=""):
         return {
@@ -117,32 +119,41 @@ def test_prep_chooses_maps_and_collapses(tmp_path, specs, monkeypatch):
             "agent_id": agent, "content": content, "title": "", "metadata": {}, "relevance": 0.0,
         }  # fmt: skip
 
+    monday = "every Monday morning the weekly status report goes out to the client by email"
     near = "the deploy goes out on Fridays after the client signs off on the release notes"
     export = [
         rec("summary", "In a 12-event session Valor fixed the build", source="agent", agent="tui-1"),
         rec("superseded", "an old preference", superseded="m9"),
         rec("knowledge", "a knowledge doc", source="knowledge", agent=None),
         rec("cyndra", "Amr wants weekly reports", agent="extraction-tg_cyndra_-100123_4", source="agent"),
+        rec(
+            "monday1",
+            "Hazem sends the weekly status report to the client every Monday morning",
+            agent="Hazem",
+            project="cyndra",
+        ),
+        rec("monday2", monday, agent="Johann", project="cyndra"),
         rec("tom", near),
         rec("jess", near + " today", agent="Jess"),
         rec("lost", "nobody knows where this goes", source="agent", agent=None, project=None),
     ]
     a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
     a.write_text("".join(json.dumps(r) + "\n" for r in export))
-    b.write_text(json.dumps(export[4]) + "\n")
+    b.write_text(json.dumps(export[6]) + "\n")
     prep.main([str(a), str(b), str(tmp_path / "out")])
     rows = {
         r["memory_id"]: r for r in map(json.loads, (tmp_path / "out/import.jsonl").read_text().splitlines())
     }
-    assert set(rows) == {"cyndra", "tom"}
+    assert set(rows) == {"cyndra", "monday2", "tom"}
+    assert (rows["monday2"]["text"], rows["monday2"]["merged_from"]) == (monday, ["monday1"])
+    assert [{r["memory_id"] for r in g} for g in judged] == [{"monday1", "monday2"}]
     assert (rows["cyndra"]["project"], rows["cyndra"]["client"], rows["cyndra"]["by"]) == (
         "https://example.test/cyndra.git", "cyndra", "valor",
     )  # fmt: skip
     assert (rows["tom"]["by"], rows["tom"]["text"], rows["tom"]["merged_from"]) == ("tom", near, ["jess"])
     assert rows["tom"]["project"] == "unused"
-    assert judged == []
     report = (tmp_path / "out/report.md").read_text()
-    for stage in ("| read | 7 |", "| knowledge skipped | 1 |", "| superseded skipped | 1 |",
-                  "| session summaries dropped | 1 |", "| no project dropped | 1 |", "| after paraphrase | 2 |"):  # fmt: skip
+    for stage in ("| read | 9 |", "| knowledge skipped | 1 |", "| superseded skipped | 1 |",
+                  "| session summaries dropped | 1 |", "| no project dropped | 1 |", "| after paraphrase | 3 |"):  # fmt: skip
         assert stage in report
     assert "`lost`" in report and near + " today" in report

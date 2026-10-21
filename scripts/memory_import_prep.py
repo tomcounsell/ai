@@ -94,8 +94,9 @@ def collapse(recs: list[dict]) -> tuple[list[dict], list[dict]]:
 
 
 def paraphrases(recs: list[dict]) -> tuple[list[dict], list[dict]]:
-    """`recs` with the duplicate groups Claude Code names merged."""
-    candidates = groups(recs, CANDIDATE, NEAR)
+    """`recs` with the duplicate groups Claude Code names merged, each
+    candidate group asked about 20 records at a time."""
+    candidates = [g[i : i + 20] for g in groups(recs, CANDIDATE, NEAR) for i in range(0, len(g), 20)]
     with ThreadPoolExecutor(8) as pool:
         answers = list(pool.map(judge, candidates))
     merged = []
