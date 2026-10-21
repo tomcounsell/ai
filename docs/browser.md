@@ -27,9 +27,11 @@ its `BYOB_ALLOW_AUTH_DOMAINS` flag is set. Tom lifted that block on
 2026-10-17 so Valor can approve its own sign-ins, `gws`'s among them
 (rollout step 6). The flag lives in the extension's `chrome.storage.local`
 and survives a Chrome restart. Set it once per Mac with `browser_eval` on
-any byob extension page, e.g.
-`chrome-extension://pkpfojimekanmnjnpengjjdmbjmphnbe/manifest.json`:
-`chrome.storage.local.set({BYOB_ALLOW_AUTH_DOMAINS: true})`.
+any byob extension page,
+`chrome-extension://<id>/manifest.json`:
+`chrome.storage.local.set({BYOB_ALLOW_AUTH_DOMAINS: true})`. The extension
+is loaded unpacked, so its `<id>` differs per Mac; `chrome://extensions`
+shows it.
 
 **The browser.** `settings.browser` (`VALOR_BROWSER`) names one fixed build,
 `chromium_headless_shell-1208` in `~/Library/Caches/ms-playwright/`, never the

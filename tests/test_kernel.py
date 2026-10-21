@@ -1441,7 +1441,49 @@ def test_an_email_thread_is_a_chat_whose_session_every_email_in_it_steers(dsn, m
     assert [p["provenance"]["by"] for p in steered] == ["Tom", "Tom"]
     assert machine.fold(rows).state is not State.STOPPED
     (reported,) = [r["payload"] for r in rows if r["type"] == "notice.requested"]
-    assert reported["chat_id"] == bridges.OPERATOR_CHAT
+    assert (reported["channel"], reported["chat_id"]) == ("email", first["message_id"])
+
+
+def test_a_notice_to_an_email_thread_is_a_reply_to_all_of_its_newest_email(dsn, mail, monkeypatch):
+    """The email bridge sends it over SMTP and marks it sent; a send in
+    doubt is not sent again, but found in Sent Mail."""
+    from bridges.email import EmailBridge, smtp
+    from core import bridge
+
+    calls = []
+
+    def send(kind):
+        def call(cfg, action, key, *rest):
+            calls.append((kind, action.payload, key))
+            if len(calls) == 1:
+                raise broker.Unknown("cut off")
+            return {"sent": [{"channel": "email", "chat_id": "root", "message_id": "<m>"}]}
+
+        return call
+
+    monkeypatch.setattr(smtp, "perform", send("perform"))
+    monkeypatch.setattr(smtp, "lookup", send("lookup"))
+
+    async def go():
+        first = await emailed(dsn, "The florist page\n\nit 500s", sender="kim@florist.test", name="Kim")
+        second = await emailed(dsn, "Re: The florist page\n\nstill", sender="kim@florist.test",
+                               name="Kim", thread=(first["message_id"],))  # fmt: skip
+        async with await db.connect(dsn) as conn:
+            nid = await notices.request(conn, first["task_id"], kind="ended", about_key="x", text="Done.")
+            outbox = bridge.Outbox(SimpleNamespace(channel="email"), {}, conn, conn, None)
+            (due,) = [i for i in await outbox.due() if isinstance(i, bridge.NoticeDue) and i.notice_id == nid]
+            b = EmailBridge(SimpleNamespace(address="valor@yuda.me"), dsn)
+            with pytest.raises(broker.Unknown):
+                await b.notice(outbox, due)
+            await b.notice(outbox, due)
+            return nid, second, await bridges.of_type(dsn, "notice.sent", notice_id=nid)
+
+    nid, second, sent = run(go())
+    assert [k for k, *_ in calls] == ["perform", "lookup"] and calls[0][2] == calls[1][2]
+    payload = calls[0][1]
+    assert payload["to"] == ["kim@florist.test"] and payload["in_reply_to"] == second["message_id"]
+    assert payload["body"] == "Done."
+    assert [s["notice_id"] for s in sent] == [nid]
 
 
 def test_provisioning_fetches_as_valor_when_the_mac_has_the_github_key(tmp_path, monkeypatch):

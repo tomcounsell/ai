@@ -235,9 +235,13 @@ with `refused` listing each address and its reply; reaching them is a new
 request. The bridge keeps no retry loop, backoff
 schedule, or dead-letter queue.
 
-**Operator notices.** Notices go to Tom's operator channel, Telegram or the
-local chat page. The
-email bridge performs the outbox's releases and ignores its notices.
+**Notices.** A notice for a task an email thread started goes to that
+thread: the bridge sends it over SMTP as a reply to all of the thread's newest
+received email (or of the one the notice replies to), with the notice's text as
+the body, and writes `notice.sent`. A send in doubt is not sent again; each
+later wake reads Sent Mail for it under the key `notice:<id>`, as for an
+effect. Every other notice goes to Tom's operator channel, Telegram or the
+local chat page.
 
 ## Stop and recovery
 
@@ -285,13 +289,13 @@ operator from the bridge too.
   a line in its log and, for a send, a failed outcome on the ledger;
   telling Tom is `core/`'s job. The one notice it writes is `send_in_doubt`
   (`EmailBridge.in_doubt`), a `notice.requested` row for a send that may or
-  may not have gone, which the operator channel's outbox delivers.
+  may not have gone, which goes where any notice for its task goes.
 
 ## The implementation
 
 | Module | Holds |
 |---|---|
-| `bridges/email/__init__.py` | `EmailBridge`: `channel`, `limits`, `performers()` giving `email.send`'s `(perform, lookup)`, and `run(outbox)`, the IMAP watch beside each released send and each Sent Mail lookup as a task of its own, reconnected on `tick()` |
+| `bridges/email/__init__.py` | `EmailBridge`: `channel`, `limits`, `performers()` giving `email.send`'s `(perform, lookup)`, and `run(outbox)`, the IMAP watch beside each released send, each notice to a thread (`notice`) and each Sent Mail lookup as a task of its own, reconnected on `tick()` |
 | `bridges/email/__main__.py` | The verbs `run`, `keys`, and `--plist` (`KeepAlive`, logs in `log_dir/email.log`); `run` logs at INFO, each line `time level message` |
 | `bridges/email/config.py` | `Config`, from settings and `mail-keys`; the passwords are held here only |
 | `bridges/email/parse.py` | Raw mail to a record's fields, and attachments to files |

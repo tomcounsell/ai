@@ -39,6 +39,7 @@ class EmailBridge:
         self._running: set[str] = set()
         self.stopped: set[str] = set()  # effects whose last call a stop ended
         self._tasks: asyncio.TaskGroup | None = None
+        self._doubted: set[str] = set()  # notices whose send is in doubt: Sent Mail settles them
 
     async def perform(self, action: broker.Action, key: str) -> dict[str, Any]:
         """The SMTP call, ended when Tom stops the effect's task. A stop
@@ -87,8 +88,8 @@ class EmailBridge:
         """The watch beside the outbox. Each `Release` is performed as its
         own task on its own connection, and so is each Sent Mail lookup
         (`reconcile`), so a server that never answers holds only its own
-        effect, and a stop ends it. Notices are Telegram's
-        (`operator_channel`), so email ignores them."""
+        effect, and a stop ends it, and so is each notice to a thread
+        (`notice`)."""
         async with asyncio.TaskGroup() as tg:
             self._tasks = tg
             tg.create_task(self.watches())
@@ -96,6 +97,8 @@ class EmailBridge:
             async for item in outbox:
                 if isinstance(item, bridge.Release):
                     self.start(item.effect_id, self.release(outbox, item))
+                elif isinstance(item, bridge.NoticeDue):
+                    self.start(item.notice_id, self.notice(outbox, item))
 
     def start(self, effect_id: str, work) -> None:
         """`work` as a task of its own, unless one already runs for this
@@ -110,7 +113,7 @@ class EmailBridge:
         try:
             await work
         except Exception:
-            log.exception("email effect %s failed; it is asked again on the next wake", effect_id)
+            log.exception("email effect or notice %s failed; it is asked again on the next wake", effect_id)
         finally:
             self._running.discard(effect_id)
 
@@ -121,6 +124,39 @@ class EmailBridge:
             outcome = await outbox.perform(item, conn)
             if outcome.kind == "unknown" and item.effect_id not in self.stopped:
                 await self.in_doubt(conn, item.effect_id)
+        finally:
+            await conn.close()
+
+    async def notice(self, outbox, item: bridge.NoticeDue) -> None:
+        """A notice to an email thread, sent over SMTP as a reply to all of
+        the thread's newest received email, or of the one it replies to, and
+        marked sent. A send in doubt is not sent again: each later wake asks
+        Sent Mail for it, as for an effect."""
+        conn = await db.connect(self.dsn, application_name="valor-email-notice")
+        try:
+            row = await (
+                await conn.execute(
+                    "SELECT payload FROM events WHERE type = 'message.received' AND task_id = 'email' "
+                    "AND (payload->>'message_id' = %s OR (%s::text IS NULL AND payload->>'chat_id' = %s)) "
+                    "ORDER BY id DESC LIMIT 1",
+                    (item.reply_to, item.reply_to, item.chat_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise broker.Failed(f"notice {item.notice_id}: no email was received in thread {item.chat_id}")
+            payload = {**bridge.email_reply_all(row[0], self.cfg.address), "body": item.text}
+            action = broker.Action("email.send", ",".join(sorted(payload["to"])), payload)
+            key = f"notice:{item.notice_id}"
+            if item.notice_id in self._doubted:
+                result = await in_thread(smtp.lookup, self.cfg, action, key, item.at)
+            else:
+                try:
+                    result = await in_thread(smtp.perform, self.cfg, action, key)
+                except broker.Unknown:
+                    self._doubted.add(item.notice_id)
+                    raise
+            await outbox.sent(item, result["sent"], conn)
+            self._doubted.discard(item.notice_id)
         finally:
             await conn.close()
 

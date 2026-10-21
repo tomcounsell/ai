@@ -67,6 +67,7 @@ NO_HEAD = "none"
 email_message = mail.email_message
 email_serialized = mail.serialized
 email_message_id = mail.message_id
+email_reply_all = mail.reply_all
 
 
 @dataclass(frozen=True)
@@ -579,11 +580,12 @@ class Outbox:
         except (broker.Refused, tasks.TaskStopped) as exc:
             return broker.Outcome(item.effect_id, "refused", error=str(exc) or type(exc).__name__)
 
-    async def sent(self, item: NoticeDue, sent: list[dict[str, str]]) -> None:
+    async def sent(self, item: NoticeDue, sent: list[dict[str, str]], conn=None) -> None:
+        conn = conn or self.conn
         try:
-            async with self.conn.transaction():
+            async with conn.transaction():
                 await ledger.append(
-                    self.conn, item.task_id, "notice.sent", {"notice_id": item.notice_id, "sent": sent}
+                    conn, item.task_id, "notice.sent", {"notice_id": item.notice_id, "sent": sent}
                 )
         except psycopg.errors.UniqueViolation:
             pass

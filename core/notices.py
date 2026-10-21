@@ -175,9 +175,9 @@ async def home(conn, task_id: str) -> tuple[str | None, str | None]:
     team chat as much as Tom's own, since only the chat session speaks to
     Tom and only in the chat it serves (Tom's rule of 2026-10-19): a chat
     session's own chat, a session's child's session's chat, else the chat
-    of the message that started the task. Else (None, None), the
-    operator's: a task no chat started, or an email thread, whose bridge
-    sends no notices."""
+    of the message that started the task; an email thread's is its root
+    message id, and the email bridge replies to the thread. Else (None,
+    None), the operator's: a task no chat started."""
     from core import tasks
 
     try:
@@ -188,7 +188,7 @@ async def home(conn, task_id: str) -> tuple[str | None, str | None]:
     if b is not None and chat is None and b.parent_id is not None:
         chat = (await tasks.brief(conn, b.parent_id)).chat
     if chat:
-        return (chat["channel"], chat["chat_id"]) if chat["channel"] != "email" else (None, None)
+        return chat["channel"], chat["chat_id"]
 
     row = await (
         await conn.execute(
@@ -199,7 +199,7 @@ async def home(conn, task_id: str) -> tuple[str | None, str | None]:
             (task_id,),
         )
     ).fetchone()
-    if row is None or row[0]["channel"] == "email":
+    if row is None:
         return None, None
     return row[0]["channel"], row[0]["chat_id"]
 
