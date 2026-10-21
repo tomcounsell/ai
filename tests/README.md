@@ -15,7 +15,8 @@ The suite proves the kernel is solid, that Telegram carries messages both ways, 
 9. Rollout: a merge of the kernel's own branch restarts it on the new commit, syncing dependencies when `uv.lock` changed, and the start that ends the rollout restarts each bridge whose code the merge reaches.
 10. Metering: a turn's model call through the gateway writes its opened and charged rows with the turn's id.
 11. Orchestration: only `valor:web` reaches the web, its guard is ledgered with its grant and expiry, and a turn loads Valor's plugin first, nests subagents without Claude Code's cap, and gives every subagent the Brief.
-12. Public site: every internal link and anchor in `site/` lands, every source link names a path in this checkout, `sitemap.xml` lists exactly the pages, each removed page redirects to one that exists, and no chat id, token or other email address is published.
+12. Memory import: an imported old record is ingested in its own project and client and recalled for that project's later tasks only; `memory import` appends each old record once, and only for projects served here; the prep script keeps human and agent records, drops summaries, maps a Cyndra-labelled record to cyndra, and collapses near-exact duplicates with Tom's record kept.
+13. Public site: every internal link and anchor in `site/` lands, every source link names a path in this checkout, `sitemap.xml` lists exactly the pages, each removed page redirects to one that exists, and no chat id, token or other email address is published.
 
 ## Running
 

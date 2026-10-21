@@ -53,6 +53,15 @@ Mac's own kernel database, as memory's role.
   recall, does not wait, and its Brief records `Memory: recall skipped:
   the store could not be reached (<reason>)`; the ingest after the turn is
   skipped too, and its rows are taken by the next ingest that reaches it.
+- **The old system's memory.** `scripts/memory_import_prep.py EXPORT...
+  OUT/` chooses the old records Tom kept (human and agent, not superseded,
+  no session summaries), maps each to its project, and deduplicates them
+  (near-exact by word overlap, paraphrases by `claude -p`), writing
+  `import.jsonl` and a `report.md` Tom reads first. `python -m core memory
+  import FILE` then appends one `memory.imported` row per line on the
+  `memory` stream for the projects this Mac serves, once per old
+  `memory_id`; ingest makes each a record of origin `imported` in the
+  line's own project and client, recalled like any other.
 - **A client fact in the wrong Brief.** A fact about one client that turns
   up in another client's Brief is recorded as a correction naming the
   record it came from (`python -m core correct TEXT --record <record>`),
