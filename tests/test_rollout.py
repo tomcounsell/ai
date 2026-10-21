@@ -602,5 +602,5 @@ def test_python_m_ui_plist_is_the_dashboards_job():
     done = subprocess.run([sys.executable, "-m", "ui", "--plist"], capture_output=True, check=True)
     job, kernel_job = plistlib.loads(done.stdout), plistlib.loads(serve.plist())
     assert job["Label"] == rollout.UI == "com.valor.ui"
-    assert job["ProgramArguments"] == [kernel_job["ProgramArguments"][0], "-m", "ui"]
+    assert job["ProgramArguments"] == [*kernel_job["ProgramArguments"][:2], "-m", "ui"]
     assert job["StandardOutPath"].endswith("ui.log") and "ProcessType" not in job

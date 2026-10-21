@@ -128,6 +128,12 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    Parakeet into `~/.cache/huggingface`, Kokoro, which the present
    skill's `tts.py` speaks with, into `~/.cache/kokoro-onnx`; Handy's own
    models folder is not used): `$PY -m tools.voice fetch`.
+   Then, at the Mac itself, `$PY -m core permissions`: it builds
+   `~/Applications/Valor.app`, which every job below runs its command
+   through, and asks in one sitting for the privacy grants the jobs and
+   their turns need (Full Disk Access, App Management, Screen Recording,
+   Automation of Messages), attached to the app so they outlast Homebrew's
+   Python upgrades. It prints each grant and exits 0 when all are allowed.
    Then for each of `core serve`, `bridges.telegram`, `bridges.email`
    (with `VALOR_EMAIL_SINCE` the rollout date), `bridges.slack` if the Mac
    reads Slack, `tools.voice` (`com.valor.voice`, which transcribes every

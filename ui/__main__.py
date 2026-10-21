@@ -22,7 +22,7 @@ def plist() -> bytes:
     job = plistlib.loads(serve.plist())
     log = str(Path(settings.log_dir) / "ui.log")
     job.pop("ProcessType")
-    job |= {"Label": rollout.UI, "ProgramArguments": [job["ProgramArguments"][0], "-m", "ui"]}
+    job |= {"Label": rollout.UI, "ProgramArguments": [*job["ProgramArguments"][:2], "-m", "ui"]}
     job |= {"StandardOutPath": log, "StandardErrorPath": log}
     return plistlib.dumps(job)
 

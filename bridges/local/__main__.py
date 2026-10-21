@@ -37,7 +37,7 @@ def plist(*, python: str | None = None) -> bytes:
     return plistlib.dumps(
         {
             "Label": LABEL,
-            "ProgramArguments": [python or sys.executable, "-m", "bridges.local", "run"],
+            "ProgramArguments": [settings.launcher, python or sys.executable, "-m", "bridges.local", "run"],
             "WorkingDirectory": str(ROOT),
             "EnvironmentVariables": env,
             "RunAtLoad": True,

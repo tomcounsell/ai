@@ -111,7 +111,7 @@ def plist(*, python: str | None = None) -> bytes:
     return plistlib.dumps(
         {
             "Label": LABEL,
-            "ProgramArguments": [python or sys.executable, "-m", "bridges.slack", "run"],
+            "ProgramArguments": [settings.launcher, python or sys.executable, "-m", "bridges.slack", "run"],
             "WorkingDirectory": str(ROOT),
             "EnvironmentVariables": env,
             "RunAtLoad": True,

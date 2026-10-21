@@ -26,6 +26,7 @@ from bridges.slack.bridge import SlackBridge
 from bridges.telegram.send import Expected, _matches
 from bridges.telegram.wire import Media, Msg, document, ogg_seconds
 from core import bridge, intake
+from core.settings import settings
 from tests import bridges
 from tests.telegram_port import (
     chat,
@@ -158,6 +159,7 @@ def test_plist_runs_the_process_with_ffmpeg_on_its_path():
 
     job = plistlib.loads(voice.plist(python="/py"))
     assert job["Label"] == "com.valor.voice" and job["ProgramArguments"] == [
+        settings.launcher,
         "/py",
         "-m",
         "tools.voice",

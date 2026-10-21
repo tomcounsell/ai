@@ -176,7 +176,14 @@ def plist(routine: Routine, *, python: str | None = None, root: Path = ROOT) -> 
     log = Path(settings.log_dir) / f"routine-{routine.name}.log"
     job: dict[str, Any] = {
         "Label": f"{LABEL}.{routine.name}",
-        "ProgramArguments": [python or sys.executable, "-m", "core", "routine", routine.name],
+        "ProgramArguments": [
+            settings.launcher,
+            python or sys.executable,
+            "-m",
+            "core",
+            "routine",
+            routine.name,
+        ],
         "WorkingDirectory": str(root),
         "EnvironmentVariables": env,
         "StandardOutPath": str(log),
