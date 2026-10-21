@@ -4,7 +4,7 @@ type: feature
 appetite: Small
 owner: Valor
 created: 2026-10-21
-tracking: TBD
+tracking: https://github.com/tomcounsell/ai/issues/3658
 last_comment_id: none
 ---
 
