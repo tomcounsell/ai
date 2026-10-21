@@ -3,7 +3,7 @@ status: Planning
 type: feature
 tracking: https://github.com/tomcounsell/ai/issues/3655
 revision_applied: true
-revision_applied_at: 2026-10-20T08:50:36Z
+revision_applied_at: 2026-10-21T10:37:51Z
 ---
 
 # RSI rebuild: requirements
@@ -47,76 +47,96 @@ One month after it ships, all three:
 - What of the `improve-research`, `improve-preflight` and `rsi` skills in `old-system` is reused (rule 10).
 
 
-# Plan (2026-10-20, #3655; revised after critique round 1)
+# Plan (2026-10-21, #3655; revised after critique round 2)
 
-Tom's requirements above stand (rule 6). Reasoning:
+Requirements above stand (rule 6). Reasoning:
 [synthesis.md](../research/rsi/synthesis.md#reasoning-behind-the-plan);
-sources: [spikes.md](../research/rsi/spikes.md). Baseline `34c4a1d9c`.
+[spikes.md](../research/rsi/spikes.md). Baseline `412f6d9cd`. Unlike the
+old controller, it starts from what Tom said and counts what Tom used.
 
-## Shape
+## Build 1: the routine
 
-One routine, `routines/rsi/`, `[schedule] interval = 900`, `ceiling =
-"act"`, `model = "frontier"`, `project = "valor"`, `branch = "main"`. It
-starts ordinary tasks through `findings.start_fix` (rule 4). Unlike the old
-controller (375 runs, 0 used), it starts from Tom's rows and counts what
-Tom used. Tom halts it with `python -m core stop <objective>`.
+- **`routines/rsi/routine.toml`:** `runner = "rsi"`, `[schedule] interval = 900`,
+  `ceiling = "act"`, `model = "frontier"`, `project = "valor"`,
+  `branch = "main"`, `mission_item = "5"`, `need` = Tom's ask of 2026-10-20
+  (one suffices, Tom, 2026-10-21).
+- **`routines/rsi/runner.py`:** `run(ctx) -> Ran`, added to
+  `core/__main__.py:_routine_runners`. Plain SQL, no turn.
+  - `rows(conn)` reads three sources:
+    - `correction.recorded` rows;
+    - `message.received` rows from Tom's verified DM: `verified`,
+      `chat_kind == "dm"`, `intake._from_operator(payload)`, and an
+      `https?://` URL in `text`;
+    - `step.failed` rows on tasks not started by `rsi` (G5).
+  - **Unseen:** a row is unseen when its id is above the routine's first
+    `routine.registered` id (`routines.registrations`) and no
+    `task.started` carries `rsi:<event id>` (`findings._started`): a
+    definition, not a guard. An ended or stopped task never restarts its row.
+  - **Starts:** each unseen row, oldest first, through
+    `findings.start_fix(parent=ctx.objective)`. None unseen:
+    `Ran(None, "nothing_due", ...)`, no turn.
+- **Project:** `project_of(url)`: the `projects/*.toml` spec whose `repo`
+  is the URL's GitHub repo, else the routine's. A DM's URL, a failed
+  step's task `origin_url`; a correction takes the routine's.
+  - `Finding` gains `project: str | None = None`. `start_fix` uses
+    `finding.project or routine.project` (the routine's branch only on its
+    own project) and records a differing project in the marker.
+- **Used:** `used_over_started(conn)` over `rsi:` tasks; used means
+  `outcomes.used_count` counts a mark with
+  `provenance.by.strip().lower() == "tom"`.
+- **Lineage:** the merge report (`notices.py`, `kind == "merge"`) adds the
+  line `rsi: <keys>`.
+- **Tests (`tests/test_rsi.py`):**
+  - 50 corrections recorded before registration start nothing;
+  - merged, stopped and crashed rows are not restarted;
+  - group, unverified and URL-less messages start nothing;
+  - a DM linking `github.com/tomcounsell/popoto` starts on popoto;
+  - an idle run starts no task;
+  - `verify` is unchanged;
+  - "Tom" equals "tom"; role-played and non-Tom marks do not count;
+  - the merge report carries the lineage line.
+- **Docs:** `routines.md` (the runner; Existence: one need suffices, Tom's
+  grant 2026-10-21), `data.md` (marker `project`), `architecture.md`.
 
-**Class.** Rule 2: Tom asked for RSI on 2026-10-20, and it acts on what Tom
-said. Scanning failed steps is a check (`routines.md`), so that source is
-G5. No two hand-done task ids exist for `need` (Needs Tom 1).
+## Build 2: `/rsi` and the weekly message
 
-## Stage 1 (Build 1)
+- `skills/valor/skills/rsi/SKILL.md` ports `old-system:.claude/skills/rsi`
+  (#3641). It reads unseen rows and asks through `ask-me`.
+- `python -m core rsi` prints used over started, unseen rows, and rows
+  whose task ended or stopped unused.
+- The runner's first run each ISO week sends it to Tom
+  (`notices.request(kind="report", about_key="rsi-week:<week>")`); Build 4
+  adds ventures and money.
+- Tests and docs as in Build 1.
 
-- **Sources:** `correction.recorded` rows from Tom and messages carrying a
-  link Tom forwarded; failed steps after G5. Ranked by
-  recurrence, then age; RSI's own tasks are skipped.
-- **Keys:** `rsi:<ledger event id>` in the `finding.keys` marker. A row is
-  *unseen* when no `task.started` carries its key; the runner starts only
-  unseen rows, so a merged, ended or stopped task never restarts its row.
-  No cursor: `task.started` is the record.
-- **`start_fix`:** `Finding` gains optional `project` and `branch`,
-  defaulting to the routine's; the refusal for no project applies to the
-  resolved value. `verify` passes neither.
-- **Use:** "used over started" joins `task.started` rows with an `rsi:` key
-  to `delivery.used` rows on the same task that `outcomes.used_count`
-  counts (not role-played) and whose `by` is Tom. Only Tom writes them
-  (`python -m core used TASK --by tom`); no agent judges use.
+## Builds 3–5 (each its own plan)
 
-Tests: a merged, a stopped, and a crashed-before-`routine.ran` row are not
-restarted on rescan; own tasks skipped; idle run opens no turn; a finding's
-project is used; `verify` still starts on its own; the count ignores
-role-played and non-Tom marks.
+3. Blind replay runner (G1).
+4. Venture template, with income read from Valor's Stripe; waits on
+   Needs Tom 1–2.
+5. Unattended on a cloud host Valor chooses.
 
-## Governance (none built without its grant; each ledgered, 90-day expiry)
+## Decisions (Tom, 2026-10-21)
+
+- **Access, not governance:** venture sign-off (Valor cannot bind Yudame
+  Inc) and the cash caps (the card issuer's limit). No incident needed.
+- **No client split:** RSI works only on open-source repos (ai, maybe
+  popoto); no `open_source` flag.
+- **Persona:** RSI may propose edits as a PR; Tom merges.
+- **Stripe:** admin access on Valor's own brand account.
+- **Accounts:** Tom's browsers stay logged in; Valor may create accounts
+  and lists every login, and its chosen cloud host with why, in
+  `~/Desktop/Valor/accounts.toml`.
+
+## Governance (ledgered, 90-day expiry)
 
 | | What | Mission item | Incident | Grant |
 |---|---|---|---|---|
-| G1 | Blind replay before "improved"; under 10 paired trials per arm the verdict is "inconclusive", which neither blocks nor promotes | 5 | #3177 (375 runs, none used; judge saw the skill's name; 2 and 4 trials inconclusive) | **Needs Tom** |
-| G2 | Tom approves each venture | Business 8 (conflicts) | none | Tom, 2026-10-20; **incident needed** |
-| G3 | $10/day inference, $50/week infrastructure, as the card's issuer limit | Bounded authority (conflicts) | none | Tom, 2026-10-20; **incident needed** |
-| G4 | Client work stays on Claude/Codex (specs gain `open_source`) | Generic across businesses | none | Tom, 2026-10-20; **incident needed** |
-| G5 | RSI reads failed steps as a source | 1 | none named | **Needs Tom** |
+| G1 | Blind replay before "improved"; under 10 paired trials per arm is "inconclusive", which neither blocks nor promotes | 5 | #3177 | Tom, 2026-10-21 |
+| G5 | Failed steps as a source | 1 | none named by Tom | Tom, 2026-10-21 |
 
 ## Needs Tom
 
-1. Accept his 2026-10-20 ask as `need` (as `verify` cites his ask), or name two hand-done tasks.
-2. Grant or refuse G1–G5 and name each incident; resolve G2 and G3 against `mission.md`.
-3. Counsel on incorporation, per-venture LLCs, insurance, agent terms, consumers, tax.
-4. Which providers and cloud sandbox host to open, and who creates each account.
-5. Persona edits by RSI (charter §12)? A weekly message?
-6. A read-only Stripe or bank adapter for the conditions routine.
-
-## Build (Large)
-
-1. **Stage 1** above. Serves Done 1; waits on nothing.
-2. **`/rsi`**, its own task: the #3641 port, grounded on unseen rows,
-   questioning through `ask-me`.
-3. **Replay runner** (G1). Serves Done 1; waits on G1.
-4. **Venture template:** owner, accounts, cap, kill date, disclosure,
-   markets, insurance; money read by the conditions routine. Serves Done 2; waits on G2, G3, Needs Tom 3 and 6.
-5. **Unattended:** the routine and kernel run on the chosen cloud host,
-   with resource-expiry conditions. Serves Done 3; waits on Needs Tom 4.
-
-Rule 10: `improve-preflight` is dropped; four `improve-research` rules go
-into the instruction. No write path is added. Tom sees merge reports with
-an `rsi:` lineage line. Docs: `routines.md`, `architecture.md`.
+1. Counsel on incorporation, per-venture LLCs, insurance, agent terms,
+   consumers and tax (Build 4).
+2. Who opens Valor's Stripe account, since it needs Yudame Inc's details.
