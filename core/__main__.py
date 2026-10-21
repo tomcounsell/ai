@@ -141,6 +141,7 @@ imports outside it.
 import argparse
 import asyncio
 import dataclasses
+import functools
 import json
 import os
 import resource
@@ -363,10 +364,11 @@ async def _serve() -> None:
         judgement_port = port()
     except (credentials.MissingKey, ValueError) as exc:
         raise SystemExit(f"serve refused: {exc}") from None
-    from core import rollout
+    from core import permissions, rollout
 
+    setup = functools.partial(permissions.ensure, serve.LABEL)
     try:
-        await serve.serve(runners(judgement_port), _performers)
+        await serve.serve(runners(judgement_port), _performers, setup=setup)
     except rollout.Restart as exc:
         raise SystemExit(str(exc)) from None  # status 1: launchd starts the merged code
 

@@ -65,3 +65,31 @@ def test_every_launchd_job_runs_through_the_launcher(module):
 def test_every_routine_runs_through_the_launcher():
     job = plistlib.loads(routines.plist(routines.load("verify", ROOT / "routines")))
     assert job["ProgramArguments"][0] == settings.launcher
+
+
+def test_ensure_puts_every_python_job_on_the_launcher_and_reloads_its_own_last(exe, tmp_path):
+    jobs = {
+        "com.valor.kernel": ["/opt/homebrew/bin/python3.14", "-m", "core.serve"],
+        "com.valor.voice": ["/opt/homebrew/bin/python3.14", "-m", "tools.voice"],
+        "com.valor.done": [str(exe), "/opt/homebrew/bin/python3.14", "-m", "core.backup"],
+        "com.valor.brew-nightly": ["/bin/bash", "brew-nightly-update.sh"],
+    }
+    for label, argv in jobs.items():
+        (tmp_path / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": argv}))
+    reloaded = []
+
+    def reload(label, plist, own):
+        reloaded.append((label, own))
+        return "5: Input/output error" if label == "com.valor.voice" else None
+
+    done = permissions.ensure("com.valor.kernel", tmp_path, exe, reload)
+    assert done == {
+        "fixed": ["com.valor.voice", "com.valor.kernel"],
+        "failed": ["com.valor.voice: 5: Input/output error"],
+    }
+    assert reloaded == [("com.valor.voice", False), ("com.valor.kernel", True)]
+    argv = {p.stem: plistlib.loads(p.read_bytes())["ProgramArguments"] for p in tmp_path.glob("*.plist")}
+    assert argv["com.valor.kernel"] == [str(exe), *jobs["com.valor.kernel"]]
+    assert argv["com.valor.done"] == jobs["com.valor.done"]
+    assert argv["com.valor.brew-nightly"] == jobs["com.valor.brew-nightly"]
+    assert permissions.ensure("com.valor.kernel", tmp_path, exe, reload) == {}

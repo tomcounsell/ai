@@ -405,7 +405,9 @@ def test_an_update_to_a_tip_ahead_restarts_and_recover_ends_it_kicking_the_dashb
         bridge = await holding(fresh, "valor-telegram", "telegram")  # unstamped: stale
         try:
             async with await db.connect(fresh) as conn:
-                return await serve.recover(conn, checkout=repo.co, running=sha, kick=kicked.append)
+                return await serve.recover(
+                    conn, checkout=repo.co, running=sha, kick=kicked.append, setup=dict
+                )
         finally:
             await bridge.close()
 
@@ -413,6 +415,7 @@ def test_an_update_to_a_tip_ahead_restarts_and_recover_ends_it_kicking_the_dashb
     assert kicked == ["com.valor.kernel.telegram", rollout.UI]
     (ended,) = typed(updates(fresh), "rollout.ended")
     assert (ended["outcome"], ended["head"]) == ("done", sha)
+    assert "setup" not in ended  # nothing fixed: nothing recorded
     assert run(asked(fresh)) != request  # ended: the next request is a new one
 
 
@@ -604,3 +607,18 @@ def test_python_m_ui_plist_is_the_dashboards_job():
     assert job["Label"] == rollout.UI == "com.valor.ui"
     assert job["ProgramArguments"] == [*kernel_job["ProgramArguments"][:2], "-m", "ui"]
     assert job["StandardOutPath"].endswith("ui.log") and "ProcessType" not in job
+
+
+def test_an_update_that_rolls_nothing_still_checks_the_setup(fresh, tmp_path):
+    repo = Repo(tmp_path)
+    request = run(asked(fresh))
+    k = kernel(fresh, repo, "none")
+    k.setup = lambda: {"fixed": ["com.valor.voice"]}
+    assert run(tick(k, fresh)) is None
+    (ended,) = typed(updates(fresh), "rollout.ended")
+    assert ended == {
+        "effect_id": request,
+        "outcome": "up_to_date",
+        "sha": repo.base,
+        "setup": {"fixed": ["com.valor.voice"]},
+    }

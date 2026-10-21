@@ -42,7 +42,9 @@ in Valor's engineering room, the update routine) is a rollout to the
 branch's tip, keyed by its request: `tip` fetches it, and a tip the
 started commit contains ends the request `up_to_date`; any other is a
 `Merge` on the `updates` stream whose effect id is the request id, and
-rolls on the one path above, hold included.
+rolls on the one path above, hold included. Either way the update ends
+with the kernel's check of this Mac's setup (`core.permissions.ensure`),
+whose fixes and failures go on the `rollout.ended` row as `setup`.
 
 `Restart` leaves `serve` once `rollout.restarting` is written; `python -m
 core serve` then exits with status 1 and launchd starts it again.

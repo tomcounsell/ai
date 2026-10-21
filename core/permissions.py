@@ -14,15 +14,22 @@ it is missing and runs `probe` inside it through LaunchServices, so Valor,
 not the terminal, is the one asking. The grants are the ones the kernel's
 Python was granted before. Full Disk Access covers its folder, volume,
 iCloud and app-data rows, so only four are asked for.
+
+Every update checks this Mac's setup (`ensure`): it builds Valor.app when
+it is missing, puts the launcher first in every `com.valor.*` job that
+still runs a bare Python, and reloads those jobs, the kernel's own last,
+from a one-shot job of its own, since a job cannot reload itself.
 """
 
 import ctypes
+import os
 import plistlib
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from core.settings import settings
@@ -41,6 +48,7 @@ GRANTS = (
     ("kTCCServiceAppleEvents", "com.apple.MobileSMS", "Privacy_Automation", "Automation: Messages"),
 )
 WAIT_S = 900
+AGENTS = Path.home() / "Library/LaunchAgents"
 
 
 def build(exe: Path) -> None:
@@ -59,6 +67,61 @@ def build(exe: Path) -> None:
     }
     (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))
     subprocess.run(["codesign", "-s", "-", "-f", "-i", BUNDLE_ID, app], check=True, capture_output=True)
+
+
+def ensure(
+    own: str,
+    agents: Path = AGENTS,
+    exe: Path | None = None,
+    reload: Callable[[str, Path, bool], str | None] | None = None,
+) -> dict[str, list[str]]:
+    """Every update's check of this Mac's setup (module docstring). `own` is
+    the label of the job running this, reloaded by a one-shot job of its
+    own. Returns `fixed`, each job put on the launcher, and `failed`, each
+    job not reloaded with why; empty ones left out."""
+    exe = exe or Path(settings.launcher)
+    reload = reload or _reload
+    fixed, failed = [], []
+    if not exe.exists():
+        build(exe)
+        fixed.append(exe.parents[2].name)
+    jobs = sorted(agents.glob("com.valor.*.plist"), key=lambda p: p.stem == own)
+    for plist in jobs:
+        job = plistlib.loads(plist.read_bytes())
+        argv = job.get("ProgramArguments", [])
+        if len(argv) < 2 or not Path(argv[0]).name.startswith("python") or argv[1] != "-m":
+            continue
+        job["ProgramArguments"] = [str(exe), *argv]
+        plist.write_bytes(plistlib.dumps(job))
+        fixed.append(plist.stem)
+        if why := reload(plist.stem, plist, plist.stem == own):
+            failed.append(f"{plist.stem}: {why}")
+    return {k: v for k, v in (("fixed", fixed), ("failed", failed)) if v}
+
+
+def _reload(label: str, plist: Path, own: bool) -> str | None:
+    """launchd reads a plist only at bootstrap. The bootout returns before
+    the job's process has exited, so the bootstrap is tried until it takes."""
+    domain = f"gui/{os.getuid()}"
+    if own:
+        helper = Path(tempfile.gettempdir()) / f"{label}.reload.plist"
+        script = (
+            f"launchctl bootout {domain}/{label}; "
+            f"until launchctl bootstrap {domain} '{plist}'; do sleep 1; done; "
+            f"launchctl bootout {domain}/{label}.reload"
+        )
+        job = {"Label": f"{label}.reload", "ProgramArguments": ["/bin/sh", "-c", script], "RunAtLoad": True}
+        helper.write_bytes(plistlib.dumps(job))
+        argv = [["launchctl", "bootstrap", domain, str(helper)]]
+    else:
+        subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], capture_output=True, check=False)
+        argv = [["launchctl", "bootstrap", domain, str(plist)]] * 20
+    for a in argv:
+        done = subprocess.run(a, capture_output=True, text=True, check=False)
+        if done.returncode == 0:
+            return None
+        time.sleep(0.5)
+    return done.stderr.strip() or f"launchctl exited with status {done.returncode}"
 
 
 def granted() -> dict[str, bool | None]:

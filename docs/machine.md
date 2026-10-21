@@ -241,7 +241,9 @@ scheduler, supervisor, or watchdog on the machine.
   every upgrade and was asked for each grant again. `python -m core
   permissions` (`core/permissions.py`) builds the app once and never
   rebuilds it, since a rebuild drops its grants, and asks for the grants at
-  the Mac ([rollout.md](rollout.md), step 9).
+  the Mac ([rollout.md](rollout.md), step 9). Every update checks this
+  (`permissions.ensure`): it builds a missing app, puts the launcher first
+  in any `com.valor.*` job still running a bare Python, and reloads it.
 - **Stop is not `launchctl`.** Stopping a task is `python -m core stop`,
   which fences it in the database, revokes its gateway token, and kills the
   turn's process group. Unloading a LaunchAgent stops a service; it is not

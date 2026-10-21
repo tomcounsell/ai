@@ -244,12 +244,14 @@ async def recover(
     checkout: Path | None = None,
     running: str | None = None,
     kick: Callable[[str], str | None] | None = None,
+    setup: Callable[[], dict[str, list[str]]] | None = None,
 ) -> dict[str, list]:
     """Settle what a killed kernel left. Returns what was done, by kind.
     With the kernel's `checkout` and the `running` commit, also ends the
     rollouts that commit contains (`rolled`); with `kick` too, when there
     is one to end, first restarts each bridge on code the running commit
-    changed (`restart_bridges`, `bridges`) and records it on those rows."""
+    changed (`restart_bridges`, `bridges`), and with `setup`, checks this
+    Mac's setup (`permissions.ensure`), recording both on those rows."""
     done: dict[str, list] = {
         "charged": [],
         "interrupted": [],
@@ -371,11 +373,25 @@ async def recover(
             except Exception as exc:  # noqa: BLE001  the bridges' restart never stops the kernel's start
                 _log(f"the bridges were not restarted: {exc!r}")
             done["bridges"] = sorted(kicked.get("restarted", {}))
+        if ending and setup is not None:
+            kicked |= await _setup(setup)
         for task_id, payload in ending:
             async with conn.transaction():
                 await ledger.append(conn, task_id, "rollout.ended", payload | kicked)
             done["rolled"].append(payload["effect_id"])
     return done
+
+
+async def _setup(setup: Callable[[], dict[str, list[str]]]) -> dict[str, dict]:
+    """`setup`'s result, as the `setup` field of a `rollout.ended` row when
+    it did anything. A failed check never stops the kernel or its update."""
+    try:
+        done = await asyncio.to_thread(setup)
+    except Exception as exc:  # noqa: BLE001
+        done = {"failed": [repr(exc)]}
+    if done:
+        _log(f"setup: {json.dumps(done)}")
+    return {"setup": done} if done else {}
 
 
 async def restart_bridges(
@@ -504,6 +520,7 @@ class Kernel:
         credential: str | Path | None = None,
         sync: Callable[[], None] | None = None,
         backup: Callable[[str], None] | None = None,
+        setup: Callable[[], dict[str, list[str]]] | None = None,
     ):
         self.gateway, self.runners, self.performers, self.dsn = gateway, runners, performers, dsn
         # The checkout this process runs from and its commit then; with no
@@ -512,6 +529,7 @@ class Kernel:
         self.migrate = migrate or (functools.partial(rollout.migrate, checkout) if checkout else None)
         self.sync = sync or (functools.partial(rollout.sync, checkout, settings.uv) if checkout else None)
         self.backup = backup or _backup
+        self.setup = setup  # every update's check of this Mac's setup (`permissions.ensure`)
         self.restart_due: rollout.Merge | None = None  # holds `schedule` until the jobs end
         self.judged: set[str] = set()  # merge effects contained in `started`, or not the kernel's
         self.waiting: set[str] = set()  # failed since the last `serve_tick_s` wake
@@ -610,7 +628,8 @@ class Kernel:
                 return
             m = rollout.Merge(request_id, intake.UPDATES, row, url, branch, tip)
             if await git.threaded(git.is_ancestor, self.checkout, tip, self.started):
-                await self._ended(conn, m, outcome="up_to_date", sha=tip)
+                checked = await _setup(self.setup) if self.setup else {}
+                await self._ended(conn, m, outcome="up_to_date", sha=tip, **checked)
             else:
                 merges = sorted([*merges, m], key=lambda x: x.row)
         retry = self.restart_due is not None
@@ -1140,12 +1159,14 @@ async def serve(
     migrate: Callable[[str], None] | None = None,
     credential: str | Path | None = None,
     kick: Callable[[str], str | None] | None = rollout.kick,
+    setup: Callable[[], dict[str, list[str]]] | None = None,
 ) -> None:
     """Run the kernel until killed, or until a rollout of its own merge
     raises `rollout.Restart`. `checkout` is the checkout it runs from and
     rolls forward; `credential` the GitHub key file for the fetch
     (default `settings.github_keyfile`); `kick` restarts a bridge's
-    launchd job at start (`restart_bridges`)."""
+    launchd job at start (`restart_bridges`); `setup` checks this Mac's
+    setup on every update (`permissions.ensure`)."""
     dsn = dsn or settings.dsn()
     started = None
     if checkout is not None:
@@ -1161,7 +1182,7 @@ async def serve(
     kernel = None
     try:
         await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (kernel_key(),))
-        done = await recover(conn, performers, checkout=checkout, running=started, kick=kick)
+        done = await recover(conn, performers, checkout=checkout, running=started, kick=kick, setup=setup)
         print(f"kernel recovered: {json.dumps({k: len(v) for k, v in done.items()})}", flush=True)
         if gateway is None:
             from core.gateway import ClaudeLogin, OpenAIKey
@@ -1178,6 +1199,7 @@ async def serve(
             started=started,
             migrate=migrate,
             credential=credential if credential is not None else settings.github_keyfile,
+            setup=setup,
         )
         await listener.execute("LISTEN valor_events")
         listening = asyncio.create_task(_listen(listener, kernel.wake))
