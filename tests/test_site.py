@@ -84,10 +84,12 @@ def test_sitemap_lists_exactly_the_pages():
 
 def test_each_removed_page_redirects_to_a_page_that_exists():
     worker = (ROOT / "src" / "index.js").read_text()
-    moved = re.findall(r'"(/[\w./-]+\.html)":\s*"(/[\w./-]+\.html)(?:#([\w-]+))?"', worker)
-    assert {old for old, _, _ in moved} == {"/runtime.html", "/codebase.html", "/memory.html", "/reflections.html"}
+    moved = re.findall(r'"(/[\w/-]+)":\s*"(/[\w./-]+\.html)(?:#([\w-]+))?"', worker)
+    research = {f"/research/{name}" for name in (
+        "valor-vs-paperclip", "valor-vs-managed-agents", "managed-agents-vs-perplexity-computer", "openhuman-vs-hermes")}
+    assert {old for old, _, _ in moved} == {"/runtime", "/codebase", "/memory", "/reflections", "/research"} | research
     for old, new, anchor in moved:
-        assert not (SITE / old.lstrip("/")).exists(), old
+        assert not (SITE / (old.lstrip("/") + ".html")).exists(), old
         target = SITE / new.lstrip("/")
         assert target.is_file(), new
         assert not anchor or anchor in PARSED[target].ids, f"{new}#{anchor}"

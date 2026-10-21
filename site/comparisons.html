@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comparisons · Valor Engels</title>
+<meta name="description" content="How Valor compares with Firstmate, OpenClaw and the hosted agents from Anthropic, Meta, xAI and OpenAI, on independence and data sovereignty.">
+<link rel="canonical" href="https://valorengels.com/comparisons.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Comparisons · Valor Engels">
+<meta property="og:description" content="How Valor compares with Firstmate, OpenClaw and the hosted agents from Anthropic, Meta, xAI and OpenAI, on independence and data sovereignty.">
+<meta property="og:url" content="https://valorengels.com/comparisons.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">How it works</span></a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="philosophy.html">Philosophy</a>
+      <a href="alignment.html">Alignment</a>
+      <a href="rules.html">Rules</a>
+      <a href="pipeline.html">Pipeline</a>
+      <a href="durability.html">Durability</a>
+      <a href="work.html">Work</a>
+      <a href="comparisons.html" aria-current="page">Comparisons</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">07 ·</span> comparisons</p>
+<h1>Comparisons: Valor and other AI coworker agents</h1>
+<p class="lede">Several products now offer an agent that works on its own for one person or a team. This page compares Valor with the ones closest to it, on the two things Valor is built around: independence and data sovereignty. Facts about other products were checked on 2026-10-21 and link to their sources.</p>
+<nav class="toc" aria-label="On this page">
+  <p class="toc-label">On this page</p>
+  <ol>
+    <li><a href="#terms">What the terms mean</a></li>
+    <li><a href="#glance">At a glance</a></li>
+    <li><a href="#firstmate">Firstmate</a></li>
+    <li><a href="#hosted">Hosted agents</a></li>
+    <li><a href="#openclaw">OpenClaw</a></li>
+    <li><a href="#leaves">What leaves Valor's Macs</a></li>
+  </ol>
+</nav>
+
+<section id="terms">
+  <p class="sec-label">What the terms mean</p>
+  <h2>Independence and data sovereignty</h2>
+  <dl class="def-list">
+    <div class="def-row"><dt>Independence</dt><dd>Valor runs on its own Macs, one per client, and acts as itself on its own accounts: its own email and Google Workspace seat, its own GitHub and chat accounts. It never acts as Tom and holds none of his accounts.</dd></div>
+    <div class="def-row"><dt>Data sovereignty</dt><dd>Valor's record of its work stays on those Macs: the ledger of every call, turn and effect, the turn transcripts and the memory store, all in Postgres on the machine. The code is public under the GPL.</dd></div>
+  </dl>
+  <p>Four of the products below run the agent on the vendor's computers, and five act under your account.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md">docs/mission.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/machine.md">docs/machine.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">docs/data.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/LICENSE">LICENSE</a></p>
+</section>
+
+<section id="glance">
+  <p class="sec-label">At a glance</p>
+  <h2>Where each agent runs, keeps data, and whose name it uses</h2>
+  <div class="table-wrap"><table class="doc stack">
+    <tr><th>Agent</th><th>Runs on</th><th>Data kept</th><th>Acts as</th><th>Price</th></tr>
+    <tr><td><b>Valor</b></td><td data-label="Runs on">its own Macs, one per client</td><td data-label="Data kept">Postgres on those Macs</td><td data-label="Acts as">its own accounts, as Valor Engels</td><td data-label="Price">hired through Yudame; code public</td></tr>
+    <tr><td><b>Firstmate</b></td><td data-label="Runs on">your machine (macOS or Linux)</td><td data-label="Data kept">files on your disk</td><td data-label="Acts as">your GitHub login</td><td data-label="Price">free, MIT licence</td></tr>
+    <tr><td><b>OpenClaw</b></td><td data-label="Runs on">your machine or server</td><td data-label="Data kept">your machine</td><td data-label="Acts as">the chat accounts you connect</td><td data-label="Price">free, MIT; you pay for the model</td></tr>
+    <tr><td><b>Claude (Cowork)</b></td><td data-label="Runs on">Anthropic's servers by default</td><td data-label="Data kept">your Claude account</td><td data-label="Acts as">you, through your connectors</td><td data-label="Price">Pro or Max, $20 to $200 a month</td></tr>
+    <tr><td><b>Meta Muse</b></td><td data-label="Runs on">a virtual machine in Meta's cloud</td><td data-label="Data kept">that virtual machine</td><td data-label="Acts as">its own name and email</td><td data-label="Price">free, with paid plans</td></tr>
+    <tr><td><b>Grok Bot</b></td><td data-label="Runs on">Cursor-hosted computers in the US</td><td data-label="Data kept">xAI's service</td><td data-label="Acts as">you, the signed-in member</td><td data-label="Price">included with SuperGrok and Cursor plans</td></tr>
+    <tr><td><b>OpenAI dots</b></td><td data-label="Runs on">its own cloud computer, or your laptop with permission</td><td data-label="Data kept">OpenAI, for as long as you keep the dot (reported)</td><td data-label="Acts as">your connected accounts</td><td data-label="Price">Pro, from $100 a month (reported)</td></tr>
+  </table></div>
+  <p>"Reported" means the figure comes from press coverage, not the vendor's own page.</p>
+</section>
+
+<section id="firstmate">
+  <p class="sec-label">Firstmate</p>
+  <h2>Firstmate, the closest comparison</h2>
+  <p><a href="https://github.com/kunchenguid/firstmate" rel="noopener" target="_blank">Firstmate</a> is an open-source project by Kun Chen, started in June 2026, with about 8,100 GitHub stars on 2026-10-21. It describes itself as "an agent distro for running a crew of agents": a set of instructions, skills and scripts that a coding agent follows. You talk to one agent, and it sends worker agents into their own git worktrees, watches them, and brings back pull requests, approved merges or reports.</p>
+  <div class="cols-2">
+    <div><h3>What Valor and Firstmate share</h3>
+      <ul class="tight">
+        <li>One agent you talk to, which hands the work to others.</li>
+        <li>Each piece of work in its own isolated checkout.</li>
+        <li>Both run on machines their operator controls, not in a vendor's cloud.</li>
+      </ul></div>
+    <div><h3>Where they differ</h3>
+      <ul class="tight">
+        <li>Firstmate uses your GitHub login; Valor has its own accounts and name.</li>
+        <li>Firstmate keeps state in files on disk; Valor keeps an append-only Postgres ledger.</li>
+        <li>Firstmate leaves merging to you, or to authority you configure; Valor merges itself when its checks pass, inside each task's effect ceiling.</li>
+        <li>Valor works in Telegram, Slack and email; Firstmate works in your terminal.</li>
+      </ul></div>
+  </div>
+  <p class="src">Sources: <a href="https://github.com/kunchenguid/firstmate" rel="noopener" target="_blank">github.com/kunchenguid/firstmate</a> (README, 2026-10-21) · <a href="https://api.github.com/repos/kunchenguid/firstmate" rel="noopener" target="_blank">GitHub API</a> (stars, created date) · <a href="pipeline.html">Valor's pipeline</a></p>
+</section>
+
+<section id="hosted">
+  <p class="sec-label">Hosted agents</p>
+  <h2>The hosted agents from Anthropic, Meta, xAI and OpenAI</h2>
+  <p>All four run the agent on the vendor's computers by default, and keep your sessions with that vendor. They differ in whose name the agent uses: Muse has its own, and the other three act as you.</p>
+  <h3>Claude (Cowork), Anthropic</h3>
+  <p>Anthropic doesn't use the name "cloud mode". The nearest feature is Cowork, the agent in the Claude app, which now runs on Anthropic's servers by default for Pro and Max, in a sandbox destroyed when the session ends. Sessions and files are saved to your Claude account. Anthropic's Cowork pages give no retention period; its data page for Claude Code says consumer data is kept for 30 days, or for 5 years if you allow it to be used to improve the models. Cowork acts under your account through connectors, and Anthropic says you remain responsible for what it does. In September 2026 Anthropic merged Cowork into the main Claude app.</p>
+  <p class="src">Sources: <a href="https://support.claude.com/en/articles/14479288-claude-cowork-architecture-overview" rel="noopener" target="_blank">Cowork architecture</a> · <a href="https://claude.com/blog/cowork-is-now-claude" rel="noopener" target="_blank">Cowork is now Claude</a> (2026-09-16) · <a href="https://code.claude.com/docs/en/data-usage" rel="noopener" target="_blank">Claude Code data usage</a></p>
+  <h3>Muse, Meta</h3>
+  <p>Meta launched Muse on 2026-09-08 as "the world's first personal AI agent built for everyone". Each agent "runs on its own dedicated computer in the cloud", a virtual machine that holds both the agent and your data, and has its own name and email address. Meta says it doesn't share your conversations or that data with its ad systems, and that you can opt out of training; press reports say training is on by default. Meta says it's free for most uses, with subscription plans.</p>
+  <p class="src">Sources: <a href="https://about.fb.com/news/2026/09/introducing-muse-personal-ai-agent/" rel="noopener" target="_blank">Meta newsroom</a> (2026-09-08) · <a href="https://en.wikipedia.org/wiki/Muse_(AI_agent)" rel="noopener" target="_blank">Wikipedia</a></p>
+  <h3>Grok Bot, xAI</h3>
+  <p>Grok Bot went into beta on 2026-08-11. Each bot works on a persistent cloud computer with a browser, files and a terminal; xAI says those computers are hosted by Cursor and run in the United States. xAI's security page says "a Bot has no identity or credentials of its own" and acts as the signed-in member. Once the service ends, xAI's security page says data is deleted within 30 days of a written request, and action recordings are kept for 90 days. It's included with SuperGrok and Cursor's paid plans.</p>
+  <p class="src">Sources: <a href="https://docs.x.ai/grok-bot/security" rel="noopener" target="_blank">Grok Bot security</a> · <a href="https://x.ai/news/grok-bot-more-plans" rel="noopener" target="_blank">xAI news</a> (2026-08-26)</p>
+  <h3>dots, OpenAI</h3>
+  <p>OpenAI announced dots on 2026-09-29: always-on agents in ChatGPT, each working from a cloud computer of its own that you can open to watch, and able to work on your laptop with permission. A dot keeps context from your conversations and connected apps for as long as you keep it, and can add to your ChatGPT memory. It signs in to services with your saved credentials. Press reports put the Pro plan, which includes one dot, at $100 a month or more. OpenAI's own pages couldn't be opened directly when checked, so these details come from press coverage and search summaries of OpenAI's help centre.</p>
+  <p class="src">Sources: <a href="https://techcrunch.com/2026/09/29/openai-launches-dots-its-bubbly-agentic-avatar/" rel="noopener" target="_blank">TechCrunch</a> (2026-09-29) · <a href="https://siliconangle.com/2026/09/29/openai-launches-dots-always-on-ai-agents-in-chatgpt-with-their-own-cloud-computers/" rel="noopener" target="_blank">SiliconANGLE</a> (2026-09-29) · <a href="https://help.openai.com/en/articles/20001529-dots-privacy-security-and-safety-faqs" rel="noopener" target="_blank">OpenAI help centre</a></p>
+</section>
+
+<section id="openclaw">
+  <p class="sec-label">OpenClaw</p>
+  <h2>OpenClaw, the popular self-hosted agent</h2>
+  <p><a href="https://github.com/openclaw/openclaw" rel="noopener" target="_blank">OpenClaw</a> is an open-source personal agent, first published in November 2025 and renamed OpenClaw in January 2026, with about 393,000 GitHub stars on 2026-10-21. You run it on your own machine or server and talk to it through WhatsApp, Telegram, Slack, Signal and other apps you connect. It's free under the MIT licence, and you pay your model provider directly. Its data stays on the machine it runs on, as Valor's does, but it works through your accounts where Valor uses its own.</p>
+  <p class="src">Sources: <a href="https://github.com/openclaw/openclaw" rel="noopener" target="_blank">github.com/openclaw/openclaw</a> · <a href="https://docs.openclaw.ai" rel="noopener" target="_blank">OpenClaw docs</a> · <a href="https://en.wikipedia.org/wiki/OpenClaw" rel="noopener" target="_blank">Wikipedia</a></p>
+</section>
+
+<section id="leaves">
+  <p class="sec-label">What leaves Valor's Macs</p>
+  <h2>What still leaves Valor's Macs</h2>
+  <p>Valor's record stays on its machines, but some of the work doesn't:</p>
+  <ul class="tight">
+    <li>Each model call goes to the model provider, Anthropic by default, through the kernel's gateway, which records it.</li>
+    <li>Classification calls, such as judging whether a request is clear enough to build, go to Jev, a small hosted model, with an open-weight model on OpenRouter as the fallback.</li>
+    <li>Messages pass through Telegram, Slack and email, and code goes to GitHub.</li>
+  </ul>
+  <p>So the model provider sees each prompt it answers. The record of the work stays on Valor's Macs: who asked for what, what was done, what it cost and what Tom corrected.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/tech-stack.md">docs/tech-stack.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md">docs/architecture.md</a></p>
+</section>
+
+<div class="page-next">
+  <a href="work.html"><span class="lbl">Previous</span>← The work</a>
+  <a href="index.html"><span class="lbl">Back to start</span>Overview →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · how the system works</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
+    <span>updated 2026-10-21</span>
+  </div>
+</footer>
+</body>
+</html>
