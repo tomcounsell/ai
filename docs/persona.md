@@ -516,11 +516,11 @@ reads, persona included), `persona_sha256`, and `persona_bytes`, so the
 ledger shows which persona version every turn ran under (property:
 Legible).
 
-**Gap: subagents.** Corrections and persona reach every Brief the kernel
+**Subagents.** Corrections and persona reach every Brief the kernel
 sends, and Pi's session gets the Brief appended to its system prompt. A
-subagent that Claude Code starts inside a turn gets neither: it has its own
-system prompt and only the prompt its parent wrote, so the constraint that
-corrections reach every agent does not hold for it (see `docs/harnesses.md`).
+subagent that Claude Code starts inside a turn opens with the same Brief
+through Valor's SubagentStart hook. The web agent is the exception: it reads
+untrusted pages, so it gets only its own prompt (see `docs/harnesses.md`).
 
 ## What the persona holds and what it leaves out
 

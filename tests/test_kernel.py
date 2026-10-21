@@ -106,6 +106,47 @@ def test_a_stopped_tasks_call_is_refused_with_a_ledger_row_before_any_provider_c
     assert state["spent_usd_micros"] == 0 and not state["open_calls"]
 
 
+def test_a_child_ceiling_above_its_parents_is_refused_and_writes_nothing(dsn):
+    async def go():
+        parent = await new_task(dsn, max_effect_class="propose")
+        async with await db.connect(dsn) as conn:
+            started = lambda: conn.execute("SELECT count(*) FROM events WHERE type = 'task.started'")
+            (before,) = await (await started()).fetchone()
+            with pytest.raises(tasks.CeilingRefused):
+                await tasks.start_child(conn, parent, ceiling="act", instruction="too high")
+            (after,) = await (await started()).fetchone()
+            child = await tasks.start_child(conn, parent, instruction="inherits")
+            return before, after, await tasks.brief(conn, child)
+
+    before, after, child = run(go())
+    assert after == before
+    assert child.max_effect_class == "propose"
+
+
+def test_a_stop_fences_the_grandchild_and_refuses_a_new_child(dsn):
+    async def go():
+        root = await new_task(dsn)
+        async with await db.connect(dsn) as conn:
+            child = await tasks.start_child(conn, root, instruction="child")
+            grandchild = await tasks.start_child(conn, child, instruction="grandchild")
+            await tasks.stop(conn, root, reason="test")
+            fence = await tasks.fenced_by(conn, grandchild)
+            with pytest.raises(tasks.TaskStopped):
+                await tasks.start_child(conn, grandchild, instruction="after the stop")
+        gateway = await bridges.gateway(dsn, upstream="http://127.0.0.1:9")  # never reached
+        body = {"model": "claude-haiku-4-5", "max_tokens": 1000}
+        body["messages"] = [{"role": "user", "content": "hi"}]
+        async with aiohttp.ClientSession() as http:
+            async with http.post(gateway.issue(grandchild, "turn-1") + "/v1/messages", json=body) as r:
+                refused = r.status, await r.json()
+        await gateway.close()
+        return grandchild, fence, refused
+
+    grandchild, fence, (status, error) = run(go())
+    assert fence == grandchild
+    assert status == 400 and "stopped" in error["error"]["message"]
+
+
 # -- effects: one request, one effect -------------------------------------------
 
 

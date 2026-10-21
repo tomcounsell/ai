@@ -83,7 +83,8 @@ a turn fail. A turn that ends without its stage's signal is followed by the next
 state; under the resident kernel that turn's step ends first, so any other ready task takes the turn
 slot before it.
 
-**Design.** The Brief gains, once tasks nest, a `parent_id` and a deadline.
+**Built.** A child task's Brief carries a `parent_id`, and its ceiling never exceeds its parent's:
+one above is refused in full (`core/tasks.py`, `child_ceiling`).
 
 ## Metered spending
 
@@ -238,8 +239,9 @@ after the plan's rounds, a step or provisioning kept failing, or a merge cannot 
 and Tom gets a report, but the task is not fenced: feedback reopens it in `patch`. A stop (`python
 -m core stop`) is final.
 
-**Design.** Once tasks nest, stopping a task fences its whole subtree: each node carries a
-generation, a stop increments it, and the kernel and broker refuse any request carrying an old one.
+**Built.** Stopping a task fences its whole subtree: `stop_tree` writes a `task.stopped` row for the
+task and each descendant in one transaction, and the gateway and broker refuse a call or effect whose
+task or any ancestor has one (`core/tasks.py`, `fenced_by`).
 
 ## The turn
 
@@ -323,9 +325,11 @@ mistakes and never what excellent looks like. Serves: Evidence, "Tom's feedback,
 Mission item 2; and corrections that are first-class, carry provenance, and reach every session and
 agent.
 
-**Design.** Corrections do not reach the subagents Claude Code starts inside a turn, a gap
-(`docs/harnesses.md`); Pi starts none. A later row naming a correction withdraws or replaces it. A
-scope beyond `global`, and rendering by relevance, arrive when one is needed or length measurably
+**Built.** Every subagent Claude Code starts inside a turn but the web agent opens with the
+dispatched Brief, corrections included, through Valor's SubagentStart hook (`docs/harnesses.md`,
+Corrections reaching subagents); Pi starts none.
+
+**Design.** A later row naming a correction withdraws or replaces it. A scope beyond `global`, and rendering by relevance, arrive when one is needed or length measurably
 costs a turn.
 
 ## The attention log
@@ -544,13 +548,16 @@ states, verdicts, loops, and the merge predicate are owned by
 | A wrong plan reaches code | critique, rounds set by stakes (built: a fresh session, `core/fresh.py`) | Mission 1 |
 | Delivery claims success | verifier reading checks and the ledger, never the narrative (built: `fresh.review_runner`) | docs describe reality |
 | Verifier too lenient | Opus-class reviewer, never cheaper (built) | Evidence |
-| Correction never reaches an agent | rendered from the ledger into every Brief; recorded per turn; subagents a gap | correction |
+| Correction never reaches an agent | rendered from the ledger into every Brief; recorded per turn; given to subagents but the web agent | correction |
 
 ## Limits
 
 - **A scheming model.** A deceptively aligned model [5, 6] with a side
-  channel leaves in the ledger only what passed the kernel; the effect
-  ceiling keeps the damage survivable.
+  channel leaves in the ledger only what passed the kernel. The effect
+  ceiling limits the kind of effect a task can make, not the harm one
+  allowed effect does: an `act` within it can still send the wrong data
+  or merge a damaging change. Nothing bounds harm in general; Tom accepts
+  that rather than add destination or quantity limits.
 - **The kernel is in the repository Valor merges to.** A delivery that
   changes `core/` merges itself when the merge predicate holds, and the
   kernel rolls forward onto it (`core/rollout.py`), so the effect ceiling

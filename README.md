@@ -72,7 +72,7 @@ Effects have classes. Every capability declares one, and every task carries a ce
 
 The drive to ask comes from Cooperative Inverse Reinforcement Learning [3]: the human and the agent share a reward the agent does not know, so its best move under uncertainty is to learn and to ask. Valor borrows the shape without claiming the guarantee, since nothing here is trained. The Off-Switch Game [8] shows why the borrow is partial: the incentive to allow shutdown holds only while the uncertainty holds, and later work shows it is fragile [9, 10]. Valor does not rely on the model's incentive. The off switch is in the kernel.
 
-If the model is deceptively aligned [5, 6] and capable enough to find side channels, the ledger records only what it chose to show. Effect ceilings keep damage survivable while the error is discovered, and Tom's reading of the ledger and the work is how it is discovered.
+If the model is deceptively aligned [5, 6] and capable enough to find side channels, the ledger records only what it chose to show. Effect ceilings limit the kind of effect a task can make while the error is discovered, not the harm an allowed one does, and Tom's reading of the ledger and the work is how it is discovered.
 
 ### Research grounding
 
@@ -84,7 +84,7 @@ Every design assumption maps to published work. An assumption without a source i
 | A corrigible agent cooperates with corrective intervention despite incentives to resist | Soares et al., 2015 [2] | the name, the shutdown framing, and the warning that an agent searching for loopholes is already misaligned |
 | Uncertainty about the human's reward makes learning and asking the rational move | Hadfield-Menell et al., 2016 [3] | beliefs with provenance and uncertainty; questions instead of assumptions |
 | Assume the model may intentionally subvert safety measures; design protocols that hold anyway | Greenblatt et al., 2023 [4] | the whole control stance; blind verification |
-| A learned model can behave aligned during training and defect later | Hubinger et al., 2019 [5]; Hubinger et al., 2024 [6] | effect ceilings keep damage survivable while deception is discovered |
+| A learned model can behave aligned during training and defect later | Hubinger et al., 2019 [5]; Hubinger et al., 2024 [6] | effect ceilings limit the kind of effect while deception is discovered; they do not bound its harm |
 | Retrieved data can act as instructions to an LLM-integrated application | Greshake et al., 2023 [7] | episodic content never carries a source class; memory grants nothing |
 | An agent's incentive to allow shutdown depends on its uncertainty and is fragile | Hadfield-Menell et al., 2017 [8]; Carey, 2018 [9]; Freedman and Gleave, 2022 [10] | the off switch lives in the kernel, never in the model's incentives |
 | Every program should operate with the least privilege needed for its job | Saltzer and Schroeder, 1975 [11] | effect classes; attenuated grants on dispatch |

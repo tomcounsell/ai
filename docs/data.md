@@ -382,8 +382,8 @@ the recorded Brief and in the system prompt argument that reached
 `claude -p` (rebuild-demonstration.md, Correction 1 rendering, verified).
 The same store state renders a byte-identical Brief, which is why the four
 turns shared one digest and why the prompt cache can hold across turns.
-Subagents Claude Code starts inside a turn do not get the Brief; that gap is
-`docs/architecture.md`'s.
+Subagents Claude Code starts inside a turn, but the web agent, get the same
+Brief through the SubagentStart hook (`docs/harnesses.md`).
 
 Rendering is the one place stored data becomes prompt text. Memory enters
 the same way: read through the port at render time, recorded in the
@@ -534,7 +534,8 @@ superuser to one of them and change a role's password or the server's
 settings; and Tom's macOS user, outside any turn, can always edit the data
 directory. If a deceptively aligned model [5, 6]
 finds a side channel, the ledger records only what it chose to show; the
-effect ceiling keeps the damage survivable while that is discovered.
+effect ceiling limits the kind of effect while that is discovered, not the
+harm an allowed one does (`docs/architecture.md`, Limits).
 
 ## Test databases
 
