@@ -21,7 +21,8 @@ On start it recovers (`recover`) what a killed kernel left:
   running commit contains: ended `done` (`core/rollout.py`). When there is
   one, first each bridge holding its lock on code the running commit
   changed where it reaches the bridge is restarted (`restart_bridges`),
-  and the row names the bridges restarted and any that failed to.
+  then the dashboard (`com.valor.ui`), and the row names the jobs
+  restarted and any that failed to.
 
 Then it starts the gateway, listens on `valor_events`, and on each wake (a
 row, or `settings.serve_tick_s` with none) binds every recorded message
@@ -73,6 +74,15 @@ start restarts each bridge the merge reached. A failed step writes
 had moved, lifts the hold, and is tried again on the next `serve_tick_s`
 wake; after `rollout.NOTICE_AFTER` failures of one merge, Tom gets one
 notice saying what failed.
+
+An update request (`intake.request_update`) rolls the same way to the
+branch's tip, fetched each wake it is open and not waiting: a tip the
+started commit contains ends it `up_to_date` at once; any other is a
+merge on the `updates` stream, its effect id the request id, and a merge
+due with it is covered. A failed fetch is `rollout.failed` at `fetch`, and
+its notice says "I could not update my own system". A request asked in a
+chat (`/update` in Valor's engineering room) gets one reply there when it
+ends (`update:<request>`), and its failure notice goes there too.
 """
 
 import asyncio
@@ -96,6 +106,7 @@ from core import (
     backup,
     bridge,
     broker,
+    credentials,
     db,
     git,
     intake,
@@ -371,10 +382,11 @@ async def restart_bridges(
 ) -> dict[str, dict]:
     """Restart each bridge holding its lock, `bridge:<channel>:<machine>`,
     in this database, whose start commit differs from `running` in code it
-    runs (`rollout.stale`), one at a time, off the loop. Returns
-    `restarted`, each label with the stamp it replaced (None when
-    unstamped), and `restart_failed`, each label with why; empty ones left
-    out."""
+    runs (`rollout.stale`), one at a time, off the loop, then the
+    dashboard's job (`rollout.UI`), which holds no connection to read, so
+    it is kicked every time. Returns `restarted`, each label with the stamp
+    it replaced (None when unstamped), and `restart_failed`, each label
+    with why; empty ones left out."""
     live: list[tuple[str, str | None]] = []
     for channel in rollout.BRIDGES:
         row = await (await conn.execute(LOCK_HOLDER, (f"bridge:{channel}:{settings.machine}",))).fetchone()
@@ -386,10 +398,8 @@ async def restart_bridges(
     due = await git.threaded(rollout.stale, checkout, running, live) if live else set()
     restarted: dict[str, str | None] = {}
     failed: dict[str, str] = {}
-    for channel, stamp in live:
-        if channel not in due:
-            continue
-        label = rollout.BRIDGES[channel]
+    kicks = [(rollout.BRIDGES[channel], stamp) for channel, stamp in live if channel in due]
+    for label, stamp in [*kicks, (rollout.UI, None)]:
         why = await git.threaded(kick, label)
         if why is None:
             restarted[label] = stamp
@@ -462,6 +472,16 @@ MERGE_OUTCOMES = (
     "AND COALESCE(i.payload->>'action_type', h.payload->>'action_type') = 'merge' "
     "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type = 'rollout.ended' "
     "AND e.payload->>'effect_id' = o.payload->>'effect_id') ORDER BY o.id"
+)
+# The update requests asked in a chat that ended with no reply yet: id,
+# the chat, the `rollout.ended` payload, and the `rollout.restarting` one.
+UNREPLIED = (
+    "SELECT r.payload->>'request_id', r.payload->'reply', e.payload, s.payload FROM events r "
+    "JOIN events e ON e.type = 'rollout.ended' AND e.payload->>'effect_id' = r.payload->>'request_id' "
+    "LEFT JOIN events s ON s.type = 'rollout.restarting' AND s.payload->>'effect_id' = r.payload->>'request_id' "
+    "WHERE r.task_id = 'updates' AND r.type = 'update.requested' AND r.payload ? 'reply' "
+    "AND NOT EXISTS (SELECT 1 FROM events n WHERE n.task_id = 'updates' AND n.type = 'notice.requested' "
+    "AND n.payload->>'about_key' = 'update:' || (r.payload->>'request_id')) ORDER BY r.id"
 )
 
 
@@ -564,6 +584,7 @@ class Kernel:
         docstring). Git runs off the loop; a wake with nothing new runs none."""
         if self.checkout is None or self.started is None:
             return
+        await self._replied(conn)
         if self.restart_due is not None and self._holding():
             return
         merges = []
@@ -575,6 +596,20 @@ class Kernel:
                 self.judged.add(effect_id)
             else:
                 merges.append(m)
+        request = await (await conn.execute(intake.OPEN_UPDATE)).fetchone()
+        if request is not None and request[1] not in self.waiting:
+            row, request_id = request
+            try:
+                url, branch, tip = await git.threaded(rollout.tip, self.checkout, self.credential)
+            except (git.GitError, credentials.CredentialError) as exc:
+                m = rollout.Merge(request_id, intake.UPDATES, row, "", "", self.started)
+                await self._failed(conn, m, ["fetch"], "fetch", str(exc))
+                return
+            m = rollout.Merge(request_id, intake.UPDATES, row, url, branch, tip)
+            if await git.threaded(git.is_ancestor, self.checkout, tip, self.started):
+                await self._ended(conn, m, outcome="up_to_date", sha=tip)
+            else:
+                merges = sorted([*merges, m], key=lambda x: x.row)
         retry = self.restart_due is not None
         self.restart_due = None
         if not merges or (not retry and all(m.effect_id in self.waiting for m in merges)):
@@ -588,7 +623,8 @@ class Kernel:
                 origin = await git.threaded(git.origin, self.checkout)
             except git.GitError:
                 origin = None
-            ours = [m for m in merges if (m.remote, m.branch) == origin]
+            # An update request is never blamed for a merge's failure.
+            ours = [m for m in merges if m.task_id != intake.UPDATES and (m.remote, m.branch) == origin]
             if ours:
                 await self._failed(conn, ours[-1], ["fetch"], "fetch", str(exc))
             else:
@@ -618,11 +654,11 @@ class Kernel:
             return
         steps = [*plan.steps, "fast-forward"]
         try:
-            _, head = await git.threaded(rollout.fast_forward, self.checkout, m.sha)
+            before, head = await git.threaded(rollout.fast_forward, self.checkout, m.sha)
         except git.GitError as exc:
             await self._failed(conn, m, steps, "fast-forward", str(exc))
             return
-        await self._ended(conn, m, outcome="done", head=head, steps=steps)
+        await self._ended(conn, m, outcome="done", head=head, steps=steps, **{"from": before})
         for c in plan.covered:
             await self._ended(conn, c, outcome="done", head=head, rolled_by=m.effect_id)
         _log(f"rolled out {m.sha} with no restart")
@@ -713,6 +749,19 @@ class Kernel:
                 (m.effect_id,),
             )
         ).fetchone()
+        update, where = m.task_id == intake.UPDATES, {}
+        if update:
+            # An update asked in the room is told there, as its sender may not be Tom.
+            asked = await (
+                await conn.execute(
+                    "SELECT payload->'reply' FROM events WHERE task_id = %s AND type = 'update.requested' "
+                    "AND payload->>'request_id' = %s",
+                    (intake.UPDATES, m.effect_id),
+                )
+            ).fetchone()
+            if asked and asked[0]:
+                where = {"reply_to": asked[0]["message_id"], "channel": asked[0]["channel"],
+                         "chat_id": asked[0]["chat_id"]}  # fmt: skip
         async with conn.transaction():
             if mixed or latest is None or (latest[0].get("step"), latest[0].get("reason")) != (step, reason):
                 await ledger.append(
@@ -728,7 +777,10 @@ class Kernel:
                     m.task_id,
                     kind="rollout",
                     about_key=f"rollout:{m.effect_id}",
-                    text=notices.lead(await notices.headline(conn, m.task_id), _rollout_text(step, tries)),
+                    text=notices.lead(
+                        await notices.headline(conn, m.task_id), _rollout_text(step, tries, update)
+                    ),
+                    **where,
                 )
             if mixed:
                 await notices.request(
@@ -738,11 +790,41 @@ class Kernel:
                     about_key=f"rollout:{m.effect_id}:mixed",
                     text=notices.lead(
                         await notices.headline(conn, m.task_id),
-                        "it is merged, but putting it live failed partway and I could not undo it, so my "
-                        f"system now runs a mix of old and new code. I try again every {settings.serve_tick_s:g} "
-                        "seconds.",
+                        ("updating my own system" if update else "it is merged, but putting it live")
+                        + " failed partway and I could not undo it, so my system now runs a mix of old and "
+                        f"new code. I try again every {settings.serve_tick_s:g} seconds.",
                     ),
+                    **where,
                 )
+
+    async def _replied(self, conn) -> None:
+        """One reply in the room for each update asked there that ended,
+        under `update:<request>`, so a restart never sends it twice."""
+        for request_id, reply, ended, restarting in await (await conn.execute(UNREPLIED)).fetchall():
+            start = ended.get("from") or (restarting or {}).get("from")
+            if ended.get("outcome") == "up_to_date":
+                text = f"I am already up to date, at {ended['sha'][:12]}."
+            elif ended.get("outcome") == "done":
+                head = ended["head"][:12]
+                text = (
+                    f"I updated my own system from {start[:12]} to {head}." if start else f"I run {head} now."
+                )
+                if ended.get("restarted"):
+                    text += f" Restarted: {', '.join(sorted(ended['restarted']))}."
+                if ended.get("restart_failed"):
+                    text += f" Not restarted: {', '.join(sorted(ended['restart_failed']))}."
+            else:
+                text = f"The update ended {ended.get('outcome')}: {ended.get('reason') or 'no reason given'}."
+            await notices.request(
+                conn,
+                intake.UPDATES,
+                kind="update",
+                about_key=f"update:{request_id}",
+                text=text,
+                reply_to=reply["message_id"],
+                channel=reply["channel"],
+                chat_id=reply["chat_id"],
+            )
 
     async def active(self, conn) -> list[str]:
         rows = await (
@@ -993,12 +1075,16 @@ ROLLOUT_STEPS = {
 }
 
 
-def _rollout_text(step: str, tries: int) -> str:
+def _rollout_text(step: str, tries: int, update: bool = False) -> str:
     """The rollout notice's sentence: what failed, in plain words; the step
     and reason stay on `rollout.failed`."""
     return (
-        "it is merged, but I could not put it live on my own system: "
-        f"{ROLLOUT_STEPS.get(step, 'one step of putting it live')} failed {tries} times. "
+        (
+            "I could not update my own system: "
+            if update
+            else "it is merged, but I could not put it live on my own system: "
+        )
+        + f"{ROLLOUT_STEPS.get(step, 'one step of putting it live')} failed {tries} times. "
         f"I try again every {settings.serve_tick_s:g} seconds."
     )
 

@@ -2,7 +2,8 @@
 incident it prevents, the mission item it serves, and a ninety-day expiry.
 
 The four granted with the pipeline on 2026-10-01, and the web guard granted on
-2026-10-16 (docs/plans/orchestration.md), are seeded by `db.migrate` on the
+2026-10-16 (docs/plans/orchestration.md), and the update room granted on
+2026-10-20 (docs/plans/update.md), are seeded by `db.migrate` on the
 `guards` stream, once each. This module records; the expiry routine (`core/routines.py`) reads the
 rows and proposes the deletion of what is due.
 """
@@ -89,6 +90,25 @@ SEEDED: tuple[dict[str, Any], ...] = (
         ),
         "via": "the 2026-10-16 orchestration rulings, seeded by migrate",
         # It fires inside a turn, which cannot reach the ledger.
+        "firing_record": False,
+    },
+    {
+        "guard_id": "update.room",
+        "name": "/update binds only in Valor's engineering room (core/intake.py, UPDATE_CHAT)",
+        "incident": "none; accepted by Tom 2026-10-20",
+        "mission_items": [1],
+        "source": "docs/plans/update.md, Grant",
+        "granted_at": "2026-10-20",
+        "expires": "2027-01-18",
+        "note": (
+            "Tom, 2026-10-20: the room restriction granted, any verified member of the room may /update. "
+            "The risk, from the round-2 critique: a stranger restarting the kernel by DM or email and "
+            "cancelling background turns."
+        ),
+        "via": "docs/plans/update.md, Grant",
+        # The firing fold reads only pipeline verdict rows (`machine.VERDICT_ROWS`),
+        # and a refused `/update` is an ordinary message: a row of its own would be
+        # code for no use.
         "firing_record": False,
     },
 )

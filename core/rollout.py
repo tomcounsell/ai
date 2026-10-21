@@ -37,6 +37,13 @@ Every failed step is tried again on a later `serve_tick_s` wake; the
 merge's notice, a report of what failed, goes out once it has failed
 `NOTICE_AFTER` times in one process.
 
+An update (`core.intake.request_update`: `python -m core update`, `/update`
+in Valor's engineering room, the update routine) is a rollout to the
+branch's tip, keyed by its request: `tip` fetches it, and a tip the
+started commit contains ends the request `up_to_date`; any other is a
+`Merge` on the `updates` stream whose effect id is the request id, and
+rolls on the one path above, hold included.
+
 `Restart` leaves `serve` once `rollout.restarting` is written; `python -m
 core serve` then exits with status 1 and launchd starts it again.
 
@@ -45,7 +52,9 @@ its lock connection with the commit it started at (`core.bridge.serve`).
 A kernel start that ends a rollout restarts every bridge holding its lock
 whose code the running commit changed (`core.serve.restart_bridges`),
 after migrate and before the `rollout.ended` rows, which name the bridges
-restarted and any that failed to:
+restarted and any that failed to. The dashboard's job (`UI`) is kicked
+after them on every such start: it holds no lock connection to read. A
+bridge's restart:
 
 - `closure`: every file a bridge can import, by walking the imports of
   `bridges/<name>/` through `core/` and `bridges/`, function-level and
@@ -91,6 +100,8 @@ BRIDGES = {
 }
 # The stamp of a bridge that could not read its own head: `core.bridge.NO_HEAD`.
 NO_HEAD = "none"
+# The dashboard's launchd job (`python -m ui --plist`), kicked with the bridges.
+UI = "com.valor.ui"
 KICK_TIMEOUT_S = 10.0
 # Read per turn (`persona/`, `skills/`) or never read by the kernel.
 QUIET_DIRS = ("persona/", "skills/", "docs/", "tests/")
@@ -281,6 +292,16 @@ def fetch(checkout: Path, url: str, branch: str, credential: str | Path | None) 
     else:
         with credentials.header_file(credential, url) as header:
             call(header)
+
+
+def tip(checkout: Path, credential: str | Path | None) -> tuple[str, str, str]:
+    """An update's fetch: the checkout's push URL and branch, and the
+    branch's tip fetched into `REF`. Raises `GitError` or `CredentialError`."""
+    url, branch = git.push_url(checkout), git.branch(checkout)
+    if branch is None:
+        raise git.GitError("the checkout is on no branch")
+    fetch(checkout, url, branch, credential)
+    return url, branch, git.out(checkout, "rev-parse", "--verify", f"{REF}^{{commit}}")
 
 
 def prepare(checkout: Path, started: str, due: list[Merge], credential: str | Path | None) -> Plan:
