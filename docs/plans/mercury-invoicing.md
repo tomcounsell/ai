@@ -36,8 +36,11 @@ from valor@yuda.me (rule 5; the live check waits on Tom's token).
      <n>"`). Gmail's Sent folder is the record, so a re-fired or resumed
      run, on any day, finds what went out. Prints each as a ready
      `email.send` payload: to the customer's Mercury email, cc the
-     invoice's `ccEmails`, never typed by hand. An invoice past its 4th
-     reminder is listed for Tom instead.
+     invoice's `ccEmails`, never typed by hand, and `files: [{path,
+     sha256}]`: the Mercury PDF written under `.valor/invoices/` in the
+     current workspace (a regular file, no link; not `$TMPDIR`), sha256 of
+     the bytes written, as `core/bridge.py` requires. An invoice past its
+     4th reminder is listed for Tom instead.
    - `notice ID`: the same payload for the first notice of a created invoice.
    - `pdf ID -o PATH`, `accounts`.
    Token: `op read "op://Yudame Secrets/Mercury API Token/credential"` per
@@ -56,8 +59,8 @@ from valor@yuda.me (rule 5; the live check waits on Tom's token).
    pay link and PDF; reminders for Valor's invoices without asking.
 2. **Weekly routine `invoices`** (`routines/invoices/routine.toml`, Monday
    09:00, ceiling `act`, project `valor`) with a generic runner `task`
-   beside `_routine_runners`. It starts nothing, and records `routine.ran`
-   "not placed here", unless the routine's project spec is placed on this
+   beside `_routine_runners`. It starts nothing, returning
+   `Ran(None, "nothing_due", "not placed here: <machine>")`, unless the routine's project spec is placed on this
    Mac (`(spec.machine or settings.default_machine) == settings.machine`),
    so only the Cowboy (on the IP allowlist) sends. Otherwise it starts one
    project task through `ctx.start_project` with marker
@@ -67,7 +70,12 @@ from valor@yuda.me (rule 5; the live check waits on Tom's token).
    `.valor/stop.md` (`Done:` and what went out). The work happens in the
    clarify turn, which `stop.md` ends (skills/sdlc/clarify.md); no plan,
    build or merge runs. The weekly call also keeps the token inside
-   Mercury's 45-day deletion window.
+   Mercury's 45-day deletion window. Routine plists are installed by hand
+   (docs/rollout.md step 9), so the build installs it on the Cowboy:
+   `python -m core routine invoices --plist` with `VALOR_MACHINE` set, into
+   `~/Library/LaunchAgents/com.valor.routine.invoices.plist`,
+   `launchctl bootstrap gui/$UID`, confirmed with `launchctl print`; the
+   delivery names that evidence, and rollout step 9 lists the routine.
 3. **Cyndra.** `cyndra-invoice` lives in `tomcounsell/work-vault`. Add
    `projects/work-vault.toml` (Cowboy, `merge_url` the vault, suite
    `python3 -m py_compile .claude/skills/yudame-invoice/render_invoice.py`)
@@ -110,11 +118,13 @@ reminder cadence are what the job does, not limits on Valor.
   overdue (due today 0, future negative); pay link from slug.
 - Remind: dashboard-made overdue invoice excluded; due today excluded;
   reminded 3 days ago excluded, 8 days ago included; 4 sent listed for Tom;
-  payload recipients are the customer's email and invoice cc.
+  payload recipients are the customer's email and invoice cc; the payload's
+  file exists at its path inside the workspace and its sha256 matches.
 - Token: read per call; prefix once; service token taken from vault `.env`
   when absent from env; missing service token, missing item each named;
   token absent from stdout/stderr, including on 401/403.
-- Routine: toml loads; spec placed elsewhere starts no task and records why;
+- Routine: toml loads; spec placed elsewhere starts no task and returns
+  `nothing_due` naming the machine;
   spec placed here starts one task whose `fold` is not legacy, with the
   instruction and ceiling.
 
