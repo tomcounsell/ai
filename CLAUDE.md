@@ -45,7 +45,7 @@ Adopted 2026-10-15 from "Valor rebuild: missteps and hard rules"
 ## Where things are
 
 `main` is the live rebuilt system (cut over 2026-10-14). The old system is
-at `backup/pre-sync-main-2026-10-15`; read it with `git show <ref>:<path>`,
+at the tag `old-system` (03f98b8d6, 2026-10-14); read it with `git show <ref>:<path>`,
 never import from it. The cori copy is `tomcounsell/cori` at commit
 0336d10642534f344e002d9a7b7abb22eb40a8a1. What the rebuild left to do is
 `docs/plans/strip.md`, then `docs/plans/valor-rebuild.md`'s open items.
