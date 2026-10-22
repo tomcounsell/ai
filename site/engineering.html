@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pipeline · Valor Engels</title>
-<meta name="description" content="How a request becomes a merged result: the stages, the loops the plan sets, and the three terms of the merge predicate.">
-<link rel="canonical" href="https://valorengels.com/pipeline.html">
+<title>Engineering · Valor Engels</title>
+<meta name="description" content="How Valor Engels takes a task from a message to a merged change: the SDLC stages, the sessions that check the work, and the pull requests it produced, each with a receipt from GitHub.">
+<link rel="canonical" href="https://valorengels.com/engineering.html">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Valor Engels">
-<meta property="og:title" content="Pipeline · Valor Engels">
-<meta property="og:description" content="How a request becomes a merged result: the stages, the loops the plan sets, and the three terms of the merge predicate.">
-<meta property="og:url" content="https://valorengels.com/pipeline.html">
+<meta property="og:title" content="Engineering · Valor Engels">
+<meta property="og:description" content="How Valor Engels takes a task from a message to a merged change: the SDLC stages, the sessions that check the work, and the pull requests it produced, each with a receipt from GitHub.">
+<meta property="og:url" content="https://valorengels.com/engineering.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -25,8 +25,8 @@
   <div class="topnav-inner">
     <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">AI engineer · Yudame</span></a>
     <nav>
-      <a href="pull-requests.html">Pull requests</a>
-      <a href="how.html" aria-current="page">How it works</a>
+      <a href="engineering.html" aria-current="page">Engineering</a>
+      <a href="index.html#how">How it works</a>
       <a href="trust.html">Trust and safety</a>
       <a href="comparisons.html">Comparisons</a>
     </nav>
@@ -35,29 +35,14 @@
 
 <main>
 
-<nav class="subnav" aria-label="How it works"><span class="grp">How it works</span>
-  <a href="how.html">Overview</a>
-  <a href="pipeline.html" aria-current="page">Pipeline</a>
-  <a href="durability.html">Durability</a>
-  <a href="chat.html">In the chat</a>
-</nav>
-
-<h1>How a request becomes a merged change</h1>
-<p class="lede">A task goes from a message to a merged change through planning, building and checking stages. It merges only when the tests pass and a fresh review session agrees.</p>
-<p>Each task passes the same checkpoints. The agent decides how to do the work in a stage; the kernel, the deterministic code that runs every task, decides which stage comes next and what may leave the machine.</p>
-<nav class="toc" aria-label="On this page">
-  <p class="toc-label">On this page</p>
-  <ol>
-    <li><a href="#stages">The path</a></li>
-    <li><a href="#sessions">Two kinds of session</a></li>
-    <li><a href="#loops">Loops</a></li>
-    <li><a href="#merge">The merge predicate</a></li>
-  </ol>
-</nav>
+<p class="kicker">engineering</p>
+<h1>Engineering</h1>
+<p class="lede">Every task Valor takes passes the same stages, from a recorded request to a merged change checked by sessions that did not write it. The pull requests at the foot of this page are what came out.</p>
 
 <section id="stages">
-  <p class="sec-label">The path</p>
+  <p class="sec-label">01 · The SDLC</p>
   <h2>The stages of a task</h2>
+  <p>Each task passes the same checkpoints. The agent decides how to do the work in a stage; the kernel, the deterministic code that runs every task, decides which stage comes next and what may leave the machine.</p>
   <div class="split"><div><p>A cheap classifier reads each request first. A thin request, such as a one-line ask or one that leans on an example, goes to clarify. There Valor inspects the code first and asks only what the code can't answer, or finds nothing to ask and proceeds.</p>
   <p>Critique reads the plan before any code exists. After every build, the test, review and docs stages check the same commit in parallel, and their findings go back together in one patch.</p>
   <p>Any stage can end in <code>stopped</code>, and a task never moves on from <code>stopped</code>.</p>
@@ -65,7 +50,7 @@
 </section>
 
 <section id="sessions">
-  <p class="sec-label">Two kinds of session</p>
+  <p class="sec-label">02 · Sessions</p>
   <h2>Which sessions do the work</h2>
   <div class="cols-2">
     <div><h3>The working session</h3><p>Clarify, plan, build and patch resume one session, so Valor keeps its context across a question, a send-back and feedback from Tom, who built Valor and runs Yudame.</p></div>
@@ -74,8 +59,8 @@
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/session.py">core/session.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/fresh.py">core/fresh.py</a></p>
 </section>
 
-<section id="loops">
-  <p class="sec-label">Loops</p>
+<section id="rounds">
+  <p class="sec-label">03 · Rounds and the merge</p>
   <h2>Critique and review rounds</h2>
   <ul class="tight">
     <li><b>A small reversible change</b> gets no extra rounds.</li>
@@ -84,11 +69,7 @@
   <p>Critique can raise those counts but can't lower them. Once the rounds are spent, Valor decides whether to patch once more or stop and tell Tom why.</p>
   <p>If that last candidate doesn't pass either, the task ends and Tom gets one report of what was built and what did not pass.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md#loops">docs/sdlc-state-machine.md, Loops</a></p>
-</section>
-
-<section id="merge">
-  <p class="sec-label">The merge predicate</p>
-  <h2>The merge predicate</h2>
+  <h3>The merge predicate</h3>
   <ol class="rules">
     <li><b>One current candidate, its checks decided.</b></li>
     <li><b>Test passed, or showed only breadth gaps with the rounds spent.</b></li>
@@ -99,10 +80,24 @@
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/machine.py">core/machine.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/broker.py">core/broker.py</a></p>
 </section>
 
-<div class="page-next">
-  <a href="how.html"><span class="lbl">Previous</span>← How it works</a>
-  <a href="durability.html"><span class="lbl">Next</span>Durability →</a>
-</div>
+<section id="output">
+  <p class="sec-label">04 · Output</p>
+  <h2>Merged pull requests</h2>
+  <p>In the 30 days to 2026-10-22, Valor merged <span class="live">93</span> pull requests across <span class="live">6</span> repositories, <span class="live">3</span> of them public. The other 3 belong to clients and are counted, not named.</p>
+  <figure class="activity"><object data="/activity.svg" type="image/svg+xml" aria-label="Merged pull requests by day, last 26 weeks, from GitHub">Merged pull requests by day, read live from GitHub.</object><figcaption>Merged pull requests by day over the last 26 weeks, read from GitHub each hour. A day links to its first public pull request.</figcaption></figure>
+  <p>Seven of the public ones, newest first. The receipt is what GitHub recorded: time from opening to merge, and the size of the change. The per-task model spend and the questions asked of Tom sit in the ledger on each Mac and are not published here.</p>
+  <div class="table-wrap"><table class="doc stack">
+    <tr><th>Merged</th><th>Change</th><th>Opened to merged</th><th>Size</th><th>Merged by</th></tr>
+    <tr><td class="mono" data-label="Merged">2026-10-21</td><td data-label="Change"><a href="https://github.com/yudame/skills/pull/3">skills#3</a>: The de-slop skill catches slogan headings and epigram sentences</td><td class="mono" data-label="Opened to merged">17 m</td><td class="mono" data-label="Size">1 commit · 2 files · +21 −7</td><td data-label="Merged by">Tom</td></tr>
+    <tr><td class="mono" data-label="Merged">2026-10-21</td><td data-label="Change"><a href="https://github.com/yudame/skills/pull/1">skills#1</a>: Presentations come out as PDF, readable on a phone</td><td class="mono" data-label="Opened to merged">4 d 4 h</td><td class="mono" data-label="Size">1 commit · 2 files · +37 −3</td><td data-label="Merged by">Tom</td></tr>
+    <tr><td class="mono" data-label="Merged">2026-10-21</td><td data-label="Change"><a href="https://github.com/tomcounsell/ai/pull/3660">ai#3660</a>: The old system's memory, imported</td><td class="mono" data-label="Opened to merged">1 h 28 m</td><td class="mono" data-label="Size">8 commits · 11 files · +664 −4</td><td data-label="Merged by">Valor</td></tr>
+    <tr><td class="mono" data-label="Merged">2026-10-21</td><td data-label="Change"><a href="https://github.com/tomcounsell/ai/pull/3659">ai#3659</a>: Every scheduled job runs through Valor.app, so macOS asks once</td><td class="mono" data-label="Opened to merged">1 h 20 m</td><td class="mono" data-label="Size">1 commit · 19 files · +312 −10</td><td data-label="Merged by">Valor</td></tr>
+    <tr><td class="mono" data-label="Merged">2026-10-21</td><td data-label="Change"><a href="https://github.com/tomcounsell/ai/pull/3657">ai#3657</a>: One command updates a Mac, from chat, Claude Code or the 03:00 routine</td><td class="mono" data-label="Opened to merged">13 m</td><td class="mono" data-label="Size">9 commits · 17 files · +718 −41</td><td data-label="Merged by">Valor</td></tr>
+    <tr><td class="mono" data-label="Merged">2026-10-09</td><td data-label="Change"><a href="https://github.com/tomcounsell/popoto/releases/tag/v1.10.0">popoto 1.10.0</a>: Popoto runs on Postgres, in five pull requests (#813, #825, #834, #838, #839)</td><td class="mono" data-label="Opened to merged">1 d 8 h</td><td class="mono" data-label="Size">19 commits · 65 files · +2814 −271</td><td data-label="Merged by">Valor</td></tr>
+    <tr><td class="mono" data-label="Merged">2026-10-02</td><td data-label="Change"><a href="https://github.com/tomcounsell/popoto/pull/730">popoto#730</a>: A rationed question queue for agent memory</td><td class="mono" data-label="Opened to merged">6 h 50 m</td><td class="mono" data-label="Size">15 commits · 16 files · +3832 −23</td><td data-label="Merged by">Tom</td></tr>
+  </table></div>
+  <p class="src">Source: <a href="https://github.com/valorengels">github.com/valorengels</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">docs/data.md</a></p>
+</section>
 
 </main>
 

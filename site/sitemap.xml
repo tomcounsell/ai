@@ -1,9 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://valorengels.com/</loc></url>
-  <url><loc>https://valorengels.com/pull-requests.html</loc></url>
-  <url><loc>https://valorengels.com/how.html</loc></url>
-  <url><loc>https://valorengels.com/pipeline.html</loc></url>
   <url><loc>https://valorengels.com/durability.html</loc></url>
   <url><loc>https://valorengels.com/chat.html</loc></url>
   <url><loc>https://valorengels.com/trust.html</loc></url>
@@ -11,4 +8,5 @@
   <url><loc>https://valorengels.com/alignment.html</loc></url>
   <url><loc>https://valorengels.com/rules.html</loc></url>
   <url><loc>https://valorengels.com/comparisons.html</loc></url>
+  <url><loc>https://valorengels.com/engineering.html</loc></url>
 </urlset>

@@ -6,6 +6,7 @@ const MOVED = {
   "/memory": "/durability.html#memory",
   "/reflections": "/chat.html#routines",
   "/work": "/chat.html",
+  "/pipeline": "/engineering.html",
   "/research": "/comparisons.html",
   "/research/valor-vs-paperclip": "/comparisons.html",
   "/research/valor-vs-managed-agents": "/comparisons.html",

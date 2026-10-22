@@ -262,30 +262,6 @@ li::marker { color: var(--faint); }
 }
 .live { font-family: var(--mono); color: var(--accent); }
 
-/* ---------- merged: one pull request per entry ---------- */
-
-.entry {
-  max-width: var(--measure);
-  padding: 26px 0 8px;
-  border-top: 1px solid var(--hairline);
-}
-.entry h3 { margin-top: 0; }
-.entry .lbl {
-  display: block;
-  font-family: var(--mono);
-  font-size: 0.68rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--faint);
-  margin-bottom: 2px;
-}
-.entry .ask, .entry .result, .entry .corrected { margin-bottom: 14px; }
-.entry .receipt {
-  font-family: var(--mono);
-  font-size: 0.8rem;
-  color: var(--muted);
-  overflow-wrap: anywhere;
-}
 
 /* ---------- two-column prose ---------- */
 

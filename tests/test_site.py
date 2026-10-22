@@ -108,6 +108,7 @@ def test_each_removed_page_redirects_to_a_page_that_exists():
         "/memory",
         "/reflections",
         "/work",
+        "/pipeline",
         "/research",
     } | research
     assert ("/reflections", "/chat.html", "routines") in moved
