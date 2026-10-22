@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valor and Muse compared · Valor Engels</title>
+<meta name="description" content="How Valor and Meta&#x27;s Muse agent differ on whose machines they run on, whose accounts they act under, and where their data is kept.">
+<link rel="canonical" href="https://valorengels.com/vs/meta-muse">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Valor and Muse compared">
+<meta property="og:description" content="How Valor and Meta&#x27;s Muse agent differ on whose machines they run on, whose accounts they act under, and where their data is kept.">
+<meta property="og:url" content="https://valorengels.com/vs/meta-muse">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Valor and Muse compared">
+<meta name="twitter:description" content="How Valor and Meta&#x27;s Muse agent differ on whose machines they run on, whose accounts they act under, and where their data is kept.">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="../index.html"><span class="name">Valor Engels</span><span class="sub">How it works</span></a>
+    <nav>
+      <a href="../index.html">Overview</a>
+      <a href="../philosophy.html">Philosophy</a>
+      <a href="../alignment.html">Alignment</a>
+      <a href="../rules.html">Rules</a>
+      <a href="../pipeline.html">Pipeline</a>
+      <a href="../durability.html">Durability</a>
+      <a href="../work.html">Work</a>
+      <a href="../comparisons.html" aria-current="page">Comparisons</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">Comparison ·</span> meta muse</p>
+<h1>Valor and Muse compared</h1>
+<p class="lede">Muse is Meta's personal AI agent for consumers, running on a computer Meta provides in its cloud. Valor runs on its own Macs under its own name.</p>
+
+<section id="what">
+  <p class="sec-label">What it is</p>
+  <h2>What Muse is</h2>
+  <p>Meta launched Muse on 2026-09-08 in the US on iOS, Android and muse.ai, with messaging in the app or WhatsApp. It can open a browser, fill out forms, send email and book travel, and checks in before it sends an email or buys something.</p>
+  <p>Meta says Muse has more than 10 million users after about six weeks, with shopping a top activity.</p>
+  <p class="src">Sources, checked 2026-10-22: <a href="https://about.fb.com/news/2026/09/introducing-muse-personal-ai-agent/">Meta newsroom</a> (dated 2026-09-08) · <a href="https://techcrunch.com/2026/09/23/everything-new-coming-to-metas-ai-agent-muse/">TechCrunch</a> (dated 2026-09-23) · <a href="https://techcrunch.com/2026/10/21/meta-says-muse-has-over-10m-users-with-shopping-a-top-activity/">TechCrunch</a> (dated 2026-10-21)</p>
+</section>
+
+<section id="shared">
+  <p class="sec-label">In common</p>
+  <h2>What it shares with Valor</h2>
+  <ul class="tight">
+    <li>Both do tasks on their own and are reached through chat apps.</li>
+    <li>Both are meant to have an identity of their own: Meta has said each Muse agent will get its own email address, which is where Muse comes closest to Valor.</li>
+  </ul>
+</section>
+
+<section id="differences">
+  <p class="sec-label">Differences</p>
+  <h2>Where they differ</h2>
+  <h3>Independence</h3>
+  <p>Muse runs on "its own dedicated computer in the cloud," which Meta built and runs. Its own email address was announced as coming soon, and had not shipped as of 2026-09-23. On other sites it uses logins the person shares, kept in Meta's secure storage.</p>
+  <p>Amazon began blocking Muse on 2026-09-20, and Meta declined Amazon's request to withdraw it.</p>
+  <p>Valor runs on its own Macs, one per client, and acts as itself on its own accounts: valor@yuda.me, GitHub, Telegram, X and LinkedIn. It holds none of Tom's accounts, so it cannot act as Tom.</p>
+  <h3>Data sovereignty</h3>
+  <p>Muse keeps conversation history and files with Meta, which says they are not shared with its ad systems. Training on interactions is on by default; people can turn it off in Data controls. Meta does not state a retention period.</p>
+  <p>Valor keeps an append-only Postgres ledger of every model call, turn, effect and correction on its Macs, with transcripts and memory in the same database. Model calls go to Anthropic by default, and messages pass through Telegram, Slack and email.</p>
+  <h3>How the work gets done</h3>
+  <p>Muse is built for errands and shopping, with checkout through Stripe's Link and partners such as Walmart, and it is far easier for a consumer to start with. Valor runs each task through plan, critique, build, test and review.</p>
+</section>
+
+<section id="glance">
+  <p class="sec-label">At a glance</p>
+  <h2>Valor and Muse side by side</h2>
+  <div class="table-wrap"><table class="doc stack">
+    <tr><th></th><th>Valor</th><th>Muse</th></tr>
+    <tr><td><b>Made by</b></td><td data-label="Valor">Tom Counsell, at Yudame</td><td data-label="Muse">Meta</td></tr>
+    <tr><td><b>Runs on</b></td><td data-label="Valor">Its own Macs, one per client</td><td data-label="Muse">A dedicated computer in Meta's cloud</td></tr>
+    <tr><td><b>Data kept</b></td><td data-label="Valor">Postgres ledger, transcripts and memory on its Macs</td><td data-label="Muse">With Meta; retention not stated</td></tr>
+    <tr><td><b>Acts as</b></td><td data-label="Valor">Itself, on its own accounts</td><td data-label="Muse">The person, with shared logins; own email announced</td></tr>
+    <tr><td><b>Price</b></td><td data-label="Valor">Not sold; hired through Yudame</td><td data-label="Muse">Free for most use; paid plans, prices not stated by Meta</td></tr>
+    <tr><td><b>Code</b></td><td data-label="Valor">Public, GPL-3.0</td><td data-label="Muse">Not open source, as far as its announcement says</td></tr>
+  </table></div>
+</section>
+
+<section id="sources">
+  <p class="sec-label">Sources</p>
+  <h2>Sources</h2>
+  <ul class="tight">
+    <li><a href="https://about.fb.com/news/2026/09/introducing-muse-personal-ai-agent/">Meta, Introducing Muse</a>, dated 2026-09-08, checked 2026-10-22</li>
+    <li><a href="https://www.meta.com/help/artificial-intelligence/2225571704857152/">Meta Help Center on Muse</a>, checked 2026-10-22</li>
+    <li><a href="https://techcrunch.com/2026/09/23/everything-new-coming-to-metas-ai-agent-muse/">TechCrunch, Everything new coming to Muse</a>, dated 2026-09-23, checked 2026-10-22</li>
+    <li><a href="https://techcrunch.com/2026/10/21/meta-says-muse-has-over-10m-users-with-shopping-a-top-activity/">TechCrunch, Muse has over 10M users</a>, dated 2026-10-21, checked 2026-10-22</li>
+    <li><a href="https://www.heise.de/en/news/Locked-out-Amazon-blocks-Meta-s-AI-agent-Muse-in-its-online-shop-11460854.html">heise, Amazon blocks Muse</a>, dated 2026-09-22, checked 2026-10-22</li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/persona/identity.toml">Valor identity</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#identity">Valor persona</a> and <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md">mission</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/machine.md">Valor machines</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">Valor data</a> and <a href="https://github.com/tomcounsell/ai/blob/main/docs/memory.md">memory</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/tech-stack.md">Valor tech stack</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/converse.md">Valor chats</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md">Valor task pipeline</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/LICENSE">Valor license</a></li>
+    <li><a href="https://yuda.me">Yudame</a></li>
+  </ul>
+</section>
+
+<div class="page-next">
+  <a href="../comparisons.html"><span class="lbl">Back</span>← All comparisons</a>
+  <a href="openai-dots.html"><span class="lbl">Next comparison</span>Valor and OpenAI dots →</a>
+</div>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · how the system works</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
+    <span>updated 2026-10-22</span>
+  </div>
+</footer>
+</body>
+</html>

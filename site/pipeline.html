@@ -49,6 +49,7 @@
     <li><a href="#sessions">Two kinds of session</a></li>
     <li><a href="#loops">Loops</a></li>
     <li><a href="#merge">The merge predicate</a></li>
+    <li><a href="#skills">The yudame skills</a></li>
   </ol>
 </nav>
 
@@ -96,6 +97,27 @@
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/machine.py">core/machine.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/broker.py">core/broker.py</a></p>
 </section>
 
+<section id="skills">
+  <p class="sec-label">The yudame skills</p>
+  <h2>The pipeline stages as developer skills</h2>
+  <p>The <a href="https://github.com/yudame/skills" rel="noopener" target="_blank">yudame/skills</a> repository holds the team's Claude Code plugins. Every Valor machine installs its <code>yudame</code> and <code>yudame-dev</code> plugins, and each of Valor's turns loads them, so Valor and a developer use the same skills.</p>
+  <p>Its <code>do-*</code> skills are the developer's version of the pipeline. Valor's own stage instructions live in <code>skills/sdlc/</code>, and the kernel runs its test and merge stages itself. The stages line up like this:</p>
+  <div class="table-wrap"><table class="doc">
+    <tr><th>Stage</th><th>Skill</th></tr>
+    <tr><td>Plan</td><td data-label="Skill"><a href="https://github.com/yudame/skills/tree/main/plugins/yudame-dev/skills/do-plan" rel="noopener" target="_blank"><code>do-plan</code></a></td></tr>
+    <tr><td>Critique</td><td data-label="Skill"><a href="https://github.com/yudame/skills/tree/main/plugins/yudame-dev/skills/do-plan-critique" rel="noopener" target="_blank"><code>do-plan-critique</code></a></td></tr>
+    <tr><td>Build</td><td data-label="Skill"><a href="https://github.com/yudame/skills/tree/main/plugins/yudame-dev/skills/do-build" rel="noopener" target="_blank"><code>do-build</code></a></td></tr>
+    <tr><td>Test</td><td data-label="Skill"><a href="https://github.com/yudame/skills/tree/main/plugins/yudame-dev/skills/do-test" rel="noopener" target="_blank"><code>do-test</code></a></td></tr>
+    <tr><td>Review</td><td data-label="Skill"><a href="https://github.com/yudame/skills/tree/main/plugins/yudame-dev/skills/do-pr-review" rel="noopener" target="_blank"><code>do-pr-review</code></a></td></tr>
+    <tr><td>Docs</td><td data-label="Skill"><a href="https://github.com/yudame/skills/tree/main/plugins/yudame-dev/skills/do-docs" rel="noopener" target="_blank"><code>do-docs</code></a></td></tr>
+    <tr><td>Patch</td><td data-label="Skill"><a href="https://github.com/yudame/skills/tree/main/plugins/yudame-dev/skills/do-patch" rel="noopener" target="_blank"><code>do-patch</code></a></td></tr>
+    <tr><td>Merge</td><td data-label="Skill"><a href="https://github.com/yudame/skills/tree/main/plugins/yudame-dev/skills/do-merge" rel="noopener" target="_blank"><code>do-merge</code></a></td></tr>
+  </table></div>
+  <p>Two more have no matching stage. <code>do-issue</code> files the GitHub issue a developer starts from, and <code>do-sdlc</code> runs the stage skills one after another, from an issue to a merged pull request.</p>
+  <p class="src">Source: <a href="https://github.com/yudame/skills" rel="noopener" target="_blank">github.com/yudame/skills</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/rollout.md">docs/rollout.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/harnesses.md">docs/harnesses.md</a></p>
+</section>
+
+
 <div class="page-next">
   <a href="rules.html"><span class="lbl">Previous</span>← The rules</a>
   <a href="durability.html"><span class="lbl">Next</span>Durability →</a>
@@ -108,7 +130,7 @@
     <span>valor engels · how the system works</span>
     <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
     <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
-    <span>updated 2026-10-21</span>
+    <span>updated 2026-10-22</span>
   </div>
 </footer>
 </body>
