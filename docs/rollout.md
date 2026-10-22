@@ -74,7 +74,11 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
 4. **The kernel database.** `$PY -m core migrate` makes the roles, the
    database and the schema, and runs `secure-login` (`pgpass`, the
    `pg_hba.conf` rules). Add `export PGPASSFILE=~/.config/valor-kernel/pgpass`
-   to the shell profile.
+   to the shell profile. Where another Postgres (the Captain's and the Bald's
+   `postgresql@15`) also starts at login, the two race for 5432: put
+   `port = 5433` in `postgresql@18`'s `postgresql.conf`, add
+   `export VALOR_PGPORT=5433` to the profile, and set `VALOR_PGPORT` when
+   step 9 generates the jobs.
 5. **Keys**, copied from the Cowboy without printing them:
    `for K in claude-token github-keys judgement-keys openai-key mail-keys telegram-keys slack-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; chmod 600 ~/.config/valor-kernel/$K; done`.
    Calibrate the judge from a copy of the Cowboy's whole `~/src/valor-demo/items/`
