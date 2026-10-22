@@ -25,23 +25,29 @@
   <div class="topnav-inner">
     <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">AI engineer · Yudame</span></a>
     <nav>
-      <a href="merged.html">Merged</a>
+      <a href="pull-requests.html">Pull requests</a>
       <a href="how.html" aria-current="page">How it works</a>
       <a href="trust.html">Trust and safety</a>
-      <a href="comparisons.html">Compared</a>
+      <a href="comparisons.html">Comparisons</a>
     </nav>
   </div>
 </header>
 
 <main>
 
-<p class="kicker"><span class="n">03 ·</span> how it works</p>
-<h1>A kernel moves the work. A model does the work. A ledger keeps the record.</h1>
-<p class="lede">Send it a message in your team's chat. Code turns the message into a task for a model to work on, and every step lands in a record you can read.</p>
+<nav class="subnav" aria-label="How it works"><span class="grp">How it works</span>
+  <a href="how.html" aria-current="page">Overview</a>
+  <a href="pipeline.html">Pipeline</a>
+  <a href="durability.html">Durability</a>
+  <a href="chat.html">In the chat</a>
+</nav>
+
+<h1>How Valor works</h1>
+<p class="lede">A kernel, which is deterministic code, turns each message into a task and moves it through its stages. A model does the work inside each stage, and every step is a row in a Postgres ledger.</p>
 
 <section id="overview">
   <p class="sec-label">01 · The system</p>
-  <h2>Code decides what it may do; a model does the work</h2>
+  <h2>The kernel, the model and the ledger</h2>
   <div class="split"><div><p>Every chat Valor is in has one session that speaks for it. The session answers, or starts a task.</p>
   <ul class="tight">
     <li><b>The kernel</b>, deterministic code, moves each task through its stages and decides what it may do.</li>
@@ -67,7 +73,7 @@
 
 <section id="deeper">
   <p class="sec-label">03 · Read deeper</p>
-  <h2>Three pages behind this one</h2>
+  <h2>The pages in this section</h2>
   <div class="dir">
     <a class="dir-row" href="pipeline.html"><span class="idx">04</span><span class="ttl">Pipeline</span><span class="dsc">From a message to a merged, tested change, with critique and review rounds.</span><span class="go">pipeline.html</span></a>
     <a class="dir-row" href="durability.html"><span class="idx">05</span><span class="ttl">Durability</span><span class="dsc">The ledger, recovery after a crash, and memory.</span><span class="go">durability.html</span></a>
@@ -76,7 +82,7 @@
 </section>
 
 <div class="page-next">
-  <a href="merged.html"><span class="lbl">Previous</span>← Merged pull requests</a>
+  <span></span>
   <a href="pipeline.html"><span class="lbl">Next</span>Pipeline →</a>
 </div>
 

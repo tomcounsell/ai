@@ -25,19 +25,25 @@
   <div class="topnav-inner">
     <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">AI engineer · Yudame</span></a>
     <nav>
-      <a href="merged.html">Merged</a>
+      <a href="pull-requests.html">Pull requests</a>
       <a href="how.html" aria-current="page">How it works</a>
       <a href="trust.html">Trust and safety</a>
-      <a href="comparisons.html">Compared</a>
+      <a href="comparisons.html">Comparisons</a>
     </nav>
   </div>
 </header>
 
 <main>
 
-<p class="kicker"><span class="n">05 ·</span> durability</p>
-<h1>Pull the power cord mid-task and Valor picks up where it stopped.</h1>
-<p class="lede">Every step it takes is a row in a ledger it cannot edit, so you can read what it did and a crash loses nothing that was recorded.</p>
+<nav class="subnav" aria-label="How it works"><span class="grp">How it works</span>
+  <a href="how.html">Overview</a>
+  <a href="pipeline.html">Pipeline</a>
+  <a href="durability.html" aria-current="page">Durability</a>
+  <a href="chat.html">In the chat</a>
+</nav>
+
+<h1>How Valor keeps its state</h1>
+<p class="lede">Every step Valor takes is a row in a Postgres ledger it cannot edit. A task's state is read from those rows, so a crash loses nothing that was recorded.</p>
 <p>The ledger is one append-only table, with a row for every model call, turn, effect, question, correction and stop. Everything the kernel knows about a task is computed from those rows, so a crash at any instant leaves nothing to reconcile.</p>
 <nav class="toc" aria-label="On this page">
   <p class="toc-label">On this page</p>

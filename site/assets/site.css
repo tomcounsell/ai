@@ -153,6 +153,27 @@ main {
 }
 .kicker .n { color: var(--faint); }
 
+/* ---------- section navigation on the grouped pages ---------- */
+
+.subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin: 26px 0 0;
+  padding: 0 0 10px;
+  border-bottom: 1px solid var(--hairline);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.subnav .grp { color: var(--faint); }
+.subnav .grp::after { content: " ·"; }
+.subnav a { color: var(--muted); text-decoration: none; }
+.subnav a:hover { color: var(--ink); }
+.subnav a[aria-current="page"] { color: var(--ink); font-weight: 600; }
+.subnav + h1 { margin-top: 40px; }
+
 h1, h3, section > h2 {
   font-family: var(--serif);
   letter-spacing: -0.01em;

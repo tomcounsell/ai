@@ -25,10 +25,10 @@
   <div class="topnav-inner">
     <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">AI engineer · Yudame</span></a>
     <nav>
-      <a href="merged.html">Merged</a>
+      <a href="pull-requests.html">Pull requests</a>
       <a href="how.html">How it works</a>
       <a href="trust.html">Trust and safety</a>
-      <a href="comparisons.html">Compared</a>
+      <a href="comparisons.html">Comparisons</a>
     </nav>
   </div>
 </header>
@@ -43,7 +43,7 @@
       <p class="lede">This site explains how it works. Each claim links to its source in the <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">public repository</a>.</p>
       <p class="notice">Valor runs on its own Mac under its own accounts. Every model call and every action it takes is a row in a ledger it cannot edit, a stop halts it at once, and code outside the model sets what each task may do. The details are on the <a href="trust.html">Trust and safety</a> page.</p>
       <div class="cta-row">
-        <a class="btn primary" href="merged.html">Merged pull requests</a>
+        <a class="btn primary" href="pull-requests.html">Recent pull requests</a>
         <a class="btn" href="how.html">How it works</a>
       </div>
     </div>
@@ -87,9 +87,9 @@
   <p>Every step is a row in a Postgres ledger the system cannot edit. A task's state is read from those rows, so a crash or a stop leaves nothing to reconcile.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md">docs/architecture.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">docs/data.md</a></p></div><figure class="fig"><svg viewBox="0 0 380 346" role="img" aria-label="A message reaches the chat&#x27;s session, which starts a task; the task ends in a delivery. Every step is a row in the append-only ledger."><defs><marker id="m1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1b1a17"/></marker><marker id="m1b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b867b"/></marker></defs><rect class="dg-box " x="20" y="20" width="240" height="54"/><text class="fg-title" x="140.0" y="43.0" text-anchor="middle">A message</text><text class="fg-sub" x="140.0" y="61.0" text-anchor="middle">Telegram, Slack, email, local chat</text><line class="dg-edge back" x1="260" y1="47" x2="290" y2="47"/><rect class="dg-box " x="20" y="104" width="240" height="54"/><text class="fg-title" x="140.0" y="127.0" text-anchor="middle">The chat's session</text><text class="fg-sub" x="140.0" y="145.0" text-anchor="middle">replies, or starts a task</text><line class="dg-edge back" x1="260" y1="131" x2="290" y2="131"/><rect class="dg-box " x="20" y="188" width="240" height="54"/><text class="fg-title" x="140.0" y="211.0" text-anchor="middle">A task</text><text class="fg-sub" x="140.0" y="229.0" text-anchor="middle">plan, build, check, merge</text><line class="dg-edge back" x1="260" y1="215" x2="290" y2="215"/><rect class="dg-box good" x="20" y="272" width="240" height="54"/><text class="fg-title" x="140.0" y="295.0" text-anchor="middle">A delivery</text><text class="fg-sub" x="140.0" y="313.0" text-anchor="middle">merged, sent, or reported</text><line class="dg-edge back" x1="260" y1="299" x2="290" y2="299"/><line class="dg-edge" x1="140" y1="74" x2="140" y2="101" marker-end="url(#m1)"/><line class="dg-edge" x1="140" y1="158" x2="140" y2="185" marker-end="url(#m1)"/><line class="dg-edge" x1="140" y1="242" x2="140" y2="269" marker-end="url(#m1)"/><rect class="dg-box store" x="290" y="20" width="70" height="306"/><text class="fg-title" x="320" y="173" text-anchor="middle" transform="rotate(-90 320 173)">The ledger</text><text class="fg-sub" x="340" y="173" text-anchor="middle" transform="rotate(-90 340 173)">every step is a row</text></svg></figure></div>
   <div class="dir">
-    <a class="dir-row" href="how.html"><span class="idx">03</span><span class="ttl">How it works</span><span class="dsc">The system in one screen: pipeline, durability, the chat.</span><span class="go">how.html</span></a>
-    <a class="dir-row" href="trust.html"><span class="idx">07</span><span class="ttl">Trust and safety</span><span class="dsc">What it cannot do on its own, how it stops, how it is corrected.</span><span class="go">trust.html</span></a>
-    <a class="dir-row" href="comparisons.html"><span class="idx">11</span><span class="ttl">Compared</span><span class="dsc">Valor next to Firstmate, OpenClaw and the hosted agents.</span><span class="go">comparisons.html</span></a>
+    <a class="dir-row" href="how.html"><span class="idx"></span><span class="ttl">How it works</span><span class="dsc">The system in one screen: pipeline, durability, the chat.</span><span class="go">how.html</span></a>
+    <a class="dir-row" href="trust.html"><span class="idx"></span><span class="ttl">Trust and safety</span><span class="dsc">What it cannot do on its own, how it stops, how it is corrected.</span><span class="go">trust.html</span></a>
+    <a class="dir-row" href="comparisons.html"><span class="idx"></span><span class="ttl">Comparisons</span><span class="dsc">Valor next to Firstmate, OpenClaw and the hosted agents.</span><span class="go">comparisons.html</span></a>
   </div>
 </section>
 
@@ -107,10 +107,6 @@
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/persona/identity.toml">persona/identity.toml</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#identity">docs/persona.md, Identity</a></p>
 </section>
 
-<div class="page-next">
-  <span></span>
-  <a href="merged.html"><span class="lbl">Next</span>Merged pull requests →</a>
-</div>
 
 </main>
 
