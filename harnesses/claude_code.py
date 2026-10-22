@@ -47,7 +47,11 @@ def version(path: str) -> str | None:
 
 
 SPAWN_DEPTH = "1000"
-HOOKS_ON = json.dumps({"disableAllHooks": False})
+# The turn's CLAUDE_CONFIG_DIR hides ~/.claude/settings.json, so the no-credit
+# attribution is passed here too.
+TURN_SETTINGS = json.dumps(
+    {"disableAllHooks": False, "attribution": {"commit": "", "pr": ""}}
+)
 SUBAGENT_OPENING = (
     "The Brief of the Valor session that started you follows. Its stage and channel are that "
     "session's; your task is the prompt you were given, and what you find goes back to it."
@@ -202,7 +206,7 @@ def workspace_turn(
             # whatever the project's or the turn's own settings say: command-line
             # settings outrank both, and a settings file the turn writes reloads.
             "--settings",
-            HOOKS_ON,
+            TURN_SETTINGS,
         ]
         for d in settings.plugin_dirs:
             if os.path.isdir(d):

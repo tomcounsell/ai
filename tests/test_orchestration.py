@@ -75,7 +75,10 @@ def test_a_turn_loads_valors_plugin_first_and_gives_every_subagent_the_brief():
     start = json.loads(argv_env.env["VALOR_SUBAGENT_START"])["hookSpecificOutput"]
     assert start["hookEventName"] == "SubagentStart"
     assert start["additionalContext"].endswith("\n\nthe brief\nwith lines")
-    assert json.loads(argv[argv.index("--settings") + 1]) == {"disableAllHooks": False}
+    assert json.loads(argv[argv.index("--settings") + 1]) == {
+        "disableAllHooks": False,
+        "attribution": {"commit": "", "pr": ""},
+    }
     assert "--disallowedTools" not in argv
 
 
