@@ -1235,6 +1235,19 @@ def test_a_chat_session_wakes_on_messages_and_reports_and_reads_only_whats_new(d
     assert "Your task c1 reports (question):\n  Which region?" in prompt
 
 
+def test_a_tasks_channel_says_no_one_holds_the_merge_and_each_signal_is_taken(dsn, tmp_path):
+    # #3663: a plan's "hold the merge" held nothing; #3665: a revised plan
+    # assumed the taken plan.json still stood.
+    async def go():
+        async with await db.connect(dsn) as conn:
+            return (await tasks.dispatch(conn, await tasks.start(conn, tasks.Brief(instruction="test", workspace=str(tmp_path)))))["text"]
+
+    text = run(go())
+    assert "# How this task reaches Tom" in text and text.count("the kernel merges") == 1
+    assert "no one approves it, so\n  nothing in a plan, a commit or a note can hold it" in text
+    assert "taking each file" in text and "is written again" in text
+
+
 def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team, tmp_path):
     from core import signals, verdicts
     from tools import chat_tasks
