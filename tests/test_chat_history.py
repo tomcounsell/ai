@@ -11,6 +11,7 @@ import subprocess
 import threading
 import urllib.error
 import urllib.request
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ from bridges.slack.bridge import SlackBridge
 from bridges.slack.wire import Refused as SlackRefused
 from bridges.telegram import gap
 from bridges.telegram.bridge import TelegramBridge
+from bridges.telegram.wire import Refused, TelethonWire
 from core import bridge, workspace
 from tests import bridges
 from tests.telegram_emulator import EmulatorWire
@@ -141,6 +143,56 @@ def test_gap_fill_reads_history_without_a_search():
 
     asyncio.run(gap.missing(Wire(), GROUP, stop_id=0, recorded=recorded))
     assert calls == [{"offset_id": 0, "limit": gap.PAGE}]
+
+
+def test_gap_fill_skips_a_chat_telegram_refuses_and_fills_the_rest():
+    """A spec'd chat the account is not in (the Bald, 2026-10-22) dropped
+    the connection on every pass, so no chat of that Mac was answered."""
+    other = GROUP - 1
+
+    class Wire:
+        dropped = False
+
+        def on_message(self, handler):
+            pass
+
+        async def history(self, chat_id, **kw):
+            if chat_id == GROUP:
+                raise Refused("Could not find the input entity for PeerChannel")
+            return [SimpleNamespace(id=42)]
+
+        async def disconnect(self):
+            self.dropped = True
+
+    class Kernel:
+        split_text = None
+
+        def owned(self, channel):
+            return [str(GROUP), str(other)]
+
+        @asynccontextmanager
+        async def conn(self):
+            yield None
+
+        async def lowest(self, conn, channel, chat):
+            return None
+
+    wire = Wire()
+    bridge = TelegramBridge(wire, Kernel())
+    assert asyncio.run(bridge.fill())
+    assert not wire.dropped
+    assert bridge._seen.get(str(other)) == 42
+
+
+def test_a_chat_telethon_cannot_resolve_is_refused():
+    wire = object.__new__(TelethonWire)
+    wire.client = SimpleNamespace(is_connected=lambda: True)
+
+    async def unreachable():
+        raise ValueError("Could not find the input entity for PeerChannel(channel_id=3794218389)")
+
+    with pytest.raises(Refused):
+        asyncio.run(wire._call(unreachable()))
 
 
 # -- Slack, over a fake wire --------------------------------------------------
