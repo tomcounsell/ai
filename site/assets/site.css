@@ -134,14 +134,6 @@ pre code { background: none; border: none; padding: 0; color: var(--ink); }
   font-weight: 600;
   border-bottom-color: var(--ink);
 }
-.topnav nav a.btn.primary {
-  padding: 7px 12px;
-  margin-left: 8px;
-  font-size: 0.82rem;
-  color: #ffffff;
-  border: 1px solid var(--accent-deep);
-}
-.topnav nav a.btn.primary:hover { color: #ffffff; }
 
 /* ---------- page scaffolding ---------- */
 
@@ -381,15 +373,6 @@ table.doc td.mono { font-family: var(--mono); font-size: 0.78rem; white-space: n
   margin-bottom: 3px;
 }
 
-.want {
-  margin: 34px 0 0;
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--faint);
-}
-.want a { color: var(--ink); }
 
 footer.site {
   border-top: 1px solid var(--ink);
@@ -607,5 +590,4 @@ ul.tight li, ol.tight li { margin-bottom: 8px; }
   .topnav nav { margin-left: 0; width: 100%; padding-bottom: 8px; gap: 0 2px; }
   .topnav nav a { padding: 8px 6px 6px; font-size: 0.82rem; }
   .topnav nav a:first-child { padding-left: 0; }
-  .topnav nav a.btn.primary { margin: 6px 0 0; width: 100%; justify-content: center; padding: 9px 12px; }
 }
