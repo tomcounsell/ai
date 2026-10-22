@@ -20,6 +20,7 @@ from core import (
     checks,
     corrections,
     db,
+    git,
     intake,
     ledger,
     machine,
@@ -480,6 +481,61 @@ def test_a_turn_keeps_the_operators_path_and_knows_its_github_repo(tmp_path, mon
     lay = workspace.Layout(tmp_path)
     found = workspace.harness_env(lay, spec, {}, {}, bin_dir=tmp_path / "bin", passfile=tmp_path / "pass")
     assert found["GH_REPO"] == "tomcounsell/popoto"
+
+
+def test_a_step_gets_the_repos_env_and_the_agent_gets_it_less_the_kernels_names(tmp_path, monkeypatch):
+    # #3666: a developer in ~/src/<repo> has its .env; a task's clones did not.
+    from harnesses import claude_code
+
+    monkeypatch.setattr(workspace, "HOME", tmp_path)
+    dot = tmp_path / "src" / "psyoptimal" / ".env"
+    dot.parent.mkdir(parents=True)
+    names = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "GITHUB_PUSH_TOKEN", "PGPASSWORD")
+    dot.write_text("".join(f"{n}=dev-{n}\n" for n in names) + "export DATABASE_URL='postgres://dev/db'\n")
+    own = "postgresql://app:pw@127.0.0.1:5440/app"
+    task = {"GH_REPO": "yudame/psyoptimal", "DATABASE_URL": own, "PGPASSFILE": "/task/pgpass"}
+    step = workspace.turn_environment({"env": task})
+    assert (
+        step["ANTHROPIC_API_KEY"] == "dev-ANTHROPIC_API_KEY"
+        and step["GEMINI_API_KEY"] == "dev-GEMINI_API_KEY"
+    )
+    assert step["DATABASE_URL"] == own and step["PGPASSFILE"] == "/task/pgpass"
+    assert not {"OPENAI_API_KEY", "GITHUB_PUSH_TOKEN", "PGPASSWORD"} & set(step)
+    harness = {"sandbox_profile": "p", "env": task}
+    agent = claude_code.workspace_turn("p", cwd=".", model="m", harness=harness)("http://gw:1", "b", "t").env
+    assert agent["GEMINI_API_KEY"] == "dev-GEMINI_API_KEY" and agent["ANTHROPIC_BASE_URL"] == "http://gw:1"
+    assert not {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_PUSH_TOKEN"} & set(agent)
+    # A check session's suite runs in the environment its own services made.
+    check = workspace.check_harness(workspace.Layout(tmp_path / "t"), tmp_path / "c", [], task, services=True)
+    assert workspace.turn_environment(check)["GEMINI_API_KEY"] == "dev-GEMINI_API_KEY"
+    # What provisioning records (`harness_env`) holds none of it.
+    spec = workspace.Spec(
+        name="p", repo="https://github.com/yudame/psyoptimal.git", kind="python-uv", suite="true"
+    )
+    lay = workspace.Layout(tmp_path / "t")
+    recorded = workspace.harness_env(lay, spec, {}, {}, bin_dir=tmp_path / "bin", passfile=tmp_path / "pass")
+    assert recorded["GH_REPO"] == "yudame/psyoptimal" and not any(
+        v.startswith("dev-") for v in recorded.values()
+    )
+
+    # Read at each step: an edit is seen, and an earlier suite run is not reused.
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "c"], check=True)
+    sha = git.out(repo, "rev-parse", "HEAD").strip()
+
+    def digest(env):
+        return checks.environment_digest(repo, sha, {}, tmp_path / "bin", env)
+
+    before = digest(task)
+    dot.write_text("GEMINI_API_KEY=rotated\n")
+    assert workspace.turn_environment({"env": task})["GEMINI_API_KEY"] == "rotated" and digest(task) != before
+    # No checkout, or no .env in it: nothing changes.
+    bare = {"DATABASE_URL": own}
+    dot.unlink()
+    assert workspace.repo_env(task) == {} and digest(task) == digest(bare)
+    assert workspace.turn_environment({"env": task}) == workspace.turn_environment({"env": {**bare, **task}})
+    assert workspace.repo_env({"GH_REPO": "yudame/elsewhere"}) == {}
 
 
 # -- Tom's own chat: one chat session, only Tom heard ---------------------------

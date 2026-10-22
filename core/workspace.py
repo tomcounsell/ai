@@ -867,14 +867,34 @@ DROP_NAMES = ("OPENAI_API_KEY", "TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "GITHU
               "PGPASSWORD", "PGPASSFILE", "VALOR_PG_PASSFILE")  # fmt: skip
 
 
-def environment(task: dict[str, str] | None = None) -> dict[str, str]:
-    """The operator's environment less the kernel's secrets, with the
-    task's own variables (`task`) over it: what a turn, and every sandboxed
-    step of a task, starts from. The task's PATH goes in front of the
-    kernel's own, never in place of it, so a PATH recorded by whatever
-    process provisioned the task still finds what the operator has."""
+def repo_env(task: dict[str, str]) -> dict[str, str]:
+    """The repository's own `.env` in this Mac's checkout of it,
+    `~/src/<name>/.env` for the `GH_REPO` the task's environment names: what
+    a developer working there has. Read by the kernel at each step and
+    never recorded; the kernel's own names (`DROP_NAMES`) stay out, as they
+    do from the operator's environment. Empty with no such file."""
+    if not task.get("GH_REPO"):
+        return {}
+    try:
+        text = (HOME / "src" / task["GH_REPO"].rsplit("/", 1)[-1] / ".env").read_text()
+    except FileNotFoundError:
+        return {}
+    return {k: v for k, v in credentials._parse_env(text).items() if k not in DROP_NAMES}
+
+
+def environment(task: dict[str, str] | None = None, *, step: bool = False) -> dict[str, str]:
+    """The operator's environment less the kernel's secrets, then the
+    repository's `.env` (`repo_env`), with the task's own variables (`task`)
+    over both: what a turn, and every sandboxed step of a task (`step`),
+    starts from. A turn's agent gets the `.env` less the names the kernel
+    drops for its own route (`DROP_PREFIXES`), so its model calls still go
+    to the gateway; a step (setup, suite, lint) gets those too. The task's
+    PATH goes in front of the kernel's own, never in place of it, so a PATH
+    recorded by whatever process provisioned the task still finds what the
+    operator has."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(DROP_PREFIXES) and k not in DROP_NAMES}
     task = task or {}
+    env.update({k: v for k, v in repo_env(task).items() if step or not k.startswith(DROP_PREFIXES)})
     env.update(task)
     if "PATH" in task:
         parts = [*task["PATH"].split(os.pathsep), *os.environ.get("PATH", "").split(os.pathsep)]
@@ -884,8 +904,9 @@ def environment(task: dict[str, str] | None = None) -> dict[str, str]:
 
 def turn_environment(harness: dict[str, Any]) -> dict[str, str]:
     """The environment a sandboxed step of the task (setup, suite, lint)
-    gets: the operator's less the kernel's secrets, and the task's own."""
-    env = environment(harness.get("env", {}))
+    gets: the operator's less the kernel's secrets, the repository's `.env`,
+    and the task's own."""
+    env = environment(harness.get("env", {}), step=True)
     env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
