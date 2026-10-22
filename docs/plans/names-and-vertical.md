@@ -18,16 +18,39 @@ kokoro-onnx turns text into phonemes with espeak and also takes
 - `Engels`: Friedrich Engels' name, hard g, `ˈɛŋɡəlz` (ENG-gulz).
 - `Yudame`: Spanish *ayúdame* without the a, `juˈdɑme` (yoo-DAH-meh).
 
-`Kokoro.wav` splits the text on those words, matched case-insensitively and
-also inside a longer token (`valorengels.com`, `yudame's`). It phonemizes the
-other pieces with the engine's own tokenizer (`self.k.tokenizer.phonemize`),
-puts the lexicon's phonemes in place of each match, and calls `create` with
-`is_phonemes=True`. With no match, the text goes to `create` unchanged, as it
-does today. Text, captions and the manifest keep the real spellings. The IPA
-is tuned by ear-check: render each name alone and in a sentence, transcribe it
-back with the local Parakeet (`tools/voice.py`), and look at espeak's phonemes
-for each piece. The delivery reports what Parakeet heard. `say` stays as is:
-it runs only when the Kokoro model files are missing.
+`Kokoro.wav` splits the text on those words, matched case-insensitively,
+including inside a longer token (`valorengels.com`), and also matches the
+domain spelling `yuda.me` (said as Yudame). Each non-name piece goes through
+the engine's own tokenizer (`self.k.tokenizer.phonemize`), and each name is
+replaced with its lexicon phonemes. The result goes to `create` with
+`is_phonemes=True`. With no match, the text goes to `create` unchanged, as
+it does today.
+
+`phonemize` strips each piece (`normalize_text` and a final `.strip()`), so
+the splice adds the gaps back: a piece that ended in whitespace in the text
+gets one space after its phonemes, and one that started with whitespace
+gets one before. "I'm Valor Engels" becomes `aɪm vˈælɚ ˈɛŋɡəlz`, not
+`…vˈælɚˈɛŋɡəlz`. The fragments around a match are handled too:
+- a possessive `'s` / `s` straight after a name adds `z` to the name's
+  phonemes rather than being phonemized alone;
+- punctuation alone in a piece (`.`, `,`, `?`, `!`, `:`, `;`) is copied
+  through as itself, which is how Kokoro's vocabulary marks pauses, rather
+  than phonemized, since espeak may return nothing for it;
+- in a domain, `.com` and `.me` are said "dot com" / "dot me".
+
+The split is a pure function, `splice(text, phonemize)`, at module level, so
+it can be tested without kokoro_onnx.
+
+Text, captions and the manifest keep the real spellings. The IPA is tuned by
+ear: render each name alone, in a sentence, as a possessive, and in
+`valorengels.com`, then transcribe each clip back with the local Parakeet
+(`tools/voice.py`). The real espeak phonemes for each fragment case above are
+printed and checked too, not only the test stub's. The delivery reports what
+Parakeet heard. `say` stays as is: it runs only when the Kokoro model files
+are missing.
+
+The yudame/skills work is done in a fresh clone under the task workspace,
+not in `~/.claude/plugins/marketplaces/yudame`, which live turns load from.
 
 **2. Vertical by default.**
 - yudame/skills `present/SKILL.md`: a deck is portrait, one slide per page, on
@@ -50,7 +73,9 @@ here. The Cap page serves the original MP4 (`v.cap.so/.../result.mp4`), so:
 1. Download it and ffprobe it.
 2. Transcribe the narration with Parakeet to get the script.
 3. Pull a frame from each scene to see its visuals.
-4. Fix anything now wrong against the live site.
+4. Fix anything now wrong against the live site. If the narration says
+   `yuda.me` or `cap.yuda.me`, either the lexicon covers it (above) or the
+   line is rewritten to say the company name.
 5. Rebuild it in the present template, vertical, with the fixed `tts.py`: same
    content and scenes, and phone-width screenshots of valorengels.com where
    the original showed the site.
@@ -60,8 +85,13 @@ here. The Cap page serves the original MP4 (`v.cap.so/.../result.mp4`), so:
    the new share link, the MP4 path under `deliverables/`, its ffprobe
    duration, and its sha256.
 
-The skills PR merges on yudame/skills once green (Valor merged #1 to #3 the
-same way), so voice replies pick up the fix when the plugin updates.
+yudame/skills has no CI. Its checks are run by hand, as its README says:
+`python3 tests/check_skills.py` and `sh tests/check_install.sh`, plus the
+new `python3 tests/check_tts.py`. The PR lists all three results, and Valor
+merges it once they pass (as with #1 to #3). Voice replies only get the fix
+once this Mac's marketplace checkout updates (`claude plugin marketplace
+update yudame`). The delivery says when that happened, and checks it by
+rendering a voice reply from the live path, not by assuming it.
 
 ## Out of scope
 
@@ -71,11 +101,19 @@ same way), so voice replies pick up the fix when the plugin updates.
 
 ## Tests
 
-- yudame/skills: `tests/check_skills.py` passes. Add a test file for `tts.py`'s
-  splice (a pure function, no model needed). It covers each name in title case,
-  lower case and all caps; inside `valorengels.com` and `yudame.com`; with a
-  possessive; a sentence with neither name, which goes through unchanged; and
-  a name next to punctuation.
+- yudame/skills: `check_skills.py` and `check_install.sh` pass. A new
+  `tests/check_tts.py` is plain Python like check_skills.py: no pytest, no
+  kokoro_onnx import. It loads `splice` from `present/tts.py` (whose
+  kokoro import is already late) and runs it with a stub phonemizer that
+  strips its input, as the real one does. It asserts:
+  - the boundary spaces: "I'm Valor Engels" has a space before the name's
+    phonemes;
+  - each name in title case, lower case and all caps;
+  - `valorengels.com`, `yudame.com` and `yuda.me` inside a domain;
+  - possessives `Yudame's` / `Engels's`, which append `z`;
+  - a name followed by `.` or `,`, which keeps the punctuation;
+  - a sentence with neither name, which comes back unchanged.
+  README gets the command beside the other two.
 - Ear check: run Parakeet on a clip saying "I'm Valor Engels, at Yudame". The
   transcript should come back close to "Engels" / "Yudame" and not "Angles" /
   "Udemy". Report what it heard, word for word.
