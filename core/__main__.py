@@ -150,7 +150,9 @@ import functools
 import json
 import os
 import resource
+import shutil
 import signal
+import subprocess
 import time
 from pathlib import Path
 
@@ -171,6 +173,7 @@ from core import (
     ledger,
     machine,
     memory,
+    notices,
     outcomes,
     router,
     routines,
@@ -539,11 +542,30 @@ def _routine_runners() -> dict:
     }
 
 
+# Below this much free disk the overnight update tells Tom (Tom, 2026-10-22).
+DISK_LOW_GB = 15
+
+
 async def update_runner(ctx: routines.Context) -> routines.Ran:
     """The overnight update: one request, which the resident kernel rolls;
-    no task."""
+    no task. It also prunes uv's shared cache (19.5 GiB on the Captain,
+    2026-10-22) and tells Tom, once a day, when this Mac's disk is low."""
     request_id = await intake.request_update(ctx.conn, by="routine", via="routine")
-    return routines.Ran(None, "started", f"update {request_id} requested")
+    pruned = await asyncio.to_thread(
+        subprocess.run, [settings.uv, "cache", "prune"], capture_output=True, text=True, check=False
+    )
+    said = (pruned.stderr.strip().splitlines() or ["uv cache pruned"])[-1]
+    free = shutil.disk_usage(Path.home()).free / 1e9
+    if free < DISK_LOW_GB:
+        await notices.request(
+            ctx.conn,
+            intake.UPDATES,
+            kind="rollout",
+            about_key=f"disk:{ctx.now:%Y-%m-%d}",
+            text=f"{settings.machine} has {free:.0f} GB of disk left after tonight's cleanup. "
+            "Builds start failing when it fills; what should go?",
+        )
+    return routines.Ran(None, "started", f"update {request_id} requested; {said}; {free:.0f} GB free")
 
 
 # How long `update --wait` waits for its request to end or fail.

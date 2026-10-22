@@ -582,9 +582,13 @@ def test_update_in_the_engineering_room_is_a_request_and_one_reply(fresh, tmp_pa
         assert reply["text"] == f"I am already up to date, at {repo.base[:12]}."
 
 
-def test_the_update_routine_writes_one_request_and_no_task(fresh):
+def test_the_update_routine_writes_one_request_and_no_task(fresh, monkeypatch):
+    import dataclasses
+
     import core.__main__ as main
     from core import routines
+
+    monkeypatch.setattr(main, "settings", dataclasses.replace(settings, uv="/usr/bin/true"))
 
     async def go():
         async with await db.connect(fresh) as conn:
@@ -597,6 +601,33 @@ def test_the_update_routine_writes_one_request_and_no_task(fresh):
     assert (ran["run"], ran["outcome"]) == (None, "started")
     (objective,) = run(of_type(fresh, "task.started"))  # the routine's own record; no run task
     assert objective["objective"] == "update"
+
+
+def test_the_update_routine_prunes_uv_and_tells_tom_once_a_day_when_disk_is_low(fresh, tmp_path, monkeypatch):
+    import dataclasses
+    import shutil
+
+    import core.__main__ as main
+    from core import routines
+
+    uv = tmp_path / "uv"
+    uv.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/argv\necho "Removed 3 files (1.0GiB)" >&2\n')
+    uv.chmod(0o755)
+    monkeypatch.setattr(main, "settings", dataclasses.replace(settings, uv=str(uv)))
+    monkeypatch.setattr(shutil, "disk_usage", lambda _: shutil._ntuple_diskusage(228e9, 220e9, 8e9))
+
+    async def go():
+        async with await db.connect(fresh) as conn:
+            for _ in range(2):
+                await routines.run(conn, "update", main._routine_runners(), directory=serve.ROOT / "routines")
+
+    run(go())
+    assert (tmp_path / "argv").read_text() == "cache prune\n" * 2
+    ran = run(of_type(fresh, "routine.ran"))
+    assert ran[0]["summary"].endswith("; Removed 3 files (1.0GiB); 8 GB free")
+    (notice,) = typed(updates(fresh), "notice.requested")
+    assert notice["kind"] == "rollout" and notice["about_key"].startswith("disk:20")
+    assert "8 GB of disk left" in notice["text"]
 
 
 def test_python_m_ui_plist_is_the_dashboards_job():

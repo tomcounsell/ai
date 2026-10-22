@@ -3,9 +3,12 @@ runner = "update"
 ceiling = "act"
 model = "frontier"  # required by every routine; this one calls no model
 mission_item = "1; Tom's ask (rule 2)"
-need = ["Tom, 2026-10-20: \"an overnight auto rollout would also be nice\"; the old system's com.valor.update"]
+need = [
+  "Tom, 2026-10-20: \"an overnight auto rollout would also be nice\"; the old system's com.valor.update",
+  "Tom, 2026-10-22: \"improve a nightly /update run to also do a cleanup as well, purging anything old and keeping an eye on disk space\"",
+]
 created = 2026-10-20
-instruction = "Roll this Mac's kernel to the tip of its branch overnight: one update request, which the resident kernel rolls."
+instruction = "Roll this Mac's kernel to the tip of its branch overnight: one update request, which the resident kernel rolls; then prune uv's cache and tell Tom when the disk is low."
 
 [schedule]
 hour = 3
