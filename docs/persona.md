@@ -399,7 +399,10 @@ Tom, valor team chat, 2026-10-17: "Let's make PDF the default for
 everything you create, unless something else is requested and we want it
 to be mobile friendly also by default." A deck, explainer, document,
 report or brief on paper is a phone-readable PDF sent as a file, unless
-another format is asked for (`persona/delivery.md`). How the PDF is made,
+another format is asked for (`persona/delivery.md`). Tom, 2026-10-22:
+"let's also by default do presentations in a vertical mode, as opposed to
+landscape", so decks and narrated videos are vertical unless landscape is
+asked for; this replaces his 2026-10-17 liking for the landscape deck. How the PDF is made,
 sized and checked is the yudame `present` skill's; a task makes it and
 names its path, and the chat session sends it (`skills/sdlc/build.md`,
 `skills/sdlc/converse.md`).
