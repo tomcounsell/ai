@@ -335,8 +335,9 @@ A turn's environment is the operator's, less the kernel's secrets (the `ANTHROPI
 `AI_AGENT` variables, the OpenAI, TypeSafe, OpenRouter, and GitHub push keys, and the `PG*` password
 variables). Over it goes the repository's own `.env` from this Mac's checkout, `~/src/<repo>/.env`
 (`workspace.repo_env`), as a developer working there has it. The kernel reads it at each step and
-never records it. The kernel's own names stay out of it; setup, suite and lint get its `ANTHROPIC_`
-keys, and the turn's agent does not. The task's own variables go over both. It carries Valor's own
+never records it. Setup, suite and lint get all of it; the turn's agent gets it less the kernel's
+own names, so a project key never pays for a turn. The task's own variables go over both: a task
+with its own database sets every libpq name, `PGPASSWORD` among them. It carries Valor's own
 `gh` login, git credential helper, and SSH agent.
 
 It also carries Valor's Google sign-in, valor@yuda.me, which `gws` uses
