@@ -16,7 +16,7 @@ kokoro-onnx turns text into phonemes with espeak and also takes
 `create(..., is_phonemes=True)`. Add a small `LEXICON` near `DEFAULT_KOKORO_VOICE`:
 
 - `Engels`: Friedrich Engels' name, hard g, `ˈɛŋɡəlz` (ENG-gulz).
-- `Yudame`: Spanish *ayúdame* without the a, `juˈdɑme` (yoo-DAH-meh).
+- `Yudame`: Spanish *ayúdame* without the a, stressed first, `jˈuːdɑmeɪ` (YOO-dah-meh; Tom, 2026-10-22 12:55 UTC).
 
 `Kokoro.wav` splits the text on those words, matched case-insensitively,
 including inside a longer token (`valorengels.com`), and also matches the
