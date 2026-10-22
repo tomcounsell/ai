@@ -41,16 +41,42 @@
 
 <p class="kicker"><span class="n">07 ·</span> comparisons</p>
 <h1>Comparisons: Valor and other AI coworker agents</h1>
-<p class="lede">Several products now offer an agent that works on its own for one person or a team. This page compares Valor with the closest of them on the two things Valor is built around, independence and data sovereignty, and links to a page for each of the five closest. Facts about other products were checked on 2026-10-21 and 2026-10-22, and link to their sources.</p>
+<p class="lede">This page lists the projects Valor took ideas from. It then compares Valor with the agents closest to it on the two things Valor is built around, independence and data sovereignty, and links to a page for each of the five closest. Facts about other products were checked on 2026-10-21 and 2026-10-22, and link to their sources.</p>
 <nav class="toc" aria-label="On this page">
   <p class="toc-label">On this page</p>
   <ol>
+    <li><a href="#inspiration">Inspiration</a></li>
     <li><a href="#terms">What the terms mean</a></li>
     <li><a href="#glance">At a glance</a></li>
     <li><a href="#pages">Comparison pages</a></li>
     <li><a href="#leaves">What leaves Valor's Macs</a></li>
   </ol>
 </nav>
+
+<section id="inspiration">
+  <p class="sec-label">Inspiration</p>
+  <h2>Projects Valor took ideas from</h2>
+  <p>Valor was built from other people's work as well as its own. Each project below links to its home, with what Valor took from it and the file in Valor's repository that says so.</p>
+  <dl class="def-list">
+    <div class="def-row"><dt><a href="https://github.com/NousResearch/hermes-agent" rel="noopener" target="_blank">Hermes Agent</a><span class="hint">Nous Research</span></dt><dd>One long-lived session per chat, the way chat sessions compact, and parts of the Slack bridge (Socket Mode, the ping watchdog, the catch-all ack).<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/main/docs/harnesses.md" rel="noopener" target="_blank">docs/harnesses.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/plans/team-chat.md" rel="noopener" target="_blank">docs/plans/team-chat.md</a> · <a href="https://github.com/tomcounsell/ai/blob/9ae02bb915b7a95b8d4f6de6a5c3c9f108841648/docs/plans/m2-5-slack.md" rel="noopener" target="_blank">Slack plan</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://github.com/openclaw/openclaw" rel="noopener" target="_blank">OpenClaw</a><span class="hint">OpenClaw Foundation</span></dt><dd>The Slack bridge's crash safety: each event recorded before it is acknowledged, and a marker on every post so a send isn't repeated after a crash.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/9ae02bb915b7a95b8d4f6de6a5c3c9f108841648/docs/plans/m2-5-slack.md" rel="noopener" target="_blank">Slack plan</a> · <a href="https://github.com/tomcounsell/ai/blob/main/bridges/slack/send.py" rel="noopener" target="_blank">bridges/slack/send.py</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://github.com/tomcounsell/cori" rel="noopener" target="_blank">cori</a><span class="hint">Tom Counsell</span></dt><dd>The rebuild's core idea, authority in a deterministic kernel outside the model's reach, and the corrigibility commitments. It is also one of the four places a component is taken from before one is written.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md" rel="noopener" target="_blank">CLAUDE.md, rule 10</a> · <a href="https://github.com/tomcounsell/ai/blob/c1eb7b8a78b25ffe977bd7a17fe3aae8ec224c1e/docs/plans/valor-cori-rebuild-setup.md" rel="noopener" target="_blank">rebuild setup plan</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://github.com/anthropics/claude-code" rel="noopener" target="_blank">Claude Code</a><span class="hint">Anthropic</span></dt><dd>The harness every turn runs in, and the first place to take a component from. Chat compaction is Claude Code's own.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/main/docs/harnesses.md" rel="noopener" target="_blank">docs/harnesses.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md" rel="noopener" target="_blank">CLAUDE.md, rule 10</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://github.com/tomcounsell/popoto" rel="noopener" target="_blank">popoto</a><span class="hint">Tom Counsell</span></dt><dd>The memory layer, and the measurement that raw turns beat model extraction, which is why memory stores raw entries.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/main/REFERENCES.md" rel="noopener" target="_blank">REFERENCES.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/memory.md" rel="noopener" target="_blank">docs/memory.md</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://docs.paperclip.ing" rel="noopener" target="_blank">Paperclip</a><span class="hint">Paperclip</span></dt><dd>For the earlier system: the ideas of budget hard-stops, goal-aligned tracing and an immutable audit log, adopted without the platform.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/a1a0aa7f2413d609e6afae5e42a2ad9675947e72/site/research.html" rel="noopener" target="_blank">old research page</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://tinyhumans.gitbook.io/openhuman" rel="noopener" target="_blank">OpenHuman</a><span class="hint">TinyHumans</span></dt><dd>For the earlier system: the case for a memory store people can read as files, half the reason that system kept two memory stores.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/a1a0aa7f2413d609e6afae5e42a2ad9675947e72/site/research.html" rel="noopener" target="_blank">old research page</a></span></dd></div>
+  </dl>
+  <h3>Studied, not adopted</h3>
+  <ul class="tight">
+    <li><b><a href="https://github.com/kunchenguid/firstmate" rel="noopener" target="_blank">Firstmate</a></b>: The closest outside system to Valor's shape: one session handing work to agents in isolated checkouts. See the comparison below.</li>
+    <li><b><a href="https://github.com/earendil-works/pi" rel="noopener" target="_blank">Pi</a></b>: Valor's second harness. The earlier system studied it with the Gondolin sandbox and kept neither, since its own machine was its isolation boundary. Pi's durable package was studied for orchestration ideas.</li>
+    <li><b><a href="https://platform.claude.com/docs/en/managed-agents/overview" rel="noopener" target="_blank">Claude Managed Agents</a></b>: Anthropic's hosted agent loop, studied as a place to move execution later; not adopted.</li>
+    <li><b><a href="https://www.perplexity.ai/products/computer" rel="noopener" target="_blank">Perplexity Computer</a></b>: A visual digital worker; it showed why an orchestrator needs an API it can call.</li>
+    <li><b><a href="https://github.com/omnigent-ai/omnigent" rel="noopener" target="_blank">Omnigent</a></b>: An open-source agent control plane; it was a reminder to check maturity claims at the source.</li>
+    <li><b><a href="https://github.com/1jehuang/jcode" rel="noopener" target="_blank">jcode</a></b>: A fast single-author coding runtime with no integration seam; an example of a project to watch rather than adopt.</li>
+  </ul>
+  <p class="src">Sources for the studied list: <a href="https://github.com/tomcounsell/ai/blob/a1a0aa7f2413d609e6afae5e42a2ad9675947e72/site/research.html" rel="noopener" target="_blank">the old research page</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/plans/pi-durable-research.md" rel="noopener" target="_blank">docs/plans/pi-durable-research.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/pi.md" rel="noopener" target="_blank">docs/pi.md</a></p>
+</section>
 
 <section id="terms">
   <p class="sec-label">What the terms mean</p>

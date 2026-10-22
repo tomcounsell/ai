@@ -234,6 +234,7 @@ li::marker { color: var(--faint); }
   font-weight: 650;
   font-size: 0.95rem;
 }
+.def-row dt .hint { display: block; font-family: var(--mono); font-weight: 400; font-size: 0.7rem; color: var(--faint); margin-top: 3px; }
 .def-row dd { margin: 0; color: var(--muted); font-size: 0.95rem; max-width: 44rem; }
 .def-row dd code { font-size: 0.8em; }
 
