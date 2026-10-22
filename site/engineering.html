@@ -4,29 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Engineering · Valor Engels</title>
-<meta name="description" content="How Valor Engels takes a task from a message to a merged change: the SDLC stages, the sessions that check the work, and the pull requests it produced, each with a receipt from GitHub.">
+<meta name="description" content="Valor's merged pull requests by day, and how he takes a task from a request to a merged change: the SDLC stages, the sessions that check the work, and the merge predicate.">
 <link rel="canonical" href="https://valorengels.com/engineering.html">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Valor Engels">
 <meta property="og:title" content="Engineering · Valor Engels">
-<meta property="og:description" content="How Valor Engels takes a task from a message to a merged change: the SDLC stages, the sessions that check the work, and the pull requests it produced, each with a receipt from GitHub.">
+<meta property="og:description" content="Valor's merged pull requests by day, and how he takes a task from a request to a merged change: the SDLC stages, the sessions that check the work, and the merge predicate.">
 <meta property="og:url" content="https://valorengels.com/engineering.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%231b1a17%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27Georgia,serif%27 font-size=%2719%27 font-weight=%27700%27 fill=%27%23faf7f0%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">AI engineer · Yudame</span></a>
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span></a>
     <nav>
+      <a href="index.html#architecture">How he works</a>
       <a href="engineering.html" aria-current="page">Engineering</a>
-      <a href="index.html#how">How it works</a>
       <a href="trust.html">Trust and safety</a>
       <a href="comparisons.html">Comparisons</a>
     </nav>
@@ -35,71 +36,77 @@
 
 <main>
 
-<p class="kicker">engineering</p>
-<h1>Engineering</h1>
-<p class="lede">Every task Valor takes passes the same stages, from a recorded request to a merged change checked by sessions that did not write it. The pull requests at the foot of this page are what came out.</p>
+<nav class="subnav sections" aria-label="Engineering">
+  <a href="#SDLC" aria-current="location">SDLC</a>
+  <a href="#sessions">Sessions</a>
+  <a href="#loops">Loops</a>
+  <a href="#merge">Merge</a>
+</nav>
 
-<section id="stages">
-  <p class="sec-label">01 · The SDLC</p>
+<h1>Engineering</h1>
+<p class="lede">Valor's merged pull requests over the last 26 weeks, then how each task gets from a request to a merged change.</p>
+
+<figure class="activity"><object data="/activity.svg" type="image/svg+xml" aria-label="Merged pull requests by day, last 26 weeks, from GitHub">Merged pull requests by day, read live from GitHub.</object></figure>
+<p class="src">Source: <a href="https://github.com/valorengels">github.com/valorengels</a> · <a href="https://github.com/tomcounsell/ai/blob/main/src/index.js">src/index.js</a>, which draws the chart</p>
+
+<section id="SDLC">
+  <p class="sec-label">SDLC</p>
   <h2>The stages of a task</h2>
-  <p>Each task passes the same checkpoints. The agent decides how to do the work in a stage; the kernel, the deterministic code that runs every task, decides which stage comes next and what may leave the machine.</p>
-  <div class="split"><div><p>A cheap classifier reads each request first. A thin request, such as a one-line ask or one that leans on an example, goes to clarify. There Valor inspects the code first and asks only what the code can't answer, or finds nothing to ask and proceeds.</p>
-  <p>Critique reads the plan before any code exists. After every build, the test, review and docs stages check the same commit in parallel, and their findings go back together in one patch.</p>
-  <p>Any stage can end in <code>stopped</code>, and a task never moves on from <code>stopped</code>.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md#the-model-in-one-table">docs/sdlc-state-machine.md</a> · <a href="https://github.com/tomcounsell/ai/tree/main/skills/sdlc/">skills/sdlc/</a></p></div><figure class="fig"><svg viewBox="0 0 380 636" role="img" aria-label="The SDLC pipeline: intake, judge, clarify if thin, plan, critique (revise loops to plan), build, checks in parallel (findings loop to patch), merge."><defs><marker id="m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1b1a17"/></marker><marker id="m4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b867b"/></marker></defs><rect class="dg-box " x="60" y="20" width="230" height="50"/><text class="fg-title" x="175.0" y="41.0" text-anchor="middle">Intake</text><text class="fg-sub" x="175.0" y="59.0" text-anchor="middle">recorded once, verbatim</text><rect class="dg-box " x="60" y="98" width="230" height="50"/><text class="fg-title" x="175.0" y="119.0" text-anchor="middle">Judge</text><text class="fg-sub" x="175.0" y="137.0" text-anchor="middle">precise or thin?</text><rect class="dg-box opt" x="60" y="176" width="230" height="50"/><text class="fg-title" x="175.0" y="197.0" text-anchor="middle">Clarify</text><text class="fg-sub" x="175.0" y="215.0" text-anchor="middle">ask, or find nothing to ask</text><rect class="dg-box " x="60" y="254" width="230" height="50"/><text class="fg-title" x="175.0" y="275.0" text-anchor="middle">Plan</text><text class="fg-sub" x="175.0" y="293.0" text-anchor="middle">approach, stakes, loop counts</text><rect class="dg-box " x="60" y="332" width="230" height="50"/><text class="fg-title" x="175.0" y="353.0" text-anchor="middle">Critique</text><text class="fg-sub" x="175.0" y="371.0" text-anchor="middle">a fresh session reads the plan</text><rect class="dg-box " x="60" y="410" width="230" height="50"/><text class="fg-title" x="175.0" y="431.0" text-anchor="middle">Build</text><text class="fg-sub" x="175.0" y="449.0" text-anchor="middle">a candidate commit</text><rect class="dg-box " x="60" y="488" width="230" height="50"/><text class="fg-title" x="175.0" y="509.0" text-anchor="middle">Checks</text><text class="fg-sub" x="175.0" y="527.0" text-anchor="middle">test · review · docs, in parallel</text><rect class="dg-box good" x="60" y="566" width="230" height="50"/><text class="fg-title" x="175.0" y="587.0" text-anchor="middle">Merge</text><text class="fg-sub" x="175.0" y="605.0" text-anchor="middle">when the predicate holds</text><line class="dg-edge" x1="175.0" y1="70" x2="175.0" y2="95" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="148" x2="175.0" y2="173" marker-end="url(#m4)"/><text class="fg-lbl" x="183.0" y="166.0">thin</text><line class="dg-edge" x1="175.0" y1="226" x2="175.0" y2="251" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="304" x2="175.0" y2="329" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="382" x2="175.0" y2="407" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="460" x2="175.0" y2="485" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="538" x2="175.0" y2="563" marker-end="url(#m4)"/><path class="dg-edge back" d="M 60 123.0 C 22 123.0, 22 279.0, 57 279.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="14" y="201.0" text-anchor="middle" transform="rotate(-90 14 201.0)">precise</text><path class="dg-edge back" d="M 290 357.0 C 330 357.0, 330 279.0, 293 279.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="334" y="322.0" text-anchor="start">revise</text><path class="dg-edge back" d="M 290 513.0 C 330 513.0, 330 435.0, 293 435.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="334" y="478.0" text-anchor="start">patch</text></svg></figure></div>
+  <div class="split"><div><p>The kernel, the deterministic code that runs every task, picks the next stage. The agent decides how to do the work inside one.</p>
+  <ol class="tight">
+    <li>Intake records the request once, verbatim.</li>
+    <li>Judge makes one model call: is the request precise or thin?</li>
+    <li>Clarify reads the code for a thin request and asks only what the code can't answer, if anything.</li>
+    <li>Plan sets the approach, the stakes and the number of rounds.</li>
+    <li>Critique: a fresh session reads the plan before any code exists.</li>
+    <li>Build makes one candidate commit.</li>
+    <li>Checks: test, review and docs run in parallel on that commit, and their findings go back as one patch.</li>
+    <li>Merge happens when the merge predicate, the three conditions below, holds.</li>
+  </ol>
+  <p>Any stage can end in <code>stopped</code>, and a task never leaves <code>stopped</code>.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md#the-model-in-one-table">docs/sdlc-state-machine.md</a> · <a href="https://github.com/tomcounsell/ai/tree/main/skills/sdlc/">skills/sdlc/</a></p></div><figure class="fig"><svg viewBox="0 0 380 636" role="img" aria-label="The SDLC pipeline: intake, judge, clarify if thin, plan, critique (revise loops to plan), build, checks in parallel (findings loop to patch), merge."><defs><marker id="m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box " x="60" y="20" width="230" height="50"/><text class="fg-title" x="175.0" y="41.0" text-anchor="middle">Intake</text><text class="fg-sub" x="175.0" y="59.0" text-anchor="middle">recorded once, verbatim</text><rect class="dg-box " x="60" y="98" width="230" height="50"/><text class="fg-title" x="175.0" y="119.0" text-anchor="middle">Judge</text><text class="fg-sub" x="175.0" y="137.0" text-anchor="middle">precise or thin?</text><rect class="dg-box opt" x="60" y="176" width="230" height="50"/><text class="fg-title" x="175.0" y="197.0" text-anchor="middle">Clarify</text><text class="fg-sub" x="175.0" y="215.0" text-anchor="middle">ask, or find nothing to ask</text><rect class="dg-box " x="60" y="254" width="230" height="50"/><text class="fg-title" x="175.0" y="275.0" text-anchor="middle">Plan</text><text class="fg-sub" x="175.0" y="293.0" text-anchor="middle">approach, stakes, loop counts</text><rect class="dg-box " x="60" y="332" width="230" height="50"/><text class="fg-title" x="175.0" y="353.0" text-anchor="middle">Critique</text><text class="fg-sub" x="175.0" y="371.0" text-anchor="middle">a fresh session reads the plan</text><rect class="dg-box " x="60" y="410" width="230" height="50"/><text class="fg-title" x="175.0" y="431.0" text-anchor="middle">Build</text><text class="fg-sub" x="175.0" y="449.0" text-anchor="middle">a candidate commit</text><rect class="dg-box " x="60" y="488" width="230" height="50"/><text class="fg-title" x="175.0" y="509.0" text-anchor="middle">Checks</text><text class="fg-sub" x="175.0" y="527.0" text-anchor="middle">test · review · docs, in parallel</text><rect class="dg-box good" x="60" y="566" width="230" height="50"/><text class="fg-title" x="175.0" y="587.0" text-anchor="middle">Merge</text><text class="fg-sub" x="175.0" y="605.0" text-anchor="middle">when the predicate holds</text><line class="dg-edge" x1="175.0" y1="70" x2="175.0" y2="95" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="148" x2="175.0" y2="173" marker-end="url(#m4)"/><text class="fg-lbl" x="183.0" y="166.0">thin</text><line class="dg-edge" x1="175.0" y1="226" x2="175.0" y2="251" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="304" x2="175.0" y2="329" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="382" x2="175.0" y2="407" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="460" x2="175.0" y2="485" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="538" x2="175.0" y2="563" marker-end="url(#m4)"/><path class="dg-edge back" d="M 60 123.0 C 22 123.0, 22 279.0, 57 279.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="14" y="201.0" text-anchor="middle" transform="rotate(-90 14 201.0)">precise</text><path class="dg-edge back" d="M 290 357.0 C 330 357.0, 330 279.0, 293 279.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="334" y="322.0" text-anchor="start">revise</text><path class="dg-edge back" d="M 290 513.0 C 330 513.0, 330 435.0, 293 435.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="334" y="478.0" text-anchor="start">patch</text></svg></figure></div>
 </section>
 
 <section id="sessions">
-  <p class="sec-label">02 · Sessions</p>
+  <p class="sec-label">Sessions</p>
   <h2>Which sessions do the work</h2>
   <div class="cols-2">
-    <div><h3>The working session</h3><p>Clarify, plan, build and patch resume one session, so Valor keeps its context across a question, a send-back and feedback from Tom, who built Valor and runs Yudame.</p></div>
-    <div><h3>Fresh sessions</h3><p>Critique, review and docs each start fresh in a worktree of the exact commit they judge. The reviewer runs the suite itself instead of trusting the builder's transcript.</p></div>
+    <div><h3>The working session</h3><p>Clarify, plan, build and patch share one resumed session. Valor keeps his context across a question, a send-back from review and feedback from Tom, who built Valor and runs Yudame.</p></div>
+    <div><h3>Fresh sessions</h3><p>Critique, review and docs each start fresh in a worktree of the exact commit they judge. The reviewer runs the suite itself.</p></div>
   </div>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/session.py">core/session.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/fresh.py">core/fresh.py</a></p>
 </section>
 
-<section id="rounds">
-  <p class="sec-label">03 · Rounds and the merge</p>
+<section id="loops">
+  <p class="sec-label">Loops</p>
   <h2>Critique and review rounds</h2>
   <ul class="tight">
-    <li><b>A small reversible change</b> gets no extra rounds.</li>
-    <li><b>Stored data, money, authentication or the kernel</b> gets two critique rounds and one review round.</li>
+    <li>A small reversible change in well-tested code gets no extra rounds.</li>
+    <li>A change to stored data, money, authentication, migrations or the kernel gets two critique rounds and one review round.</li>
+    <li>Critique can raise these counts but never lower them.</li>
+    <li>When the rounds are spent, Valor patches once more or stops. If that candidate fails too, the task ends and Tom gets one report.</li>
   </ul>
-  <p>Critique can raise those counts but can't lower them. Once the rounds are spent, Valor decides whether to patch once more or stop and tell Tom why.</p>
-  <p>If that last candidate doesn't pass either, the task ends and Tom gets one report of what was built and what did not pass.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md#loops">docs/sdlc-state-machine.md, Loops</a></p>
-  <h3>The merge predicate</h3>
+</section>
+
+<section id="merge">
+  <p class="sec-label">Merge</p>
+  <h2>The merge predicate</h2>
   <ol class="rules">
     <li><b>One current candidate, its checks decided.</b></li>
     <li><b>Test passed, or showed only breadth gaps with the rounds spent.</b></li>
     <li><b>Review passed.</b></li>
   </ol>
-  <p>The broker reads the predicate in the same transaction that writes the merge's intent. The target repository and branch were fixed when the task started, and no turn can change them.</p>
-  <p>If the branch moved in the meantime and the work replays cleanly onto it, the replay happens with no turn at all. Otherwise the work goes back to rebase.</p>
+  <ul class="tight">
+    <li>The broker, the one component that performs effects, reads the predicate in the same transaction that writes the request to merge.</li>
+    <li>The target repository and branch are fixed when the task starts. No turn can change them.</li>
+    <li>If the branch has moved and the work replays cleanly onto it, the kernel replays it without a turn. Otherwise the work goes back for a rebase.</li>
+  </ul>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/machine.py">core/machine.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/broker.py">core/broker.py</a></p>
 </section>
 
-<section id="output">
-  <p class="sec-label">04 · Output</p>
-  <h2>Merged pull requests</h2>
-  <p>In the 30 days to 2026-10-22, Valor merged <span class="live">93</span> pull requests across <span class="live">6</span> repositories, <span class="live">3</span> of them public. The other 3 belong to clients and are counted, not named.</p>
-  <figure class="activity"><object data="/activity.svg" type="image/svg+xml" aria-label="Merged pull requests by day, last 26 weeks, from GitHub">Merged pull requests by day, read live from GitHub.</object><figcaption>Merged pull requests by day over the last 26 weeks, read from GitHub each hour. A day links to its first public pull request.</figcaption></figure>
-  <p>Seven of the public ones, newest first. The receipt is what GitHub recorded: time from opening to merge, and the size of the change. The per-task model spend and the questions asked of Tom sit in the ledger on each Mac and are not published here.</p>
-  <div class="table-wrap"><table class="doc stack">
-    <tr><th>Merged</th><th>Change</th><th>Opened to merged</th><th>Size</th><th>Merged by</th></tr>
-    <tr><td class="mono" data-label="Merged">2026-10-21</td><td data-label="Change"><a href="https://github.com/yudame/skills/pull/3">skills#3</a>: The de-slop skill catches slogan headings and epigram sentences</td><td class="mono" data-label="Opened to merged">17 m</td><td class="mono" data-label="Size">1 commit · 2 files · +21 −7</td><td data-label="Merged by">Tom</td></tr>
-    <tr><td class="mono" data-label="Merged">2026-10-21</td><td data-label="Change"><a href="https://github.com/yudame/skills/pull/1">skills#1</a>: Presentations come out as PDF, readable on a phone</td><td class="mono" data-label="Opened to merged">4 d 4 h</td><td class="mono" data-label="Size">1 commit · 2 files · +37 −3</td><td data-label="Merged by">Tom</td></tr>
-    <tr><td class="mono" data-label="Merged">2026-10-21</td><td data-label="Change"><a href="https://github.com/tomcounsell/ai/pull/3660">ai#3660</a>: The old system's memory, imported</td><td class="mono" data-label="Opened to merged">1 h 28 m</td><td class="mono" data-label="Size">8 commits · 11 files · +664 −4</td><td data-label="Merged by">Valor</td></tr>
-    <tr><td class="mono" data-label="Merged">2026-10-21</td><td data-label="Change"><a href="https://github.com/tomcounsell/ai/pull/3659">ai#3659</a>: Every scheduled job runs through Valor.app, so macOS asks once</td><td class="mono" data-label="Opened to merged">1 h 20 m</td><td class="mono" data-label="Size">1 commit · 19 files · +312 −10</td><td data-label="Merged by">Valor</td></tr>
-    <tr><td class="mono" data-label="Merged">2026-10-21</td><td data-label="Change"><a href="https://github.com/tomcounsell/ai/pull/3657">ai#3657</a>: One command updates a Mac, from chat, Claude Code or the 03:00 routine</td><td class="mono" data-label="Opened to merged">13 m</td><td class="mono" data-label="Size">9 commits · 17 files · +718 −41</td><td data-label="Merged by">Valor</td></tr>
-    <tr><td class="mono" data-label="Merged">2026-10-09</td><td data-label="Change"><a href="https://github.com/tomcounsell/popoto/releases/tag/v1.10.0">popoto 1.10.0</a>: Popoto runs on Postgres, in five pull requests (#813, #825, #834, #838, #839)</td><td class="mono" data-label="Opened to merged">1 d 8 h</td><td class="mono" data-label="Size">19 commits · 65 files · +2814 −271</td><td data-label="Merged by">Valor</td></tr>
-    <tr><td class="mono" data-label="Merged">2026-10-02</td><td data-label="Change"><a href="https://github.com/tomcounsell/popoto/pull/730">popoto#730</a>: A rationed question queue for agent memory</td><td class="mono" data-label="Opened to merged">6 h 50 m</td><td class="mono" data-label="Size">15 commits · 16 files · +3832 −23</td><td data-label="Merged by">Tom</td></tr>
-  </table></div>
-  <p class="src">Source: <a href="https://github.com/valorengels">github.com/valorengels</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">docs/data.md</a></p>
-</section>
-
 </main>
+<script src="assets/site.js" defer></script>
 
 <footer class="site">
   <div class="inner">

@@ -4,29 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Alignment · Valor Engels</title>
-<meta name="description" content="What corrigible means for Valor: stop, bounds, a ledger and corrections enforced by a kernel outside the model&#x27;s reach, and how Valor changes itself.">
+<meta name="description" content="What corrigible means for Valor: stop, bounds, a ledger and corrections enforced by a kernel outside the model&#x27;s reach, and how Valor changes himself.">
 <link rel="canonical" href="https://valorengels.com/alignment.html">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Valor Engels">
 <meta property="og:title" content="Alignment · Valor Engels">
-<meta property="og:description" content="What corrigible means for Valor: stop, bounds, a ledger and corrections enforced by a kernel outside the model&#x27;s reach, and how Valor changes itself.">
+<meta property="og:description" content="What corrigible means for Valor: stop, bounds, a ledger and corrections enforced by a kernel outside the model&#x27;s reach, and how Valor changes himself.">
 <meta property="og:url" content="https://valorengels.com/alignment.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%231b1a17%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27Georgia,serif%27 font-size=%2719%27 font-weight=%27700%27 fill=%27%23faf7f0%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">AI engineer · Yudame</span></a>
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span></a>
     <nav>
+      <a href="index.html#architecture">How he works</a>
       <a href="engineering.html">Engineering</a>
-      <a href="index.html#how">How it works</a>
       <a href="trust.html" aria-current="page">Trust and safety</a>
       <a href="comparisons.html">Comparisons</a>
     </nav>
@@ -35,53 +36,52 @@
 
 <main>
 
-<nav class="subnav" aria-label="Trust and safety"><span class="grp">Trust and safety</span>
-  <a href="trust.html">Overview</a>
+<nav class="subnav" aria-label="Trust and safety">
+  <a href="trust.html">Trust and safety</a>
   <a href="philosophy.html">Philosophy</a>
   <a href="alignment.html" aria-current="page">Alignment</a>
   <a href="rules.html">Rules</a>
 </nav>
 
-<h1>How Valor stays correctable</h1>
-<p class="lede">Any task can be stopped at once, runs under a ceiling on what it may do, and reads every standing correction at the start of each turn.</p>
-<p>Corrigible means capable of being corrected. Valor can't rely on the model wanting to be corrected, so the authority to stop, bound and correct it sits in deterministic code outside the prompt. That code covers the work routed through it; the known limits below say what it doesn't cover.</p>
+<h1>Alignment</h1>
+<p class="lede">Corrigible means capable of being corrected. Valor can't rely on the model wanting to be corrected, so the authority to stop, bound and correct him sits in deterministic code outside the prompt. That code covers the work routed through it; the known limits below say what it doesn't cover.</p>
 <nav class="toc" aria-label="On this page">
   <p class="toc-label">On this page</p>
   <ol>
-    <li><a href="#properties">Four properties</a></li>
-    <li><a href="#stop">The off switch</a></li>
-    <li><a href="#bounded">Bounded authority</a></li>
-    <li><a href="#corrections">Correction</a></li>
-    <li><a href="#data">Steering</a></li>
-    <li><a href="#rsi">Recursive self-improvement</a></li>
+    <li><a href="#four-properties">Four properties</a></li>
+    <li><a href="#stop">Stop</a></li>
+    <li><a href="#bounded-authority">Bounded authority</a></li>
+    <li><a href="#correction">Correction</a></li>
+    <li><a href="#steering">Steering</a></li>
+    <li><a href="#recursive-self-improvement">Recursive self-improvement</a></li>
     <li><a href="#limits">Limits</a></li>
   </ol>
 </nav>
 
-<section id="properties">
+<section id="four-properties">
   <p class="sec-label">Four properties</p>
   <h2>Four properties the kernel enforces</h2>
-  <p>The kernel is the deterministic code that runs every task. Alignment research names four things a model should be trained to have. Valor can't inspect that training, so it enforces what a system around the model can, and says where that stops.</p>
+  <p>Alignment research names four things a model should be trained to have. Valor can't inspect that training, so he enforces what a system around the model can, and says where that stops.</p>
   <div class="table-wrap"><table class="doc stack">
     <tr><th>Property</th><th>Enforced</th><th>Not caught</th></tr>
     <tr><td><b>Stoppable</b></td><td data-label="Enforced">a stop fences every later call and effect at once; durable state survives</td><td data-label="Not caught">an effect already sent before the stop; a side channel</td></tr>
-    <tr><td><b>Bounded</b></td><td data-label="Enforced">an effect ceiling on every task, held by the broker; every call metered</td><td data-label="Not caught">the model's own judgement; an account it reaches around the broker</td></tr>
-    <tr><td><b>Legible</b></td><td data-label="Enforced">every brokered effect and every correction in a ledger it can't edit</td><td data-label="Not caught">a model that narrates well and acts otherwise</td></tr>
+    <tr><td><b>Bounded</b></td><td data-label="Enforced">an effect ceiling on every task, held by the broker; every call metered</td><td data-label="Not caught">the model's own judgment; an account a turn reaches around the broker</td></tr>
+    <tr><td><b>Legible</b></td><td data-label="Enforced">every brokered effect and every correction in a ledger the system can't edit</td><td data-label="Not caught">a model that narrates well and acts otherwise</td></tr>
     <tr><td><b>Correctable</b></td><td data-label="Enforced">a reviewed persona and a corrections ledger every turn reads</td><td data-label="Not caught">a bad prior</td></tr>
   </table></div>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/README.md#what-corrigible-means-here">README.md, What corrigible means here</a> · <a href="https://github.com/tomcounsell/ai/blob/main/REFERENCES.md">REFERENCES.md</a></p>
 </section>
 
 <section id="stop">
-  <p class="sec-label">The off switch</p>
+  <p class="sec-label">Stop</p>
   <h2>How stopping a task works</h2>
-  <div class="split"><div><p>An agent's incentive to allow shutdown holds only while it is unsure what the human wants, and <a href="https://github.com/tomcounsell/ai/blob/main/REFERENCES.md">research</a> shows that incentive is fragile, so Valor doesn't depend on it.</p>
-  <p>A stop is recorded as one ledger row. The gateway and the broker read that row before every model call and every effect, whether or not the running process ever hears about the stop. Stopping a task stops every task under it. The turn's processes are then killed, which takes seconds, and an effect already sent can't be called back.</p>
+  <div class="split"><div><p>An agent's incentive to allow shutdown holds only while it is unsure what the human wants. Research shows that incentive is fragile, so Valor doesn't depend on it.</p>
+  <p>A stop is recorded as one ledger row. The gateway and the broker read that row before every model call and every effect, whether or not the running process ever hears about the stop. Stopping a task stops every task under it. The turn's processes are then killed, which takes seconds. An effect already sent can't be called back.</p>
   <p>A test stops a task mid-turn and checks that nothing is left open.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#stop">docs/architecture.md, Stop</a> · <a href="https://github.com/tomcounsell/ai/blob/main/tests/test_serve.py">tests/test_serve.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 414" role="img" aria-label="A stop writes one row. The gateway and the broker read it and refuse further calls and effects; the running turn is revoked, killed, drained and reaped, and ends as stopped."><defs><marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1b1a17"/></marker><marker id="m2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b867b"/></marker></defs><rect class="dg-box " x="20" y="20" width="340" height="46"/><text class="fg-title" x="190.0" y="48.0" text-anchor="middle">python -m core stop</text><line class="dg-edge" x1="190" y1="66" x2="190" y2="93" marker-end="url(#m2)"/><rect class="dg-box store" x="20" y="96" width="340" height="50"/><text class="fg-title" x="190.0" y="117.0" text-anchor="middle">task.stopped: one row</text><text class="fg-sub" x="190.0" y="135.0" text-anchor="middle">the fence everything reads</text><line class="dg-edge" x1="95" y1="146" x2="95" y2="177" marker-end="url(#m2)"/><line class="dg-edge" x1="285" y1="146" x2="285" y2="177" marker-end="url(#m2)"/><line class="dg-edge" x1="190" y1="146" x2="190" y2="261" marker-end="url(#m2)"/><rect class="dg-box " x="20" y="180" width="150" height="50"/><text class="fg-title" x="95.0" y="201.0" text-anchor="middle">Gateway</text><text class="fg-sub" x="95.0" y="219.0" text-anchor="middle">refuses every call</text><rect class="dg-box " x="210" y="180" width="150" height="50"/><text class="fg-title" x="285.0" y="201.0" text-anchor="middle">Broker</text><text class="fg-sub" x="285.0" y="219.0" text-anchor="middle">refuses every effect</text><rect class="dg-box " x="20" y="264" width="340" height="50"/><text class="fg-title" x="190.0" y="285.0" text-anchor="middle">The running turn</text><text class="fg-sub" x="190.0" y="303.0" text-anchor="middle">revoked, killed, drained, reaped</text><line class="dg-edge" x1="190" y1="314" x2="190" y2="341" marker-end="url(#m2)"/><rect class="dg-box good" x="20" y="344" width="340" height="50"/><text class="fg-title" x="190.0" y="365.0" text-anchor="middle">turn.ended: stopped</text><text class="fg-sub" x="190.0" y="383.0" text-anchor="middle">every call charged, nothing lost</text></svg></figure></div>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#stop">docs/architecture.md, Stop</a> · <a href="https://github.com/tomcounsell/ai/blob/main/tests/test_serve.py">tests/test_serve.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 414" role="img" aria-label="A stop writes one row. The gateway and the broker read it and refuse further calls and effects; the running turn is revoked, killed, drained and reaped, and ends as stopped."><defs><marker id="m2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m2b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box " x="20" y="20" width="340" height="46"/><text class="fg-title" x="190.0" y="48.0" text-anchor="middle">python -m core stop</text><line class="dg-edge" x1="190" y1="66" x2="190" y2="93" marker-end="url(#m2)"/><rect class="dg-box store" x="20" y="96" width="340" height="50"/><text class="fg-title" x="190.0" y="117.0" text-anchor="middle">task.stopped: one row</text><text class="fg-sub" x="190.0" y="135.0" text-anchor="middle">the fence everything reads</text><line class="dg-edge" x1="95" y1="146" x2="95" y2="177" marker-end="url(#m2)"/><line class="dg-edge" x1="285" y1="146" x2="285" y2="177" marker-end="url(#m2)"/><line class="dg-edge" x1="190" y1="146" x2="190" y2="261" marker-end="url(#m2)"/><rect class="dg-box " x="20" y="180" width="150" height="50"/><text class="fg-title" x="95.0" y="201.0" text-anchor="middle">Gateway</text><text class="fg-sub" x="95.0" y="219.0" text-anchor="middle">refuses every call</text><rect class="dg-box " x="210" y="180" width="150" height="50"/><text class="fg-title" x="285.0" y="201.0" text-anchor="middle">Broker</text><text class="fg-sub" x="285.0" y="219.0" text-anchor="middle">refuses every effect</text><rect class="dg-box " x="20" y="264" width="340" height="50"/><text class="fg-title" x="190.0" y="285.0" text-anchor="middle">The running turn</text><text class="fg-sub" x="190.0" y="303.0" text-anchor="middle">revoked, killed, drained, reaped</text><line class="dg-edge" x1="190" y1="314" x2="190" y2="341" marker-end="url(#m2)"/><rect class="dg-box good" x="20" y="344" width="340" height="50"/><text class="fg-title" x="190.0" y="365.0" text-anchor="middle">turn.ended: stopped</text><text class="fg-sub" x="190.0" y="383.0" text-anchor="middle">every call charged, nothing lost</text></svg></figure></div>
 </section>
 
-<section id="bounded">
+<section id="bounded-authority">
   <p class="sec-label">Bounded authority</p>
   <h2>Effect classes and ceilings</h2>
   <p>Every effect has a class:</p>
@@ -90,44 +90,44 @@
     <li><code>propose</code>: reversible, such as a branch or a draft.</li>
     <li><code>act</code>: irreversible, such as a merge, a send, a payment or a deploy.</li>
   </ul>
-  <p>Every task has a ceiling, and a child task's can never exceed its parent's. One broker performs every effect made with the credentials the kernel holds, and refuses anything above the ceiling. An account a turn reaches through the keychain or a logged-in session is outside it (Known limits).</p>
-  <p>Within it, nothing waits for approval from Tom, who built Valor and runs Yudame. Valor acts as itself on its own accounts, and every <code>act</code> that leaves is reported to him. Spending is metered and shown, and never stops a task.</p>
+  <p>Every task has a ceiling, and a child task's can never exceed its parent's. One broker performs every effect made with the credentials the kernel holds, and refuses anything above the ceiling. An account a turn reaches through the keychain or a logged-in session is outside the broker (see Known limits below).</p>
+  <p>Within it, nothing waits for Tom's approval: Valor acts as himself on his own accounts, and every <code>act</code> that leaves is reported to him. Spending is metered and shown, and never stops a task.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#effect-classes-and-the-broker">docs/architecture.md, Effect classes</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md#constraints">docs/mission.md, Constraints</a></p>
 </section>
 
-<section id="corrections">
+<section id="correction">
   <p class="sec-label">Correction</p>
   <h2>How corrections reach running tasks</h2>
   <div class="split"><div><p>A correction is the most useful thing Tom can give Valor. Each one is a numbered ledger row, and every turn renders the corrections in force as it starts, so one recorded now changes tasks that are already running.</p>
-  <p>The persona asks Valor to comply first, state a conflict once if the stakes are high, and never argue a standing correction again. A subagent Claude Code starts inside a turn opens with the same persona and corrections, except the web agent, which reads untrusted pages and gets only its own prompt. A correction is an instruction: the ledger records that it was given, and following it is still the model's.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#how-the-persona-reaches-a-turn">docs/persona.md, How the persona reaches a turn</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/corrections.py">core/corrections.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 474" role="img" aria-label="A correction becomes a numbered ledger row, is rendered into every turn&#x27;s prompt between the Brief and memory, and reaches the next turn of every task."><defs><marker id="m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1b1a17"/></marker><marker id="m3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b867b"/></marker></defs><rect class="dg-box " x="20" y="20" width="320" height="50"/><text class="fg-title" x="180.0" y="41.0" text-anchor="middle">Tom gives a correction</text><text class="fg-sub" x="180.0" y="59.0" text-anchor="middle">by chat, or python -m core correct</text><line class="dg-edge" x1="180" y1="70" x2="180" y2="97" marker-end="url(#m3)"/><rect class="dg-box store" x="20" y="100" width="320" height="50"/><text class="fg-title" x="180.0" y="121.0" text-anchor="middle">A numbered ledger row</text><text class="fg-sub" x="180.0" y="139.0" text-anchor="middle">who gave it, how, and when</text><line class="dg-edge" x1="180" y1="150" x2="180" y2="181" marker-end="url(#m3)"/><text class="fg-sub" x="20" y="198" text-anchor="start">Every turn's prompt, rendered fresh:</text><rect class="dg-box " x="20" y="208" width="320" height="30"/><text class="fg-title" x="32" y="228" text-anchor="start">Persona</text><text class="fg-sub" x="140" y="228" text-anchor="start">from persona/, changed by review</text><rect class="dg-box " x="20" y="242" width="320" height="30"/><text class="fg-title" x="32" y="262" text-anchor="start">Brief</text><text class="fg-sub" x="140" y="262" text-anchor="start">instruction, ceiling, workspace</text><rect class="dg-box hl" x="20" y="276" width="320" height="30"/><text class="fg-title" x="32" y="296" text-anchor="start">Corrections</text><text class="fg-sub" x="140" y="296" text-anchor="start">every one in force</text><rect class="dg-box " x="20" y="310" width="320" height="30"/><text class="fg-title" x="32" y="330" text-anchor="start">Remembered</text><text class="fg-sub" x="140" y="330" text-anchor="start">memory, quoted as data</text><rect class="dg-box " x="20" y="344" width="320" height="30"/><text class="fg-title" x="32" y="364" text-anchor="start">Channel</text><text class="fg-sub" x="140" y="364" text-anchor="start">how to reach Tom</text><line class="dg-edge" x1="180" y1="378" x2="180" y2="401" marker-end="url(#m3)"/><rect class="dg-box good" x="20" y="404" width="320" height="50"/><text class="fg-title" x="180.0" y="425.0" text-anchor="middle">The next turn of every task</text><text class="fg-sub" x="180.0" y="443.0" text-anchor="middle">including tasks already running</text><path class="dg-edge back" d="M 340 429 C 362 429, 362 125, 343 125" marker-end="url(#m3b)"/><text class="fg-lbl" x="375" y="277" text-anchor="middle" transform="rotate(-90 375 277)">each turn records which numbers it saw</text></svg></figure></div>
+  <p>The persona asks Valor to comply first, state a conflict once if the stakes are high, and never argue a standing correction again. Any subagent that Claude Code starts inside a turn opens with the same persona and corrections. The exception is the web agent, which reads untrusted pages and gets only its own prompt. A correction is an instruction: the ledger records that it was given, and following it is still up to the model.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#how-the-persona-reaches-a-turn">docs/persona.md, How the persona reaches a turn</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/corrections.py">core/corrections.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 474" role="img" aria-label="A correction becomes a numbered ledger row, is rendered into every turn&#x27;s prompt between the Brief and memory, and reaches the next turn of every task."><defs><marker id="m3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box " x="20" y="20" width="320" height="50"/><text class="fg-title" x="180.0" y="41.0" text-anchor="middle">Tom gives a correction</text><text class="fg-sub" x="180.0" y="59.0" text-anchor="middle">by chat, or python -m core correct</text><line class="dg-edge" x1="180" y1="70" x2="180" y2="97" marker-end="url(#m3)"/><rect class="dg-box store" x="20" y="100" width="320" height="50"/><text class="fg-title" x="180.0" y="121.0" text-anchor="middle">A numbered ledger row</text><text class="fg-sub" x="180.0" y="139.0" text-anchor="middle">who gave it, how, and when</text><line class="dg-edge" x1="180" y1="150" x2="180" y2="181" marker-end="url(#m3)"/><text class="fg-sub" x="20" y="198" text-anchor="start">Every turn's prompt, rendered fresh:</text><rect class="dg-box " x="20" y="208" width="320" height="30"/><text class="fg-title" x="32" y="228" text-anchor="start">Persona</text><text class="fg-sub" x="140" y="228" text-anchor="start">from persona/, changed by review</text><rect class="dg-box " x="20" y="242" width="320" height="30"/><text class="fg-title" x="32" y="262" text-anchor="start">Brief</text><text class="fg-sub" x="140" y="262" text-anchor="start">instruction, ceiling, workspace</text><rect class="dg-box hl" x="20" y="276" width="320" height="30"/><text class="fg-title" x="32" y="296" text-anchor="start">Corrections</text><text class="fg-sub" x="140" y="296" text-anchor="start">every one in force</text><rect class="dg-box " x="20" y="310" width="320" height="30"/><text class="fg-title" x="32" y="330" text-anchor="start">Remembered</text><text class="fg-sub" x="140" y="330" text-anchor="start">memory, quoted as data</text><rect class="dg-box " x="20" y="344" width="320" height="30"/><text class="fg-title" x="32" y="364" text-anchor="start">Channel</text><text class="fg-sub" x="140" y="364" text-anchor="start">how to reach Tom</text><line class="dg-edge" x1="180" y1="378" x2="180" y2="401" marker-end="url(#m3)"/><rect class="dg-box good" x="20" y="404" width="320" height="50"/><text class="fg-title" x="180.0" y="425.0" text-anchor="middle">The next turn of every task</text><text class="fg-sub" x="180.0" y="443.0" text-anchor="middle">including tasks already running</text><path class="dg-edge back" d="M 340 429 C 362 429, 362 125, 343 125" marker-end="url(#m3b)"/><text class="fg-lbl" x="375" y="277" text-anchor="middle" transform="rotate(-90 375 277)">each turn records which numbers it saw</text></svg></figure></div>
 </section>
 
-<section id="data">
+<section id="steering">
   <p class="sec-label">Steering</p>
   <h2>Instructions inside files, pages and email</h2>
   <p>A file, a web page, a quoted email or a memory may inform the work. An instruction inside it is not followed, and nothing in it widens what Valor may do.</p>
-  <p>Web pages are read only inside a dedicated web agent, one of five guards in force, so a page's text never reaches a working agent's context.</p>
+  <p>Web pages are read only inside a dedicated web agent, one of six guards in force, so a page's text never reaches a working agent's context.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#instructions-come-from-tom-and-the-brief">docs/persona.md, Instructions</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/guards.py">core/guards.py</a></p>
 </section>
 
-<section id="rsi">
+<section id="recursive-self-improvement">
   <p class="sec-label">Recursive self-improvement</p>
-  <h2>How Valor changes its own code</h2>
-  <p>Valor's repository is one of its projects. A change to it is planned, critiqued, built, and checked by sessions that didn't write it, then merged by the same predicate as any other.</p>
+  <h2>How Valor changes his own code</h2>
+  <p>Valor's repository is one of his projects. A change to it is planned, critiqued, built, and checked by sessions that didn't write it, then merged by the same predicate as any other.</p>
   <h3>How the kernel deploys its own changes</h3>
-  <p>When a merge lands on its own checkout, the kernel:</p>
+  <p>When a merge lands on the checkout the kernel runs from, the kernel:</p>
   <ol class="tight">
     <li>waits for running work to end;</li>
     <li>backs up the database if the schema changed;</li>
     <li>migrates and restarts;</li>
     <li>rolls back if a step fails.</li>
   </ol>
-  <h3>Limits on changing itself</h3>
+  <h3>Limits on changing himself</h3>
   <dl class="def-list">
     <div class="def-row"><dt>Changing the persona</dt><dd>A turn can't edit the persona it runs under. The persona changes through a reviewed merge.</dd></div>
     <div class="def-row"><dt>Adding a limit</dt><dd>A new limit needs Tom's grant and expires in ninety days.</dd></div>
-    <div class="def-row"><dt>Autonomy</dt><dd>Valor's autonomy shrinks automatically on evidence and grows only by Tom's decision.</dd></div>
+    <div class="def-row"><dt>Granting autonomy</dt><dd>Valor's autonomy can be reduced when the evidence shows it should be.</dd></div>
     <div class="def-row"><dt>Share of work on other projects</dt><dd>In any week, most merged tasks are on projects other than Valor.</dd></div>
   </dl>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/rollout.py">core/rollout.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md#constraints">docs/mission.md, Constraints</a> · <a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md">CLAUDE.md</a></p>
@@ -137,8 +137,8 @@
   <p class="sec-label">Limits</p>
   <h2>Known limits</h2>
   <dl class="def-list">
-    <div class="def-row"><dt>A deceptive model</dt><dd>A deceptively aligned model with a side channel leaves in the ledger only what passed the kernel. The broker enforces each task's effect ceiling and each action's own refusals. That limits the kind of effect, not the harm an allowed one does, until Tom, reading the work, finds it.</dd></div>
-    <div class="def-row"><dt>Keychain access</dt><dd>Turns run as the machine's user, so a deliberate keychain read isn't fenced, and an account reached that way or through a logged-in session acts outside the broker, the ceiling, the stop and the ledger. Tom accepted this on 2026-10-01.</dd></div>
+    <div class="def-row"><dt>A deceptive model</dt><dd>A deceptively aligned model with a side channel leaves in the ledger only what passed the kernel. The broker enforces each task's effect ceiling and each action's own refusals. That limits the kind of effect. It does not limit the harm an allowed effect does until Tom finds it while reading the work.</dd></div>
+    <div class="def-row"><dt>Keychain access</dt><dd>Turns run as the machine's user, so a deliberate keychain read isn't fenced, and an account reached that way or through a logged-in session acts outside the broker, the ceiling, the stop and the ledger. Tom has accepted this.</dd></div>
     <div class="def-row"><dt>Changing the kernel</dt><dd>The kernel is in the repository Valor merges to, so a merged change to <code>core/</code> can change the ceiling or the stop. The merge predicate, the suite and a fresh reviewer are the only checks on that path.</dd></div>
     <div class="def-row"><dt>Transcripts</dt><dd>A transcript is written by the agent, so the reviewer reruns the suite instead of trusting it.</dd></div>
   </dl>
@@ -151,6 +151,7 @@
 </div>
 
 </main>
+<script src="assets/site.js" defer></script>
 
 <footer class="site">
   <div class="inner">

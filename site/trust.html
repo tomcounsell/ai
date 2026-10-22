@@ -4,29 +4,30 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trust and safety · Valor Engels</title>
-<meta name="description" content="What Valor cannot do on its own, how it stops and is corrected, what leaves its Macs, and the rule that governs every new limit.">
+<meta name="description" content="What Valor may do on his own accounts, how a task is stopped and corrected, what leaves Valor's machines, and how a new limit is added.">
 <link rel="canonical" href="https://valorengels.com/trust.html">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Valor Engels">
 <meta property="og:title" content="Trust and safety · Valor Engels">
-<meta property="og:description" content="What Valor cannot do on its own, how it stops and is corrected, what leaves its Macs, and the rule that governs every new limit.">
+<meta property="og:description" content="What Valor may do on his own accounts, how a task is stopped and corrected, what leaves Valor's machines, and how a new limit is added.">
 <meta property="og:url" content="https://valorengels.com/trust.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%231b1a17%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27Georgia,serif%27 font-size=%2719%27 font-weight=%27700%27 fill=%27%23faf7f0%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">AI engineer · Yudame</span></a>
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span></a>
     <nav>
+      <a href="index.html#architecture">How he works</a>
       <a href="engineering.html">Engineering</a>
-      <a href="index.html#how">How it works</a>
       <a href="trust.html" aria-current="page">Trust and safety</a>
       <a href="comparisons.html">Comparisons</a>
     </nav>
@@ -35,63 +36,68 @@
 
 <main>
 
-<nav class="subnav" aria-label="Trust and safety"><span class="grp">Trust and safety</span>
-  <a href="trust.html" aria-current="page">Overview</a>
+<nav class="subnav" aria-label="Trust and safety">
+  <a href="trust.html" aria-current="page">Trust and safety</a>
   <a href="philosophy.html">Philosophy</a>
   <a href="alignment.html">Alignment</a>
   <a href="rules.html">Rules</a>
 </nav>
 
 <h1>Trust and safety</h1>
-<p class="lede">What Valor cannot do on its own, how a task is stopped and corrected, what leaves its Macs, and how a new limit is added. Valor works under its own accounts, never a client's.</p>
+<p class="lede">This page covers what Valor may do on his own accounts, how a task is stopped and corrected, what leaves Valor's machines, and how a new limit is added. Each section links to the detail on Alignment and Rules.</p>
 
-<section id="cannot">
-  <p class="sec-label">01 · What it cannot do on its own</p>
-  <h2>The broker and the ceiling</h2>
-  <p>The kernel, Valor's deterministic core, holds its credentials, and every effect made with them passes one broker. Each effect has a class: <code>read</code>; <code>propose</code>, reversible, such as a branch; or <code>act</code>, irreversible, such as a merge, a send or a payment. Every task has a ceiling, a child task's never above its parent's, and the broker refuses anything above it. A merge leaves only when the tests and a fresh review have passed.</p>
-  <p>Inside the ceiling nothing waits for a tap from Tom, who built Valor and runs Yudame; every <code>act</code> that leaves is reported to him. Valor acts as itself on its own accounts. It never acts as Tom, and holds none of his accounts.</p>
-  <p>Every model call goes through a gateway that prices it on its task in the ledger. Spending is metered and shown, and nothing caps it.</p>
-  <p class="callout">One known gap: a turn runs as the Mac's user, so an account reached through the keychain or a logged-in session acts outside the broker. Tom accepted this on 2026-10-01. <a href="alignment.html#limits">Known limits</a></p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/broker.py">core/broker.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#effect-classes-and-the-broker">docs/architecture.md, Effect classes</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md#constraints">docs/mission.md, Constraints</a> · <a href="https://github.com/tomcounsell/ai/blob/main/persona/identity.toml">persona/identity.toml</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/spending.py">core/spending.py</a></p>
+<section id="authority">
+  <p class="sec-label">Authority</p>
+  <h2>Accounts, effects and the ceiling</h2>
+  <p>Valor acts as himself on his own accounts: his own email, GitHub and chat accounts. He never acts as Tom, who built Valor and runs Yudame, and holds none of Tom's accounts.</p>
+  <p>The kernel, Valor's deterministic core outside the model, holds the credentials, and one broker performs every effect made with them. Each effect has a class:</p>
+  <ul class="tight">
+    <li><code>read</code>: no effect.</li>
+    <li><code>propose</code>: reversible, such as a branch or a draft.</li>
+    <li><code>act</code>: irreversible, such as a merge, a send, a payment or a deploy.</li>
+  </ul>
+  <p>Every task has a ceiling, the highest effect class it may use. A child task's ceiling is never above its parent's, and the broker refuses anything above it. Inside the ceiling nothing waits for Tom's approval, and every <code>act</code> that leaves is reported to him. Spending is metered and shown, and never stops a task. <a href="alignment.html#bounded-authority">Effect classes and ceilings</a></p>
+  <p class="callout">A turn runs as the machine's user, so an account reached through the keychain or a logged-in session acts outside the broker, the ceiling, the stop and the ledger. Tom has accepted this. <a href="alignment.html#limits">Known limits</a></p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md">docs/mission.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#effect-classes-and-the-broker">docs/architecture.md, Effect classes</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/broker.py">core/broker.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#limits">docs/architecture.md, Limits</a></p>
 </section>
 
-<section id="stop">
-  <p class="sec-label">02 · Stop and correction</p>
+<section id="corrigibility">
+  <p class="sec-label">Corrigibility</p>
   <h2>Stop and correction</h2>
-  <div class="split"><div><p>A stop writes one row to the ledger, the append-only record of everything Valor does. The gateway and the broker read it before every model call and effect, so the task and every task under it stop at once. The turn's processes are killed and every call is charged, though an effect already sent can't be called back. A test stops a task mid-turn and checks that nothing is left open.</p>
-  <p>A correction from Tom is a numbered row carrying who gave it, how and when. Every turn renders the corrections in force as it starts, so one given now reaches tasks already running. Tom withdraws or replaces one with a later row; the original stays in the ledger and no turn renders it again.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#stop">docs/architecture.md, Stop</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/corrections.py">core/corrections.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/tests/test_serve.py">tests/test_serve.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 474" role="img" aria-label="A correction becomes a numbered ledger row, is rendered into every turn&#x27;s prompt between the Brief and memory, and reaches the next turn of every task."><defs><marker id="t3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1b1a17"/></marker><marker id="t3b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b867b"/></marker></defs><rect class="dg-box " x="20" y="20" width="320" height="50"/><text class="fg-title" x="180.0" y="41.0" text-anchor="middle">Tom gives a correction</text><text class="fg-sub" x="180.0" y="59.0" text-anchor="middle">by chat, or python -m core correct</text><line class="dg-edge" x1="180" y1="70" x2="180" y2="97" marker-end="url(#t3)"/><rect class="dg-box store" x="20" y="100" width="320" height="50"/><text class="fg-title" x="180.0" y="121.0" text-anchor="middle">A numbered ledger row</text><text class="fg-sub" x="180.0" y="139.0" text-anchor="middle">who gave it, how, and when</text><line class="dg-edge" x1="180" y1="150" x2="180" y2="181" marker-end="url(#t3)"/><text class="fg-sub" x="20" y="198" text-anchor="start">Every turn's prompt, rendered fresh:</text><rect class="dg-box " x="20" y="208" width="320" height="30"/><text class="fg-title" x="32" y="228" text-anchor="start">Persona</text><text class="fg-sub" x="140" y="228" text-anchor="start">from persona/, changed by review</text><rect class="dg-box " x="20" y="242" width="320" height="30"/><text class="fg-title" x="32" y="262" text-anchor="start">Brief</text><text class="fg-sub" x="140" y="262" text-anchor="start">instruction, ceiling, workspace</text><rect class="dg-box hl" x="20" y="276" width="320" height="30"/><text class="fg-title" x="32" y="296" text-anchor="start">Corrections</text><text class="fg-sub" x="140" y="296" text-anchor="start">every one in force</text><rect class="dg-box " x="20" y="310" width="320" height="30"/><text class="fg-title" x="32" y="330" text-anchor="start">Remembered</text><text class="fg-sub" x="140" y="330" text-anchor="start">memory, quoted as data</text><rect class="dg-box " x="20" y="344" width="320" height="30"/><text class="fg-title" x="32" y="364" text-anchor="start">Channel</text><text class="fg-sub" x="140" y="364" text-anchor="start">how to reach Tom</text><line class="dg-edge" x1="180" y1="378" x2="180" y2="401" marker-end="url(#t3)"/><rect class="dg-box good" x="20" y="404" width="320" height="50"/><text class="fg-title" x="180.0" y="425.0" text-anchor="middle">The next turn of every task</text><text class="fg-sub" x="180.0" y="443.0" text-anchor="middle">including tasks already running</text><path class="dg-edge back" d="M 340 429 C 362 429, 362 125, 343 125" marker-end="url(#t3b)"/><text class="fg-lbl" x="375" y="277" text-anchor="middle" transform="rotate(-90 375 277)">each turn records which numbers it saw</text></svg></figure></div>
+  <div class="split"><div><p>Corrigible means capable of being corrected. An agent's incentive to allow shutdown is fragile, so Valor doesn't depend on the model wanting to be stopped or corrected. Both live in kernel code.</p>
+  <p>A stop writes one row to the ledger, the append-only record of everything Valor does. By reading that row, the gateway refuses every later model call and the broker refuses every later effect, for the task and every task under it. The turn's processes are then killed. An effect already sent can't be called back. <a href="alignment.html#stop">How stopping a task works</a></p>
+  <p>A correction from Tom is a numbered ledger row with who gave it, how and when. Every turn renders the corrections in force as it starts, so one given now reaches tasks already running. The persona asks Valor to comply first and never argue a standing correction again. <a href="alignment.html#correction">How corrections reach running tasks</a></p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/README.md#what-corrigible-means-here">README.md, What corrigible means here</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md#stop">docs/architecture.md, Stop</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/corrections.py">core/corrections.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#take-correction-constraint-reliable-stop-recovery-and-correction">docs/persona.md, Take correction</a></p></div><figure class="fig"><svg viewBox="0 0 380 424" role="img" aria-label="Tom can stop a task or correct Valor. A stop writes one task.stopped row that the gateway and broker read, and the task and its subtree end as stopped. A correction writes a numbered row that every turn renders, so running tasks follow it on their next turn. Both are kernel code outside the model."><defs><marker id="t1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker></defs><rect class="dg-box " x="20" y="20" width="340" height="46"/><text class="fg-title" x="190" y="48" text-anchor="middle">Tom</text><line class="dg-edge" x1="100" y1="66" x2="100" y2="93" marker-end="url(#t1)"/><line class="dg-edge" x1="280" y1="66" x2="280" y2="93" marker-end="url(#t1)"/><rect class="dg-box " x="20" y="96" width="160" height="50"/><text class="fg-title" x="100" y="117" text-anchor="middle">Stop</text><text class="fg-sub" x="100" y="135" text-anchor="middle">python -m core stop</text><rect class="dg-box " x="200" y="96" width="160" height="50"/><text class="fg-title" x="280" y="117" text-anchor="middle">Correction</text><text class="fg-sub" x="280" y="135" text-anchor="middle">by chat or command</text><line class="dg-edge" x1="100" y1="146" x2="100" y2="173" marker-end="url(#t1)"/><line class="dg-edge" x1="280" y1="146" x2="280" y2="173" marker-end="url(#t1)"/><rect class="dg-box store" x="20" y="176" width="160" height="50"/><text class="fg-title" x="100" y="197" text-anchor="middle">task.stopped</text><text class="fg-sub" x="100" y="215" text-anchor="middle">one ledger row</text><rect class="dg-box store" x="200" y="176" width="160" height="50"/><text class="fg-title" x="280" y="197" text-anchor="middle">A numbered row</text><text class="fg-sub" x="280" y="215" text-anchor="middle">who, how and when</text><line class="dg-edge" x1="100" y1="226" x2="100" y2="253" marker-end="url(#t1)"/><line class="dg-edge" x1="280" y1="226" x2="280" y2="253" marker-end="url(#t1)"/><rect class="dg-box " x="20" y="256" width="160" height="50"/><text class="fg-title" x="100" y="277" text-anchor="middle">Gateway, broker</text><text class="fg-sub" x="100" y="295" text-anchor="middle">refuse calls, effects</text><rect class="dg-box hl" x="200" y="256" width="160" height="50"/><text class="fg-title" x="280" y="277" text-anchor="middle">Every turn</text><text class="fg-sub" x="280" y="295" text-anchor="middle">renders all in force</text><line class="dg-edge" x1="100" y1="306" x2="100" y2="333" marker-end="url(#t1)"/><line class="dg-edge" x1="280" y1="306" x2="280" y2="333" marker-end="url(#t1)"/><rect class="dg-box good" x="20" y="336" width="160" height="50"/><text class="fg-title" x="100" y="357" text-anchor="middle">Stopped</text><text class="fg-sub" x="100" y="375" text-anchor="middle">the task and its subtree</text><rect class="dg-box good" x="200" y="336" width="160" height="50"/><text class="fg-title" x="280" y="357" text-anchor="middle">Running tasks</text><text class="fg-sub" x="280" y="375" text-anchor="middle">follow it next turn</text><text class="fg-lbl" x="190" y="410" text-anchor="middle">kernel code, outside the model's prompt</text></svg></figure></div>
 </section>
 
-<section id="leaves">
-  <p class="sec-label">03 · What leaves the Macs</p>
-  <h2>What still leaves Valor's Macs</h2>
-  <p>Valor's record stays on its machines, but some of the work doesn't:</p>
+<section id="data">
+  <p class="sec-label">Data</p>
+  <h2>What leaves Valor's machines</h2>
+  <p>Valor's record of his work stays in Postgres on his own machines: who asked for what, what was done, what it cost and what Tom corrected. Some of the work leaves:</p>
   <ul class="tight">
     <li>Each model call goes to the model provider, Anthropic by default, through the kernel's gateway, which records it.</li>
-    <li>Classification calls, such as judging whether a request is clear enough to build, go to Jev, a hosted model, with an open-weight model on OpenRouter as the fallback.</li>
+    <li>Classification calls, such as triaging a request, go to Jev, a hosted model, with an open-weight model on OpenRouter as the fallback.</li>
     <li>Messages pass through Telegram, Slack and email, and code goes to GitHub.</li>
   </ul>
-  <p>So the model provider sees each prompt it answers. The record of the work stays on Valor's Macs: who asked for what, what was done, what it cost and what Tom corrected.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/tech-stack.md">docs/tech-stack.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md">docs/architecture.md</a></p>
+  <p>This means the model provider sees every prompt it answers.</p>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">docs/data.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/tech-stack.md">docs/tech-stack.md</a></p>
 </section>
 
 <section id="governance">
-  <p class="sec-label">04 · Governance</p>
-  <h2>Governance</h2>
-  <p>A new check, gate or denial must name the mission item it serves and an incident that already happened without it, and needs Tom's grant in the plan file that adds it. A bug fix never adds one.</p>
-  <p>Each guard in force is ledgered with its incident, its mission item and a ninety-day expiry; one that never fired is listed for Tom and deleted unless he keeps it. The full text is on <a href="rules.html">Rules</a>.</p>
+  <p class="sec-label">Governance</p>
+  <h2>How a new limit is added</h2>
+  <p>A new check, gate or denial (a guard) must name the mission item it serves and an incident that already happened without it, and needs Tom's grant in the plan file that adds it. A bug fix never adds one. Each guard is ledgered with a ninety-day expiry; one that never fired is listed for Tom and deleted unless he keeps it. Six guards are in force. <a href="rules.html#the-governing-constraint">The governance paragraph</a></p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md">CLAUDE.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/guards.py">core/guards.py</a></p>
 </section>
 
-<section id="deeper">
-  <p class="sec-label">05 · Read deeper</p>
-  <h2>The pages in this section</h2>
-  <div class="dir">
-    <a class="dir-row" href="philosophy.html"><span class="idx">08</span><span class="ttl">Philosophy</span><span class="dsc">The mission and the one question it answers to.</span><span class="go">philosophy.html</span></a>
-    <a class="dir-row" href="alignment.html"><span class="idx">09</span><span class="ttl">Alignment</span><span class="dsc">Stop, bounds, corrections, and how Valor changes itself.</span><span class="go">alignment.html</span></a>
-    <a class="dir-row" href="rules.html"><span class="idx">10</span><span class="ttl">Rules</span><span class="dsc">The governance paragraph and ten hard rules, verbatim.</span><span class="go">rules.html</span></a>
-  </div>
+<section id="further-reading">
+  <p class="sec-label">Further reading</p>
+  <h2>Pages in this section</h2>
+  <ul class="tight">
+    <li><a href="philosophy.html">Philosophy</a>: the mission and the question every mechanism is judged against.</li>
+    <li><a href="alignment.html">Alignment</a>: stop, bounds, corrections, self-improvement and known limits in detail.</li>
+    <li><a href="rules.html">Rules</a>: the governance paragraph and the ten hard rules, word for word.</li>
+  </ul>
 </section>
 
 <div class="page-next">
@@ -100,6 +106,7 @@
 </div>
 
 </main>
+<script src="assets/site.js" defer></script>
 
 <footer class="site">
   <div class="inner">

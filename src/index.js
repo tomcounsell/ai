@@ -18,8 +18,8 @@ const MOVED = {
 // read from GitHub at request time and cached for an hour.
 const WEEKS = 26;
 const DAY_MS = 86400000;
-const RAMP = ["#ebe5d7", "#ddbda8", "#d09579", "#c26d4a", "#b5451b"];
-const SERIF = `"Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, Georgia, serif`;
+const RAMP = ["#ebedf0", "#9be9a8", "#40c463", "#30a14e", "#216e39"];
+const SANS = `-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif`;
 const MONO = "ui-monospace, Menlo, monospace";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const QUERY = `query($q: String!, $cursor: String) {
@@ -45,24 +45,24 @@ function gridStart(asOf) {
 function renderActivity(days, totals, asOf) {
   const out = [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 150" width="760" height="150" role="img" aria-label="Merged pull requests by day, last 26 weeks">`,
-    `<rect width="760" height="150" fill="#faf7f0"/>`,
+    `<rect width="760" height="150" fill="#ffffff"/>`,
   ];
   const text = (x, y, size, fill, body, extra = "") =>
     `<text x="${x}" y="${y}" font-family='${MONO}' font-size="${size}" fill="${fill}"${extra}>${body}</text>`;
   if (!days) {
-    out.push(text(0, 16, 12, "#1b1a17", "Activity is read from GitHub; it is not available right now."), "</svg>");
+    out.push(text(0, 16, 12, "#1f2328", "Activity is read from GitHub; it is not available right now."), "</svg>");
     return out.join("");
   }
-  const n = (v) => `<tspan fill="#b5451b">${v}</tspan>`;
+  const n = (v) => `<tspan fill="#0969da">${v}</tspan>`;
   out.push(
-    text(0, 16, 12, "#1b1a17",
+    text(0, 16, 12, "#1f2328",
       `Last 30 days: ${n(totals.prs)} pull requests merged · ${n(totals.repos)} repositories · ${n(totals.public)} public`),
-    text(760, 16, 11, "#8b867b", `as of ${esc(asOf)}`, ` text-anchor="end"`),
+    text(760, 16, 11, "#818b98", `as of ${esc(asOf)}`, ` text-anchor="end"`),
   );
   const max = Math.max(0, ...Object.values(days).map((d) => d.count));
   const x0 = 30, y0 = 50, step = 13;
   for (const [row, label] of [[0, "Mon"], [2, "Wed"], [4, "Fri"]]) {
-    out.push(text(0, y0 + row * step + 9, 9, "#8b867b", label));
+    out.push(text(0, y0 + row * step + 9, 9, "#818b98", label));
   }
   const start = gridStart(asOf);
   for (let col = 0; col < WEEKS; col++) {
@@ -70,10 +70,10 @@ function renderActivity(days, totals, asOf) {
     for (let row = 0; row < 7; row++) {
       const t = start + (col * 7 + row) * DAY_MS;
       const date = isoDate(t);
-      if (date.endsWith("-01")) out.push(text(x, y0 - 8, 10, "#8b867b", MONTHS[new Date(t).getUTCMonth()]));
+      if (date.endsWith("-01")) out.push(text(x, y0 - 8, 10, "#818b98", MONTHS[new Date(t).getUTCMonth()]));
       const y = y0 + row * step;
       if (date > asOf) {
-        out.push(`<rect x="${x}" y="${y}" width="10" height="10" rx="2" fill="none" stroke="#e9e4d8"/>`);
+        out.push(`<rect x="${x}" y="${y}" width="10" height="10" rx="2" fill="none" stroke="#e4e8ec"/>`);
         continue;
       }
       const day = days[date] || { count: 0, url: null };
@@ -83,17 +83,17 @@ function renderActivity(days, totals, asOf) {
     }
   }
   out.push(
-    `<text x="${x0 + WEEKS * step + 30}" y="${y0 + 16}" font-family='${SERIF}' font-size="18" font-weight="600" fill="#1b1a17">Merged pull requests, by day</text>`,
-    text(x0 + WEEKS * step + 30, y0 + 36, 11, "#5b574e", "github.com/valorengels · last 26 weeks"),
-    text(x0 + WEEKS * step + 30, y0 + 54, 11, "#5b574e", "a day links to its first public pull request"),
+    `<text x="${x0 + WEEKS * step + 30}" y="${y0 + 16}" font-family='${SANS}' font-size="18" font-weight="600" fill="#1f2328">Merged pull requests, by day</text>`,
+    text(x0 + WEEKS * step + 30, y0 + 36, 11, "#59636e", "github.com/valorengels · last 26 weeks"),
+    text(x0 + WEEKS * step + 30, y0 + 54, 11, "#59636e", "a day links to its first public pull request"),
   );
   let lx = 760 - 5 * step - 34;
-  out.push(text(lx - 6, 146, 10, "#8b867b", "fewer", ` text-anchor="end"`));
+  out.push(text(lx - 6, 146, 10, "#818b98", "fewer", ` text-anchor="end"`));
   for (const fill of RAMP) {
     out.push(`<rect x="${lx}" y="137" width="10" height="10" rx="2" fill="${fill}"/>`);
     lx += step;
   }
-  out.push(text(lx + 3, 146, 10, "#8b867b", "more"), "</svg>");
+  out.push(text(lx + 3, 146, 10, "#818b98", "more"), "</svg>");
   return out.join("");
 }
 
