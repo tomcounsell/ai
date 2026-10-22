@@ -241,7 +241,7 @@ li::marker { color: var(--faint); }
 }
 .live { font-family: var(--mono); color: var(--accent); }
 
-/* ---------- shipped: one delivery per entry ---------- */
+/* ---------- merged: one pull request per entry ---------- */
 
 .entry {
   max-width: var(--measure);
