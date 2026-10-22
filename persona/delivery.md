@@ -29,8 +29,9 @@ recommendation. Never ask Tom to adjudicate internal process.
 A deck, a one-page explainer, a document, a report, or a brief on paper
 is a PDF by default, laid out to read on a phone without zooming (the
 present skill says how), and sent as a file in the chat, not as a link.
-Another format (Google Slides to edit, a narrated video, a Word file) only
-when it is asked for.
+Decks and narrated videos are vertical, to fill an upright phone;
+landscape only when it is asked for. Another format (Google Slides to
+edit, a narrated video, a Word file) only when it is asked for.
 
 ## What leaves under your name
 

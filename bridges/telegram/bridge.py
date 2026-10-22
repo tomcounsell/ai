@@ -12,7 +12,8 @@ Reconnecting: a dropped connection is reconnected at once. When a connect
 fails, or a receive or a gap-fill pass fails, the next connect waits one
 `serve_tick_s` first, the same wake the outbox runs on; the wait ends
 when a gap-fill pass completes. A flood wait on connect is waited out for
-exactly the seconds Telegram gives.
+exactly the seconds Telegram gives. A chat Telegram refuses (one this
+account is not in) is skipped by the pass, not a failed pass.
 
 A message with a file is received off the update stream: its download
 runs as its own task, so a slow download never holds up the messages
@@ -42,7 +43,7 @@ from pathlib import Path
 from bridges.telegram import gap, inbound
 from bridges.telegram.send import Sender, notice_key
 from bridges.telegram.state import State
-from bridges.telegram.wire import FloodWait, Msg, Wire, WireError
+from bridges.telegram.wire import FloodWait, Msg, Refused, Wire, WireError
 
 log = logging.getLogger("valor.telegram")
 
@@ -262,7 +263,10 @@ class TelegramBridge:
                     except ValueError:
                         log.warning("owned chat %r is not a Telegram chat id", chat)
                         continue
-                    await self._fill_chat(chat_id)
+                    try:
+                        await self._fill_chat(chat_id)
+                    except Refused as e:
+                        log.warning("gap fill skipped chat %s: %s", chat_id, e)
             except WireError as e:
                 if isinstance(e, FloodWait):
                     self.sender.flood.hit(e.seconds)

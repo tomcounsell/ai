@@ -37,7 +37,8 @@
 <main>
 
 <nav class="subnav sections" aria-label="Comparisons">
-  <a href="#terms" aria-current="location">Terms</a>
+  <a href="#inspiration" aria-current="location">Inspiration</a>
+  <a href="#terms">Terms</a>
   <a href="#at-a-glance">At a glance</a>
   <a href="#firstmate">Firstmate</a>
   <a href="#hosted-agents">Hosted agents</a>
@@ -46,6 +47,31 @@
 
 <h1>Comparisons</h1>
 <p class="lede">Several products now offer an agent that works on its own for one person or a team. This page compares Valor with the ones closest to him, on the two things Valor is built around: independence and data sovereignty. Facts about other products were checked on 2026-10-21 and link to their sources.</p>
+
+<section id="inspiration">
+  <p class="sec-label">Inspiration</p>
+  <h2>Projects Valor took ideas from</h2>
+  <p>Valor was built from other people's work as well as his own. Each project below links to its home, with what Valor took from it and the file in Valor's repository that says so.</p>
+  <dl class="def-list">
+    <div class="def-row"><dt><a href="https://github.com/NousResearch/hermes-agent" rel="noopener" target="_blank">Hermes Agent</a><span class="hint">Nous Research</span></dt><dd>One long-lived session per chat, the way chat sessions compact, and parts of the Slack bridge (Socket Mode, the ping watchdog, the catch-all ack).<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/main/docs/harnesses.md" rel="noopener" target="_blank">docs/harnesses.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/plans/team-chat.md" rel="noopener" target="_blank">docs/plans/team-chat.md</a> · <a href="https://github.com/tomcounsell/ai/blob/9ae02bb915b7a95b8d4f6de6a5c3c9f108841648/docs/plans/m2-5-slack.md" rel="noopener" target="_blank">Slack plan</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://github.com/openclaw/openclaw" rel="noopener" target="_blank">OpenClaw</a><span class="hint">OpenClaw Foundation</span></dt><dd>The Slack bridge's crash safety: each event recorded before it is acknowledged, and a marker on every post so a send isn't repeated after a crash.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/9ae02bb915b7a95b8d4f6de6a5c3c9f108841648/docs/plans/m2-5-slack.md" rel="noopener" target="_blank">Slack plan</a> · <a href="https://github.com/tomcounsell/ai/blob/main/bridges/slack/send.py" rel="noopener" target="_blank">bridges/slack/send.py</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://github.com/tomcounsell/cori" rel="noopener" target="_blank">cori</a><span class="hint">Tom Counsell</span></dt><dd>Valor's core idea, authority in a deterministic kernel outside the model's reach, and the corrigibility commitments. It is also one of the four places a component is taken from before one is written.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md" rel="noopener" target="_blank">CLAUDE.md, rule 10</a> · <a href="https://github.com/tomcounsell/ai/blob/c1eb7b8a78b25ffe977bd7a17fe3aae8ec224c1e/docs/plans/valor-cori-rebuild-setup.md" rel="noopener" target="_blank">cori setup plan</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://github.com/anthropics/claude-code" rel="noopener" target="_blank">Claude Code</a><span class="hint">Anthropic</span></dt><dd>The harness every turn runs in, and the first place to take a component from. Chat compaction is Claude Code's own.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/main/docs/harnesses.md" rel="noopener" target="_blank">docs/harnesses.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md" rel="noopener" target="_blank">CLAUDE.md, rule 10</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://github.com/earendil-works/pi" rel="noopener" target="_blank">Pi</a><span class="hint">earendil-works</span></dt><dd>Valor's second harness: a turn can run in Pi instead of Claude Code, behind the same port. Pi's durable package was also studied for orchestration ideas.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/main/docs/pi.md" rel="noopener" target="_blank">docs/pi.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/harnesses.md" rel="noopener" target="_blank">docs/harnesses.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/plans/pi-durable-research.md" rel="noopener" target="_blank">docs/plans/pi-durable-research.md</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://github.com/tomcounsell/popoto" rel="noopener" target="_blank">popoto</a><span class="hint">Tom Counsell</span></dt><dd>The memory layer, and the measurement that raw turns beat model extraction, which is why memory stores raw entries.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/main/REFERENCES.md" rel="noopener" target="_blank">REFERENCES.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/memory.md" rel="noopener" target="_blank">docs/memory.md</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://docs.paperclip.ing" rel="noopener" target="_blank">Paperclip</a><span class="hint">Paperclip</span></dt><dd>The ideas of budget hard-stops, goal-aligned tracing and an immutable audit log, adopted without the platform.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/a1a0aa7f2413d609e6afae5e42a2ad9675947e72/site/research.html" rel="noopener" target="_blank">old research page</a></span></dd></div>
+    <div class="def-row"><dt><a href="https://tinyhumans.gitbook.io/openhuman" rel="noopener" target="_blank">OpenHuman</a><span class="hint">TinyHumans</span></dt><dd>The case for a memory store people can read as files.<br><span class="src"><a href="https://github.com/tomcounsell/ai/blob/a1a0aa7f2413d609e6afae5e42a2ad9675947e72/site/research.html" rel="noopener" target="_blank">old research page</a></span></dd></div>
+  </dl>
+  <h3>Studied, not adopted</h3>
+  <ul class="tight">
+    <li><b><a href="https://github.com/kunchenguid/firstmate" rel="noopener" target="_blank">Firstmate</a></b>: The closest outside system to Valor's shape: one session handing work to agents in isolated checkouts. See the comparison below.</li>
+    <li><b><a href="https://platform.claude.com/docs/en/managed-agents/overview" rel="noopener" target="_blank">Claude Managed Agents</a></b>: Anthropic's hosted agent loop, studied as a place to move execution later; not adopted.</li>
+    <li><b><a href="https://www.perplexity.ai/products/computer" rel="noopener" target="_blank">Perplexity Computer</a></b>: A visual digital worker; it showed why an orchestrator needs an API it can call.</li>
+    <li><b><a href="https://github.com/omnigent-ai/omnigent" rel="noopener" target="_blank">Omnigent</a></b>: An open-source agent control plane; it was a reminder to check maturity claims at the source.</li>
+    <li><b><a href="https://github.com/1jehuang/jcode" rel="noopener" target="_blank">jcode</a></b>: A fast single-author coding runtime with no integration seam; an example of a project to watch rather than adopt.</li>
+  </ul>
+  <p class="src">Sources for the studied list: <a href="https://github.com/tomcounsell/ai/blob/a1a0aa7f2413d609e6afae5e42a2ad9675947e72/site/research.html" rel="noopener" target="_blank">the old research page</a></p>
+</section>
 
 <section id="terms">
   <p class="sec-label">Terms</p>
@@ -64,14 +90,14 @@
   <div class="table-wrap"><table class="doc stack">
     <tr><th>Agent</th><th>Runs on</th><th>Data kept</th><th>Acts as</th><th>Price</th></tr>
     <tr><td><b>Valor</b></td><td data-label="Runs on">his own machines</td><td data-label="Data kept">Postgres on those machines</td><td data-label="Acts as">his own accounts, as Valor Engels</td><td data-label="Price">works for Yudame's clients; code public</td></tr>
-    <tr><td><b>Firstmate</b></td><td data-label="Runs on">your machine (macOS or Linux)</td><td data-label="Data kept">files on your disk</td><td data-label="Acts as">your GitHub login</td><td data-label="Price">free, MIT license</td></tr>
-    <tr><td><b>OpenClaw</b></td><td data-label="Runs on">your machine or server</td><td data-label="Data kept">your machine</td><td data-label="Acts as">the chat accounts you connect</td><td data-label="Price">free, MIT; you pay for the model</td></tr>
+    <tr><td><b><a href="vs/firstmate.html">Firstmate</a></b></td><td data-label="Runs on">your machine (macOS or Linux)</td><td data-label="Data kept">files on your disk</td><td data-label="Acts as">your GitHub login</td><td data-label="Price">free, MIT license</td></tr>
+    <tr><td><b><a href="vs/openclaw.html">OpenClaw</a></b></td><td data-label="Runs on">your machine or server</td><td data-label="Data kept">your machine</td><td data-label="Acts as">the chat accounts you connect</td><td data-label="Price">free, MIT; you pay for the model</td></tr>
     <tr><td><b>Claude (Cowork)</b></td><td data-label="Runs on">Anthropic's servers by default</td><td data-label="Data kept">your Claude account</td><td data-label="Acts as">you, through your connectors</td><td data-label="Price">Pro or Max, $20 to $200 a month</td></tr>
-    <tr><td><b>Meta Muse</b></td><td data-label="Runs on">a virtual machine in Meta's cloud</td><td data-label="Data kept">that virtual machine</td><td data-label="Acts as">its own name and email</td><td data-label="Price">free, with paid plans</td></tr>
-    <tr><td><b>Grok Bot</b></td><td data-label="Runs on">Cursor-hosted computers in the US</td><td data-label="Data kept">xAI's service</td><td data-label="Acts as">you, the signed-in member</td><td data-label="Price">included with SuperGrok and Cursor plans</td></tr>
-    <tr><td><b>OpenAI dots</b></td><td data-label="Runs on">its own cloud computer, or your laptop with permission</td><td data-label="Data kept">OpenAI, for as long as you keep the dot (reported)</td><td data-label="Acts as">your connected accounts</td><td data-label="Price">Pro, from $100 a month (reported)</td></tr>
+    <tr><td><b><a href="vs/meta-muse.html">Meta Muse</a></b></td><td data-label="Runs on">a virtual machine in Meta's cloud</td><td data-label="Data kept">that virtual machine</td><td data-label="Acts as">its own name and email</td><td data-label="Price">free, with paid plans</td></tr>
+    <tr><td><b><a href="vs/grok-bot.html">Grok Bot</a></b></td><td data-label="Runs on">Cursor-hosted computers in the US</td><td data-label="Data kept">xAI's service</td><td data-label="Acts as">you, the signed-in member</td><td data-label="Price">included with SuperGrok and Cursor plans</td></tr>
+    <tr><td><b><a href="vs/openai-dots.html">OpenAI dots</a></b></td><td data-label="Runs on">its own cloud computer, or your laptop with permission</td><td data-label="Data kept">OpenAI, for as long as you keep the dot (reported)</td><td data-label="Acts as">your connected accounts</td><td data-label="Price">Pro, from $100 a month (reported)</td></tr>
   </table></div>
-  <p>"Reported" means the figure comes from press coverage, not the vendor's own page.</p>
+  <p>Each linked name opens a page comparing that product with Valor. "Reported" means the figure comes from press coverage, not the vendor's own page.</p>
 </section>
 
 <section id="firstmate">

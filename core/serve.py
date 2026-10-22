@@ -477,10 +477,14 @@ async def _rolled(conn, checkout: Path, running: str) -> list[tuple[str, dict[st
 
 
 # The kernel's merge outcomes not yet ended, oldest first.
-# Tasks with a provisioned workspace not removed since.
+# Tasks with a provisioned workspace not removed since: the kernel's
+# provisioning writes a row, a start with `--project` (and a routine run's)
+# the task's document.
 RECLAIMABLE = (
     "SELECT DISTINCT p.task_id FROM events p WHERE p.type = 'workspace.provisioned' AND NOT EXISTS ("
-    "SELECT 1 FROM events r WHERE r.task_id = p.task_id AND r.type = 'workspace.removed' AND r.id > p.id)"
+    "SELECT 1 FROM events r WHERE r.task_id = p.task_id AND r.type = 'workspace.removed' AND r.id > p.id) "
+    "UNION SELECT d.id FROM documents d WHERE d.kind = 'task' AND d.body->>'mirror' IS NOT NULL "
+    "AND NOT EXISTS (SELECT 1 FROM events r WHERE r.task_id = d.id AND r.type = 'workspace.removed')"
 )
 MERGE_OUTCOMES = (
     "SELECT o.id, o.task_id, o.payload->>'effect_id', o.payload->'result' FROM events o "
@@ -895,8 +899,8 @@ class Kernel:
             return (r[0], idle, r[1] if idle else positions.get(r[2], len(positions)), r[2])
 
         ranked = sorted(ready, key=key)
-        for background, latest, task_id in ranked[: max(free, 0)]:
-            _log(f"task {task_id}: step started, queue position {positions.get(task_id)} of {len(positions)}")
+        for i, (background, latest, task_id) in enumerate(ranked[: max(free, 0)]):
+            _log(f"task {task_id}: step started, queue position {i + 1} of {len(ranked)} ready")
             (self.background if background else self.harness).add(task_id)
             self._start(task_id, self._step(task_id, latest), latest)
 
@@ -923,12 +927,10 @@ class Kernel:
             if _provision_due(rows):
                 self._start(task_id, self._provision(task_id, b.project.get("name")), latest)
             return None
-        if f.state is State.WAITING:
-            return None
+        if not router.has_step(rows, f, bool(b.chat)):
+            return None  # a chat session waits for the chat or its tasks, not its own outcomes
         if latest <= self.seen.get(task_id, 0) and not router.retry_due(rows):
             return None
-        if b.chat and not session.chat_waiting(rows) and not router.retry_due(rows):
-            return None  # a chat session waits for the chat or its tasks, not its own outcomes
         if f.state in AT_ONCE:
             self._start(task_id, self._step(task_id, latest), latest)
         elif f.state in HARNESS:

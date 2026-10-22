@@ -561,23 +561,6 @@ async def open_ids(conn) -> list[tuple[str, list[dict[str, Any]], machine.Fold]]
     return out
 
 
-async def queue_line(conn, task_id: str) -> str:
-    """What a writer sees after starting an ask: how many tasks are open on
-    its project, how many open tasks are ahead of it in the one queue the
-    kernel runs, and which on the project wait on an answer."""
-    found = await open_ids(conn)
-    ids = [t for t, _, _ in found]
-    positions = queue(ids, await moves(conn, ids))
-    if task_id not in positions:
-        return f"queue: task {task_id} is not open"
-    project = project_name(await brief(conn, task_id))
-    same = [(t, f) for t, _, f in found if project_name(await brief(conn, t)) == project]
-    waiting = [t for t, f in same if f.state is machine.State.WAITING]
-    ahead = sum(1 for p in positions.values() if p < positions[task_id])
-    line = f"queue: {len(same)} open on {project}, {ahead} ahead of {task_id} in the kernel's queue"
-    return line + (f"; waiting on an answer: {', '.join(waiting)}" if waiting else "")
-
-
 async def lock_tree(conn, task_id: str) -> str:
     """The tree's advisory lock, `tree:<root id>`, taken by the writers that
     change what a tree holds or whether a node may reopen (`start_child`,

@@ -33,9 +33,9 @@ the new one to the token on Mercury's token page. Mercury deletes a token unused
    invoice is marked as Valor's (`internalNote: valor`), which is what makes it
    eligible for reminders. A number already in Mercury is printed and nothing is
    created. The customer is found by email or created. `accounts` lists the account
-   ids; payments go to Yudame's checking account. The token in use has no accounts
-   scope (`/accounts` is 403 `tokenNotInScope`), so `accounts` then lists the account
-   each existing invoice pays into; use the one Tom's own invoices use.
+   ids; payments go to Yudame's active checking account (••3031). A token without the
+   accounts scope is refused `/accounts` (403 `tokenNotInScope`); `accounts` then lists
+   the account each existing invoice pays into.
    A spec with a discount or credit (the Cyndra budget line) becomes one services
    line priced net of it, since Mercury does not document negative prices; the PDF
    carries the detail.
@@ -44,9 +44,8 @@ the new one to the token on Mercury's token page. Mercury deletes a token unused
    Mercury's PDF written into `.valor/invoices/`. Write it unchanged to
    `.valor/effects/notice-<number>.json`. It leaves from valor@yuda.me without asking
    Tom again.
-   The pay link, `https://app.mercury.com/pay/<slug>`, is built from the invoice's
-   slug as Mercury's list reference describes; the docs do not state its form. Until
-   one has been opened and shown Mercury's pay page, open the link before sending.
+   The pay link is `https://app.mercury.com/pay/<slug>`; it opened on Mercury's pay page
+   with the right number, amount and due date for 250901DF and 251215DF (2026-10-21).
 4. **Reminders** are the weekly `invoices` routine (`routines/invoices/`): `remind`
    picks Valor's Unpaid invoices at least a day overdue, at most one reminder per
    invoice every 7 days and 4 in all, reading valor@yuda.me's Sent mail (`gws`) for
@@ -56,6 +55,35 @@ the new one to the token on Mercury's token page. Mercury deletes a token unused
 
 `unpaid` lists every Unpaid invoice with its customer, days overdue and pay link.
 `pdf ID` writes one invoice's PDF.
+
+## Collecting an old balance
+
+Learned on Fuse (UserCRO, Inc.), 2026-10-21.
+
+- **Where the invoices are.** Each client's sent invoices are PDFs in Tom's work vault,
+  `<Client>/invoices/PDFs sent/`, or `_archive_/<Client>/invoices/PDFs sent/` for a past
+  client. Read them from `origin/main` (`git -C ~/work-vault fetch`, then `git show
+  origin/main:<path>`); the local checkout lags and carries Tom's untracked files.
+  Numbers are `YYMMDD` + the client code (`DF` for DeckFusion/Fuse), and a revised
+  invoice keeps its number with a suffix (`-adjusted`, `_a`), so read the latest one.
+  `pdftotext -layout` gives the bill-to, the dates and TOTAL DUE.
+- **What was paid.** `received <NAME> --since <date>` lists every incoming payment
+  naming the client on every account, archived ones included. Clients put the invoice
+  number in the memo, so set each invoice's TOTAL DUE against the payments naming it.
+  A total that matches no invoice is a partial payment or a renegotiated rate: show
+  Tom the evidence and ask, since Tom's memory of what is owed is approximate.
+- **Who to send to.** The invoice PDFs carry no email. Ask Tom, then confirm each
+  address from valor@yuda.me's mail (`gws gmail users messages list`, `q: from:<domain>`).
+- **The draft Tom approves** is the reconciliation table, each invoice (number, amount,
+  due date), the recipients and the email text. Keep the client's original numbers, so
+  they match the client's books. A partial balance is one line naming what was billed
+  and what was received.
+- **Checking a pay link.** The pay page is a single-page app: `curl` gets only the
+  shell, and BYOB timed out on it. Headless Chrome renders it:
+  `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --no-sandbox --disable-gpu --virtual-time-budget=25000 --window-size=1000,1400 --screenshot=<png> <link>`,
+  then read the screenshot for the amount, number and due date.
+- **BCC.** `email.send` has no BCC field. When Tom asks for one, send him a separate
+  copy, marked as such.
 
 ## Cyndra
 

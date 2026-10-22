@@ -538,15 +538,22 @@ def compare(
 # -- one suite run ------------------------------------------------------------------------
 
 
-def environment_digest(mirror: str | Path, sha: str, project: dict[str, Any], bin_dir: Path) -> str:
+def environment_digest(
+    mirror: str | Path, sha: str, project: dict[str, Any], bin_dir: Path, task_env: dict[str, str]
+) -> str:
     """What a run's result depends on besides the commit's code: the
-    lockfiles at the commit, the setup commands, the spec's env, and the
-    bytes of each file in the work directory's `bin/`."""
+    lockfiles at the commit, the setup commands, the spec's env, the
+    repository's `.env` (`workspace.repo_env` for the task's `task_env`;
+    only this hash of it is recorded), and the bytes of each file in the
+    work directory's `bin/`."""
     h = hashlib.sha256()
     listing = git.trusted(mirror, "ls-tree", sha, "--", *LOCKFILES)
     h.update(listing.encode())
     h.update(repr(list(project.get("setup") or ())).encode())
     h.update(repr(sorted((project.get("env") or {}).items())).encode())
+    found = workspace.repo_env(task_env)
+    if found:
+        h.update(repr(sorted(found.items())).encode())
     if bin_dir.is_dir():
         for p in sorted(bin_dir.iterdir()):
             h.update(p.name.encode() + b"\0")
@@ -807,7 +814,9 @@ async def base_and_head(ctx, lay: workspace.Layout, b: tasks.Brief, stop: asynci
     command = (b.project or {}).get("suite") or "true"
     ran: dict[str, dict[str, Any]] = {}
     for key, role, sha in (("base", "base", base), ("head", head_role, head)):
-        digest = await asyncio.to_thread(environment_digest, b.mirror, sha, b.project or {}, bin_dir)
+        digest = await asyncio.to_thread(
+            environment_digest, b.mirror, sha, b.project or {}, bin_dir, b.harness.get("env", {})
+        )
         async with await db.connect(ctx.dsn) as conn:
             rows = await ledger.read(conn, ctx.task_id)
             if await tasks.is_stopped(conn, ctx.task_id):

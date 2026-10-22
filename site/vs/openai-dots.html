@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valor and OpenAI dots compared · Valor Engels</title>
+<meta name="description" content="How Valor and OpenAI dots differ on whose machines they run on, whose accounts they act under, and where their data is kept.">
+<link rel="canonical" href="https://valorengels.com/vs/openai-dots">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Valor and OpenAI dots compared">
+<meta property="og:description" content="How Valor and OpenAI dots differ on whose machines they run on, whose accounts they act under, and where their data is kept.">
+<meta property="og:url" content="https://valorengels.com/vs/openai-dots">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Valor and OpenAI dots compared">
+<meta name="twitter:description" content="How Valor and OpenAI dots differ on whose machines they run on, whose accounts they act under, and where their data is kept.">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="/index.html"><span class="name">Valor Engels</span></a>
+    <nav>
+      <a href="/index.html#architecture">How he works</a>
+      <a href="/engineering.html">Engineering</a>
+      <a href="/trust.html">Trust and safety</a>
+      <a href="/comparisons.html" aria-current="page">Comparisons</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<h1>Valor and OpenAI dots compared</h1>
+<p class="lede">OpenAI dots are always-on agents inside ChatGPT, each working from a cloud computer of its own and keeping its record with OpenAI. Valor runs on his own machines under his own name.</p>
+<p><a href="/comparisons.html#hosted-agents">All comparisons</a></p>
+
+<section id="what-it-is">
+  <p class="sec-label">What it is</p>
+  <h2>What OpenAI dots are</h2>
+  <p>OpenAI launched dots at its DevDay conference on 2026-09-29. They are agents in ChatGPT powered by GPT-6 Astra. Each works from its own cloud computer that you can open to watch; with permission it can also work on your laptop.</p>
+  <p>Dots reach more than 4,000 apps through OpenAI's plugins and can sign in with saved passwords without the passwords being shown to the model. Employers can set up specialist dots with their own identity and credentials for one job. No adoption figures are published.</p>
+  <p>OpenAI's own pages would not open when checked, so facts about dots here rest on press coverage and a search summary of OpenAI's privacy FAQ.</p>
+  <p class="src">Sources, checked 2026-10-22: <a href="https://techcrunch.com/2026/09/29/openai-launches-dots-its-bubbly-agentic-avatar/">TechCrunch</a> (dated 2026-09-29) · <a href="https://siliconangle.com/2026/09/29/openai-launches-dots-always-on-ai-agents-in-chatgpt-with-their-own-cloud-computers/">SiliconANGLE</a> (dated 2026-09-29) · <a href="https://www.datacamp.com/blog/openai-dots">DataCamp</a> (dated 2026-09-29)</p>
+</section>
+
+<section id="in-common">
+  <p class="sec-label">In common</p>
+  <h2>What it shares with Valor</h2>
+  <ul class="tight">
+    <li>Both keep working between conversations.</li>
+    <li>Both work from a computer of their own.</li>
+    <li>Both can be given their own identity and accounts to work under.</li>
+  </ul>
+</section>
+
+<section id="differences">
+  <p class="sec-label">Differences</p>
+  <h2>Where they differ</h2>
+  <h3>Independence</h3>
+  <p>A dot runs on OpenAI's cloud and acts in your ChatGPT account or under an identity your employer sets up. Valor runs on his <a href="https://github.com/tomcounsell/ai/blob/main/docs/machine.md">own machines</a> and acts as himself on <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#identity">his own accounts</a>: valor@yuda.me, GitHub, Telegram, X and LinkedIn. He holds none of Tom Counsell's accounts, so he cannot act as Tom.</p>
+  <h3>Data sovereignty</h3>
+  <p>A dot keeps context from conversations and plugins for as long as you keep it, and can add to ChatGPT memory. Business, Enterprise and Edu content is not used for training by default; personal plans use ChatGPT's data controls. No retention period is stated.</p>
+  <p>Valor keeps an <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">append-only Postgres ledger</a> of every model call, turn, effect and correction on his machines, with transcripts and <a href="https://github.com/tomcounsell/ai/blob/main/docs/memory.md">memory</a> in the same database. Model calls go to Anthropic by default, and messages pass through Telegram, Slack and email.</p>
+  <h3>How the work gets done</h3>
+  <p>Dots are easier to start, with one included in a paid plan and 4,000 apps ready. Valor runs each task through a <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md">fixed pipeline</a> of plan, critique, build, test and review in its own workspace.</p>
+</section>
+
+<section id="at-a-glance">
+  <p class="sec-label">At a glance</p>
+  <h2>Valor and OpenAI dots side by side</h2>
+  <div class="table-wrap"><table class="doc stack">
+    <tr><th></th><th>Valor</th><th>OpenAI dots</th></tr>
+    <tr><td><b>Made by</b></td><td data-label="Valor">Tom Counsell, at Yudame</td><td data-label="OpenAI dots">OpenAI</td></tr>
+    <tr><td><b>Runs on</b></td><td data-label="Valor">His own machines</td><td data-label="OpenAI dots">OpenAI's cloud, or your laptop with permission</td></tr>
+    <tr><td><b>Data kept</b></td><td data-label="Valor">Postgres ledger, transcripts and memory on his machines</td><td data-label="OpenAI dots">With OpenAI, for as long as you keep the dot</td></tr>
+    <tr><td><b>Acts as</b></td><td data-label="Valor">Himself, on his own accounts</td><td data-label="OpenAI dots">You in ChatGPT, or an identity your employer sets up</td></tr>
+    <tr><td><b>Price</b></td><td data-label="Valor">Works for Yudame's clients</td><td data-label="OpenAI dots">One dot included with Pro (from $100 a month) or Business Premium</td></tr>
+    <tr><td><b>Code</b></td><td data-label="Valor">Public, GPL-3.0</td><td data-label="OpenAI dots">Not stated; no public API announced</td></tr>
+  </table></div>
+</section>
+
+<section id="sources">
+  <p class="sec-label">Sources</p>
+  <h2>Pages checked for this comparison</h2>
+  <ul class="tight">
+    <li><a href="https://techcrunch.com/2026/09/29/openai-launches-dots-its-bubbly-agentic-avatar/">TechCrunch</a>, dated 2026-09-29, checked 2026-10-22</li>
+    <li><a href="https://siliconangle.com/2026/09/29/openai-launches-dots-always-on-ai-agents-in-chatgpt-with-their-own-cloud-computers/">SiliconANGLE</a>, dated 2026-09-29, checked 2026-10-22</li>
+    <li><a href="https://www.cbsnews.com/news/sam-altman-openai-dots-chatgpt-agents-safety/">CBS News</a>, dated 2026-09-29, checked 2026-10-22</li>
+    <li><a href="https://www.datacamp.com/blog/openai-dots">DataCamp</a>, dated 2026-09-29, checked 2026-10-22</li>
+    <li><a href="https://help.openai.com/en/articles/20001529-dots-privacy-security-and-safety-faqs">OpenAI dots privacy FAQ</a>, read through a search summary, checked 2026-10-22</li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/persona/identity.toml">Valor identity</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#identity">persona</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md">mission</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/machine.md">machines</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">Valor data</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/memory.md">memory</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/tech-stack.md">tech stack</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md">task pipeline</a> · <a href="https://github.com/tomcounsell/ai/blob/main/LICENSE">license</a> · <a href="https://yuda.me">Yudame</a></li>
+  </ul>
+</section>
+
+<div class="page-next">
+  <a href="/vs/meta-muse.html"><span class="lbl">Previous comparison</span>← Valor and Muse</a>
+  <a href="/vs/grok-bot.html"><span class="lbl">Next comparison</span>Valor and Grok Bot →</a>
+</div>
+
+</main>
+<script src="/assets/site.js" defer></script>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · ai engineer at yudame</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
+    <span>updated 2026-10-22</span>
+  </div>
+</footer>
+</body>
+</html>

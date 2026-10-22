@@ -378,6 +378,25 @@ def test_a_finished_tasks_workspace_is_removed_a_day_after_it_finished(dsn, tmp_
     assert run(go()) == (False, False, True) and not (tmp_path / "w").exists()
 
 
+def test_the_kernel_reclaims_a_workspace_recorded_in_the_task_document(dsn, tmp_path, monkeypatch):
+    """`core start --project` and a routine run record the workspace in the
+    task's document, with no `workspace.provisioned` row; the Cowboy kept
+    eight such finished workspaces from 2026-10-16 on."""
+    monkeypatch.setattr(serve, "RECLAIM_AFTER_S", 0.0)
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            (tmp_path / "w" / "kernel.git").mkdir(parents=True)
+            task = await tasks.start(
+                conn, tasks.Brief(instruction="x", mirror=str(tmp_path / "w" / "kernel.git"))
+            )
+            await tasks.stop(conn, task, reason="done")
+            await serve.Kernel(None, {}, None, dsn).reclaim(conn)
+
+    run(go())
+    assert not (tmp_path / "w").exists()
+
+
 def test_the_kernel_and_routine_jobs_find_uv_after_the_system_directories(monkeypatch, tmp_path):
     """A routine runs the project's setup (`uv sync --frozen`) as the kernel
     does, so its launchd job gets the kernel's PATH, `uv`'s directory on it."""

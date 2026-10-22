@@ -73,6 +73,11 @@ at files on `main`.
    product claim sourced through the web agent. `research.html` and the
    four `research/*.html` articles are deleted, and `src/index.js` sends
    each old address, with or without `.html`, to `comparisons.html`.
+   Tom, 2026-10-22: each of the five closest gets "its own small landing
+   page so they can be easily shared". `site/vs/<slug>.html` for Firstmate,
+   OpenClaw, Muse, dots and Grok Bot, each with its own title and Open
+   Graph tags; Claude Cowork, the furthest, stays in the hub table only.
+   `pipeline.html` links the yudame/skills `do-*` skills (Tom, 2026-10-22).
 3. **Removed.** `runtime.html`, `memory.html`, `reflections.html`,
    `codebase.html`, `assets/graph.js` (a 36k-line snapshot of the old
    codebase), and `assets/site.js`, which only renders that graph

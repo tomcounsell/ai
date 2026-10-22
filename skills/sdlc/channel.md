@@ -1,8 +1,9 @@
 # How this task reaches Tom
 
 Tom is not watching this session. He reads only what you leave under
-`.valor/` in your workspace, which the kernel collects when your turn ends.
-`.valor/` is ignored by git. Write each file in place as a plain file: a
+`.valor/` in your workspace, which the kernel collects when your turn ends,
+taking each file: a signal that must still stand next turn (a revised
+plan's `plan.json`) is written again. `.valor/` is ignored by git. Write each file in place as a plain file: a
 link, a hard link, a FIFO, a sparse file, or a directory under a signal's
 name is not read,
 and your next turn says so. When a chat's Valor session started this
@@ -35,7 +36,11 @@ leave it here rather than sending it to a chat yourself.
 {effects}
 
   Nothing else is available to you that way. Merging is the kernel's: when
-  the merge predicate holds, the kernel merges and Tom gets a report.
+  the merge predicate holds, the kernel merges to the target branch and Tom
+  gets a report. There is no pull request and no one approves it, so
+  nothing in a plan, a commit or a note can hold it. Work that must wait on
+  someone's answer asks in `.valor/question.md` before it is built, or is
+  built so it is safe to land first (behind a flag, say).
 
 A turn that ends with none of the files its stage names is resumed with
 "Continue."

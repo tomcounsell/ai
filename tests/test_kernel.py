@@ -20,10 +20,12 @@ from core import (
     checks,
     corrections,
     db,
+    git,
     intake,
     ledger,
     machine,
     notices,
+    router,
     runs,
     session,
     slot,
@@ -479,6 +481,61 @@ def test_a_turn_keeps_the_operators_path_and_knows_its_github_repo(tmp_path, mon
     lay = workspace.Layout(tmp_path)
     found = workspace.harness_env(lay, spec, {}, {}, bin_dir=tmp_path / "bin", passfile=tmp_path / "pass")
     assert found["GH_REPO"] == "tomcounsell/popoto"
+
+
+def test_a_step_gets_the_repos_env_and_the_agent_gets_it_less_the_kernels_names(tmp_path, monkeypatch):
+    # #3666: a developer in ~/src/<repo> has its .env; a task's clones did not.
+    from harnesses import claude_code
+
+    monkeypatch.setattr(workspace, "HOME", tmp_path)
+    dot = tmp_path / "src" / "psyoptimal" / ".env"
+    dot.parent.mkdir(parents=True)
+    names = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "GITHUB_PUSH_TOKEN", "PGPASSWORD")
+    dot.write_text("".join(f"{n}=dev-{n}\n" for n in names) + "export DATABASE_URL='postgres://dev/db'\n")
+    lay = workspace.Layout(tmp_path / "t")
+    spec = workspace.Spec(
+        name="p", repo="https://github.com/yudame/psyoptimal.git", kind="python-uv", suite="true"
+    )
+    with_db = dataclasses.replace(spec, services=("postgres",))
+    pg = {"bin_dir": tmp_path / "bin", "passfile": tmp_path / "pass"}
+    task = workspace.harness_env(lay, with_db, {"postgres": 5440}, {"app": "pw"}, **pg)
+    step = workspace.turn_environment({"env": task})
+    # The suite gets the whole .env, as a developer's does...
+    assert all(step[n] == f"dev-{n}" for n in names if n != "PGPASSWORD")
+    # ...under the task's own database, every libpq name its own.
+    assert step["DATABASE_URL"] == "postgresql://app:pw@127.0.0.1:5440/app" and step["PGPASSWORD"] == "pw"
+    # A project with no database of its own gets the developer's.
+    bare_step = workspace.turn_environment({"env": workspace.harness_env(lay, spec, {}, {}, **pg)})
+    assert bare_step["PGPASSWORD"] == "dev-PGPASSWORD" and bare_step["DATABASE_URL"] == "postgres://dev/db"
+    harness = {"sandbox_profile": "p", "env": task}
+    agent = claude_code.workspace_turn("p", cwd=".", model="m", harness=harness)("http://gw:1", "b", "t").env
+    assert agent["GEMINI_API_KEY"] == "dev-GEMINI_API_KEY" and agent["ANTHROPIC_BASE_URL"] == "http://gw:1"
+    assert not {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_PUSH_TOKEN"} & set(agent)
+    # A check session's suite runs in the environment its own services made.
+    check = workspace.check_harness(workspace.Layout(tmp_path / "t"), tmp_path / "c", [], task, services=True)
+    assert workspace.turn_environment(check)["GEMINI_API_KEY"] == "dev-GEMINI_API_KEY"
+    # What provisioning records (`harness_env`) holds none of it.
+    assert task["GH_REPO"] == "yudame/psyoptimal" and not any(v.startswith("dev-") for v in task.values())
+
+    # Read at each step: an edit is seen, and an earlier suite run is not reused.
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "c"], check=True)
+    sha = git.out(repo, "rev-parse", "HEAD").strip()
+
+    def digest(env):
+        return checks.environment_digest(repo, sha, {}, tmp_path / "bin", env)
+
+    before = digest(task)
+    dot.write_text("GEMINI_API_KEY=rotated\n")
+    assert workspace.turn_environment({"env": task})["GEMINI_API_KEY"] == "rotated" and digest(task) != before
+    # No checkout, or no .env in it: nothing changes.
+    bare = {k: v for k, v in task.items() if k != "GH_REPO"}
+    dot.unlink()
+    assert workspace.repo_env(task) == {} and digest(task) == digest(bare)
+    without = workspace.turn_environment({"env": task})
+    assert without == {**workspace.turn_environment({"env": bare}), "GH_REPO": "yudame/psyoptimal"}
+    assert workspace.repo_env({"GH_REPO": "yudame/elsewhere"}) == {}
 
 
 # -- Tom's own chat: one chat session, only Tom heard ---------------------------
@@ -955,6 +1012,39 @@ def test_queue_order_is_start_order_moved_by_each_placement_in_turn():
     assert order(at("before", "d", "gone"), at("after", "a", "a")) == "abcd"  # not open, or itself
 
 
+def test_the_queue_line_counts_ahead_only_tasks_with_a_step_to_run(dsn):
+    # #3668: idle chat sessions and waiting tasks were counted as a backlog.
+    from tests.test_machine import _reach
+
+    async def go():
+        chat = await new_task(dsn, chat={"channel": "telegram", "chat_id": f"-{uuid.uuid4().int % 10**9}"})
+        waiting, a, b = [await new_task(dsn) for _ in range(3)]
+        async with await db.connect(dsn) as conn:
+            for row in _reach(State.WAITING).rows[1:]:
+                p = {
+                    k: f"{waiting}-{v}" if k in ("turn_id", "effect_id") else v
+                    for k, v in row["payload"].items()
+                }
+                await ledger.append(conn, waiting, row["type"], p)
+            # Placed before the idle chat session: its place still counts.
+            await ledger.append(conn, b, "task.placed", {"anchor": chat, "where": "before"})
+            idle = [await router.queue_line(conn, t) for t in (a, b)]
+            await ledger.append(conn, chat, "message.steered", {"text": "hi"})
+            heard = await router.queue_line(conn, a)
+            rows = await ledger.read(conn, chat)
+        return idle, heard, rows
+
+    idle, heard, rows = run(go())
+    # Other tests' open tasks are ahead of all three; count from b's line.
+    a_idle, b_idle, a_heard = [int(line.split(", ")[1].split(" ahead")[0]) for line in (*idle, heard)]
+    assert (a_idle - b_idle, a_heard - b_idle) == (1, 2) and "waiting on an answer" in idle[0]
+    quiet = [r for r in rows if r["type"] != "message.steered"]
+    f = machine.fold(quiet)
+    assert not router.has_step(quiet, f, True)
+    failed = {"id": 10**9, "type": "step.failed", "payload": {}, "at": None}
+    assert router.has_step([*quiet, failed], f, True) and router.has_step(quiet, f, False)
+
+
 def test_core_shape_labels_the_decision_steers_an_amend_and_places_the_task(dsn):
     async def go():
         async with await db.connect(dsn) as conn:
@@ -1233,6 +1323,23 @@ def test_a_chat_session_wakes_on_messages_and_reports_and_reads_only_whats_new(d
     assert not idle and waiting
     assert "is staging up?" not in prompt and "and prod?" in prompt
     assert "Your task c1 reports (question):\n  Which region?" in prompt
+
+
+def test_a_tasks_channel_says_no_one_holds_the_merge_and_each_signal_is_taken(dsn, tmp_path):
+    # #3663: a plan's "hold the merge" held nothing; #3665: a revised plan
+    # assumed the taken plan.json still stood.
+    async def go():
+        async with await db.connect(dsn) as conn:
+            return (
+                await tasks.dispatch(
+                    conn, await tasks.start(conn, tasks.Brief(instruction="test", workspace=str(tmp_path)))
+                )
+            )["text"]
+
+    text = run(go())
+    assert "# How this task reaches Tom" in text and text.count("the kernel merges") == 1
+    assert "no one approves it, so\n  nothing in a plan, a commit or a note can hold it" in text
+    assert "taking each file" in text and "is written again" in text
 
 
 def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team, tmp_path):

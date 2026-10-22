@@ -49,7 +49,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from core import broker, db, git, ledger, machine, spending, tasks, verdicts, workspace
+from core import broker, db, git, ledger, machine, session, spending, tasks, verdicts, workspace
 from core.gateway import Gateway
 from core.machine import Check, State
 
@@ -292,6 +292,37 @@ def retry_due(rows: list[dict[str, Any]], now: datetime | None = None) -> bool:
     at = last.get("at")
     now = now or datetime.now(UTC)
     return at is None or now >= at + timedelta(seconds=delay)
+
+
+def has_step(rows: list[dict[str, Any]], f: machine.Fold, chat: bool) -> bool:
+    """Whether an open task has a step to run on its new rows: not waiting
+    on an answer, and for a chat session, a message or report to answer
+    (`session.chat_waiting`) or a failed step due again. The kernel schedules
+    by it, and the queue line counts only these as ahead."""
+    if f.state is State.WAITING:
+        return False
+    return not chat or session.chat_waiting(rows) or retry_due(rows)
+
+
+async def queue_line(conn, task_id: str) -> str:
+    """What a writer sees after starting an ask: how many tasks are open on
+    its project, how many open tasks with a step to run (`has_step`)
+    are ahead of it in the one queue the kernel runs, and which on the
+    project wait on an answer."""
+    found = await tasks.open_ids(conn)
+    ids = [t for t, _, _ in found]
+    positions = tasks.queue(ids, await tasks.moves(conn, ids))
+    if task_id not in positions:
+        return f"queue: task {task_id} is not open"
+    project = tasks.project_name(await tasks.brief(conn, task_id))
+    same = [(t, f) for t, _, f in found if tasks.project_name(await tasks.brief(conn, t)) == project]
+    waiting = [t for t, f in same if f.state is State.WAITING]
+    ahead = 0
+    for t, rows, f in found:
+        if positions[t] < positions[task_id] and has_step(rows, f, bool((await tasks.brief(conn, t)).chat)):
+            ahead += 1
+    line = f"queue: {len(same)} open on {project}, {ahead} ahead of {task_id} in the kernel's queue"
+    return line + (f"; waiting on an answer: {', '.join(waiting)}" if waiting else "")
 
 
 class _Services:

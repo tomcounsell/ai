@@ -331,6 +331,9 @@ class TelethonWire:
             raise Refused(f"{type(e).__name__}: {e.message}") from None
         except (ConnectionError, OSError, TimeoutError) as e:
             raise NotConnected(type(e).__name__) from None
+        except ValueError as e:
+            # Telethon's own answer for a chat this account cannot reach.
+            raise Refused(str(e)) from None
 
     async def _send(self, request):
         """A request that may leave a message on Telegram."""

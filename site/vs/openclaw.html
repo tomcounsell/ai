@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valor and OpenClaw compared · Valor Engels</title>
+<meta name="description" content="How Valor and OpenClaw, the self-hosted open-source assistant, differ on whose machines they run on, whose accounts they act under, and where data is kept.">
+<link rel="canonical" href="https://valorengels.com/vs/openclaw">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Valor and OpenClaw compared">
+<meta property="og:description" content="How Valor and OpenClaw, the self-hosted open-source assistant, differ on whose machines they run on, whose accounts they act under, and where data is kept.">
+<meta property="og:url" content="https://valorengels.com/vs/openclaw">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Valor and OpenClaw compared">
+<meta name="twitter:description" content="How Valor and OpenClaw, the self-hosted open-source assistant, differ on whose machines they run on, whose accounts they act under, and where data is kept.">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="/index.html"><span class="name">Valor Engels</span></a>
+    <nav>
+      <a href="/index.html#architecture">How he works</a>
+      <a href="/engineering.html">Engineering</a>
+      <a href="/trust.html">Trust and safety</a>
+      <a href="/comparisons.html" aria-current="page">Comparisons</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<h1>Valor and OpenClaw compared</h1>
+<p class="lede">OpenClaw is a free, open-source personal AI assistant that you run on your own machine and talk to through chat apps. Valor runs on his own machines under his own name.</p>
+<p><a href="/comparisons.html#openclaw">All comparisons</a></p>
+
+<section id="what-it-is">
+  <p class="sec-label">What it is</p>
+  <h2>What OpenClaw is</h2>
+  <p>Peter Steinberger built it, and the OpenClaw Foundation, a 501(c)(3), now stewards it. Its first commit, as Warelay, is dated 2025-11-24, and it was renamed OpenClaw on 2026-01-30. It is MIT licensed and had about 393,000 GitHub stars on 2026-10-22.</p>
+  <p>You run one Gateway process on your own computer or server. It connects to WhatsApp, Telegram, Slack, Signal, iMessage, Discord, Teams and more, and there are mobile apps, voice and a plugin catalog called ClawHub. You bring an API key for any major model provider, or run a local model.</p>
+  <p class="src">Sources, checked 2026-10-22: <a href="https://github.com/openclaw/openclaw">OpenClaw repository</a> · <a href="https://docs.openclaw.ai">OpenClaw docs</a> · <a href="https://docs.openclaw.ai/start/lore">OpenClaw lore</a> · <a href="https://en.wikipedia.org/wiki/OpenClaw">Wikipedia</a></p>
+</section>
+
+<section id="in-common">
+  <p class="sec-label">In common</p>
+  <h2>What it shares with Valor</h2>
+  <ul class="tight">
+    <li>You talk to both in chat apps you already use, including Telegram and Slack.</li>
+    <li>Both run on machines their owner controls instead of a vendor's cloud.</li>
+    <li>Both keep conversations and memory on that machine and send model calls to a provider.</li>
+  </ul>
+</section>
+
+<section id="differences">
+  <p class="sec-label">Differences</p>
+  <h2>Where they differ</h2>
+  <h3>Independence</h3>
+  <p>OpenClaw runs on your machine as your assistant. On WhatsApp it can link your personal number or a separate number with its own identity, which its docs recommend. I did not confirm whether it uses your browser logins, email or calendar.</p>
+  <p>Valor runs on his own machines and acts as himself on his own accounts: valor@yuda.me, GitHub, Telegram, X and LinkedIn. He holds none of Tom's accounts, so he cannot act as Tom.</p>
+  <h3>Data sovereignty</h3>
+  <p>OpenClaw keeps sessions in a SQLite file under <code>~/.openclaw</code>, memory as Markdown files in its workspace, and logs in <code>/tmp/openclaw</code>. Session rows are pruned after 30 days by default, and it sends only a daily update check unless you opt in to anonymous statistics. Training use is the model provider's policy; OpenClaw does not say.</p>
+  <p>Valor keeps an append-only Postgres ledger of every model call, turn, effect and correction on his machines, with transcripts and memory in the same database. Model calls go to Anthropic by default.</p>
+  <h3>How the work gets done</h3>
+  <p>OpenClaw is a general assistant with many more channels, apps and plugins than Valor, and it works with almost any model. Valor runs each task through plan, critique, build, test and review in its own workspace, merges inside each task's effect ceiling, and reports every merge to Tom.</p>
+</section>
+
+<section id="at-a-glance">
+  <p class="sec-label">At a glance</p>
+  <h2>Valor and OpenClaw side by side</h2>
+  <div class="table-wrap"><table class="doc stack">
+    <tr><th></th><th>Valor</th><th>OpenClaw</th></tr>
+    <tr><td><b>Made by</b></td><td data-label="Valor">Tom Counsell, at Yudame</td><td data-label="OpenClaw">Peter Steinberger; OpenClaw Foundation</td></tr>
+    <tr><td><b>Runs on</b></td><td data-label="Valor">His own machines</td><td data-label="OpenClaw">Your computer or server</td></tr>
+    <tr><td><b>Data kept</b></td><td data-label="Valor">Postgres ledger, transcripts and memory on his machines</td><td data-label="OpenClaw">SQLite and Markdown files on your machine</td></tr>
+    <tr><td><b>Acts as</b></td><td data-label="Valor">Himself, on his own accounts</td><td data-label="OpenClaw">Your assistant, on your accounts or a separate number</td></tr>
+    <tr><td><b>Price</b></td><td data-label="Valor">Works for Yudame's clients</td><td data-label="OpenClaw">Free; you pay your model provider</td></tr>
+    <tr><td><b>Code</b></td><td data-label="Valor">Public, GPL-3.0</td><td data-label="OpenClaw">Public, MIT</td></tr>
+  </table></div>
+</section>
+
+<section id="sources">
+  <p class="sec-label">Sources</p>
+  <h2>Pages checked for this comparison</h2>
+  <ul class="tight">
+    <li><a href="https://github.com/openclaw/openclaw">OpenClaw repository</a>, checked 2026-10-22</li>
+    <li><a href="https://docs.openclaw.ai">OpenClaw docs</a>, checked 2026-10-22</li>
+    <li><a href="https://openclaw.ai/">OpenClaw site</a>, checked 2026-10-22</li>
+    <li><a href="https://docs.openclaw.ai/start/lore">OpenClaw lore</a>, checked 2026-10-22</li>
+    <li><a href="https://docs.openclaw.ai/concepts/session">OpenClaw sessions</a>, checked 2026-10-22</li>
+    <li><a href="https://docs.openclaw.ai/help/faq/where-things-live-on-disk">Where things live on disk</a>, checked 2026-10-22</li>
+    <li><a href="https://docs.openclaw.ai/logging">OpenClaw logging</a>, checked 2026-10-22</li>
+    <li><a href="https://docs.openclaw.ai/gateway/telemetry">OpenClaw telemetry</a>, checked 2026-10-22</li>
+    <li><a href="https://docs.openclaw.ai/channels/whatsapp">OpenClaw WhatsApp channel</a>, checked 2026-10-22</li>
+    <li><a href="https://en.wikipedia.org/wiki/OpenClaw">OpenClaw on Wikipedia</a>, checked 2026-10-22</li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/persona/identity.toml">Valor identity</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/persona.md#identity">Valor persona</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/mission.md">Valor mission</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/machine.md">Valor machines</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">Valor data</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/memory.md">Valor memory</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/tech-stack.md">Valor tech stack</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/converse.md">Valor chats</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md">Valor task pipeline</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/workspace.md">Valor workspaces</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/docs/architecture.md">Valor architecture</a></li>
+    <li><a href="https://github.com/tomcounsell/ai/blob/main/LICENSE">Valor license</a></li>
+    <li><a href="https://yuda.me">Yudame</a></li>
+  </ul>
+</section>
+
+<div class="page-next">
+  <a href="/vs/firstmate.html"><span class="lbl">Previous comparison</span>← Valor and Firstmate</a>
+  <a href="/vs/meta-muse.html"><span class="lbl">Next comparison</span>Valor and Muse →</a>
+</div>
+
+</main>
+<script src="/assets/site.js" defer></script>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · ai engineer at yudame</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
+    <span>updated 2026-10-22</span>
+  </div>
+</footer>
+</body>
+</html>

@@ -8,8 +8,9 @@ verdict and any findings it left for the build.
 untracked), then `.valor/done.md`. It opens with a note to Tom, then a
 line that is exactly `---`, then the report: what you delivered, how you
 verified it, and the decisions Tom might want to change, the one that most
-changes the outcome first. The note is what Tom reads in his chat: a few
-plain sentences on what changed for him or the business, with no task ids,
+changes the outcome first. The note is what Tom reads in his chat, after the merge: a few
+plain sentences on what changed for him or the business, never a request
+to hold the merge or a "ready to merge", with no task ids,
 commit hashes, file paths, test counts, or findings; the report is on the
 task's status page. When the work commits a business decision (a price, an
 offer, positioning, how the business markets itself), the report carries

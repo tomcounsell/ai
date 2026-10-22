@@ -145,6 +145,15 @@ def fresh(request) -> str:
 
 
 @pytest.fixture(autouse=True)
+def no_repo_env(tmp_path_factory, monkeypatch):
+    """Every test's tasks read the repository `.env` from an empty home, never
+    from this Mac's own `~/src` checkouts (`workspace.repo_env`)."""
+    from core import workspace
+
+    monkeypatch.setattr(workspace, "HOME", tmp_path_factory.getbasetemp() / "home")
+
+
+@pytest.fixture(autouse=True)
 def release_ports(request):
     """After a test that used the ledger, stop the services of every task
     whose workspace still holds ports and record `workspace.removed`, so a
