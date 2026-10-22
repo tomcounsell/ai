@@ -24,6 +24,7 @@ from core import (
     ledger,
     machine,
     notices,
+    router,
     runs,
     session,
     slot,
@@ -955,6 +956,39 @@ def test_queue_order_is_start_order_moved_by_each_placement_in_turn():
     assert order(at("before", "d", "gone"), at("after", "a", "a")) == "abcd"  # not open, or itself
 
 
+def test_the_queue_line_counts_ahead_only_tasks_with_a_step_to_run(dsn):
+    # #3668: idle chat sessions and waiting tasks were counted as a backlog.
+    from tests.test_machine import _reach
+
+    async def go():
+        chat = await new_task(dsn, chat={"channel": "telegram", "chat_id": f"-{uuid.uuid4().int % 10**9}"})
+        waiting, a, b = [await new_task(dsn) for _ in range(3)]
+        async with await db.connect(dsn) as conn:
+            for row in _reach(State.WAITING).rows[1:]:
+                p = {
+                    k: f"{waiting}-{v}" if k in ("turn_id", "effect_id") else v
+                    for k, v in row["payload"].items()
+                }
+                await ledger.append(conn, waiting, row["type"], p)
+            # Placed before the idle chat session: its place still counts.
+            await ledger.append(conn, b, "task.placed", {"anchor": chat, "where": "before"})
+            idle = [await router.queue_line(conn, t) for t in (a, b)]
+            await ledger.append(conn, chat, "message.steered", {"text": "hi"})
+            heard = await router.queue_line(conn, a)
+            rows = await ledger.read(conn, chat)
+        return idle, heard, rows
+
+    idle, heard, rows = run(go())
+    # Other tests' open tasks are ahead of all three; count from b's line.
+    a_idle, b_idle, a_heard = [int(line.split(", ")[1].split(" ahead")[0]) for line in (*idle, heard)]
+    assert (a_idle - b_idle, a_heard - b_idle) == (1, 2) and "waiting on an answer" in idle[0]
+    quiet = [r for r in rows if r["type"] != "message.steered"]
+    f = machine.fold(quiet)
+    assert not router.has_step(quiet, f, True)
+    failed = {"id": 10**9, "type": "step.failed", "payload": {}, "at": None}
+    assert router.has_step([*quiet, failed], f, True) and router.has_step(quiet, f, False)
+
+
 def test_core_shape_labels_the_decision_steers_an_amend_and_places_the_task(dsn):
     async def go():
         async with await db.connect(dsn) as conn:
@@ -1240,7 +1274,11 @@ def test_a_tasks_channel_says_no_one_holds_the_merge_and_each_signal_is_taken(ds
     # assumed the taken plan.json still stood.
     async def go():
         async with await db.connect(dsn) as conn:
-            return (await tasks.dispatch(conn, await tasks.start(conn, tasks.Brief(instruction="test", workspace=str(tmp_path)))))["text"]
+            return (
+                await tasks.dispatch(
+                    conn, await tasks.start(conn, tasks.Brief(instruction="test", workspace=str(tmp_path)))
+                )
+            )["text"]
 
     text = run(go())
     assert "# How this task reaches Tom" in text and text.count("the kernel merges") == 1
