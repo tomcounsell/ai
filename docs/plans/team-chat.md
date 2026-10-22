@@ -58,6 +58,10 @@ The proving ground is Eng: Monday Flowers with Rain, on the Pirate (Tom,
 teamwork session there on the new kernel; he judges it as good as Eng: PsyOPTIMAL or better, recorded with
 the date (rule 5). Then the Captain and the Bald roll out.
 
+**Met** (Tom, 2026-10-22): "the bar was met with monday flowers group chat
+working great yesterday", the session of 2026-10-21 in Eng: Monday Flowers
+on the Pirate. The Captain and the Bald roll out from 2026-10-22.
+
 **Next: the Agent Builders Chat**, the real test (Tom, 2026-10-16): many
 people chatting freely with Valor about his own codebase, in the old
 mostly read-only teammate mode. There Valor spoke only when his name
