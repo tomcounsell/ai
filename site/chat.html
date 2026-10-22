@@ -39,7 +39,7 @@
 <p class="kicker"><span class="n">06 ·</span> in the chat</p>
 <h1>Each chat gets one session that answers you or starts a task.</h1>
 <p class="lede">Ask Valor in the Telegram, Slack or email thread your team already uses; the chat's session replies, or starts a task and posts the result there.</p>
-<p>Valor works in the chats a team already uses. In each one, a single session speaks for it and hands the work to agents behind it.</p>
+<p>In each chat, a single session speaks for Valor and hands the work to agents behind it.</p>
 <nav class="toc" aria-label="On this page">
   <p class="toc-label">On this page</p>
   <ol>
@@ -60,7 +60,7 @@
     <li>anything to deliver to a task.</li>
   </ul>
   <p>A task reports back to the session that started it, and only the session posts in the chat.</p>
-  <p>When Tom, who built Valor and runs Yudame, is still talking an idea through, the session starts nothing. It asks what only he can settle, one question per message.</p>
+  <p>When Tom, who built Valor and runs Yudame, is still talking an idea through, the session starts nothing and asks what only he can settle, one question per message.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/converse.md">skills/sdlc/converse.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/tools/chat_tasks.py">tools/chat_tasks.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 262" role="img" aria-label="A message reaches the chat&#x27;s session, which handles a small lookup with a subagent, the web with the web agent, and anything to deliver with a task that reports back."><defs><marker id="m8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1b1a17"/></marker><marker id="m8b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b867b"/></marker></defs><rect class="dg-box " x="20" y="20" width="340" height="46"/><text class="fg-title" x="190.0" y="48.0" text-anchor="middle">A message in the chat</text><line class="dg-edge" x1="190" y1="66" x2="190" y2="93" marker-end="url(#m8)"/><rect class="dg-box " x="20" y="96" width="340" height="50"/><text class="fg-title" x="190.0" y="117.0" text-anchor="middle">The chat's session</text><text class="fg-sub" x="190.0" y="135.0" text-anchor="middle">reads the chat, memory, tasks, repo</text><line class="dg-edge" x1="190" y1="146" x2="72" y2="190" marker-end="url(#m8)"/><rect class="dg-box " x="20" y="192" width="104" height="50"/><text class="fg-title" x="72.0" y="213.0" text-anchor="middle">Subagent</text><text class="fg-sub" x="72.0" y="231.0" text-anchor="middle">a quick lookup</text><line class="dg-edge" x1="190" y1="146" x2="190" y2="190" marker-end="url(#m8)"/><rect class="dg-box " x="138" y="192" width="104" height="50"/><text class="fg-title" x="190.0" y="213.0" text-anchor="middle">Web agent</text><text class="fg-sub" x="190.0" y="231.0" text-anchor="middle">search, a page</text><line class="dg-edge" x1="190" y1="146" x2="308" y2="190" marker-end="url(#m8)"/><rect class="dg-box " x="256" y="192" width="104" height="50"/><text class="fg-title" x="308.0" y="213.0" text-anchor="middle">Task</text><text class="fg-sub" x="308.0" y="231.0" text-anchor="middle">work to deliver</text><path class="dg-edge back" d="M 360 217 C 374 217, 374 121, 363 121" marker-end="url(#m8b)"/></svg></figure></div>
 </section>
 
@@ -68,7 +68,7 @@
   <p class="sec-label">Rooms</p>
   <h2>Team chats and engineering chats</h2>
   <div class="cols-2">
-    <div><h3>Team chats</h3><p>Valor waits to be mentioned, and no engineering work starts there. It can still search the web or file a GitHub issue there.</p></div>
+    <div><h3>Team chats</h3><p>Valor waits to be mentioned and starts no engineering work, though it can still search the web or file a GitHub issue.</p></div>
     <div><h3>Engineering chats</h3><p>Every message reaches the session, and engineering work starts here.</p></div>
   </div>
   <p>Each chat's purpose is written down and included in every turn's prompt.</p>
@@ -93,7 +93,7 @@
 <section id="routines">
   <p class="sec-label">Routines</p>
   <h2>Routines</h2>
-  <p>launchd, the macOS scheduler, decides when a routine runs and the kernel provides everything else, so each run has a ceiling, a meter and a ledger, and can be stopped.</p>
+  <p>launchd, the macOS service manager, decides when a routine runs. The kernel provides everything else, so each run has a ceiling, a meter and a ledger, and can be stopped.</p>
   <div class="table-wrap"><table class="doc">
     <tr><td class="mono">verify</td><td>runs a project's suite and starts a fix task for each new red group</td></tr>
     <tr><td class="mono">expiry</td><td>lists guards past ninety days for Tom; deletes nothing itself</td></tr>

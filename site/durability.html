@@ -39,7 +39,7 @@
 <p class="kicker"><span class="n">05 ·</span> durability</p>
 <h1>Pull the power cord mid-task and Valor picks up where it stopped.</h1>
 <p class="lede">Every step it takes is a row in a ledger it cannot edit, so you can read what it did and a crash loses nothing that was recorded.</p>
-<p>Every model call, turn, effect, question, correction and stop is a row in one append-only table. Everything the kernel knows about a task is computed from those rows, so a crash at any instant leaves nothing to reconcile.</p>
+<p>The ledger is one append-only table, with a row for every model call, turn, effect, question, correction and stop. Everything the kernel knows about a task is computed from those rows, so a crash at any instant leaves nothing to reconcile.</p>
 <nav class="toc" aria-label="On this page">
   <p class="toc-label">On this page</p>
   <ol>
@@ -84,8 +84,8 @@
   <dl class="def-list">
     <div class="def-row"><dt>Retries</dt><dd>A failed step waits a minute, then twice as long each time; four failures in a row end the task with a report.</dd></div>
     <div class="def-row"><dt>Turn slots</dt><dd>Each Mac runs two turns at a time by default, which keeps memory use within its 16 GB.</dd></div>
-    <div class="def-row"><dt>Tom's answers</dt><dd>A turn uses up an answer from Tom, who built Valor and runs Yudame, only if the turn finishes, so a failed turn can't lose it.</dd></div>
-    <div class="def-row"><dt>Backups</dt><dd>The newest 30 dumps are kept, each restorable into a scratch cluster and checked.</dd></div>
+    <div class="def-row"><dt>Tom's answers</dt><dd>An answer from Tom, who built Valor and runs Yudame, is used up only when the turn that takes it finishes, so a failed turn can't lose it.</dd></div>
+    <div class="def-row"><dt>Backups</dt><dd>The newest 30 dumps are kept. A restore loads a dump into a scratch cluster and checks it against its manifest.</dd></div>
   </dl>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/README.md#entry-points">core/README.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/serve.py">core/serve.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/backup.py">core/backup.py</a></p>
 </section>
@@ -94,7 +94,7 @@
   <p class="sec-label">Harnesses and bridges</p>
   <h2>Harnesses and bridges</h2>
   <h3>Harnesses</h3>
-  <p>The kernel never knows which agent it runs. A harness, the adapter for one agent, hands it the command for one turn, normally <code>claude -p</code>, and a gateway meters every model call that turn makes.</p>
+  <p>The kernel never knows which agent it runs. Each agent has a harness, an adapter that hands the kernel the command for one turn, normally <code>claude -p</code>. A gateway meters every model call that turn makes.</p>
   <p>A turn talks back only through files it leaves under <code>.valor/</code>.</p>
   <h3>Bridges</h3>
   <p>Telegram, Slack, email and the local chat are each a process that records inbound messages and performs the sends the broker releases. The kernel's loop drives all the work.</p>
