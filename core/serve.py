@@ -477,10 +477,14 @@ async def _rolled(conn, checkout: Path, running: str) -> list[tuple[str, dict[st
 
 
 # The kernel's merge outcomes not yet ended, oldest first.
-# Tasks with a provisioned workspace not removed since.
+# Tasks with a provisioned workspace not removed since: the kernel's
+# provisioning writes a row, a start with `--project` (and a routine run's)
+# the task's document.
 RECLAIMABLE = (
     "SELECT DISTINCT p.task_id FROM events p WHERE p.type = 'workspace.provisioned' AND NOT EXISTS ("
-    "SELECT 1 FROM events r WHERE r.task_id = p.task_id AND r.type = 'workspace.removed' AND r.id > p.id)"
+    "SELECT 1 FROM events r WHERE r.task_id = p.task_id AND r.type = 'workspace.removed' AND r.id > p.id) "
+    "UNION SELECT d.id FROM documents d WHERE d.kind = 'task' AND d.body->>'mirror' IS NOT NULL "
+    "AND NOT EXISTS (SELECT 1 FROM events r WHERE r.task_id = d.id AND r.type = 'workspace.removed')"
 )
 MERGE_OUTCOMES = (
     "SELECT o.id, o.task_id, o.payload->>'effect_id', o.payload->'result' FROM events o "
