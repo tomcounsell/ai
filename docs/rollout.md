@@ -19,7 +19,7 @@ teamwork session in a group telegram chat, where Valor acts properly
 according to his persona and accomplishes tasks with Tom and the team. The
 Eng: PsyOPTIMAL group is a great example of how well Valor has been working
 with the team for several months. The rebuild has to be as good if not
-better than that." Building to it is [plans/team-chat.md](plans/team-chat.md). Until then their old updater is harmless: `main` was rewritten, so
+better than that." Tom recorded it met on 2026-10-22 ([plans/team-chat.md](plans/team-chat.md), Done). Until each is cut over, its old updater is harmless: `main` was rewritten, so
 its fast-forward fails and it keeps running its own code (the Pirate's
 `logs/update.log`, 395 aborted fast-forwards).
 
