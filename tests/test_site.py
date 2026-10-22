@@ -2,10 +2,16 @@
 source link names a file this checkout has, the sitemap lists the pages, the
 removed pages redirect somewhere real, and nothing private is published."""
 
+import json
 import re
+import shutil
+import subprocess
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SITE = ROOT / "site"
@@ -75,7 +81,9 @@ def test_every_source_link_names_a_path_in_this_checkout():
 
 
 def test_sitemap_lists_exactly_the_pages():
-    listed = set(re.findall(r"<loc>https://valorengels\.com/([^<]*)</loc>", (SITE / "sitemap.xml").read_text()))
+    listed = set(
+        re.findall(r"<loc>https://valorengels\.com/([^<]*)</loc>", (SITE / "sitemap.xml").read_text())
+    )
     pages = {
         "" if p == SITE / "index.html" else str(p.relative_to(SITE)) for p in PAGES if p.name != "404.html"
     }
@@ -85,9 +93,24 @@ def test_sitemap_lists_exactly_the_pages():
 def test_each_removed_page_redirects_to_a_page_that_exists():
     worker = (ROOT / "src" / "index.js").read_text()
     moved = re.findall(r'"(/[\w/-]+)":\s*"(/[\w./-]+\.html)(?:#([\w-]+))?"', worker)
-    research = {f"/research/{name}" for name in (
-        "valor-vs-paperclip", "valor-vs-managed-agents", "managed-agents-vs-perplexity-computer", "openhuman-vs-hermes")}
-    assert {old for old, _, _ in moved} == {"/runtime", "/codebase", "/memory", "/reflections", "/research"} | research
+    research = {
+        f"/research/{name}"
+        for name in (
+            "valor-vs-paperclip",
+            "valor-vs-managed-agents",
+            "managed-agents-vs-perplexity-computer",
+            "openhuman-vs-hermes",
+        )
+    }
+    assert {old for old, _, _ in moved} == {
+        "/runtime",
+        "/codebase",
+        "/memory",
+        "/reflections",
+        "/work",
+        "/research",
+    } | research
+    assert ("/reflections", "/chat.html", "routines") in moved
     for old, new, anchor in moved:
         assert not (SITE / (old.lstrip("/") + ".html")).exists(), old
         target = SITE / new.lstrip("/")
@@ -114,3 +137,57 @@ def test_nothing_private_is_published():
                     continue
                 found.append(f"{path.relative_to(SITE)}: {kind} {hit}")
     assert not found, found
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node is not on PATH")
+def test_activity_svg_links_public_days_only_and_never_names_a_private_repo():
+    today = datetime.now(UTC).date()
+    yesterday = today - timedelta(days=1)
+    public = {"nameWithOwner": "tomcounsell/ai", "isPrivate": False}
+    private = {"nameWithOwner": "hidden-org/secret-repo", "isPrivate": True}
+    nodes = [
+        {
+            "mergedAt": f"{today}T10:00:00Z",
+            "url": "https://github.com/hidden-org/secret-repo/pull/9",
+            "repository": private,
+        },
+        {
+            "mergedAt": f"{today}T11:00:00Z",
+            "url": "https://github.com/tomcounsell/ai/pull/1",
+            "repository": public,
+        },
+        {
+            "mergedAt": f"{yesterday}T09:00:00Z",
+            "url": "https://github.com/hidden-org/secret-repo/pull/8",
+            "repository": private,
+        },
+    ]
+    github = {
+        "data": {
+            "search": {"issueCount": 3, "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}
+        }
+    }
+    script = (
+        "globalThis.caches = { default: { match: async () => undefined, put: async () => {} } };"
+        f"globalThis.fetch = async () => new Response({json.dumps(json.dumps(github))});"
+        "const src = Buffer.from(process.argv[1]).toString('base64');"
+        "const worker = (await import('data:text/javascript;base64,' + src)).default;"
+        "const res = await worker.fetch(new Request('https://valorengels.com/activity.svg'),"
+        " { GITHUB_TOKEN: 't' }, { waitUntil() {} });"
+        "process.stdout.write(res.headers.get('content-type') + '\\n' + await res.text());"
+    )
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", script, (ROOT / "src" / "index.js").read_text()],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    kind, svg = out.split("\n", 1)
+    assert kind.startswith("image/svg+xml") and svg.startswith("<svg")
+    assert (
+        len(re.findall(r"<title>\d{4}-\d\d-\d\d: \d+ merged</title>", svg)) + svg.count('fill="none"') == 182
+    )
+    assert '<a href="https://github.com/tomcounsell/ai/pull/1" target="_top"><rect' in svg
+    assert f"<title>{yesterday}: 1 merged</title>" in svg
+    assert not re.search(rf"<a [^>]*><rect[^>]*><title>{yesterday}", svg)
+    assert "hidden-org" not in svg and "secret-repo" not in svg

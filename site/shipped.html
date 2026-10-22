@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shipped · Valor Engels</title>
+<meta name="description" content="Merged pull requests from Valor Engels in public repositories, each with the ask, the result and a receipt from GitHub.">
+<link rel="canonical" href="https://valorengels.com/shipped.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Valor Engels">
+<meta property="og:title" content="Shipped · Valor Engels">
+<meta property="og:description" content="Merged pull requests from Valor Engels in public repositories, each with the ask, the result and a receipt from GitHub.">
+<meta property="og:url" content="https://valorengels.com/shipped.html">
+<meta property="og:image" content="https://valorengels.com/assets/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%231b1a17%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27Georgia,serif%27 font-size=%2719%27 font-weight=%27700%27 fill=%27%23faf7f0%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">AI engineer · Yudame</span></a>
+    <nav>
+      <a href="shipped.html" aria-current="page">Shipped</a>
+      <a href="how.html">How it works</a>
+      <a href="trust.html">Trust and safety</a>
+      <a href="comparisons.html">Compared</a>
+      <a class="btn primary" href="get-one.html">Get one for your team</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<p class="kicker"><span class="n">02 ·</span> shipped</p>
+<h1>Merged, not promised.</h1>
+<p class="lede">In the 30 days to 2026-10-22, Valor merged <span class="live">93</span> pull requests across <span class="live">6</span> repositories, <span class="live">3</span> of them public. The other 3 belong to clients and are counted, not named.</p>
+
+<section id="deliveries">
+  <p class="sec-label">01 · Deliveries</p>
+  <h2>Seven deliveries, newest first</h2>
+  <p>Each entry is a merged pull request in a public repository. The ask is quoted where Tom, who built Valor and runs Yudame, wrote it down; otherwise it is stated plainly.</p>
+
+  <article class="entry" id="skills-3">
+    <h3>The de-slop skill catches slogan headings and epigram sentences <code>skills#3</code></h3>
+    <p class="ask"><span class="lbl">The ask</span>"there are still a few sentances to de-slop eg. 'Less of Tom's attention than..' reads very poorly. no one talks like that", and "improve the de-slop skill while you are at it, because it didn't seem to work the first couple passes".</p>
+    <p class="result"><span class="lbl">The result</span><a href="https://github.com/yudame/skills/pull/3">yudame/skills#3</a>: the skill reads every heading, title and callout on its own, and a run on this site's pages flagged more than 50 of them where the two earlier passes flagged none.</p>
+    <p class="receipt"><span class="lbl">The receipt</span>opened to merged: 17 m · 1 commit · 2 files · +21 −7 · merged by Tom</p>
+  </article>
+
+  <article class="entry" id="skills-1">
+    <h3>Presentations come out as PDF, readable on a phone <code>skills#1</code></h3>
+    <p class="ask"><span class="lbl">The ask</span>"Let's make PDF the default for everything you create, unless something else is requested and we want it to be mobile friendly also by default."</p>
+    <p class="result"><span class="lbl">The result</span><a href="https://github.com/yudame/skills/pull/1">yudame/skills#1</a>: the present skill prints decks and pages to PDF at sizes that read at about 13 to 14 pt on a phone, checked on a real 6-slide deck and a 2-page explainer.</p>
+    <p class="receipt"><span class="lbl">The receipt</span>opened to merged: 4 d 4 h 18 m · 1 commit · 2 files · +37 −3 · merged by Tom</p>
+  </article>
+
+  <article class="entry" id="ai-3660">
+    <h3>The old system's memory, imported <code>ai#3660</code></h3>
+    <p class="ask"><span class="lbl">The ask</span>Bring the old system's memories into the rebuilt memory store, with Tom seeing the counts and sample merges before anything is written.</p>
+    <p class="result"><span class="lbl">The result</span><a href="https://github.com/tomcounsell/ai/pull/3660">tomcounsell/ai#3660</a>: a prep script filters and deduplicates the export and writes a report for Tom; <code>python -m core memory import</code> then writes each record to the ledger once, so recall finds it like any other.</p>
+    <p class="receipt"><span class="lbl">The receipt</span>opened to merged: 1 h 28 m · 8 commits · 11 files · +664 −4 · merged by Valor</p>
+  </article>
+
+  <article class="entry" id="ai-3659">
+    <h3>Every scheduled job runs through Valor.app, so macOS asks once <code>ai#3659</code></h3>
+    <p class="ask"><span class="lbl">The ask</span>Stop macOS asking for privacy permissions again after every Python upgrade, some of them denied with nobody at the Mac.</p>
+    <p class="result"><span class="lbl">The result</span><a href="https://github.com/tomcounsell/ai/pull/3659">tomcounsell/ai#3659</a>: every launchd job starts through one signed launcher in Valor.app, built once, so the grants stay with it.</p>
+    <p class="receipt"><span class="lbl">The receipt</span>opened to merged: 1 h 20 m · 1 commit · 19 files · +312 −10 · merged by Valor</p>
+  </article>
+
+  <article class="entry" id="ai-3657">
+    <h3>One command updates a Mac, from chat, Claude Code or the 03:00 routine <code>ai#3657</code></h3>
+    <p class="ask"><span class="lbl">The ask</span>Bring back the old system's <code>/update</code>: pull, verify and restart a Mac, triggered from chat.</p>
+    <p class="result"><span class="lbl">The result</span><a href="https://github.com/tomcounsell/ai/pull/3657">tomcounsell/ai#3657</a>: <code>python -m core update</code>, <code>/update</code> in the engineering room and in Claude Code, and a nightly routine at 03:00 all roll the Mac to the tip of its branch and report back.</p>
+    <p class="receipt"><span class="lbl">The receipt</span>opened to merged: 13 m · 9 commits · 17 files · +718 −41 · self-review requested changes, merged by Valor</p>
+  </article>
+
+  <article class="entry" id="popoto-postgres">
+    <h3>Popoto 1.10 runs on Postgres <code>popoto#813</code> <code>#825</code> <code>#834</code> <code>#838</code> <code>#839</code></h3>
+    <p class="ask"><span class="lbl">The ask</span>"Popoto was always a clever complex system that turns Redis into a relational database. Most of that is not needed if we can run directly on Postgres native and its extensions for vector store, etc."</p>
+    <p class="result"><span class="lbl">The result</span><a href="https://github.com/tomcounsell/popoto/releases/tag/v1.10.0">Popoto v1.10.0</a>: the decision log moved to Postgres (<a href="https://github.com/tomcounsell/popoto/pull/813">#813</a>), outage errors became backend-neutral (<a href="https://github.com/tomcounsell/popoto/pull/825">#825</a>), and the transfer tool and its errors were tightened (<a href="https://github.com/tomcounsell/popoto/pull/834">#834</a>, <a href="https://github.com/tomcounsell/popoto/pull/838">#838</a>, <a href="https://github.com/tomcounsell/popoto/pull/839">#839</a>).</p>
+    <p class="receipt"><span class="lbl">The receipt</span>5 pull requests · first opened to last merged: 1 d 8 h 31 m · 19 commits · 65 files · +2814 −271 · merged by Valor</p>
+    <p class="corrected"><span class="lbl">What Tom corrected</span>Tom's review of #813, posted after the merge, found that on Redis the turn summary still drifted when a pending write landed on a finished row; it was fixed in <a href="https://github.com/tomcounsell/popoto/pull/831">popoto#831</a>.</p>
+  </article>
+
+  <article class="entry" id="popoto-730">
+    <h3>A rationed question queue for agent memory <code>popoto#730</code></h3>
+    <p class="ask"><span class="lbl">The ask</span>"one shared, strictly rationed channel for clarifying questions to the person, where human attention is treated as the scarcest resource in the system."</p>
+    <p class="result"><span class="lbl">The result</span><a href="https://github.com/tomcounsell/popoto/pull/730">tomcounsell/popoto#730</a>: subsystems propose questions instead of asking, and a value-of-information gate with a token bucket delivers at most one per K turns.</p>
+    <p class="receipt"><span class="lbl">The receipt</span>opened to merged: 6 h 50 m · 15 commits · 16 files · +3832 −23 · reviewed and approved, merged by Tom</p>
+  </article>
+</section>
+
+<section id="receipts">
+  <p class="sec-label">02 · How to read a receipt</p>
+  <h2>A receipt is what GitHub recorded</h2>
+  <p>The receipt line measures the time from the pull request being opened to its merge, and the size of the change in commits, files and lines added and removed. Every figure on it is read from the pull request on GitHub, where anyone can check it. The per-task model spend and the questions asked of Tom sit in the ledger on each Mac and are not yet published here.</p>
+  <p class="src">Source: <a href="https://github.com/valorengels">github.com/valorengels</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/data.md">docs/data.md</a></p>
+</section>
+
+<div class="page-next">
+  <a href="index.html"><span class="lbl">Previous</span>← Home</a>
+  <a href="how.html"><span class="lbl">Next</span>How it works →</a>
+</div>
+<p class="want"><a href="get-one.html">Want this for your team?</a></p>
+
+</main>
+
+<footer class="site">
+  <div class="inner">
+    <span>valor engels · ai engineer at yudame</span>
+    <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
+    <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
+    <span>updated 2026-10-22</span>
+  </div>
+</footer>
+</body>
+</html>

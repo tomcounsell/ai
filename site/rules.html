@@ -16,32 +16,30 @@
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%231b1a17%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27Georgia,serif%27 font-size=%2719%27 font-weight=%27700%27 fill=%27%23faf7f0%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">How it works</span></a>
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">AI engineer · Yudame</span></a>
     <nav>
-      <a href="index.html">Overview</a>
-      <a href="philosophy.html">Philosophy</a>
-      <a href="alignment.html">Alignment</a>
-      <a href="rules.html" aria-current="page">Rules</a>
-      <a href="pipeline.html">Pipeline</a>
-      <a href="durability.html">Durability</a>
-      <a href="work.html">Work</a>
-      <a href="comparisons.html">Comparisons</a>
+      <a href="shipped.html">Shipped</a>
+      <a href="how.html">How it works</a>
+      <a href="trust.html" aria-current="page">Trust and safety</a>
+      <a href="comparisons.html">Compared</a>
+      <a class="btn primary" href="get-one.html">Get one for your team</a>
     </nav>
   </div>
 </header>
 
 <main>
 
-<p class="kicker"><span class="n">03 ·</span> the rules</p>
-<h1>The rules: governance and the ten hard rules</h1>
-<p class="lede">Two paragraphs and ten rules open the repository's <code>CLAUDE.md</code>. They are quoted here word for word, with a note where the practice isn't obvious.</p>
+<p class="kicker"><span class="n">10 ·</span> rules</p>
+<h1>Ten rules bind how Valor works, and no new limit is added without Tom's written grant.</h1>
+<p class="lede">Read these to know how Valor works on your project: with a developer's full access, and with any new limit granted in writing by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a>, who built Valor and runs Yudame, then reviewed after ninety days.</p>
+<p>Two paragraphs and ten rules open the repository's <code>CLAUDE.md</code>. They are quoted here word for word, with a note where the practice isn't obvious.</p>
 
 <section id="governance">
   <p class="sec-label">The governing constraint</p>
@@ -49,7 +47,7 @@
   <div class="split"><div><p>Guardrails brought the old system to a halt, and an early trial of the rebuild stalled the same way: three times on an invented spending cap, waiting on Tom each time. The paragraph below was written in response.</p>
   <blockquote class="verbatim"><p><b>Governance is restrained by structure, not sentiment.</b> Before any check, gate, hook, validator, review round, approval step, isolation, sandbox rule, denial, allowlist, refusal, capability removal, or verification layer is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance needs Tom's grant, one per instance, written in the plan file that adds it. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is listed for Tom, and deleted unless he keeps it. The reviewer asks whether the diff adds governance; a yes with no grant in the plan file is a refused merge. The same paragraph, in the same words, sits at the top of <code>CLAUDE.md</code>, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.</p><p><b>Tests are not governance.</b> A test that asserts documented behavior or a documented invariant is part of the code. It is not a check, gate, hook, validator, review round, or approval step, and it needs no incident or grant.</p></blockquote>
   <p>The paragraph is also correction 1. Five guards are in force today: four checkpoints from Tom's pipeline decision of 2026-10-01, and the web agent.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md">CLAUDE.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/guards.py">core/guards.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 506" role="img" aria-label="A new limit is added only if it names a mission item and a past incident and Tom grants it; it is ledgered with a ninety-day expiry, listed for Tom if it never fired, and deleted unless he keeps it."><defs><marker id="m5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m5b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box " x="20" y="20" width="220" height="50"/><text class="fg-title" x="130.0" y="41.0" text-anchor="middle">A new limit</text><text class="fg-sub" x="130.0" y="59.0" text-anchor="middle">a check, gate, hook, denial…</text><line class="dg-edge" x1="130" y1="70" x2="130" y2="97" marker-end="url(#m5)"/><rect class="dg-box " x="20" y="100" width="220" height="62"/><text class="fg-title" x="130.0" y="127.0" text-anchor="middle">Names a mission item</text><text class="fg-title" x="130.0" y="145.0" text-anchor="middle">and a past incident?</text><line class="dg-edge" x1="240" y1="131" x2="262" y2="131" marker-end="url(#m5)"/><text class="fg-lbl" x="244" y="124">no</text><rect class="dg-box bad" x="264" y="106" width="96" height="50"/><text class="fg-title" x="312.0" y="136.0" text-anchor="middle">Not added</text><line class="dg-edge" x1="130" y1="162" x2="130" y2="193" marker-end="url(#m5)"/><text class="fg-lbl" x="138" y="183.0">yes</text><rect class="dg-box " x="20" y="196" width="220" height="50"/><text class="fg-title" x="130.0" y="217.0" text-anchor="middle">Tom's grant</text><text class="fg-sub" x="130.0" y="235.0" text-anchor="middle">one per instance, in the plan</text><line class="dg-edge" x1="130" y1="246" x2="130" y2="273" marker-end="url(#m5)"/><rect class="dg-box " x="20" y="276" width="220" height="50"/><text class="fg-title" x="130.0" y="297.0" text-anchor="middle">Ledgered</text><text class="fg-sub" x="130.0" y="315.0" text-anchor="middle">incident, mission item, expiry</text><line class="dg-edge" x1="130" y1="326" x2="130" y2="353" marker-end="url(#m5)"/><rect class="dg-box " x="20" y="356" width="220" height="50"/><text class="fg-title" x="130.0" y="377.0" text-anchor="middle">At 90 days</text><text class="fg-sub" x="130.0" y="395.0" text-anchor="middle">listed if it never fired</text><line class="dg-edge" x1="130" y1="406" x2="130" y2="433" marker-end="url(#m5)"/><rect class="dg-box bad" x="20" y="436" width="220" height="50"/><text class="fg-title" x="130.0" y="457.0" text-anchor="middle">Deleted</text><text class="fg-sub" x="130.0" y="475.0" text-anchor="middle">unless Tom keeps it</text></svg></figure></div>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/CLAUDE.md">CLAUDE.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/guards.py">core/guards.py</a></p></div><figure class="fig"><svg viewBox="0 0 380 506" role="img" aria-label="A new limit is added only if it names a mission item and a past incident and Tom grants it; it is ledgered with a ninety-day expiry, listed for Tom if it never fired, and deleted unless he keeps it."><defs><marker id="m5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1b1a17"/></marker><marker id="m5b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b867b"/></marker></defs><rect class="dg-box " x="20" y="20" width="220" height="50"/><text class="fg-title" x="130.0" y="41.0" text-anchor="middle">A new limit</text><text class="fg-sub" x="130.0" y="59.0" text-anchor="middle">a check, gate, hook, denial…</text><line class="dg-edge" x1="130" y1="70" x2="130" y2="97" marker-end="url(#m5)"/><rect class="dg-box " x="20" y="100" width="220" height="62"/><text class="fg-title" x="130.0" y="127.0" text-anchor="middle">Names a mission item</text><text class="fg-title" x="130.0" y="145.0" text-anchor="middle">and a past incident?</text><line class="dg-edge" x1="240" y1="131" x2="262" y2="131" marker-end="url(#m5)"/><text class="fg-lbl" x="244" y="124">no</text><rect class="dg-box bad" x="264" y="106" width="96" height="50"/><text class="fg-title" x="312.0" y="136.0" text-anchor="middle">Not added</text><line class="dg-edge" x1="130" y1="162" x2="130" y2="193" marker-end="url(#m5)"/><text class="fg-lbl" x="138" y="183.0">yes</text><rect class="dg-box " x="20" y="196" width="220" height="50"/><text class="fg-title" x="130.0" y="217.0" text-anchor="middle">Tom's grant</text><text class="fg-sub" x="130.0" y="235.0" text-anchor="middle">one per instance, in the plan</text><line class="dg-edge" x1="130" y1="246" x2="130" y2="273" marker-end="url(#m5)"/><rect class="dg-box " x="20" y="276" width="220" height="50"/><text class="fg-title" x="130.0" y="297.0" text-anchor="middle">Ledgered</text><text class="fg-sub" x="130.0" y="315.0" text-anchor="middle">incident, mission item, expiry</text><line class="dg-edge" x1="130" y1="326" x2="130" y2="353" marker-end="url(#m5)"/><rect class="dg-box " x="20" y="356" width="220" height="50"/><text class="fg-title" x="130.0" y="377.0" text-anchor="middle">At 90 days</text><text class="fg-sub" x="130.0" y="395.0" text-anchor="middle">listed if it never fired</text><line class="dg-edge" x1="130" y1="406" x2="130" y2="433" marker-end="url(#m5)"/><rect class="dg-box bad" x="20" y="436" width="220" height="50"/><text class="fg-title" x="130.0" y="457.0" text-anchor="middle">Deleted</text><text class="fg-sub" x="130.0" y="475.0" text-anchor="middle">unless Tom keeps it</text></svg></figure></div>
 </section>
 
 <section id="hard-rules">
@@ -72,18 +70,19 @@
 </section>
 
 <div class="page-next">
-  <a href="alignment.html"><span class="lbl">Previous</span>← Alignment and corrigibility</a>
-  <a href="pipeline.html"><span class="lbl">Next</span>The pipeline →</a>
+  <a href="alignment.html"><span class="lbl">Previous</span>← Alignment</a>
+  <a href="comparisons.html"><span class="lbl">Next</span>Compared →</a>
 </div>
+<p class="want"><a href="get-one.html">Want this for your team?</a></p>
 
 </main>
 
 <footer class="site">
   <div class="inner">
-    <span>valor engels · how the system works</span>
+    <span>valor engels · ai engineer at yudame</span>
     <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
     <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
-    <span>updated 2026-10-21</span>
+    <span>updated 2026-10-22</span>
   </div>
 </footer>
 </body>

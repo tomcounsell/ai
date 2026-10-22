@@ -24,9 +24,27 @@ CLOUDFLARE_ACCOUNT_ID="$(curl -sf -H "Authorization: Bearer $CLOUDFLARE_API_TOKE
 export CLOUDFLARE_ACCOUNT_ID
 
 if command -v wrangler >/dev/null 2>&1; then
-  wrangler deploy
+  WRANGLER=(wrangler)
 else
-  npx --yes wrangler@latest deploy
+  WRANGLER=(npx --yes wrangler@latest)
 fi
+
+# /activity.svg reads Valor's merged pull requests from GitHub with this token.
+# It is the signed-in gh account's token and only needs read access to the
+# repositories Valor's pull requests are in.
+GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
+[ -n "$GITHUB_TOKEN" ] || { echo "deploy-site: gh auth token is empty; run gh auth login. Nothing deployed" >&2; exit 1; }
+printf '%s' "$GITHUB_TOKEN" | "${WRANGLER[@]}" secret put GITHUB_TOKEN
+unset GITHUB_TOKEN
+
+"${WRANGLER[@]}" deploy
 curl -sf https://valorengels.com/ >/dev/null && echo "deploy-site: live OK" \
   || { echo "deploy-site: valorengels.com did not answer; wrangler rollback undoes the deploy" >&2; exit 1; }
+# Report, never a gate. The head is read whole first: under pipefail, head
+# closing the pipe early would fail curl and read as a miss.
+ACTIVITY="$(curl -sf https://valorengels.com/activity.svg || true)"
+if printf '%s' "${ACTIVITY:0:200}" | grep -q '<svg'; then
+  echo "deploy-site: activity OK"
+else
+  echo "deploy-site: warning, /activity.svg did not answer with an SVG" >&2
+fi

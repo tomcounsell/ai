@@ -16,32 +16,30 @@
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://valorengels.com/assets/og-image.png">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%230969da%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27-apple-system,Helvetica,Arial,sans-serif%27 font-size=%2718%27 font-weight=%27700%27 fill=%27white%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%231b1a17%27/%3E%3Ctext x=%2716%27 y=%2723%27 font-family=%27Georgia,serif%27 font-size=%2719%27 font-weight=%27700%27 fill=%27%23faf7f0%27 text-anchor=%27middle%27%3EV%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body>
 
 <header class="topnav">
   <div class="topnav-inner">
-    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">How it works</span></a>
+    <a class="brand" href="index.html"><span class="name">Valor Engels</span><span class="sub">AI engineer · Yudame</span></a>
     <nav>
-      <a href="index.html">Overview</a>
-      <a href="philosophy.html">Philosophy</a>
-      <a href="alignment.html">Alignment</a>
-      <a href="rules.html">Rules</a>
-      <a href="pipeline.html" aria-current="page">Pipeline</a>
-      <a href="durability.html">Durability</a>
-      <a href="work.html">Work</a>
-      <a href="comparisons.html">Comparisons</a>
+      <a href="shipped.html">Shipped</a>
+      <a href="how.html" aria-current="page">How it works</a>
+      <a href="trust.html">Trust and safety</a>
+      <a href="comparisons.html">Compared</a>
+      <a class="btn primary" href="get-one.html">Get one for your team</a>
     </nav>
   </div>
 </header>
 
 <main>
 
-<p class="kicker"><span class="n">04 ·</span> the SDLC pipeline</p>
-<h1>Pipeline: how a request becomes a merged change</h1>
-<p class="lede">Each task passes the same checkpoints. The agent decides how to do the work in a stage; the kernel decides which stage comes next and what may leave the machine.</p>
+<p class="kicker"><span class="n">04 ·</span> pipeline</p>
+<h1>From a message to a merged, tested change, checked by sessions that did not write it.</h1>
+<p class="lede">Ask in a chat; Valor plans, builds and tests the change, and merges it only when the tests pass and a fresh review agrees.</p>
+<p>Each task passes the same checkpoints. The agent decides how to do the work in a stage; the kernel, the deterministic code that runs every task, decides which stage comes next and what may leave the machine.</p>
 <nav class="toc" aria-label="On this page">
   <p class="toc-label">On this page</p>
   <ol>
@@ -58,14 +56,14 @@
   <div class="split"><div><p>A cheap classifier reads each request first. A thin request, such as a one-line ask or one that leans on an example, goes to clarify, where Valor inspects the code and then asks only what the code can't answer, or proceeds without asking.</p>
   <p>Critique reads the plan before any code exists. After every build, the test, review and docs stages check the same commit in parallel, and their findings go back together in one patch.</p>
   <p>Any stage can end in <code>stopped</code>, and a task never moves on from <code>stopped</code>.</p>
-  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md#the-model-in-one-table">docs/sdlc-state-machine.md</a> · <a href="https://github.com/tomcounsell/ai/tree/main/skills/sdlc/">skills/sdlc/</a></p></div><figure class="fig"><svg viewBox="0 0 380 636" role="img" aria-label="The SDLC pipeline: intake, judge, clarify if thin, plan, critique (revise loops to plan), build, checks in parallel (findings loop to patch), merge."><defs><marker id="m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker><marker id="m4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#818b98"/></marker></defs><rect class="dg-box " x="60" y="20" width="230" height="50"/><text class="fg-title" x="175.0" y="41.0" text-anchor="middle">Intake</text><text class="fg-sub" x="175.0" y="59.0" text-anchor="middle">recorded once, verbatim</text><rect class="dg-box " x="60" y="98" width="230" height="50"/><text class="fg-title" x="175.0" y="119.0" text-anchor="middle">Judge</text><text class="fg-sub" x="175.0" y="137.0" text-anchor="middle">precise or thin?</text><rect class="dg-box opt" x="60" y="176" width="230" height="50"/><text class="fg-title" x="175.0" y="197.0" text-anchor="middle">Clarify</text><text class="fg-sub" x="175.0" y="215.0" text-anchor="middle">ask, or find nothing to ask</text><rect class="dg-box " x="60" y="254" width="230" height="50"/><text class="fg-title" x="175.0" y="275.0" text-anchor="middle">Plan</text><text class="fg-sub" x="175.0" y="293.0" text-anchor="middle">approach, stakes, loop counts</text><rect class="dg-box " x="60" y="332" width="230" height="50"/><text class="fg-title" x="175.0" y="353.0" text-anchor="middle">Critique</text><text class="fg-sub" x="175.0" y="371.0" text-anchor="middle">a fresh session reads the plan</text><rect class="dg-box " x="60" y="410" width="230" height="50"/><text class="fg-title" x="175.0" y="431.0" text-anchor="middle">Build</text><text class="fg-sub" x="175.0" y="449.0" text-anchor="middle">a candidate commit</text><rect class="dg-box " x="60" y="488" width="230" height="50"/><text class="fg-title" x="175.0" y="509.0" text-anchor="middle">Checks</text><text class="fg-sub" x="175.0" y="527.0" text-anchor="middle">test · review · docs, in parallel</text><rect class="dg-box good" x="60" y="566" width="230" height="50"/><text class="fg-title" x="175.0" y="587.0" text-anchor="middle">Merge</text><text class="fg-sub" x="175.0" y="605.0" text-anchor="middle">when the predicate holds</text><line class="dg-edge" x1="175.0" y1="70" x2="175.0" y2="95" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="148" x2="175.0" y2="173" marker-end="url(#m4)"/><text class="fg-lbl" x="183.0" y="166.0">thin</text><line class="dg-edge" x1="175.0" y1="226" x2="175.0" y2="251" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="304" x2="175.0" y2="329" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="382" x2="175.0" y2="407" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="460" x2="175.0" y2="485" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="538" x2="175.0" y2="563" marker-end="url(#m4)"/><path class="dg-edge back" d="M 60 123.0 C 22 123.0, 22 279.0, 57 279.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="14" y="201.0" text-anchor="middle" transform="rotate(-90 14 201.0)">precise</text><path class="dg-edge back" d="M 290 357.0 C 330 357.0, 330 279.0, 293 279.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="334" y="322.0" text-anchor="start">revise</text><path class="dg-edge back" d="M 290 513.0 C 330 513.0, 330 435.0, 293 435.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="334" y="478.0" text-anchor="start">patch</text></svg></figure></div>
+  <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/docs/sdlc-state-machine.md#the-model-in-one-table">docs/sdlc-state-machine.md</a> · <a href="https://github.com/tomcounsell/ai/tree/main/skills/sdlc/">skills/sdlc/</a></p></div><figure class="fig"><svg viewBox="0 0 380 636" role="img" aria-label="The SDLC pipeline: intake, judge, clarify if thin, plan, critique (revise loops to plan), build, checks in parallel (findings loop to patch), merge."><defs><marker id="m4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1b1a17"/></marker><marker id="m4b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8b867b"/></marker></defs><rect class="dg-box " x="60" y="20" width="230" height="50"/><text class="fg-title" x="175.0" y="41.0" text-anchor="middle">Intake</text><text class="fg-sub" x="175.0" y="59.0" text-anchor="middle">recorded once, verbatim</text><rect class="dg-box " x="60" y="98" width="230" height="50"/><text class="fg-title" x="175.0" y="119.0" text-anchor="middle">Judge</text><text class="fg-sub" x="175.0" y="137.0" text-anchor="middle">precise or thin?</text><rect class="dg-box opt" x="60" y="176" width="230" height="50"/><text class="fg-title" x="175.0" y="197.0" text-anchor="middle">Clarify</text><text class="fg-sub" x="175.0" y="215.0" text-anchor="middle">ask, or find nothing to ask</text><rect class="dg-box " x="60" y="254" width="230" height="50"/><text class="fg-title" x="175.0" y="275.0" text-anchor="middle">Plan</text><text class="fg-sub" x="175.0" y="293.0" text-anchor="middle">approach, stakes, loop counts</text><rect class="dg-box " x="60" y="332" width="230" height="50"/><text class="fg-title" x="175.0" y="353.0" text-anchor="middle">Critique</text><text class="fg-sub" x="175.0" y="371.0" text-anchor="middle">a fresh session reads the plan</text><rect class="dg-box " x="60" y="410" width="230" height="50"/><text class="fg-title" x="175.0" y="431.0" text-anchor="middle">Build</text><text class="fg-sub" x="175.0" y="449.0" text-anchor="middle">a candidate commit</text><rect class="dg-box " x="60" y="488" width="230" height="50"/><text class="fg-title" x="175.0" y="509.0" text-anchor="middle">Checks</text><text class="fg-sub" x="175.0" y="527.0" text-anchor="middle">test · review · docs, in parallel</text><rect class="dg-box good" x="60" y="566" width="230" height="50"/><text class="fg-title" x="175.0" y="587.0" text-anchor="middle">Merge</text><text class="fg-sub" x="175.0" y="605.0" text-anchor="middle">when the predicate holds</text><line class="dg-edge" x1="175.0" y1="70" x2="175.0" y2="95" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="148" x2="175.0" y2="173" marker-end="url(#m4)"/><text class="fg-lbl" x="183.0" y="166.0">thin</text><line class="dg-edge" x1="175.0" y1="226" x2="175.0" y2="251" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="304" x2="175.0" y2="329" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="382" x2="175.0" y2="407" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="460" x2="175.0" y2="485" marker-end="url(#m4)"/><line class="dg-edge" x1="175.0" y1="538" x2="175.0" y2="563" marker-end="url(#m4)"/><path class="dg-edge back" d="M 60 123.0 C 22 123.0, 22 279.0, 57 279.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="14" y="201.0" text-anchor="middle" transform="rotate(-90 14 201.0)">precise</text><path class="dg-edge back" d="M 290 357.0 C 330 357.0, 330 279.0, 293 279.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="334" y="322.0" text-anchor="start">revise</text><path class="dg-edge back" d="M 290 513.0 C 330 513.0, 330 435.0, 293 435.0" marker-end="url(#m4b)"/><text class="fg-lbl" x="334" y="478.0" text-anchor="start">patch</text></svg></figure></div>
 </section>
 
 <section id="sessions">
   <p class="sec-label">Two kinds of session</p>
   <h2>Which sessions do the work</h2>
   <div class="cols-2">
-    <div><h3>The working session</h3><p>Clarify, plan, build and patch resume one session, so Valor keeps its context across a question, a send-back and Tom's feedback.</p></div>
+    <div><h3>The working session</h3><p>Clarify, plan, build and patch resume one session, so Valor keeps its context across a question, a send-back and feedback from Tom, who built Valor and runs Yudame.</p></div>
     <div><h3>Fresh sessions</h3><p>Critique, review and docs each start fresh in a worktree of the exact commit they judge. The reviewer runs the suite itself instead of trusting the builder's transcript.</p></div>
   </div>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/session.py">core/session.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/core/fresh.py">core/fresh.py</a></p>
@@ -97,18 +95,19 @@
 </section>
 
 <div class="page-next">
-  <a href="rules.html"><span class="lbl">Previous</span>← The rules</a>
+  <a href="how.html"><span class="lbl">Previous</span>← How it works</a>
   <a href="durability.html"><span class="lbl">Next</span>Durability →</a>
 </div>
+<p class="want"><a href="get-one.html">Want this for your team?</a></p>
 
 </main>
 
 <footer class="site">
   <div class="inner">
-    <span>valor engels · how the system works</span>
+    <span>valor engels · ai engineer at yudame</span>
     <span>built and operated by <a href="https://tomcounsell.com" rel="noopener" target="_blank">Tom Counsell</a></span>
     <span>written from the docs and code at <a href="https://github.com/tomcounsell/ai" rel="noopener" target="_blank">github.com/tomcounsell/ai</a></span>
-    <span>updated 2026-10-21</span>
+    <span>updated 2026-10-22</span>
   </div>
 </footer>
 </body>
