@@ -179,6 +179,10 @@ per-account table, with the gaps, is [performers.md](performers.md).
   Valor's GitHub account with `GITHUB_PUSH_TOKEN`. Each repository fetched
   is one `repository.fetched` row ([routines.md](routines.md), Watched
   conditions).
+- **Through a routine's read of the ledger, not the broker**: the `rsi`
+  routine reads corrections, Tom's DMs and failed steps from the ledger by
+  SQL, starts one task per unseen row, and runs no turn
+  ([routines.md](routines.md)).
 
 **The gap.** A turn runs as the Mac's one macOS user with Valor's own `gh` login, git credential
 helper, SSH agent, and `sentry-cli` auth, can read the login keychain through `security`, reads the shared 1Password vaults through `op`, and reaches

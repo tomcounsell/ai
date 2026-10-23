@@ -122,6 +122,11 @@ def used_count(marks: list[dict[str, Any]]) -> int:
     return sum(1 for m in marks if m["provenance"]["role_played"] is not True)
 
 
+def used_by(rows: list[dict[str, Any]], by: str) -> int:
+    """`used_count` of the task's marks made by `by` (case and edge spaces ignored)."""
+    return used_count([m for m in _marks(rows) if (m["provenance"]["by"] or "").strip().lower() == by])
+
+
 def _feedback(rows: list[dict[str, Any]], merge: dict[str, Any]) -> list[dict[str, Any]]:
     """Every `feedback.given` row after the merge's outcome and before the
     task's next delivery: feedback on the merged work. Feedback given in

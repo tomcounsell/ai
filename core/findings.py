@@ -35,11 +35,13 @@ SUITE_KEY = "suite"
 @dataclass(frozen=True)
 class Finding:
     """`keys` dedupe the finding (e.g. `verify:tests.test_pi::test_pi_command`);
-    `text` says what is wrong in one paragraph; `evidence` is what shows it."""
+    `text` says what is wrong in one paragraph; `evidence` is what shows it;
+    `project` names the project the fix is in, when not the routine's."""
 
     keys: tuple[str, ...]
     text: str
     evidence: str
+    project: str | None = None
 
 
 def head(text: str, limit: int = MESSAGE) -> str:
@@ -69,7 +71,7 @@ def instruction(finding: Finding, source: str) -> str:
     )
 
 
-async def _started(conn, key: str) -> list[tuple[str, int]]:
+async def started(conn, key: str) -> list[tuple[str, int]]:
     """Each task started with `key`, latest first: (task id, row id)."""
     rows = await (
         await conn.execute(
@@ -96,7 +98,7 @@ async def _cleared_after(conn, key: str, started_id: int) -> bool:
 
 async def holder(conn, key: str) -> str | None:
     """The task holding `key`, or None."""
-    for task_id, started_id in await _started(conn, key):
+    for task_id, started_id in await started(conn, key):
         state = await routines.state_of(conn, task_id)
         if state == "merged":
             continue
@@ -133,8 +135,9 @@ async def start_fix(
     """(task id, started). Under the session locks `finding:<key>` for each
     key, taken in sorted order and held through provisioning to
     `task.started`: if a task holds any of the keys, its id comes back with
-    started False. Otherwise one task starts on the routine's project and
-    branch, a child of `parent`, at the routine's ceiling and model, with
+    started False. Otherwise one task starts on the finding's project
+    (else the routine's, on the routine's branch; a differing project is
+    recorded in the marker), a child of `parent`, at the routine's ceiling and model, with
     `Brief.routine` set (background work) and the marker
     `{"sdlc": 1, "finding": {"keys", "source"}}`."""
     if not finding.keys:
@@ -151,7 +154,10 @@ async def start_fix(
             found = await holder(conn, key)
             if found:
                 return found, False
+        project = finding.project or routine.project
         marker: dict[str, Any] = {"sdlc": 1, "finding": {"keys": list(finding.keys), "source": routine.name}}
+        if project != routine.project:
+            marker["finding"]["project"] = project
         task_id = await start_project(
             conn,
             parent=parent,
@@ -159,8 +165,8 @@ async def start_fix(
             routine=routine.name,
             ceiling=routine.ceiling,
             model=routine.model,
-            project=routine.project,
-            branch=routine.branch,
+            project=project,
+            branch=routine.branch if project == routine.project else None,
             marker=marker,
         )
         return task_id, True
