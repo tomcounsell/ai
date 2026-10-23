@@ -455,14 +455,18 @@ async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, A
     if chat and _own_chat(chat, kind, effect):
         return None
     if kind == "merge":
-        f = machine.fold(await ledger.read(conn, task_id))
+        rows = await ledger.read(conn, task_id)
+        f = machine.fold(rows)
         branch = payload.get("target_branch") or effect.get("target")
         built = note((f.delivery or {}).get("summary"))
+        found = rows[0]["payload"].get("finding") or {}
+        lineage = f"rsi: {', '.join(found['keys'])}" if found.get("source") == "rsi" else ""
         text = "\n\n".join(
             x
             for x in (
                 lead(await headline(conn, task_id), f"it is done and merged into {branch}."),
                 built,
+                lineage,
             )
             if x
         )

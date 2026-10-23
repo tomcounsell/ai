@@ -1,0 +1,13 @@
+name = "rsi"
+runner = "rsi"
+ceiling = "act"
+model = "frontier"
+mission_item = "5"
+need = ["Tom, 2026-10-20, in an interview: Valor gets more capable and more autonomous, and takes the resources that fund both (docs/plans/rsi.md); one need suffices (Tom, 2026-10-21)"]
+created = 2026-10-23
+project = "valor"
+branch = "main"
+instruction = "Start one fix task for each unseen correction, Tom's repository link, and failed step on Valor's own work, and send Tom the week's used-over-started."
+
+[schedule]
+interval = 900

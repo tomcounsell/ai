@@ -40,6 +40,8 @@ routine NAME --finding TEXT --key KEY [--key KEY] [--evidence FILE]
                                start one fix task for a finding under the
                                routine's objective, unless a task holds a key
 routines                       every routine, its last run, and its spending
+rsi                            what rsi started that Tom used, its unseen rows, and its tasks
+                               that ended or stopped unused
 agenda                         the next strategy meeting's open agenda items, as JSON
 workspace show TASK_ID         where the kernel provisioned the task
 workspace remove TASK_ID       delete a stopped, merged, or ended task's workspace and
@@ -527,6 +529,7 @@ async def _routine_project(
 
 def _routine_runners() -> dict:
     from routines.conditions import runner as conditions
+    from routines.rsi import runner as rsi
     from routines.verify import runner as verify
 
     # No business data source is granted yet (Stripe, Google Analytics), so
@@ -537,6 +540,7 @@ def _routine_runners() -> dict:
         routines.EXPIRY_RUNNER: routines.expiry_runner,
         "conditions": conditions.runner({}, credential=settings.github_keyfile),
         "verify": verify.run,
+        "rsi": rsi.run,
         "update": update_runner,
         "task": routines.task_runner,
     }
@@ -779,6 +783,10 @@ async def _run(args) -> None:
         if args.command == "routines":
             for rep in await routines.reports(conn):
                 print(routines.listing(rep))
+        elif args.command == "rsi":
+            from routines.rsi import runner as rsi
+
+            print(await rsi.status(conn))
         elif args.command == "agenda":
             print(json.dumps(await agenda.open_items(conn), indent=2, default=str))
         elif args.command == "start" and args.project:
@@ -1129,6 +1137,7 @@ def main() -> None:
     routine.add_argument("--evidence", help="a file whose text is the finding's evidence")
     sub.add_parser("routines")
     sub.add_parser("agenda")
+    sub.add_parser("rsi")
     sub.add_parser("backup").add_argument("--plist", action="store_true")
     sub.add_parser("serve").add_argument("--plist", action="store_true")
     sub.add_parser("permissions").add_argument("--probe", action="store_true")

@@ -19,7 +19,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 
 | Key | Holds | Serves |
 |---|---|---|
-| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`, `update`, `task`) | Mac native (launchd for scheduling) |
+| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`, `rsi`, `update`, `task`) | Mac native (launchd for scheduling) |
 | `ceiling`, `model` | the effect class every run's tree is capped at, and the model seat | Bounded authority, metered spending |
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
@@ -86,7 +86,7 @@ changes nothing. `python -m core routines` lists every routine with its last
 run and its period spending; a run stopped after its firing is listed
 `stopped`, whatever outcome the firing recorded.
 
-The four routines the kernel holds:
+The five routines the kernel holds:
 
 - **expiry** (04:00 daily): `routines.due` folds the ledger and lists the
   guards and routines past their ninety days. The list is the run's summary,
@@ -101,6 +101,22 @@ The four routines the kernel holds:
   provisions, and starts one fix task for each group of red tests that no
   task holds (Findings, below). The runner holds the session lock
   `run:<run>`.
+- **rsi** (every 900 seconds, ceiling `act`): plain SQL, no turn
+  (`routines/rsi/runner.py`). It reads three sources: `correction.recorded`
+  rows; Tom's verified DMs that link a repository of the open-source set
+  (`valor`, `popoto`); and `task.ended` rows of kind `step` (retries
+  exhausted, one per task) on tasks of that set that `rsi` did not start.
+  A row is unseen when it is newer than the routine's first registration and
+  no `task.started` carries the key `rsi:<event id>`; each unseen row, oldest
+  first, starts one fix task through `findings.start_fix` (a task that ended,
+  stopped or merged never restarts its row), on the project the row names
+  (a link's repository, a failed task's) else the routine's. Nothing unseen
+  is `nothing_due`. `python -m core rsi` prints the tasks Tom used over the
+  tasks started (a `delivery.used` mark by `tom`, any case, not role-played),
+  the unseen rows, and the tasks that ended or stopped unused; the first run
+  of each ISO week sends that to Tom as a `report` notice
+  (`rsi-week:<year>-W<week>`). A merge report of an `rsi` task adds the line
+  `rsi: <keys>`. Plan: [plans/rsi.md](plans/rsi.md).
 - **update** (03:00 daily, ceiling `act`): asks the resident kernel to roll
   this Mac to its branch's tip (`intake.request_update`, `by: routine`), as
   `python -m core update` does, and starts no task. Having no run task, the
@@ -371,7 +387,9 @@ like any other: the loop adds no merge path and no gate.
 
 **Existence.** A routine is added on a demonstrated second need: the same
 work done by hand, as a task, twice. `routine.toml` names both task ids.
-A first occurrence is a task, not a routine (Mission item 5).
+A first occurrence is a task, not a routine (Mission item 5). One need
+suffices when Tom grants it: `rsi` rests on his ask of 2026-10-20 (Tom,
+2026-10-21).
 
 **Use.** A routine is in use when a run in the last ninety days led to
 something outside itself: an effect performed, a question Tom answered, a
