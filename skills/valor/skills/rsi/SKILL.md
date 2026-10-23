@@ -31,7 +31,7 @@ A session has no predictable end, so nothing waits for a closing step.
 
 - **A correction** ("that is wrong, do this"): `python -m core correct "<text>"`. The routine starts a task for it.
 - **Work to do now**: start it, `python -m core start "<instruction>" --project <valor|popoto>`, or tell Tom the plan skill is the path for anything larger.
-- **A row not worth a task**: say so; it stays unseen and is no obligation. The routine starts each unseen row on its own.
+- **A row not worth a task**: say so. It is no obligation, but the routine starts a task for every unseen row within 15 minutes, so a row not worth a task needs a ruling from Tom, not silence.
 - **A change to authority, a spending limit or a venture**: a proposal with its evidence, which Tom grants in writing in a plan file. This session grants nothing.
 
 Read `python -m core rsi` again after each write and tell Tom what moved in a line. If nothing moved, say that.

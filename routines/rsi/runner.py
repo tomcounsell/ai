@@ -178,13 +178,11 @@ async def status(conn) -> str:
 
 async def run(ctx: Context) -> Ran:
     r = ctx.routine
-    if ctx.start_project is None or not r.project:
-        raise routines.Refused(f"routine {r.name} starts project tasks; none is given")
     async with routines.holding(ctx.conn, f"routine:{r.name}"):
         fresh = await unseen(ctx.conn, await since(ctx.conn))
-        run_id, new = None, 0
+        new = 0
         for row in fresh:
-            run_id, made = await findings.start_fix(
+            _, made = await findings.start_fix(
                 ctx.conn, row.finding, parent=ctx.objective, routine=r, start_project=ctx.start_project
             )
             new += made
@@ -198,4 +196,4 @@ async def run(ctx: Context) -> Ran:
         )
     if not fresh:
         return Ran(None, "nothing_due", "no unseen rows")
-    return Ran(run_id, "started", f"started {new} of {len(fresh)} unseen rows")
+    return Ran(None, "started", f"started {new} of {len(fresh)} unseen rows")
