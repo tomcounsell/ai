@@ -943,6 +943,33 @@ def test_a_sessions_and_its_childs_notices_are_at_home_in_the_chat_they_came_fro
     assert not notes and reported == [(True, "credential")]
 
 
+def test_a_chat_session_that_kept_failing_on_a_message_says_so_in_reply_to_it(dsn):
+    """The mastery chat, 2026-10-23: a broken install failed four turns on
+    Tom's message, and the chat was told "one of its steps failed" about
+    no work it could name."""
+    ended = {"by": "kernel", "kind": "step", "check": None, "state": "clarify", "tries": 4, "reason": "boom"}
+
+    async def go():
+        team = await new_task(dsn, chat={"channel": "telegram", "chat_id": "-1009"}, max_effect_class="act")
+        answered = await new_task(dsn, chat={"channel": "telegram", "chat_id": "-1010"}, max_effect_class="act")
+        async with await db.connect(dsn) as conn:
+            for task in (team, answered):
+                said = {"text": "Can this be used?", "message_id": "11706"}
+                await ledger.append(conn, task, "message.steered", said)
+                for verdict in ("idle", "failed") if task == answered else ("failed",):
+                    turn = {"state": "clarify", "verdict": verdict, "turn_id": ledger.new_id()}
+                    await ledger.append(conn, task, "turn.collected", turn)
+                await ledger.append(conn, task, "task.ended", ended)
+                await notices.owe(conn, task)
+        return [bridges.typed(await bridges.rows(dsn, t), "notice.requested")[0] for t in (team, answered)]
+
+    failed, later = run(go())
+    assert failed["reply_to"] == "11706" and failed["chat_id"] == "-1009"
+    assert failed["text"].startswith("I could not answer this: something in my own system failed 4 times")
+    assert "Send it again" in failed["text"] and notices.AGAIN not in failed["text"]
+    assert later["reply_to"] is None and later["text"].endswith(notices.AGAIN)
+
+
 def test_a_session_ended_after_its_pick_gives_way_to_a_new_one(dsn, dm):
     """The binder picks the DM's session, then waits on its tree's lock
     while another connection stops it; once the lock is free the binder

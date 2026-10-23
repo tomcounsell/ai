@@ -17,7 +17,8 @@ task's home chat (`home`), the chat its work came in from, else to
 
 - `question` (`about_key` `question:<id>`): the open question.
 - `ended` (`ended:<row>`): the task ended without merging: what was built,
-  and why it stopped, in plain words. A reply to it is feedback.
+  and why it stopped, in plain words. A reply to it is feedback. A chat
+  session's, when its steps kept failing on a message, replies to it.
 
 `credential(conn, task_id, sha, why)` asks Tom for the push credential a
 merge needs (`credential:<sha>`), the one merge failure that reaches him.
@@ -234,16 +235,34 @@ async def owe(conn, task_id: str) -> list[str]:
                 )
             )
     if f.state is State.ENDED and f.entry is not None:
+        said = await unanswered(conn, task_id, rows)
         made.append(
             await request(
                 conn,
                 task_id,
                 kind="ended",
                 about_key=f"ended:{f.entry.get('id')}",
-                text=ended_text(f, await headline(conn, task_id)),
+                text=ended_text(f, await headline(conn, task_id), said),
+                reply_to=said and said.get("message_id"),
             )
         )
     return [m for m in made if m]
+
+
+async def unanswered(conn, task_id: str, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The message a chat session ended without answering: its latest
+    `message.steered`, when no turn collected after it went through. None
+    for a task that is no chat session."""
+    from core import tasks
+
+    if not (await tasks.brief(conn, task_id)).chat:
+        return None
+    for r in reversed(rows):
+        if r["type"] == "turn.collected" and r["payload"].get("verdict") != "failed":
+            return None
+        if r["type"] == "message.steered":
+            return r["payload"]
+    return None
 
 
 def short(instruction: str | None, limit: int = 80) -> str | None:
@@ -304,16 +323,24 @@ MERGE_WHY = {
 AGAIN = "Reply to this message if you want me to pick it up again or change course."
 
 
-def ended_text(f: machine.Fold, head: str | None) -> str:
+def ended_text(f: machine.Fold, head: str | None, said: dict[str, Any] | None = None) -> str:
     """The report owed when a task ends without merging: why it stopped,
     in Valor's words when the working session decided it, in plain words
     for the kernel's own reasons (the raw error stays on `task.ended`), and
-    what was built. A reply to it is feedback."""
+    what was built. A reply to it is feedback. A chat session whose steps
+    kept failing on a message (`said`, `unanswered`) is sent in reply to
+    that message: it went unanswered, the fault was Valor's, and saying it
+    again reaches a new session, which reads the chat's history."""
     entry = f.entry or {}
     p = entry.get("payload") or {}
     built = note((f.delivery or {}).get("summary"))
     kind = p.get("kind") if entry.get("type") == "task.ended" else "rounds"
     parts: list[str | None]
+    if kind == "step" and said is not None:
+        return (
+            f"I could not answer this: something in my own system failed {p.get('tries') or 'several'} "
+            "times in a row as I tried, so I sent nothing. Send it again to have it answered."
+        )
     if kind == "decided":
         text = str(p.get("text") or "")
         done = text.lstrip().lower().startswith("done:")
