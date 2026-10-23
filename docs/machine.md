@@ -337,7 +337,8 @@ variables). Over it goes the repository's own `.env` from this Mac's checkout, `
 (`workspace.repo_env`), as a developer working there has it. The kernel reads it at each step and
 never records it. Setup, suite and lint get all of it; the turn's agent gets it less the kernel's
 own names, so a project key never pays for a turn. The task's own variables go over both: a task
-with its own database sets every libpq name, `PGPASSWORD` among them. It carries Valor's own
+with its own database sets every libpq name and gets no `PGPASSWORD`, from the `.env` or anywhere,
+so each role its password file covers logs in with its own line. It carries Valor's own
 `gh` login, git credential helper, and SSH agent.
 
 It also carries Valor's Google sign-in, valor@yuda.me, which `gws` uses

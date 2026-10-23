@@ -122,7 +122,8 @@ the Brief and in the `--append-system-prompt` argument that reached `claude -p`
 provider and GitHub keys, the libpq password variables), then the repository's own `.env` from
 `~/src/<repo>/.env` less those same names (`workspace.repo_env`; setup, suite and lint get it whole),
 then the workspace's own variables
-from the task's harness settings. So the turn has Valor's `gh` login, git credential helper and SSH agent.
+from the task's harness settings; with a database of its own, no `PGPASSWORD`, so libpq uses the
+task's password file for every role. So the turn has Valor's `gh` login, git credential helper and SSH agent.
 The wrapper then sets:
 
 - `ANTHROPIC_BASE_URL`: the gateway URL issued for this turn.

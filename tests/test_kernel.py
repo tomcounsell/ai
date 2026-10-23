@@ -502,18 +502,23 @@ def test_a_step_gets_the_repos_env_and_the_agent_gets_it_less_the_kernels_names(
     step = workspace.turn_environment({"env": task})
     # The suite gets the whole .env, as a developer's does...
     assert all(step[n] == f"dev-{n}" for n in names if n != "PGPASSWORD")
-    # ...under the task's own database, every libpq name its own.
-    assert step["DATABASE_URL"] == "postgresql://app:pw@127.0.0.1:5440/app" and step["PGPASSWORD"] == "pw"
+    # ...under the task's own database, every libpq name its own, and no
+    # PGPASSWORD, so each role in its password file logs in with its line.
+    assert step["DATABASE_URL"] == "postgresql://app:pw@127.0.0.1:5440/app" and "PGPASSWORD" not in step
+    assert step["PGPASSFILE"] == str(tmp_path / "pass")
+    # A task recorded with the app's PGPASSWORD (6074b1a2b) loses it too.
+    assert "PGPASSWORD" not in workspace.turn_environment({"env": {**task, "PGPASSWORD": "pw"}})
     # A project with no database of its own gets the developer's.
     bare_step = workspace.turn_environment({"env": workspace.harness_env(lay, spec, {}, {}, **pg)})
     assert bare_step["PGPASSWORD"] == "dev-PGPASSWORD" and bare_step["DATABASE_URL"] == "postgres://dev/db"
     harness = {"sandbox_profile": "p", "env": task}
     agent = claude_code.workspace_turn("p", cwd=".", model="m", harness=harness)("http://gw:1", "b", "t").env
     assert agent["GEMINI_API_KEY"] == "dev-GEMINI_API_KEY" and agent["ANTHROPIC_BASE_URL"] == "http://gw:1"
-    assert not {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_PUSH_TOKEN"} & set(agent)
+    assert not {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_PUSH_TOKEN", "PGPASSWORD"} & set(agent)
     # A check session's suite runs in the environment its own services made.
     check = workspace.check_harness(workspace.Layout(tmp_path / "t"), tmp_path / "c", [], task, services=True)
-    assert workspace.turn_environment(check)["GEMINI_API_KEY"] == "dev-GEMINI_API_KEY"
+    checked = workspace.turn_environment(check)
+    assert checked["GEMINI_API_KEY"] == "dev-GEMINI_API_KEY" and "PGPASSWORD" not in checked
     # What provisioning records (`harness_env`) holds none of it.
     assert task["GH_REPO"] == "yudame/psyoptimal" and not any(v.startswith("dev-") for v in task.values())
 

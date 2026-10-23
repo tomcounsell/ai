@@ -643,9 +643,6 @@ def harness_env(
                 "PGUSER": "app",
                 "PGDATABASE": "app",
                 "PGPASSFILE": str(passfile),
-                # Over a `PGPASSWORD` from the repository's `.env`, which libpq
-                # would prefer to the password file.
-                "PGPASSWORD": passwords["app"],
                 "DATABASE_URL": f"postgresql://app:{passwords['app']}@127.0.0.1:{port}/app",
                 "TEST_DB_HOST": "127.0.0.1",
                 "TEST_DB_PORT": str(port),
@@ -891,7 +888,9 @@ def environment(task: dict[str, str] | None = None, *, step: bool = False) -> di
     starts from. A step (setup, suite, lint) gets the whole `.env`; a
     turn's agent gets it less the kernel's names (`DROP_PREFIXES`,
     `DROP_NAMES`), so its model calls still go to the gateway and no
-    project key pays for them. The task's
+    project key pays for them. A task with its own database (a
+    `PGPASSFILE` of its own) gets no `PGPASSWORD`, which libpq would send
+    for every role in place of the password file's line for it. The task's
     PATH goes in front of the kernel's own, never in place of it, so a PATH
     recorded by whatever process provisioned the task still finds what the
     operator has."""
@@ -904,6 +903,8 @@ def environment(task: dict[str, str] | None = None, *, step: bool = False) -> di
         else {k: v for k, v in found.items() if not k.startswith(DROP_PREFIXES) and k not in DROP_NAMES}
     )
     env.update(task)
+    if "PGPASSFILE" in task:
+        env.pop("PGPASSWORD", None)
     if "PATH" in task:
         parts = [*task["PATH"].split(os.pathsep), *os.environ.get("PATH", "").split(os.pathsep)]
         env["PATH"] = os.pathsep.join(dict.fromkeys(p for p in parts if p))
