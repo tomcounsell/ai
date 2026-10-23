@@ -1,9 +1,9 @@
 ---
-status: Planning
+status: Ready
 type: feature
 tracking: https://github.com/tomcounsell/ai/issues/3655
 revision_applied: true
-revision_applied_at: 2026-10-21T10:37:51Z
+revision_applied_at: 2026-10-23T10:17:20Z
 ---
 
 # RSI rebuild: requirements
@@ -47,7 +47,9 @@ One month after it ships, all three:
 - What of the `improve-research`, `improve-preflight` and `rsi` skills in `old-system` is reused (rule 10).
 
 
-# Plan (2026-10-21, #3655; revised after critique round 2)
+# Plan (2026-10-21, #3655; revised after critique round 3)
+
+Tom, 2026-10-23: fix and build, no further critique.
 
 Requirements above stand (rule 6). Reasoning:
 [synthesis.md](../research/rsi/synthesis.md#reasoning-behind-the-plan);
@@ -56,7 +58,8 @@ old controller, it starts from what Tom said and counts what Tom used.
 
 ## Build 1: the routine
 
-- **`routines/rsi/routine.toml`:** `runner = "rsi"`, `[schedule] interval = 900`,
+- **`routines/rsi/routine.toml`:** `name = "rsi"`, `created = 2026-10-23`
+  (a TOML date), a one-line `instruction`, `runner = "rsi"`, `[schedule] interval = 900`,
   `ceiling = "act"`, `model = "frontier"`, `project = "valor"`,
   `branch = "main"`, `mission_item = "5"`, `need` = Tom's ask of 2026-10-20
   (one suffices, Tom, 2026-10-21).
@@ -65,9 +68,13 @@ old controller, it starts from what Tom said and counts what Tom used.
   - `rows(conn)` reads three sources:
     - `correction.recorded` rows;
     - `message.received` rows from Tom's verified DM: `verified`,
-      `chat_kind == "dm"`, `intake._from_operator(payload)`, and an
-      `https?://` URL in `text`;
-    - `step.failed` rows on tasks not started by `rsi` (G5).
+      `chat_kind == "dm"`, `intake._from_operator(payload)`, and a
+      GitHub URL of a repo in the allowed set below (intake already
+      starts a task for any other Tom message, `core/intake.py:637-650`);
+    - `task.ended` rows with `kind == "step"` (retries exhausted), one
+      per task, on tasks not started by `rsi` and whose project is in the
+      allowed set (G5). Not the per-retry `step.failed` rows
+      (`core/router.py:214, 282-294`).
   - **Unseen:** a row is unseen when its id is above the routine's first
     `routine.registered` id (`routines.registrations`) and no
     `task.started` carries `rsi:<event id>` (`findings._started`): a
@@ -75,9 +82,11 @@ old controller, it starts from what Tom said and counts what Tom used.
   - **Starts:** each unseen row, oldest first, through
     `findings.start_fix(parent=ctx.objective)`. None unseen:
     `Ran(None, "nothing_due", ...)`, no turn.
-- **Project:** `project_of(url)`: the `projects/*.toml` spec whose `repo`
-  is the URL's GitHub repo, else the routine's. A DM's URL, a failed
-  step's task `origin_url`; a correction takes the routine's.
+- **Project:** `project_of(url)` matches only the allowed set, `valor`
+  and `popoto` (Tom's open-source decision; no new flag), by their specs'
+  `repo`, loading those two specs directly, not `Spec.here()`. Any other
+  URL falls back to the routine's project. A DM's URL, a failed step's
+  task `origin_url`; a correction takes the routine's.
   - `Finding` gains `project: str | None = None`. `start_fix` uses
     `finding.project or routine.project` (the routine's branch only on its
     own project) and records a differing project in the marker.
@@ -89,12 +98,22 @@ old controller, it starts from what Tom said and counts what Tom used.
 - **Tests (`tests/test_rsi.py`):**
   - 50 corrections recorded before registration start nothing;
   - merged, stopped and crashed rows are not restarted;
-  - group, unverified and URL-less messages start nothing;
+  - five `step.failed` retries start nothing; their `task.ended kind=step`
+    starts exactly one;
+  - a failed step on a client (e.g. cuttlefish) task starts nothing;
+  - group, unverified and URL-less messages start nothing; DMs linking
+    vm.tiktok.com, claude.ai or a client repo start nothing;
   - a DM linking `github.com/tomcounsell/popoto` starts on popoto;
+  - `routines.load("rsi")` succeeds;
   - an idle run starts no task;
   - `verify` is unchanged;
   - "Tom" equals "tom"; role-played and non-Tom marks do not count;
   - the merge report carries the lineage line.
+- **Expect idle:** one correction row exists, so Build 1 mostly reports
+  `nothing_due` until failed steps arrive; an idle week is not a fault.
+- **Check:** `settings.machine` gives `Valor-the-Cowboy`, project specs say
+  "Valor the Cowboy". If the mismatch is real, it is a separate bug commit
+  with a test (rule 9).
 - **Docs:** `routines.md` (the runner; Existence: one need suffices, Tom's
   grant 2026-10-21), `data.md` (marker `project`), `architecture.md`.
 
