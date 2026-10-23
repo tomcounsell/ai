@@ -421,7 +421,8 @@ def team_spec(p: dict[str, Any]) -> workspace.Spec | None:
 
 
 # A message names Valor (the old system's mention triggers: "valor",
-# "@valor", "hey valor", and his Telegram handle, @valorengels).
+# "@valor", "hey valor", and his Telegram handle, @valorengels). A Slack tag
+# of Valor arrives labelled `<@U..|valor>` by its bridge.
 MENTION = re.compile(r"(?i)(?<![\w])@?valor(?:engels)?\b")
 # How many of the chat's recorded messages a new chat session starts with.
 HISTORY = 20

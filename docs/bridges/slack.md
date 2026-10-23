@@ -9,7 +9,10 @@ outbox. This doc covers what is particular to Slack.
 **Status.** Built in `bridges/slack/`. `python -m bridges.slack run` runs
 it under `bridge.serve`; `keys` copies its tokens, `manifest` prints the
 app manifest, and `--plist` prints its launchd job. The last section lists
-the modules.
+the modules. On the Cowboy it serves the Yudame workspace (`T0B6E8JPE3C`):
+Tom's DMs, and #general (`C0B67T44KEF`), a mentions-only team chat for
+general Yudame business, listed in `projects/valor.toml` because that Mac
+runs the one bridge holding the Yudame tokens (Tom, 2026-10-23).
 
 ## What it serves
 
@@ -83,7 +86,7 @@ live and in gap fill; so are bot messages, and every subtype but none,
 | `message_id` | The message's `ts` |
 | `sender_id` | `<team>/<user>`, the team being the message's `user_team`, else its `team`, else the connected workspace's, uppercased. One function builds it, live, in gap fill, and in send, so a live event and its history copy are one person |
 | `sender_name` | `users.info`'s real name, cached in memory |
-| `text` | Slack's `text` as stored (entities and wrapped links included) |
+| `text` | Slack's `text` as stored (entities and wrapped links included), except that a mention of Valor's own user, `<@U..>`, is written `<@U..|valor>`, so the kernel's mention rule sees it in a mentions-only chat (the thread's texts likewise) |
 | `reply_to`, `topic_id` | The thread root (`thread_ts`) of a reply; none for a top-level message |
 | `thread` | The root and the replies before this one, the last 50 in all, Valor's own posts included, nothing downloaded |
 | `attachments` | Each file fetched from `url_private_download` into `inbound_dir/slack/`, named by its sha256, as `{name, mime, bytes, path}`; a file Slack will not give is `{name, mime, bytes, skipped}` with the reason; an `audio/*` file (a clip, a voice memo) also has `transcript` from the voice process, or `transcript_failed` with the reason, as on Telegram ([telegram.md](telegram.md), Voice notes) |

@@ -402,6 +402,9 @@ class SlackWire:
     async def user_name(self, user):
         return "Tom"
 
+    async def replies(self, channel, ts, cursor=None):
+        return [{"ts": ts, "text": "<@UVALOR> look"}], None
+
     async def ack(self, envelope_id):
         self.acked.append(envelope_id)
 
@@ -488,6 +491,28 @@ def test_slack_acks_a_slow_voice_note_once_it_is_recorded(tmp_path):
         run(go())
     finally:
         go_on.set()
+
+
+def test_slack_labels_valors_own_tag_in_a_message_and_its_thread(tmp_path):
+    """So the kernel's mention rule sees a Slack tag of Valor; anyone
+    else's tag, and a message with none, is kept as Slack stored it."""
+    b, _, got = slack_bridge(tmp_path)
+    texts = ["<@UVALOR> hi, ask <@UTOM>", "no tag here", "<@UVALOR|valor> already"]
+    for n, text in enumerate(texts):
+        run(
+            b._receive(
+                "T0ABC/C0TEAM", "C0TEAM", {**slack_msg(f"179200001{n}.000100"), "text": text}, dm=False
+            )
+        )
+    reply = {**slack_msg("1792000020.000100"), "text": "and?", "thread_ts": "1792000019.000100"}
+    run(b._receive("T0ABC/C0TEAM", "C0TEAM", reply, dm=False))
+    assert [m.text for m in got] == [
+        "<@UVALOR|valor> hi, ask <@UTOM>",
+        "no tag here",
+        "<@UVALOR|valor> already",
+        "and?",
+    ]
+    assert got[3].thread == [{"id": "1792000019.000100", "text": "<@UVALOR|valor> look", "attachments": []}]
 
 
 # -- email -----------------------------------------------------------------------

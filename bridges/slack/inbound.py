@@ -49,6 +49,13 @@ def wanted(msg: dict[str, Any], own: str) -> bool:
     )
 
 
+def named(text: str, own: str) -> str:
+    """`text` with Valor's own mentions, stored by Slack as `<@U..>`,
+    labelled `<@U..|valor>`, so the kernel's mention rule and the session
+    reading it see that the message names Valor."""
+    return text.replace(f"<@{own}>", f"<@{own}|valor>") if own else text
+
+
 def chat_of(team: str, channel: str, msg: dict[str, Any], *, dm: bool) -> str:
     """The port's `chat_id`: the other person's id for a DM, else
     `<team>/<channel>`."""
@@ -111,7 +118,7 @@ async def thread(wire: SlackWire, channel: str, msg: dict[str, Any]) -> list[dic
     return [
         {
             "id": m["ts"],
-            "text": m.get("text", ""),
+            "text": named(m.get("text", ""), wire.user_id),
             "attachments": [skipped(f, "earlier message") for f in m.get("files") or []],
         }
         for m in first + rest
@@ -141,7 +148,7 @@ async def build(
         "sender_id": person(wire.team_id, msg),
         "sender_name": await wire.user_name(msg["user"]),
         "sent_at": datetime.fromtimestamp(float(msg["ts"]), UTC).isoformat(),
-        "text": msg.get("text") or "",
+        "text": named(msg.get("text") or "", wire.user_id),
         "reply_to": top,
         "thread": await thread(wire, channel, msg),
         "topic_id": top,

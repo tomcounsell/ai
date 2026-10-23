@@ -15,6 +15,7 @@ import aiohttp
 import psycopg
 import pytest
 
+from bridges.slack import inbound as slack_inbound
 from core import (
     broker,
     checks,
@@ -667,6 +668,42 @@ def test_a_stranger_in_toms_dm_binds_to_none(dsn, dm):
     assert (bound["as"], bound["task_id"]) == ("none", None) and after == before
 
 
+def test_in_a_slack_mentions_chat_valors_own_tag_or_a_reply_in_his_thread_wakes_the_session(dsn, dm):
+    """Slack stores a tag as `<@U..>`; the bridge labels Valor's own so
+    the mention rule sees it, as on Telegram. Another person's tag, or no
+    tag, is heard."""
+    chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
+    (pathlib.Path(settings.projects_dir) / "office.toml").write_text(
+        'name = "office"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
+        f'chats = ["slack:{chat}"]\nmentions = ["slack:{chat}"]\n'
+    )
+
+    async def say(text, ts, **kw):
+        inbound = intake.Inbound(
+            channel="slack", chat_id=chat, chat_kind="group", message_id=ts, sender_id="T0ABC/ULEWIS",
+            sender_name="Lewis", sent_at="2026-10-23T11:00:00Z", text=slack_inbound.named(text, "UVALOR"), **kw,
+        )  # fmt: skip
+        async with await db.connect(dsn) as conn:
+            got = await intake.receive(conn, inbound)
+            await intake.bind(conn)
+        (bound,) = await bridges.of_type(dsn, "message.bound", received_id=got.received_id)
+        return bound
+
+    async def go():
+        quiet = [(await say(t, at(n)))["as"] for t, n in (("lunch at noon?", 10), ("ask <@UTOM>", 11))]
+        tagged = await say("<@UVALOR> what's on today?", at(20))
+        await posted(dsn, tagged["task_id"], chat, at(30), "Nothing booked.")
+        reply = await say("thanks", at(40), reply_to=at(30), topic_id=at(30))
+        async with await db.connect(dsn) as conn:
+            b = await tasks.brief(conn, tagged["task_id"])
+        return quiet, tagged, reply, b
+
+    quiet, tagged, reply, b = run(go())
+    assert quiet == ["heard", "heard"] and tagged["as"] == "steer"
+    assert (reply["task_id"], reply["as"]) == (tagged["task_id"], "steer")
+    assert b.chat == {"channel": "slack", "chat_id": chat} and b.project == {"name": "office"}
+
+
 def test_replies_bind_to_an_older_task_another_chats_session_or_this_chats_session(dsn, dm):
     """A threaded reply to a question sent before the DM had a session
     answers it; a reply to a team session's post steers that session, as
@@ -956,7 +993,9 @@ def test_a_chat_session_that_kept_failing_on_a_message_says_so_in_reply_to_it(ds
 
     async def go():
         team = await new_task(dsn, chat={"channel": "telegram", "chat_id": "-1009"}, max_effect_class="act")
-        answered = await new_task(dsn, chat={"channel": "telegram", "chat_id": "-1010"}, max_effect_class="act")
+        answered = await new_task(
+            dsn, chat={"channel": "telegram", "chat_id": "-1010"}, max_effect_class="act"
+        )
         async with await db.connect(dsn) as conn:
             for task in (team, answered):
                 said = {"text": "Can this be used?", "message_id": "11706"}
@@ -1636,6 +1675,11 @@ def test_the_real_specs_keep_team_chats_quiet_and_the_rest_answering(tmp_path):
         for i in ids:
             assert "No engineering or SDLC work starts here" in specs[name].rooms[f"telegram:{i}"], i
     assert "a public group" in specs["valor"].rooms["telegram:-1003879986445"]
+    general = (
+        "slack:T0B6E8JPE3C/C0B67T44KEF"  # Yudame Slack #general, received on the Cowboy (Tom, 2026-10-23)
+    )
+    assert general in specs["valor"].mentions and specs["valor"].machine == "Valor the Cowboy"
+    assert "No engineering or SDLC work starts here" in specs["valor"].rooms[general]
     for name, ids in answering.items():
         assert {f"telegram:{i}" for i in ids} <= set(specs[name].chats) - set(specs[name].mentions), name
 
