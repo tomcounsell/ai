@@ -3,7 +3,7 @@ status: Planning
 type: feature
 appetite: Small
 created: 2026-10-23
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/3671
 last_comment_id:
 ---
 
