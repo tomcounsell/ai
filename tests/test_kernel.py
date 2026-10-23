@@ -993,9 +993,7 @@ def test_a_chat_session_that_kept_failing_on_a_message_says_so_in_reply_to_it(ds
 
     async def go():
         team = await new_task(dsn, chat={"channel": "telegram", "chat_id": "-1009"}, max_effect_class="act")
-        answered = await new_task(
-            dsn, chat={"channel": "telegram", "chat_id": "-1010"}, max_effect_class="act"
-        )
+        answered = await new_task(dsn, chat={"channel": "telegram", "chat_id": "-1010"}, max_effect_class="act")
         async with await db.connect(dsn) as conn:
             for task in (team, answered):
                 said = {"text": "Can this be used?", "message_id": "11706"}

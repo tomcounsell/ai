@@ -373,7 +373,7 @@ system"): a task naming the chat (`Brief.chat`), started by its first
 message with the chat's last 20 recorded messages, and resumed for every
 message after, anyone's, with no rights by sender. A message that wakes it
 is a steer; in a chat the spec lists under `mentions` (the old teammate
-groups) only one naming Valor ("valor", "@valor", "@valorengels") or replying to his post
+groups) only one naming Valor ("valor", "@valor", "@valorengels", or a Slack tag of Valor, which the Slack bridge labels `<@U..|valor>`) or replying to his post
 wakes it, and the rest are heard (`message.heard`, quiet) and reach it
 with the next. Each turn's prompt is what came in since the last, with
 when, who and message ids; a message that wakes it during a turn reaches

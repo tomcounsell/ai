@@ -32,7 +32,7 @@ route for teamwork on general yudame business things".
    writes Valor's own mention in the record's `text` (and the thread's)
    as Slack's labelled form, `<@U0B6C6J735L|valor>`. `MENTION` then
    matches it as written, unchanged, and the session reading the message
-   sees that the mention is of itself. Nothing in `core/` changes; send
+   sees that the mention is of itself. In `core/` only `MENTION`'s comment changes; send
    lookup never reads inbound text. `docs/bridges/slack.md`'s record
    table says so.
 
