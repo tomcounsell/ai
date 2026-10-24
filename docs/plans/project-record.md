@@ -13,7 +13,10 @@ record.
    `Grant(task_id, turn_id)` held only in the kernel's process). A second
    route on the same app, `GET /t/{token}/record/{verb}`, resolves the
    token to its task, the task to its Brief's project, and answers from
-   `core/record.py` with SELECTs on the kernel's connection. Why this path:
+   `core/record.py` with SELECTs on the kernel's connection, run in
+   `asyncio.to_thread` so a slow query never stalls a streaming call. It
+   is registered before the catch-all `/t/{token}/{tail:.*}`, which
+   forwards any other tail upstream with the kernel's credential. Why this path:
    the turn already holds the token, so it gains no credential; the grant
    is the only turn identity the kernel issues, so scope comes from the
    kernel, never from an argument the turn sends; the 5432 deny is
@@ -26,7 +29,10 @@ record.
    whose Brief names the project, with all its rows, and (b) every
    `message.received` whose chat is in the project's spec `chats`, or that
    was bound (`message.bound`) to one of those tasks (email threads, whose
-   chat ids are thread roots). A task with no project is answered 404,
+   chat ids are thread roots). A message in a chat of A bound to a task of
+   B (the operator chat is valor's, and every project's tasks report
+   there) is shown, since it is that chat's content, with its binding's
+   task id; B's task rows are not. A task with no project is answered 404,
    naming why. This is the reach Tom set, not a limit on anything readable
    today, so it adds no governance and needs no grant; nor does anything
    else here (the 5432 deny stays as it is).
@@ -59,7 +65,19 @@ record.
    topic files are already readable (the sandbox denies only the kernel's
    paths); the index gives their paths. Each session still writes only its
    own memory. Tasks of the project get the same file, so a task reads
-   its chats' memory too.
+   its chats' memory too. Memory is shared at exactly the record's reach.
+
+## The reach, as Tom gave it
+
+`projects/valor.toml` is not only this repository: its chats include Tom's
+own DM, the operator chat (approvals across all projects), 13 third-party
+DMs (Graham D, a Cuttlefish client; Cyndra, Psyoptimal and Gato
+collaborators) and Yudame Slack #general, beside the public Agent Builders
+and Perplexity groups. Built as given, anyone who mentions Valor in a
+public group can get it to read and repeat those, and a disclosure posted
+publicly cannot be reverted. Tom's answer rested on only this open source
+repo being attached to a public chat, so this is put to him before the
+build (`.valor/question.md`), with the default his rule as given.
 
 5. **Docs.** `skills/sdlc/converse.md`: the record and the other chats'
    memory are readable; look there before saying something cannot be
@@ -89,6 +107,10 @@ store; the persona's Remembered recall, which stays as it is.
     `task T` shows the effect's intent and outcome; `task S3` is 404;
   - a grant for a turn of S3 sees B and not A (both ways);
   - `--search`, `--limit`, `--before` and the 200 cap;
+  - a message in chat 1 bound to a task of B is listed with that task id,
+    and `task <B's task>` is 404;
+  - a `record/` path is answered by the kernel and never reaches a stub
+    upstream;
   - an unknown or retired token is refused; a task with no project is 404;
   - nothing writes: `events` and `documents` counts unchanged after every
     call.
