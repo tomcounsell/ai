@@ -67,17 +67,26 @@ record.
    own memory. Tasks of the project get the same file, so a task reads
    its chats' memory too. Memory is shared at exactly the record's reach.
 
-## The reach, as Tom gave it
+## Each DM under its project (Tom, 2026-10-24 08:53 UTC)
 
-`projects/valor.toml` is not only this repository: its chats include Tom's
-own DM, the operator chat (approvals across all projects), 13 third-party
-DMs (Graham D, a Cuttlefish client; Cyndra, Psyoptimal and Gato
-collaborators) and Yudame Slack #general, beside the public Agent Builders
-and Perplexity groups. Built as given, anyone who mentions Valor in a
-public group can get it to read and repeat those, and a disclosure posted
-publicly cannot be reverted. Tom's answer rested on only this open source
-repo being attached to a public chat, so this is put to him before the
-build (`.valor/question.md`), with the default his rule as given.
+"DMs should have the same teammate scope as teammate groups. And
+specifically whitelisted per project. ... moving each person to the
+project they belong to." So each DM is listed in its own project's `chats`
+with its room description, which already gives the team group's scope (no
+engineering or SDLC work; web search and GitHub issues fine). Kevin, Matt
+Rideout, Nick Frith and Andy Malkin stay under valor; so do Tom's DM and
+the operator group. Graham D is removed entirely (08:54): his DM and room
+in `valor.toml`, and `email:grahamhderry@gmail.com` in `cuttlefish.toml`.
+
+A chat is received only by the bridge of the Mac its spec names. Today the
+Cowboy receives every DM. The Pirate runs the new Telegram bridge
+(`com.valor.kernel.telegram`, checked 2026-10-24), so Mike Berson moves to
+`gato-os.toml`. The Captain (psyoptimal) and the Bald (cyndra) still run
+the old system, so moving Lewis Parrott and the six Cyndra DMs leaves them
+unreceived by the new kernel until those rollouts. That is put to Tom
+(`.valor/question.md`); the build does what he answers, default: move them
+(each DM then waits with its project's team groups, already unreceived
+until the same rollout).
 
 5. **Docs.** `skills/sdlc/converse.md`: the record and the other chats'
    memory are readable; look there before saying something cannot be
@@ -119,5 +128,7 @@ store; the persona's Remembered recall, which stays as it is.
 - Memory: S1's turn's CLAUDE.md imports S2's MEMORY.md, not S3's or its
   own; a session started after it appears at the next turn; T gets it.
 - Each harness's env carries `VALOR_RECORD_URL` for its turn.
+- `tests/test_rollout.py`, beside its spec checks: each moved DM is
+  in exactly one spec; Graham D's DM and email are in none.
 - Live: Tom asks in Eng: Valor about Agent Builders' last messages and the
   answer comes from `valor-record`, recorded with the date.
