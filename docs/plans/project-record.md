@@ -67,26 +67,30 @@ record.
    own memory. Tasks of the project get the same file, so a task reads
    its chats' memory too. Memory is shared at exactly the record's reach.
 
-## Each DM under its project (Tom, 2026-10-24 08:53 UTC)
+## Each DM under its project (Tom, 2026-10-24 and 10-25)
 
-"DMs should have the same teammate scope as teammate groups. And
-specifically whitelisted per project. ... moving each person to the
-project they belong to." So each DM is listed in its own project's `chats`
-with its room description, which already gives the team group's scope (no
-engineering or SDLC work; web search and GitHub issues fine). Kevin, Matt
-Rideout, Nick Frith and Andy Malkin stay under valor; so do Tom's DM and
-the operator group. Graham D is removed entirely (08:54): his DM and room
-in `valor.toml`, and `email:grahamhderry@gmail.com` in `cuttlefish.toml`.
+Tom: "DMs should have the same teammate scope as teammate groups. And
+specifically whitelisted per project", then (10-25 10:54 UTC) "Charlie DM
+goes to PsyOptimal / Thabiso goes to SATSOL / Remove Rideout, Andy, Nick,
+Colin / Remove emails from Cuttlefish". Each DM sits in its project's
+`chats` with a room description giving the team group's scope (no
+engineering or SDLC work; web search and GitHub issues fine):
 
-A chat is received only by the bridge of the Mac its spec names. Today the
-Cowboy receives every DM. The Pirate runs the new Telegram bridge
-(`com.valor.kernel.telegram`, checked 2026-10-24), so Mike Berson moves to
-`gato-os.toml`. The Captain (psyoptimal) and the Bald (cyndra) still run
-the old system, so moving Lewis Parrott and the six Cyndra DMs leaves them
-unreceived by the new kernel until those rollouts. That is put to Tom
-(`.valor/question.md`); the build does what he answers, default: move them
-(each DM then waits with its project's team groups, already unreceived
-until the same rollout).
+- valor keeps Kevin's DM, Tom's DM, the operator and Eng groups, Agent
+  Builders, Perplexity and Yudame Slack #general.
+- Removed, chat and room: Matt Rideout, Andy Malkin, Nick Frith, Colin
+  Behring, Graham D.
+- psyoptimal: Charlie (room rewritten: works with Tom on Psyoptimal) and
+  Lewis Parrott. satsol: Thabiso Epema (room rewritten for SATSOL).
+  cyndra: Johann, Jess Mason, Hazem. gato-os: Mike Berson.
+- cuttlefish: its three email lanes and `rooms.email` removed; the Eng
+  group stays. Other projects' email lanes are unchanged.
+
+Moved now (Tom reassigned rather than wait). Only the Mac a spec names
+receives its chats: Mike is answered by the Pirate's bridge (checked
+2026-10-24); the psyoptimal (Captain) and cyndra (Bald) DMs wait for those
+rollouts, like their team groups; Thabiso's waits until SATSOL has a Mac
+(`machine = "unassigned"`). The delivery says so.
 
 5. **Docs.** `skills/sdlc/converse.md`: the record and the other chats'
    memory are readable; look there before saying something cannot be
@@ -129,6 +133,7 @@ store; the persona's Remembered recall, which stays as it is.
   own; a session started after it appears at the next turn; T gets it.
 - Each harness's env carries `VALOR_RECORD_URL` for its turn.
 - `tests/test_rollout.py`, beside its spec checks: each moved DM is
-  in exactly one spec; Graham D's DM and email are in none.
+  in exactly one spec, the one above; the five removed DMs and
+  cuttlefish's email lanes are in none.
 - Live: Tom asks in Eng: Valor about Agent Builders' last messages and the
   answer comes from `valor-record`, recorded with the date.
