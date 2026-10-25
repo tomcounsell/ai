@@ -16,9 +16,10 @@ member, Tom); an email record is not. Whether the sender is the operator
 is decided at bind.
 
 Ownership: this machine's bridges receive the operator's own chat and
-addresses (Tom's email addresses, his Slack ids), and the chats a project
-spec lists (`chats`) whose `machine` is this one; a spec naming no
-machine belongs to `settings.default_machine`. The operator chat is the
+addresses (Tom's email addresses), and the chats a project spec lists
+(`chats`) whose `machine` is this one; a spec naming no machine belongs to
+`settings.default_machine`. Tom's Telegram and Slack DMs are owned only
+through a spec (`valor.toml`), so a second Mac's bridge never takes them. The operator chat is the
 bridge's whose channel is `settings.operator_channel`: the Telegram
 operator chat, a Slack chat, or the one local chat, `local`.
 
@@ -368,8 +369,6 @@ def owned(channel: str) -> list[str]:
     ids: list[str] = []
     if channel == "email":
         ids.extend(settings.operator_email)
-    if channel == "slack":
-        ids.extend(settings.operator_slack_ids)
     if channel == "local" and settings.operator_channel == "local":
         ids.append(LOCAL_CHAT)
     elif (

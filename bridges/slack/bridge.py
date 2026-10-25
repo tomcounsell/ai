@@ -160,6 +160,9 @@ class SlackBridge:
             finally:
                 self._busy = False
 
+    async def connected(self) -> bool:
+        return await self.wire.connected()
+
     async def tick(self) -> None:
         if await self.wire.connected():
             await self.fill()

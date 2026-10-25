@@ -127,6 +127,9 @@ class TelegramBridge:
             finally:
                 self._busy = False
 
+    async def connected(self) -> bool:
+        return self.wire.connected()
+
     async def tick(self) -> None:
         """On every wake: drop settled send records, and fill the gap; a
         pass under a flood wait waits for the next wake."""

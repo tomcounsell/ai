@@ -683,3 +683,111 @@ def test_each_dm_is_listed_under_the_project_its_person_works_on():
         assert f"telegram:{ident}" not in listed, ident
     for address in ("nav@krystallabs.io", "gcason2@gmail.com", "grahamhderry@gmail.com"):
         assert f"email:{address}" not in listed, address
+
+
+# -- connected means the bridge's own connection is up (Tom, 2026-10-25) ------------
+
+
+def test_a_bridge_is_connected_only_while_its_own_connection_is_up(fresh, tmp_path, monkeypatch):
+    """Its lock connection runs from start, before it connects, so a Slack
+    bridge whose connect keeps failing is not connected; once up it is,
+    from then; after a disconnect, or a listener the database dropped and
+    `wait` replaced while it was up, as it is."""
+    from core import bridge as port
+    from core import permissions
+
+    monkeypatch.setattr(permissions, "AGENTS", tmp_path)
+    (tmp_path / f"{rollout.BRIDGES['slack']}.plist").write_bytes(b"")
+    slack = FakeBridge("slack")
+    up = [False]
+
+    async def connected():
+        return up[0]
+
+    slack.connected = connected
+
+    async def go():
+        seen = []
+        lock = await db.connect(fresh, application_name="valor-slack@abc123")
+        listener = await db.connect(fresh, application_name="valor-slack-listen")
+        async with await db.connect(fresh) as conn:
+            outbox = port.Outbox(slack, {}, conn, conn, listener, fresh)
+
+            async def state():
+                await outbox.report()
+                (s,) = [s for s in await rollout.services(conn) if s["name"] == "slack"]
+                seen.append((s["commit"], s["since"] is not None))
+                return s["since"]
+
+            await state()
+            up[0] = True
+            since = await state()
+            await conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                               "WHERE application_name LIKE 'valor-slack-up@%%'")  # fmt: skip
+            with bridges.configure(serve_tick_s=0.05):
+                assert await outbox.wait() is False
+            again = await state()
+            up[0] = False
+            await state()
+            await outbox.listener.close()
+        await lock.close()
+        return seen, since, again
+
+    seen, since, again = run(go())
+    assert seen == [("abc123", False), ("abc123", True), ("abc123", True), ("abc123", False)]
+    assert since == again and rollout.states([{"name": "slack", "since": since}]) == {
+        "slack": f"connected since {since:%Y-%m-%d %H:%M:%S} UTC"
+    }
+    assert rollout.states([{"name": "kernel", "since": since}, {"name": "slack", "since": None}]) == {
+        "slack": "not connected"
+    }
+
+
+def test_an_update_reports_each_bridges_state_waiting_for_one_it_installed(fresh, tmp_path, monkeypatch):
+    """The `rollout.ended` row names each installed bridge connected or
+    not; a bridge the setup check just installed is waited for, and one
+    that never connects in `BRIDGE_WAIT_S` is named not connected."""
+    import time
+
+    from core import permissions
+
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    monkeypatch.setattr(permissions, "AGENTS", agents)
+    for label in (rollout.BRIDGES["telegram"], rollout.BRIDGES["slack"]):
+        (agents / f"{label}.plist").write_bytes(b"")
+    monkeypatch.setattr(serve, "BRIDGE_WAIT_S", 3.0)
+    repo = Repo(tmp_path)
+
+    async def update(slack_comes: bool):
+        request = await asked(fresh)
+        telegram = await db.connect(fresh, application_name=f"valor-telegram-up@{int(time.time()) - 3600}")
+        k = kernel(fresh, repo, "none")
+        installed = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def setup():
+            loop.call_soon_threadsafe(installed.set)
+            return {"fixed": [permissions.SLACK]}
+
+        k.setup = setup
+        late = []
+
+        async def connects():  # the job the setup check loaded, connecting a second later
+            await installed.wait()
+            await asyncio.sleep(1.1)
+            late.append(await db.connect(fresh, application_name=f"valor-slack-up@{int(time.time())}"))
+
+        coming = asyncio.create_task(connects()) if slack_comes else None
+        await tick(k, fresh)
+        if coming:
+            await coming
+        for c in [telegram, *late]:
+            await c.close()
+        (ended,) = [r for r in typed(await rows(fresh, intake.UPDATES), "rollout.ended") if r["effect_id"] == request]
+        return ended["bridges"]
+
+    came, never = run(update(True)), run(update(False))
+    assert came["telegram"].startswith("connected since ") and came["slack"].startswith("connected since ")
+    assert never["slack"] == "not connected" and never["telegram"].startswith("connected since ")
+    assert serve.said(never) == f"slack not connected; telegram {never['telegram']}"

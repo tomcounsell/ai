@@ -15,8 +15,10 @@ suite = "cd behring && ./.venv/bin/python -m pytest -p no:cacheprovider -q --jun
 # "Eng: Cyndra Consulting", the team groups "Cyndra Dev Team" and "Cyndra
 # Devs", the DMs of Johann, Jess Mason and Hazem (Tom, 2026-10-25),
 # Charlie's address and the domain cyndra.ai.
+# #cyndra-dev in the Yudame Slack, the Slack twin of its Eng group (Tom, 2026-10-25).
 chats = [
     "telegram:-1003900483201",
+    "slack:T0B6E8JPE3C/C0CC2PWDETE",
     "telegram:-1003794218389",
     "telegram:-1004385743413",
     "telegram:6084902164",
@@ -35,6 +37,7 @@ rooms."telegram:-1004385743413" = "Cyndra Devs, a Cyndra developers' group. No e
 rooms."telegram:6084902164" = "A direct message with Johann, who works with Tom on Cyndra. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
 rooms."telegram:7388810030" = "A direct message with Jess Mason, who works with Tom on Cyndra. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
 rooms."telegram:7178632018" = "A direct message with Hazem, who works with Tom on Cyndra. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
+rooms."slack:T0B6E8JPE3C/C0CC2PWDETE" = "Engineering on Cyndra's consulting monorepo: one directory per client engagement, Behring's in production."
 rooms.email = "Email with the Cyndra team, as a teammate. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
 machine = "Valor the Bald"
 knowledge_base = "Cyndra"

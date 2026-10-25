@@ -19,6 +19,14 @@ Every update checks this Mac's setup (`ensure`): it builds Valor.app when
 it is missing, puts the launcher first in every `com.valor.*` job that
 still runs a bare Python, and reloads those jobs, the kernel's own last,
 from a one-shot job of its own, since a job cannot reload itself.
+
+It also makes sure Slack is served where this Mac's projects list a
+Slack chat (`slack`, Tom, 2026-10-25): `python -m bridges.slack keys`
+copies this Mac's own app's tokens from the vault (none: `slack: no keys`,
+and nothing is started), a missing `com.valor.kernel.slack` job is written
+from `python -m bridges.slack --plist` with the settings of this Mac's
+Telegram job, and loaded, and a job whose keys changed is reloaded. Each
+Mac has its own app, so this never starts a second bridge on one token.
 """
 
 import ctypes
@@ -49,6 +57,8 @@ GRANTS = (
 )
 WAIT_S = 900
 AGENTS = Path.home() / "Library/LaunchAgents"
+SLACK = "com.valor.kernel.slack"  # `bridges/slack/__main__.py`'s LABEL
+TELEGRAM = "com.valor.kernel.telegram"
 
 
 def build(exe: Path) -> None:
@@ -85,6 +95,7 @@ def ensure(
     if not exe.exists():
         build(exe)
         fixed.append(exe.parents[2].name)
+    slack(agents, reload, fixed, failed)
     jobs = sorted(agents.glob("com.valor.*.plist"), key=lambda p: p.stem == own)
     for plist in jobs:
         job = plistlib.loads(plist.read_bytes())
@@ -97,6 +108,46 @@ def ensure(
         if why := reload(plist.stem, plist, plist.stem == own):
             failed.append(f"{plist.stem}: {why}")
     return {k: v for k, v in (("fixed", fixed), ("failed", failed)) if v}
+
+
+def slack(
+    agents: Path,
+    reload: Callable[[str, Path, bool], str | None],
+    fixed: list[str],
+    failed: list[str],
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> None:
+    """The Slack bridge served on this Mac when a spec placed here lists a
+    Slack chat (module docstring); each change or failure appended to
+    `fixed` or `failed`."""
+    from core import workspace
+
+    if not any(c.startswith("slack:") for spec in workspace.Spec.here() for c in spec.chats):
+        return
+    plist = agents / f"{SLACK}.plist"
+    telegram = agents / f"{TELEGRAM}.plist"
+    env = dict(os.environ)
+    if telegram.exists():
+        job = plistlib.loads(telegram.read_bytes()).get("EnvironmentVariables", {})
+        env |= {k: v for k, v in job.items() if k not in ("PATH", "HOME")}
+    keys = run([sys.executable, "-m", "bridges.slack", "keys"], cwd=ROOT, env=env, capture_output=True, text=True)
+    if keys.returncode != 0:
+        why = (keys.stderr.strip() or keys.stdout.strip()).splitlines()[-1:] or [f"status {keys.returncode}"]
+        failed.append(f"slack: no keys ({why[0]})")
+        return
+    if plist.exists():
+        if ": written" not in keys.stdout:
+            return
+        fixed.append(f"{SLACK}: new keys")
+    else:
+        made = run([sys.executable, "-m", "bridges.slack", "--plist"], cwd=ROOT, env=env, capture_output=True)
+        if made.returncode != 0:
+            failed.append(f"{SLACK}: --plist exited with status {made.returncode}")
+            return
+        plist.write_bytes(made.stdout)
+        fixed.append(SLACK)
+    if why := reload(SLACK, plist, False):
+        failed.append(f"{SLACK}: {why}")
 
 
 def _reload(label: str, plist: Path, own: bool) -> str | None:

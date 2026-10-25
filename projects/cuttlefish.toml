@@ -20,9 +20,11 @@ setup = ["PATH=\"$PATH:/opt/homebrew/opt/postgresql@18/bin\" SDKROOT=/Library/De
 # playwright, which the `test` extra does not install.
 suite = "uv run pytest -p no:cacheprovider -q --ignore=apps/podcast/tests/e2e --junitxml={junit} apps"
 # "Eng: Cuttlefish". Its email contacts were removed (Tom, 2026-10-25).
-chats = ["telegram:-1003801797780"]
+# #cuttlefish-dev in the Yudame Slack, the Slack twin of its Eng group (Tom, 2026-10-25).
+chats = ["telegram:-1003801797780", "slack:T0B6E8JPE3C/C0CBHMQBYET"]
 # What each chat is for, rendered into every turn of its chat session.
 rooms."telegram:-1003801797780" = "Engineering on the Cuttlefish product."
+rooms."slack:T0B6E8JPE3C/C0CBHMQBYET" = "Engineering on the Cuttlefish product."
 machine = "Valor the Captain"
 
 [env]

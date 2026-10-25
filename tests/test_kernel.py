@@ -1484,7 +1484,10 @@ def test_each_chat_gets_its_rooms_entry_else_tom_owns_or_emails_else_none(tmp_pa
 
 def test_every_listed_chat_resolves_to_its_description_on_its_machine():
     real = pathlib.Path(__file__).parent.parent / "projects"
-    with bridges.configure(projects_dir=str(real), operator_telegram_id="179144806"):
+    toms = ("telegram:179144806", "slack:T0B6E8JPE3C/U0B78H17XQ8")
+    with bridges.configure(
+        projects_dir=str(real), operator_telegram_id="179144806", operator_slack_ids=("T0B6E8JPE3C/U0B78H17XQ8",)
+    ):
         specs = workspace.Spec.all()
         listed = {chat: spec for spec in specs for chat in spec.chats}
         assert set(listed) >= {
@@ -1507,7 +1510,7 @@ def test_every_listed_chat_resolves_to_its_description_on_its_machine():
                 assert found == spec.rooms["email"] != intake.EMAIL_ROOM, chat
             else:
                 assert found == (
-                    intake.TOMS_OWN_ROOM if chat == "telegram:179144806" else spec.rooms[chat]
+                    intake.TOMS_OWN_ROOM if chat in toms else spec.rooms[chat]
                 ), chat
         assert intake.room("email", "<root@mail.test>", "valor") == intake.EMAIL_ROOM
 
@@ -1680,6 +1683,94 @@ def test_the_real_specs_keep_team_chats_quiet_and_the_rest_answering(tmp_path):
     assert "No engineering or SDLC work starts here" in specs["valor"].rooms[general]
     for name, ids in answering.items():
         assert {f"telegram:{i}" for i in ids} <= set(specs[name].chats) - set(specs[name].mentions), name
+
+
+YUDAME_SLACK = "T0B6E8JPE3C"
+TOM_SLACK = f"{YUDAME_SLACK}/U0B78H17XQ8"
+
+
+def real_specs(**more) -> dict[str, workspace.Spec]:
+    root = pathlib.Path(__file__).parent.parent / "projects"
+    with bridges.configure(projects_dir=str(root), **more):
+        return {s.name: s for s in workspace.Spec.all()}
+
+
+def test_each_project_has_a_slack_dev_channel_answering_as_its_eng_group():
+    """`<project>-dev` in the Yudame Slack is the Slack twin of the
+    project's Eng group: every message wakes it and its room is the Eng
+    group's (Tom, 2026-10-25); yudame, with no Eng group, has its own."""
+    eng = {"valor": "-1003449100931", "popoto": "-5189826365", "cuttlefish": "-1003801797780",
+           "psyoptimal": "-1003743854645", "cyndra": "-1003900483201", "satsol": "-5136818964",
+           "mastery": "-5565152737", "gato-os": "-1003513124705", "mondayflowers": "-5302491300",
+           "counsell-home": "-5174105183", "yudame": None}  # fmt: skip
+    specs = real_specs()
+    channels = set()
+    for name, spec in specs.items():
+        dev = [c for c in spec.chats if c.startswith(f"slack:{YUDAME_SLACK}/C") and c != "slack:T0B6E8JPE3C/C0B67T44KEF"]
+        if name not in eng:
+            assert dev == [], name
+            continue
+        (chat,) = dev
+        channels.add(chat)
+        assert chat not in spec.mentions, name
+        room = spec.rooms[chat]
+        assert room == (spec.rooms[f"telegram:{eng[name]}"] if eng[name] else "Engineering on the yuda.me site.")
+    assert len(channels) == len(eng)
+
+
+def test_toms_slack_dm_is_owned_only_on_the_mac_valor_is_placed_on():
+    """Tom's ids alone own nothing, so a second Mac's Slack bridge never
+    takes his DM; each Mac's bridge owns its own projects' dev channels."""
+    owned = {}
+    for mac in ("Valor the Cowboy", "Valor the Pirate"):
+        root = pathlib.Path(__file__).parent.parent / "projects"
+        with bridges.configure(projects_dir=str(root), machine=mac, default_machine=mac,
+                               operator_slack_ids=(TOM_SLACK,), operator_channel="telegram"):  # fmt: skip
+            owned[mac] = set(intake.owned("slack"))
+    specs = real_specs()
+    assert TOM_SLACK in owned["Valor the Cowboy"] and TOM_SLACK not in owned["Valor the Pirate"]
+    for name, spec in specs.items():
+        slack = {c.removeprefix("slack:") for c in spec.chats if c.startswith("slack:")}
+        mine = spec.machine if spec.machine in owned else None
+        for mac, ids in owned.items():
+            assert (slack <= ids) if mac == mine else not (slack & ids), (name, mac)
+
+
+def test_in_a_slack_dev_channel_every_message_wakes_the_session_and_tom_is_tom(dsn, tmp_path):
+    """As in an Eng group: anyone's message steers the one session, naming
+    its sender; Tom, by his Slack id, is `tom`."""
+    dev, tom = "T0ABC/C0DEV", "T0ABC/U0TOM"
+    with bridges.operator(tmp_path, operator_slack_ids=(tom,)):
+        (pathlib.Path(settings.projects_dir) / "flowers.toml").write_text(
+            'name = "flowers"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
+            f'chats = ["slack:{dev}"]\nrooms."slack:{dev}" = "Engineering on the florist site."\n'
+        )
+
+        async def says(text, sender, name, ts):
+            inbound = intake.Inbound(
+                channel="slack", chat_id=dev, chat_kind="group", message_id=ts, sender_id=sender,
+                sender_name=name, sent_at="2026-10-25T11:00:00Z", text=text,
+            )  # fmt: skip
+            async with await db.connect(dsn) as conn:
+                got = await intake.receive(conn, inbound)
+                await intake.bind(conn)
+            (bound,) = await bridges.of_type(dsn, "message.bound", received_id=got.received_id)
+            return bound
+
+        async def go():
+            first = await says("morning", "T0ABC/U0KIM", "Kim", at(1))
+            said = [await says(t, who, name, at(n)) for n, (t, who, name) in enumerate(
+                [("the checkout 500s", tom, "Tom"), ("I see it too", "T0ABC/U0KIM", "Kim")], 2)]  # fmt: skip
+            async with await db.connect(dsn) as conn:
+                b = await tasks.brief(conn, first["task_id"])
+            return first, said, b, await rows_of(dsn, first["task_id"])
+
+        first, said, b, rows = run(go())
+        room = intake.room("slack", dev)
+    assert [x["as"] for x in said] == ["steer", "steer"] and {x["task_id"] for x in said} == {first["task_id"]}
+    assert b.chat == {"channel": "slack", "chat_id": dev} and room == "Engineering on the florist site."
+    steered = [r["payload"]["provenance"]["by"] for r in rows if r["type"] == "message.steered"]
+    assert steered == ["Kim", "tom", "Kim"]
 
 
 def test_an_email_thread_is_a_chat_whose_session_every_email_in_it_steers(dsn, mail):

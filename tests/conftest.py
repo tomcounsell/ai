@@ -154,6 +154,15 @@ def no_repo_env(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_launch_agents(tmp_path_factory, monkeypatch):
+    """Every test reads its installed launchd jobs from an empty folder,
+    never this Mac's own (`rollout.services`)."""
+    from core import permissions
+
+    monkeypatch.setattr(permissions, "AGENTS", tmp_path_factory.getbasetemp() / "LaunchAgents")
+
+
+@pytest.fixture(autouse=True)
 def release_ports(request):
     """After a test that used the ledger, stop the services of every task
     whose workspace still holds ports and record `workspace.removed`, so a

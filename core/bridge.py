@@ -45,6 +45,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import time
 import urllib.request
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
@@ -407,6 +408,10 @@ class Bridge(Protocol):
     # A bridge may define `async def reconcile(self, outbox)`, which then
     # replaces the outbox's own serial reconcile at start and on each wake,
     # for a bridge that settles each effect as its own task.
+    # A bridge may define `async def connected(self)`, whether its own
+    # connection to its service is up; the outbox names its listening
+    # connection by it (`Outbox.report`). A bridge without one is up while
+    # its outbox runs.
     # A bridge may define `async def read(self, chat, q, limit, before)`,
     # a chat's messages newest first (`q` a text search, `before` a message
     # id to page back from); `serve` then answers it for turns (`reads`).
@@ -422,7 +427,14 @@ class Outbox:
     waits for a row of any of these kinds, or `settings.serve_tick_s`. On a
     row's wake it yields again first, so a 👀 is placed before the bridge's
     gap fill runs; then on either wake it reconciles this channel's
-    dangling sends, calls the bridge's `tick`, and yields again."""
+    dangling sends, calls the bridge's `tick`, and yields again.
+
+    Before each round it reports whether the bridge is connected (`report`):
+    its listening connection is named `valor-<channel>-up@<epoch>`, the
+    second it came up, while the bridge's own connection is up, and
+    `valor-<channel>-listen` while it is down, which `rollout.services`
+    reads. The lock connection is held from start, before the bridge
+    connects, so it says only that the process runs."""
 
     def __init__(
         self,
@@ -440,12 +452,15 @@ class Outbox:
         self.conn = conn
         self.perform_conn = perform_conn
         self.listener = listener
+        self.up_since: int | None = None
+        self.named = f"valor-{self.channel}-listen"
 
     def __aiter__(self) -> AsyncIterator[Release | NoticeDue | ReactionDue]:
         return self._items()
 
     async def _items(self) -> AsyncIterator[Release | NoticeDue | ReactionDue]:
         while True:
+            await self.report()
             for item in await self.due():
                 yield item
             if await self.wait():
@@ -545,6 +560,30 @@ class Outbox:
                 due.append(item)
         return due
 
+    def listen_name(self) -> str:
+        if self.up_since is None:
+            return f"valor-{self.channel}-listen"
+        return f"valor-{self.channel}-up@{self.up_since}"
+
+    async def report(self) -> None:
+        """Name the listening connection by whether the bridge is connected
+        (class docstring). Run between waits, never inside `notifies`. A
+        dead listener is left to `wait`, which names its new one."""
+        connected = getattr(self.bridge, "connected", None)
+        up = await connected() if connected is not None else True
+        if not up:
+            self.up_since = None
+        elif self.up_since is None:
+            self.up_since = int(time.time())
+        name = self.listen_name()
+        if name == self.named:
+            return
+        try:
+            await self.listener.execute("SELECT set_config('application_name', %s, false)", (name,))
+        except psycopg.OperationalError:
+            return
+        self.named = name
+
     async def wait(self) -> bool:
         """Until a release, notice, or reaction row is written (true), or the
         tick (false)."""
@@ -561,12 +600,13 @@ class Outbox:
             # new one; `due` catches up what was missed.
             await asyncio.sleep(settings.serve_tick_s)
             try:
-                listener = await db.connect(self.dsn, application_name=f"valor-{self.channel}-listen")
+                listener = await db.connect(self.dsn, application_name=self.listen_name())
                 await listener.execute("LISTEN valor_events")
             except psycopg.OperationalError:
                 return False
             await self.listener.close()
             self.listener = listener
+            self.named = self.listen_name()
         return False
 
     async def perform(self, item: Release, conn=None) -> broker.Outcome:

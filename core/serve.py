@@ -367,6 +367,7 @@ async def recover(
             _log(f"the kernel's checkout cannot be read; rollouts not ended: {exc}")
             ending = []
         kicked: dict[str, dict] = {}
+        acting = datetime.now(UTC).replace(microsecond=0)
         if ending and kick is not None:
             try:
                 kicked = await restart_bridges(conn, checkout, running, kick)
@@ -375,6 +376,8 @@ async def recover(
             done["bridges"] = sorted(kicked.get("restarted", {}))
         if ending and setup is not None:
             kicked |= await _setup(setup)
+        if ending:
+            kicked |= await bridge_states(conn, kicked, acting)
         for task_id, payload in ending:
             async with conn.transaction():
                 await ledger.append(conn, task_id, "rollout.ended", payload | kicked)
@@ -392,6 +395,39 @@ async def _setup(setup: Callable[[], dict[str, list[str]]]) -> dict[str, dict]:
     if done:
         _log(f"setup: {json.dumps(done)}")
     return {"setup": done} if done else {}
+
+
+# How long an update's report waits for a bridge it restarted or installed
+# to connect before naming it not connected.
+BRIDGE_WAIT_S = 60.0
+
+
+async def bridge_states(conn, done: dict[str, Any], after: datetime) -> dict[str, dict[str, str]]:
+    """`bridges`, each installed bridge's state (`rollout.states`) for an
+    update's `rollout.ended` row. `done` is what the update restarted and
+    set up, from `after` on; a bridge among them is waited for, at most
+    `BRIDGE_WAIT_S`, until it connects after `after` (its old process,
+    killed by the restart, may still be connected), else it is named not
+    connected."""
+    acted = [*(done.get("restarted") or {}), *(done.get("setup") or {}).get("fixed", [])]
+    labels = {label: channel for channel, label in rollout.BRIDGES.items()}
+    waiting = {labels[a.split(":")[0]] for a in acted if a.split(":")[0] in labels}
+    deadline = time.monotonic() + BRIDGE_WAIT_S
+    while True:
+        found = await rollout.services(conn)
+        for s in found:
+            if s["name"] in waiting and s["since"] and s["since"] < after:
+                s["since"] = None
+        down = {s["name"] for s in found if not s["since"]}
+        if not (down & waiting) or time.monotonic() >= deadline:
+            states = rollout.states(found)
+            return {"bridges": states} if states else {}
+        await asyncio.sleep(2)
+
+
+def said(bridges: dict[str, str]) -> str:
+    """The bridges' states as one sentence's clause."""
+    return "; ".join(f"{name} {state}" for name, state in sorted(bridges.items()))
 
 
 async def restart_bridges(
@@ -632,7 +668,9 @@ class Kernel:
                 return
             m = rollout.Merge(request_id, intake.UPDATES, row, url, branch, tip)
             if await git.threaded(git.is_ancestor, self.checkout, tip, self.started):
+                acting = datetime.now(UTC).replace(microsecond=0)
                 checked = await _setup(self.setup) if self.setup else {}
+                checked |= await bridge_states(conn, checked, acting)
                 await self._ended(conn, m, outcome="up_to_date", sha=tip, **checked)
             else:
                 merges = sorted([*merges, m], key=lambda x: x.row)
@@ -841,6 +879,8 @@ class Kernel:
                     text += f" Not restarted: {', '.join(sorted(ended['restart_failed']))}."
             else:
                 text = f"The update ended {ended.get('outcome')}: {ended.get('reason') or 'no reason given'}."
+            if ended.get("bridges"):
+                text += f" Bridges: {said(ended['bridges'])}."
             await notices.request(
                 conn,
                 intake.UPDATES,

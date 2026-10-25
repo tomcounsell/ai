@@ -596,12 +596,16 @@ async def _update(conn, args) -> None:
             start = ended.get("from") or (rows.get("rollout.restarting") or {}).get("from")
             if ended.get("outcome") == "up_to_date":
                 print(f"up to date at {ended['sha']}")
-                return
-            print(f"{ended.get('outcome')}: from {start} to {ended.get('head')}")
+            else:
+                print(f"{ended.get('outcome')}: from {start} to {ended.get('head')}")
             for label in sorted(ended.get("restarted") or {}):
                 print(f"restarted {label}")
             for label, why in sorted((ended.get("restart_failed") or {}).items()):
                 print(f"not restarted {label}: {why}")
+            for line in (ended.get("setup") or {}).get("failed", []):
+                print(f"setup failed: {line}")
+            for name, state in sorted((ended.get("bridges") or {}).items()):
+                print(f"{name} {state}")
             return
         if failed is not None:
             raise SystemExit(f"failed at {failed['step']}: {failed['reason']}")

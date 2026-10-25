@@ -77,7 +77,8 @@ bridge's restart:
   a bridge started by hand that holds the lock is not replaced.
 
 Imports the standard library, `core.binaries`, `core.credentials`,
-`core.git`, and `core.targets`.
+`core.git`, `core.permissions` (where the launchd jobs are), and
+`core.targets`.
 """
 
 import ast
@@ -87,10 +88,11 @@ import re
 import signal
 import subprocess
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from core import binaries, credentials, git, targets
+from core import binaries, credentials, git, permissions, targets
 
 REF = "refs/valor-kernel/rollout"
 # Each bridge's launchd job, by channel: `LABEL` in `bridges/<name>/__main__.py`.
@@ -452,9 +454,12 @@ def _run(checkout: Path, argv: list[str], env: dict[str, str], name: str) -> Non
 
 async def services(conn) -> list[dict[str, Any]]:
     """The kernel and each bridge connected or installed on this machine (its
-    launchd plist), from its lock connection (`valor-kernel@<commit>`,
-    `valor-<channel>@<commit>`): `name`, `commit`, and `since`, when it
-    connected (None: not connected)."""
+    launchd plist): `name`, `commit` from its lock connection
+    (`valor-kernel@<commit>`, `valor-<channel>@<commit>`), and `since`,
+    when it connected (None: not connected). A bridge's is the second its
+    outbox named its listening connection `valor-<channel>-up@<epoch>`
+    (`core.bridge.Outbox.report`): its own connection to its service is
+    up, not only its process. The kernel's is its lock connection's start."""
     rows = await (
         await conn.execute(
             "SELECT application_name, backend_start FROM pg_stat_activity "
@@ -462,13 +467,28 @@ async def services(conn) -> list[dict[str, Any]]:
             "AND application_name LIKE 'valor-%%@%%'"
         )
     ).fetchall()
-    found = {}
-    for app, since in rows:
-        name, _, commit = app.removeprefix("valor-").partition("@")
-        found[name] = {"name": name, "commit": commit or None, "since": since}
-    agents = Path.home() / "Library/LaunchAgents"
-    installed = [c for c, label in BRIDGES.items() if (agents / f"{label}.plist").exists()]
+    found, up = {}, {}
+    for app, started in rows:
+        name, _, at = app.removeprefix("valor-").partition("@")
+        if name.endswith("-up"):
+            if at.isdigit():
+                up[name.removesuffix("-up")] = datetime.fromtimestamp(int(at), UTC)
+            continue
+        found[name] = {"name": name, "commit": at or None, "since": started if name == "kernel" else None}
+    for name, since in up.items():
+        found.setdefault(name, {"name": name, "commit": None, "since": None})["since"] = since
+    installed = [c for c, label in BRIDGES.items() if (permissions.AGENTS / f"{label}.plist").exists()]
     return [
         found.get(name, {"name": name, "commit": None, "since": None})
         for name in ["kernel", *sorted(set(installed) | found.keys() - {"kernel"})]
     ]
+
+
+def states(services: list[dict[str, Any]]) -> dict[str, str]:
+    """Each bridge's state in words, as an update reports it: `connected
+    since <UTC time>` or `not connected`."""
+    return {
+        s["name"]: f"connected since {s['since']:%Y-%m-%d %H:%M:%S} UTC" if s["since"] else "not connected"
+        for s in services
+        if s["name"] != "kernel"
+    }

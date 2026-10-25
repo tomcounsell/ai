@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import plistlib
+import re
 import sys
 from pathlib import Path
 
@@ -35,6 +36,7 @@ SCOPES = [
     "mpim:history",
     "channels:read",
     "groups:read",
+    "groups:write",
     "im:read",
     "mpim:read",
     "im:write",
@@ -89,17 +91,26 @@ def credentials() -> tuple[str, str]:
     return keys["SLACK_APP_TOKEN"], keys["SLACK_USER_TOKEN"]
 
 
-def copy(vault_env: str | Path, path: Path) -> dict[str, str]:
-    """Copy the tokens from the vault into `slack-keys`, under the team id
-    the user token's `auth.test` names."""
+def vault_names(machine: str) -> dict[str, str]:
+    """Each key's name in the vault for `machine`: each Mac has its own app,
+    so one Socket Mode token never runs on two bridges (`SLACK_APP_TOKEN_
+    VALOR_THE_PIRATE`)."""
+    suffix = re.sub(r"[^A-Z0-9]+", "_", machine.upper()).strip("_")
+    return {k: f"{k}_{suffix}" for k in KEYS}
+
+
+def copy(vault_env: str | Path, path: Path, machine: str) -> dict[str, str]:
+    """Copy `machine`'s tokens from the vault into `slack-keys`, under the
+    team id the user token's `auth.test` names."""
     from bridges.slack.wire import team_of
     from core.credentials import _parse_env, copy_keys
 
-    token = _parse_env(Path(vault_env).read_text()).get("SLACK_USER_TOKEN")
+    names = vault_names(machine)
+    token = _parse_env(Path(vault_env).read_text()).get(names["SLACK_USER_TOKEN"])
     if not token:
-        raise SystemExit(f"SLACK_USER_TOKEN is missing from {vault_env}")
+        raise SystemExit(f"{names['SLACK_USER_TOKEN']} is missing from {vault_env}")
     team = team_of(token)
-    return copy_keys(vault_env, path, [f"{team}_{k}" for k in KEYS], {f"{team}_{k}": k for k in KEYS})
+    return copy_keys(vault_env, path, [f"{team}_{k}" for k in KEYS], {f"{team}_{k}": names[k] for k in KEYS})
 
 
 def plist(*, python: str | None = None) -> bytes:
@@ -127,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plist", action="store_true", help="print the launchd job")
     sub = parser.add_subparsers(dest="verb")
     sub.add_parser("run", help="run the bridge")
-    sub.add_parser("keys", help="copy the app and user tokens from the vault into the key directory")
+    sub.add_parser("keys", help="copy this machine's app and user tokens from the vault into the key directory")
     sub.add_parser("manifest", help="print the app manifest for api.slack.com")
     args = parser.parse_args(argv)
 
@@ -141,9 +152,10 @@ def main(argv: list[str] | None = None) -> int:
         from bridges.slack.kernel import keyfile
         from core.settings import settings
 
-        for name, status in copy(settings.vault_env, keyfile()).items():
+        statuses = copy(settings.vault_env, keyfile(), settings.machine)
+        for name, status in statuses.items():
             print(f"{name}: {status}")
-        return 0
+        return 1 if "missing" in statuses.values() else 0
     if args.verb == "run":
         from bridges.slack.bridge import SlackBridge
         from bridges.slack.kernel import from_core, seen_path

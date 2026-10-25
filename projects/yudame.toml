@@ -12,9 +12,11 @@ setup = ["npm ci"]
 suite = "npm run build"
 # "Yudame", the company's team chat, which waits to be mentioned (Tom,
 # 2026-10-17).
-chats = ["telegram:-4719889199"]
+# #yudame-dev in the Yudame Slack, engineering on the site (Tom, 2026-10-25).
+chats = ["telegram:-4719889199", "slack:T0B6E8JPE3C/C0CBX4MBN1L"]
 mentions = ["telegram:-4719889199"]
 # What each chat is for, rendered into every turn of its chat session;
-rooms = { "telegram:-4719889199" = "The company's team chat, with Lewis and Rain; answer whoever mentions you. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to the Eng group of the project they are about, else Tom." }
+rooms."telegram:-4719889199" = "The company's team chat, with Lewis and Rain; answer whoever mentions you. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to the Eng group of the project they are about, else Tom."
+rooms."slack:T0B6E8JPE3C/C0CBX4MBN1L" = "Engineering on the yuda.me site."
 machine = "Valor the Pirate"
 knowledge_base = "Yudame"
