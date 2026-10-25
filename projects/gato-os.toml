@@ -1,6 +1,5 @@
-# gato-os: served by the Pirate (one Mac per client). No kernel runs as
-# "Valor the Pirate" until that Mac's rollout, so this spec and its chat
-# are inert until then. `client` follows the old config's owner; Tom may
+# gato-os: served by the Pirate (one Mac per client), which runs the
+# kernel and its Telegram bridge. `client` follows the old config's owner; Tom may
 # rename it.
 name = "gato-os"
 client = "chainstarters"
@@ -23,11 +22,13 @@ merge_url = "https://github.com/chainstarters/gato-os.git"
 suite = "mkdir -p target && printf '[profile.valor.junit]\\npath = \"junit.xml\"\\n' > target/valor-nextest.toml && { cargo nextest run --workspace --no-fail-fast --config-file target/valor-nextest.toml --profile valor; rc=$?; cp target/nextest/valor/junit.xml {junit}; exit $rc; }"
 # CI's gates, as AGENTS.md lists them.
 lint = "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && ./scripts/lint-all.sh"
-# "Eng: Gato", and the domain chainstarters.com.
-chats = ["telegram:-1003513124705", "email:@chainstarters.com"]
+# "Eng: Gato", Mike Berson's DM (Tom, 2026-10-25), and the domain
+# chainstarters.com.
+chats = ["telegram:-1003513124705", "telegram:469027377", "email:@chainstarters.com"]
 # What each chat is for, rendered into every turn of its chat session;
 # `email` is any email thread under the project.
 rooms."telegram:-1003513124705" = "Assessment and engineering for Chainstarters' Gato OS."
+rooms."telegram:469027377" = "A direct message with Mike Berson, who works with Tom on Gato OS. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Gato."
 rooms.email = "Email with the Chainstarters team, as a teammate. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Gato."
 machine = "Valor the Pirate"
 knowledge_base = "SOUL"

@@ -322,6 +322,7 @@ def workspace_turn(
         env = environment(harness.get("env", {}))
         env["PI_CODING_AGENT_DIR"] = agent_dir
         env["PI_OFFLINE"] = "1"
+        env["VALOR_RECORD_URL"] = f"{base_url}/record"  # valor-record (core/record.py)
         env["GIT_TERMINAL_PROMPT"] = "0"
         if harness.get("tmpdir"):
             env["TMPDIR"] = harness["tmpdir"]

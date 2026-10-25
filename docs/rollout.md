@@ -12,16 +12,18 @@ kernel in `~/src/ai-kernel-staging`; the swap, retirement and jobs (steps
 voice checks aside). The notes in steps 3, 9 and 10 are what that run
 found.
 
-**Order.** The Captain and the Bald next. Those two serve
-customers and teams and stay on the old system until the new one is shown
-a valid replacement. The bar, Tom's words (2026-10-16): "a successful
-teamwork session in a group telegram chat, where Valor acts properly
-according to his persona and accomplishes tasks with Tom and the team. The
-Eng: PsyOPTIMAL group is a great example of how well Valor has been working
-with the team for several months. The rebuild has to be as good if not
-better than that." Tom recorded it met on 2026-10-22 ([plans/team-chat.md](plans/team-chat.md), Done). Until each is cut over, its old updater is harmless: `main` was rewritten, so
-its fast-forward fails and it keeps running its own code (the Pirate's
-`logs/update.log`, 395 aborted fast-forwards).
+**Then the Captain and the Bald,** which serve customers and teams, once
+the new system was shown a valid replacement. The bar, Tom's words
+(2026-10-16): "a successful teamwork session in a group telegram chat,
+where Valor acts properly according to his persona and accomplishes tasks
+with Tom and the team. The Eng: PsyOPTIMAL group is a great example of how
+well Valor has been working with the team for several months. The rebuild
+has to be as good if not better than that." Tom recorded it met on
+2026-10-22 ([plans/team-chat.md](plans/team-chat.md), Done), and both had
+switched over by 2026-10-25 (Tom: "the other macs switched over
+already"). On 2026-10-25 each ran `com.valor.kernel` and
+`com.valor.kernel.telegram` from `~/src/ai`, and each ledger held messages
+from its projects' groups.
 
 Run from the Mac (or over SSH as `valorengels`), in `bash`:
 

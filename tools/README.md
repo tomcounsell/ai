@@ -19,6 +19,7 @@ Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and 
 Installed into every turn's `bin/` (`core/workspace.py` `WORKSPACE_TOOLS`, before each turn).
 
 - `look` (`read`): a page's screenshot and DOM ([docs/browser.md](../docs/browser.md)).
+- `valor_record.py`, as `valor-record`: `chats`, `messages [CHAT] [--search TEXT]`, `tasks`, `task ID` read the turn's own project's record (messages and their bindings, tasks, effects) from the kernel at `$VALOR_RECORD_URL` (`core/record.py`). Standard library and Python 3.9. A read; it writes nothing.
 - `valor_read.py`, as `valor-telegram` and `valor-slack` (`read`): `read [CHAT] [--search TEXT]` reads or searches a chat's history through its running bridge, with Valor's own account. Standard library and Python 3.9, the turn's `python3`. No send: sends stay broker effects.
 
 ## Voice

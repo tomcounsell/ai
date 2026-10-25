@@ -1,6 +1,5 @@
-# mondayflowers: served by the Pirate (one Mac per client). No kernel runs
-# as "Valor the Pirate" until that Mac's rollout, so this spec and its chat
-# are inert until then. `client` follows the old config's owner; Tom may
+# mondayflowers: served by the Pirate (one Mac per client), which runs the
+# kernel. `client` follows the old config's owner; Tom may
 # rename it.
 name = "mondayflowers"
 client = "mondayflowers"

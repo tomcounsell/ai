@@ -194,6 +194,7 @@ def workspace_turn(
         env = environment(harness.get("env", {}))
         env["CODEX_HOME"] = codex_home
         env[KEY_VARIABLE] = TURN_TOKEN
+        env["VALOR_RECORD_URL"] = f"{base_url}/record"  # valor-record (core/record.py)
         env["GIT_TERMINAL_PROMPT"] = "0"
         if harness.get("tmpdir"):
             env["TMPDIR"] = harness["tmpdir"]

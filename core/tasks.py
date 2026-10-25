@@ -15,7 +15,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from core import corrections, git, ledger, machine, memory, outcomes, persona
+from core import corrections, git, ledger, machine, memory, outcomes, persona, record
 from core.settings import resolve_model, settings
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
@@ -343,7 +343,9 @@ async def dispatch(
     now from the kernel's own checkout, never from the workspace), then the
     Brief: the task's commitments plus every
     correction in force, rendered from the ledger now, then what memory
-    recalls for it (`core.memory.recall`; none for a fresh session), never from a copy
+    recalls for it (`core.memory.recall`; none for a fresh session), and the
+    memory index of each other chat session of its project (`core.record.memories`; none
+    for a fresh session), never from a copy
     made when the task started, and for a task with a workspace, how the
     turn reaches Tom (`skills/sdlc/channel.md`, listing `offered`, the
     usage lines of the task's own performers) and the stage file for the state the task
@@ -382,6 +384,10 @@ async def dispatch(
     remembered = await memory.recall(conn, task_id, fresh)
     if remembered:
         sections.append(remembered)
+    if b.workspace and not fresh:
+        shared = await record.memories(conn, task_id)
+        if shared:
+            sections.append(shared)
     lines: list[str] = []
     if fresh:
         if fresh != "advice":  # the advisor answers in prose, in its own stage file

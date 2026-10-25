@@ -1,6 +1,4 @@
-# yudame: the yuda.me website, served by the Pirate. No kernel runs as
-# "Valor the Pirate" until that Mac's rollout, so this spec and its chat
-# are inert until then. `client` follows the old config's owner; Tom may
+# yudame: the yuda.me website, served by the Pirate, which runs the kernel. `client` follows the old config's owner; Tom may
 # rename it.
 name = "yudame"
 client = "yudame"

@@ -1,6 +1,5 @@
 # cuttlefish: served by the Captain (the old fleet's owner; one Mac per
-# client). No kernel runs as "Valor the Captain" until that Mac's own
-# install, so this spec and its chat are inert until then. Its client is
+# client), which runs the kernel and its Telegram bridge. Its client is
 # open for Tom. Built from docs/plans/cutover-data.md, section 2.1; the
 # suite has not run in the kernel.
 name = "cuttlefish"
@@ -20,13 +19,10 @@ setup = ["PATH=\"$PATH:/opt/homebrew/opt/postgresql@18/bin\" SDKROOT=/Library/De
 # over its testpaths, less apps/podcast/tests/e2e, whose conftest imports
 # playwright, which the `test` extra does not install.
 suite = "uv run pytest -p no:cacheprovider -q --ignore=apps/podcast/tests/e2e --junitxml={junit} apps"
-# "Eng: Cuttlefish", and the old system's customer-service contacts by
-# address (Tom's own, tom@yuda.me, is his already).
-chats = ["telegram:-1003801797780", "email:nav@krystallabs.io", "email:gcason2@gmail.com", "email:grahamhderry@gmail.com"]
-# What each chat is for, rendered into every turn of its chat session;
-# `email` is any email thread under the project.
+# "Eng: Cuttlefish". Its email contacts were removed (Tom, 2026-10-25).
+chats = ["telegram:-1003801797780"]
+# What each chat is for, rendered into every turn of its chat session.
 rooms."telegram:-1003801797780" = "Engineering on the Cuttlefish product."
-rooms.email = "Customer service for Cuttlefish by email: answer the client's questions and check status. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cuttlefish."
 machine = "Valor the Captain"
 
 [env]

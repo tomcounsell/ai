@@ -164,6 +164,7 @@ def workspace_turn(
     def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
         env = environment(harness.get("env", {}))
         env["ANTHROPIC_BASE_URL"] = base_url
+        env["VALOR_RECORD_URL"] = f"{base_url}/record"  # valor-record (core/record.py)
         if max_output_tokens is not None:
             env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
         env["GIT_TERMINAL_PROMPT"] = "0"

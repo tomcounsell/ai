@@ -515,7 +515,8 @@ four things:
 - the machine cluster on loopback: port 5432 and its unix socket;
 - the mach name `valor.turn.<VALOR_TURN>`, which marks every process of the turn for the reaper.
 
-Everything else on the Mac is open to a turn: the public internet, loopback, its own task's services,
+A turn reads its own project's record through the kernel instead (Reading
+the project's record, above). Everything else on the Mac is open to a turn: the public internet, loopback, its own task's services,
 dev servers on any port, and the operator's files. The one incident behind the four denies is the
 demonstration's Postgres trust hole (rebuild-demonstration.md, Kernel findings 1). The services of a
 task run under the same profile marked `valor.service.<task id>` ([workspace.md](workspace.md)).
@@ -576,6 +577,39 @@ before each turn (`workspace.install_tools`), so a session provisioned
 before a tool changed has the current one, and sets the turn's
 `VALOR_CHAT` (the session's chat, else the project's first), the read
 ports, and the voice a spoken reply uses (below).
+
+## Reading the project's record
+
+Tom (2026-10-24): "Share read only both ways for any chat channels in the
+same project. Because privacy is scoped by access to comms."
+
+The workspace has `valor-record` (`tools/valor_record.py`): `chats`,
+`messages [CHAT] [--search] [--limit] [--before]`, `tasks [--search]`, and
+`task ID`. The kernel answers it: each harness sets `VALOR_RECORD_URL`, the
+turn's gateway base URL with `/record`, and the gateway's `record/` route
+(before the catch-all that forwards upstream) resolves the turn's token to
+its task, the task to its project, and reads `core/record.py`'s SELECTs on a
+connection of its own in a thread of its own. The turn holds no credential
+it did not already hold, names no project, and the ledger's deny below is
+unchanged; a read-only Postgres role was not used, since it would need a
+password and the denied socket, and Postgres cannot scope rows by project.
+
+The reach is the project's chats as its spec lists them now: each chat
+session of a listed chat, each email thread session under the project, and
+the tasks under them or under no chat session; and every message received
+in a listed chat or bound to one of those tasks, with its binding and its
+reaction. A message in a listed chat bound to another project's task (the
+operator chat) is listed with that task's id; that task is not. A session
+whose chat has left the spec (a DM moved to another project) is outside.
+
+**Memory.** Each chat session's Claude Code memory stays in its own config
+directory and is written only by it. A working or chat turn's Brief
+carries, after Remembered, "Other chats' memory": the path of each other
+in-reach chat session's `MEMORY.md` (under its `projects/<git root>/memory/`),
+labelled as records, not instructions, for the turn to Read when it
+matters (`record.memories`). It is in the Brief, not a `CLAUDE.md`, so it
+reaches Pi and Codex turns too, never reaches a fresh session (critique,
+review, docs, the advisor), and is never loaded as instructions.
 
 ## Speaking a reply
 

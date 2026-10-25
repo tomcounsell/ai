@@ -1,6 +1,5 @@
 # psyoptimal: served by the Captain (the old fleet's owner; one Mac per
-# client). No kernel runs as "Valor the Captain" until that Mac's own
-# install, so this spec and its chat are inert until then. Its client is
+# client), which runs the kernel and its Telegram bridge. Its client is
 # open for Tom. From the draft in docs/plans/cutover-data.md, section 2.1.
 name = "psyoptimal"
 repo = "https://github.com/yudame/psyoptimal.git"
@@ -12,15 +11,19 @@ merge_url = "https://github.com/yudame/psyoptimal.git"
 services = ["postgres"]
 setup = ["PATH=\"$PATH:/opt/homebrew/opt/postgresql@18/bin\" SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk uv sync --frozen"]
 suite = "uv run pytest -p no:cacheprovider -q --junitxml={junit} apps/team apps/public apps/api"
-# "Eng: PsyOPTIMAL", the team group "PsyOPTIMAL", and the domains
-# psyoptimal.com and psyoptimalsports.com. Team chats wait to be mentioned
+# "Eng: PsyOPTIMAL", the team group "PsyOPTIMAL", the DMs of Charlie and
+# Lewis Parrott (Tom, 2026-10-25), and the domains psyoptimal.com and
+# psyoptimalsports.com. Team chats wait to be mentioned
 # (Tom, 2026-10-17).
-chats = ["telegram:-1003743854645", "telegram:-1002600253717", "email:@psyoptimal.com", "email:@psyoptimalsports.com"]
+chats = ["telegram:-1003743854645", "telegram:-1002600253717", "telegram:7312372670", "telegram:7820562338",
+         "email:@psyoptimal.com", "email:@psyoptimalsports.com"]
 mentions = ["telegram:-1002600253717"]
 # What each chat is for, rendered into every turn of its chat session;
 # `email` is any email thread under the project.
 rooms."telegram:-1003743854645" = "Engineering on Psyoptimal, and assessment questions with Lewis."
 rooms."telegram:-1002600253717" = "The PsyOPTIMAL team group, with Lewis and his team. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: PsyOPTIMAL."
+rooms."telegram:7312372670" = "A direct message with Charlie, who works with Tom on Psyoptimal. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: PsyOPTIMAL."
+rooms."telegram:7820562338" = "A direct message with Lewis Parrott, who works with Tom on Psyoptimal. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: PsyOPTIMAL."
 rooms.email = "Email with the PsyOPTIMAL team, as a teammate. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: PsyOPTIMAL."
 machine = "Valor the Captain"
 

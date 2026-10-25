@@ -1,6 +1,9 @@
 """The model gateway: the one path a turn's model calls take.
 
-A local HTTP proxy with two routes. A turn is pointed at it with a per-turn
+It also answers a turn's `valor-record` (`GET <base>/record/<verb>`) from
+`core/record.py`, for the project of the token's task, never upstream.
+
+A local HTTP proxy with two model routes. A turn is pointed at it with a per-turn
 token in the path (`ANTHROPIC_BASE_URL`, or `<base>/openai/v1` for an
 OpenAI client), so every call the harness makes, including its own side
 calls, passes through here.
@@ -76,7 +79,7 @@ import aiohttp
 from aiohttp import web
 from yarl import URL
 
-from core import binaries, credentials, db, spending, tasks
+from core import binaries, credentials, db, record, spending, tasks
 from core.ledger import new_id
 from core.settings import settings
 
@@ -391,6 +394,8 @@ class Gateway:
 
     async def start(self, host: str = "127.0.0.1", port: int = 0) -> str:
         app = web.Application(client_max_size=64 * 1024 * 1024)
+        # Before the catch-all, which forwards any other tail upstream.
+        app.router.add_route("*", "/t/{token}/record/{verb}", self.record)
         app.router.add_route("*", "/t/{token}/{tail:.*}", self.handle)
         self._runner = web.AppRunner(app, handler_cancellation=True)
         await self._runner.setup()
@@ -441,6 +446,25 @@ class Gateway:
         """Wait until every call of the task has been charged."""
         while self.calls.get(task_id):
             await asyncio.wait(list(self.calls[task_id]))
+
+    # -- the project's record --------------------------------------------------
+
+    async def record(self, request: web.Request) -> web.Response:
+        """`valor-record`'s read of the turn's own project (`core/record.py`),
+        on a connection of its own in a thread of its own, so a slow read
+        never holds up a streaming call."""
+        grant = self.grants.get(request.match_info["token"])
+        if grant is None or grant.task_id in self.revoked:
+            return web.json_response({"error": "turn token revoked or unknown"}, status=403)
+        if request.method != "GET":
+            return web.json_response({"error": "the record is read with GET"}, status=405)
+        try:
+            found = await asyncio.to_thread(
+                asyncio.run, record.answer(self.dsn, grant.task_id, request.match_info["verb"], dict(request.query))
+            )
+        except record.NotFound as exc:
+            return web.json_response({"error": str(exc)}, status=404)
+        return web.json_response(found, dumps=lambda v: json.dumps(v, default=str, ensure_ascii=False))
 
     # -- the call path --------------------------------------------------------
 

@@ -16,20 +16,15 @@ lint = "uv run ruff check ."
 merge_url = "https://github.com/tomcounsell/ai.git"
 # The operator group, the Eng group, and Tom's own DM, received on the
 # Cowboy; the outside groups "Agent Builders Chat" and "Perplexity Build
-# Comp"; and, as the old system answered every DM against this repo, the
-# DMs of Kevin, Matt Rideout, Nick Frith, Andy Malkin, Charlie, Colin
-# Behring, Thabiso Epema, Johann, Jess Mason, Hazem, Lewis Parrott, Mike
-# Berson and Graham D; and #general in the Yudame Slack, for general Yudame
+# Comp"; Kevin's DM, as he works with Tom on Valor (each other DM is under
+# the project its person works on; Tom, 2026-10-24 and 10-25); and #general in the Yudame Slack, for general Yudame
 # business, listed here because this Mac runs the one Slack bridge with the
 # Yudame tokens (yudame.toml's machine, the Pirate, has none; Tom,
 # 2026-10-23).
 chats = [
     "telegram:-1003890616618", "telegram:-1003449100931", "telegram:179144806",
     "telegram:-1003879986445", "telegram:-1003936769817",
-    "telegram:577036901", "telegram:2106858278", "telegram:7954357506", "telegram:2019570687",
-    "telegram:7312372670", "telegram:8209004019", "telegram:8762685703", "telegram:6084902164",
-    "telegram:7388810030", "telegram:7178632018", "telegram:7820562338", "telegram:469027377",
-    "telegram:437868058", "slack:T0B6E8JPE3C/C0B67T44KEF",
+    "telegram:577036901", "slack:T0B6E8JPE3C/C0B67T44KEF",
 ]
 # Team chats wait to be mentioned (Tom, 2026-10-17).
 mentions = ["telegram:-1003879986445", "telegram:-1003936769817", "slack:T0B6E8JPE3C/C0B67T44KEF"]
@@ -40,18 +35,6 @@ rooms."telegram:-1003449100931" = "Engineering on Valor itself."
 rooms."telegram:-1003879986445" = "Agent Builders Chat, a public group about building agents, where you talk as a teammate. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Valor."
 rooms."telegram:-1003936769817" = "Perplexity Build Comp, an outside group around a Perplexity build competition, where you talk as a teammate. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Valor."
 rooms."telegram:577036901" = "A direct message with Kevin, who works with Tom on Valor. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Valor."
-rooms."telegram:2106858278" = "A direct message with Matt Rideout, who works with Tom on Valor. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Valor."
-rooms."telegram:7954357506" = "A direct message with Nick Frith, who works with Tom on Valor. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Valor."
-rooms."telegram:2019570687" = "A direct message with Andy Malkin, who works with Tom on Valor. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Valor."
-rooms."telegram:7312372670" = "A direct message with Charlie, who works with Tom on Cyndra. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
-rooms."telegram:8209004019" = "A direct message with Colin Behring, who works with Tom on Cyndra. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
-rooms."telegram:8762685703" = "A direct message with Thabiso Epema, who works with Tom on Cyndra. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
-rooms."telegram:6084902164" = "A direct message with Johann, who works with Tom on Cyndra. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
-rooms."telegram:7388810030" = "A direct message with Jess Mason, who works with Tom on Cyndra. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
-rooms."telegram:7178632018" = "A direct message with Hazem, who works with Tom on Cyndra. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cyndra Consulting."
-rooms."telegram:7820562338" = "A direct message with Lewis Parrott, who works with Tom on Psyoptimal. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: PsyOPTIMAL."
-rooms."telegram:469027377" = "A direct message with Mike Berson, who works with Tom on Gato OS. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Gato."
-rooms."telegram:437868058" = "A direct message with Graham D, a Cuttlefish client: customer service, answering his questions and checking status. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to Eng: Cuttlefish."
 rooms."slack:T0B6E8JPE3C/C0B67T44KEF" = "#general in the Yudame Slack, the company's team chat for general Yudame business; answer whoever mentions you. No engineering or SDLC work starts here; web search and filing GitHub issues are fine; engineering requests go to the Eng group of the project they are about, else Tom."
 machine = "Valor the Cowboy"
 
