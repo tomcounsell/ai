@@ -185,6 +185,7 @@ def test_a_session_reads_its_projects_other_chats_and_nothing_of_another(fresh, 
         assert secret == [] and other_chat == []
         ids = [x["task_id"] for x in listed]
         assert set(ids) == {t["s1"], t["s2"], t["mail"], t["t"]}
+        assert {x["task_id"]: x["state"] for x in listed}[t["s2"]] == "open"
         (built,) = [x for x in listed if x["task_id"] == t["t"]]
         assert (built["parent_id"], built["open_question"]) == (t["s2"], "which color?")
         assert [r["type"] for r in one] == [

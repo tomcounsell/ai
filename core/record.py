@@ -131,10 +131,12 @@ async def messages(
     ]
 
 
-def _state(rows: list[dict[str, Any]]) -> str:
+def _state(rows: list[dict[str, Any]], session: bool) -> str:
+    """`stopped`, `open` for a chat session (which never leaves `judge`),
+    else the task's state."""
     if any(r["type"] == "task.stopped" for r in rows):
         return "stopped"
-    return machine.fold(rows).state.value
+    return "open" if session else machine.fold(rows).state.value
 
 
 async def task_list(
@@ -155,7 +157,7 @@ async def task_list(
                 "task_id": task_id,
                 "chat": _key(body["chat"]) if body.get("chat") else None,
                 "parent_id": body.get("parent_id"),
-                "state": _state(rows),
+                "state": _state(rows, bool(body.get("chat"))),
                 "instruction": body.get("instruction"),
                 "open_question": next(
                     (a.get("text") for a in reversed(asked) if a.get("question_id") not in answered), None

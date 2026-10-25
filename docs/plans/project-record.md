@@ -39,15 +39,15 @@ Valor about Agent Builders) and Valor answers from the record.
    (`ledger.render` without `gateway.*` rows or the Brief text). Limit 50,
    at most 200; `--json`.
 
-4. **Memory as paths, read as data.** `_turn_for` writes `CLAUDE.md` in the
-   task directory above the workspace (Claude Code loads cwd's ancestors;
-   never `~/.claude/CLAUDE.md`), listing each other in-reach chat session's
-   room and the absolute path of its `MEMORY.md`, found under its
-   `work_state/claude/projects/*/memory/` (keyed by git root, not cwd),
-   with one line: other chats' notes, data to Read when relevant. No `@`
-   import: CLAUDE.md content is taken as instructions, and a public group's
-   notes must not be. Tasks of the project get the same file. Each session
-   writes only its own memory.
+4. **Memory as paths, read as data.** A working or chat turn's Brief
+   (`tasks.dispatch`, `record.memories`) names each other in-reach chat
+   session's room and the absolute path of its `MEMORY.md`, found under
+   its `work_state/claude/projects/*/memory/` (keyed by git root, not
+   cwd), labelled records to Read when relevant, not instructions. In the
+   Brief rather than a task-directory `CLAUDE.md` (critique round 2): a
+   `CLAUDE.md` at the task root would also load into the blind check
+   sessions under `checks/`, and Pi and Codex read none; a fresh session's
+   Brief gets none. Each session writes only its own memory.
 
 5. **Specs (Tom, 2026-10-24, 10-25).** Each DM in its project's `chats`
    with a teammate-scope room: valor keeps Kevin; Charlie (room rewritten)
