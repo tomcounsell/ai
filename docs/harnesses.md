@@ -516,7 +516,7 @@ four things:
 - the mach name `valor.turn.<VALOR_TURN>`, which marks every process of the turn for the reaper.
 
 A turn reads its own project's record through the kernel instead (Reading
-the project's record, above). Everything else on the Mac is open to a turn: the public internet, loopback, its own task's services,
+the project's record, below). Everything else on the Mac is open to a turn: the public internet, loopback, its own task's services,
 dev servers on any port, and the operator's files. The one incident behind the four denies is the
 demonstration's Postgres trust hole (rebuild-demonstration.md, Kernel findings 1). The services of a
 task run under the same profile marked `valor.service.<task id>` ([workspace.md](workspace.md)).
