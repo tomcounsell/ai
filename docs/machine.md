@@ -222,7 +222,11 @@ scheduler, supervisor, or watchdog on the machine.
   `@none` is not. The `rollout.ended` row names the bridges restarted and
   any that failed, and a failed one is tried again only at the next start
   that ends a rollout. A merge of only `docs/`, `tests/`, `persona/`,
-  `skills/` or top-level `*.md` restarts nothing. The kick restarts
+  `skills/` or top-level `*.md` restarts nothing. Every update's
+  `rollout.ended` row also names each installed bridge `connected since`
+  the second its own connection came up, or `not connected`, waiting up
+  to 60 s for one it just restarted or installed
+  ([telegram.md](bridges/telegram.md#the-outbox), Connected). The kick restarts
   launchd's instance of the label, so a bridge started by hand that holds
   the lock keeps running its old code until it is stopped. A bridge
   reconciles its outbox on start, so a send the kill cut off is looked up

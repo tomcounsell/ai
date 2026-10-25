@@ -82,7 +82,9 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `export VALOR_PGPORT=5433` to the profile, and set `VALOR_PGPORT` when
    step 9 generates the jobs.
 5. **Keys**, copied from the Cowboy without printing them:
-   `for K in claude-token github-keys judgement-keys openai-key mail-keys telegram-keys slack-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; chmod 600 ~/.config/valor-kernel/$K; done`.
+   `for K in claude-token github-keys judgement-keys openai-key mail-keys telegram-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; chmod 600 ~/.config/valor-kernel/$K; done`.
+   Never `slack-keys`: it holds the Cowboy's own Slack app, whose Socket
+   Mode token must not run on two bridges. Each Mac has its own (step 9).
    Calibrate the judge from a copy of the Cowboy's whole `~/src/valor-demo/items/`
    (the judgement file names case files beside it):
    `$PY -m core calibrate <items>/judgement/intake.underspecified.json`
@@ -147,8 +149,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    Automation of Messages), attached to the app so they outlast Homebrew's
    Python upgrades. It prints each grant and exits 0 when all are allowed.
    Then for each of `core serve`, `bridges.telegram`, `bridges.email`
-   (with `VALOR_EMAIL_SINCE` the rollout date), `bridges.slack` if the Mac
-   reads Slack, `tools.voice` (`com.valor.voice`, which transcribes every
+   (with `VALOR_EMAIL_SINCE` the rollout date), `tools.voice` (`com.valor.voice`, which transcribes every
    bridge's audio; about 1.7 GB resident once used), `core backup` (into `~/valor-backups`, made first, or `VALOR_BACKUP_DIR` on an external disk),
    `ui` (`com.valor.ui`, the dashboard; stop a hand-started one on port
    8790 first, `lsof -ti tcp:8790 | xargs kill`, or the job crash-loops),
@@ -164,11 +165,18 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `tools.voice` plist adds ffmpeg's; add it by hand to the others. A
    rollout restarts the bridges but not `com.valor.voice`: when
    `tools/voice.py` changed, `launchctl kickstart -k $D/com.valor.voice`. A plist edited on disk takes effect only after
-   `launchctl bootout $D/<label>` and a fresh `bootstrap`. On a Mac that
-   reads Slack, the app at api.slack.com carries the manifest's user scopes
-   (`python -m bridges.slack manifest`); when it gained one (`search:read`
-   for `valor-slack read --search`), reinstall the app to Valor's account
-   and run `python -m bridges.slack keys` if the user token changed.
+   `launchctl bootout $D/<label>` and a fresh `bootstrap`. A Mac whose
+   projects list a Slack chat has its own Slack app in the Yudame
+   workspace, "Valor <name>" (the Pirate's is "Valor Pirate"), made at
+   api.slack.com as Valor from `python -m bridges.slack manifest`, Socket
+   Mode on, installed to Valor's account, with an app-level token with
+   `connections:write`; its tokens go in the vault `.env` as
+   `SLACK_APP_TOKEN_<MACHINE>` and `SLACK_USER_TOKEN_<MACHINE>`
+   (`VALOR_THE_PIRATE`). The `com.valor.kernel.slack` job is not made by
+   hand: every update copies the keys and installs and loads it
+   ([bridges/slack.md](bridges/slack.md), One app per Mac). When the
+   manifest gains a scope, update each app's (`apps.manifest.update`, or
+   the app's OAuth page) and reinstall it to Valor's account.
    A kernel crash-looping after a rollout or an update: take the checkout
    back to the commit it rolled from (`from` on its `rollout.restarting`
    row), `git -C ~/src/ai reset --keep <from>`, then

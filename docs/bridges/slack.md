@@ -9,10 +9,33 @@ outbox. This doc covers what is particular to Slack.
 **Status.** Built in `bridges/slack/`. `python -m bridges.slack run` runs
 it under `bridge.serve`; `keys` copies its tokens, `manifest` prints the
 app manifest, and `--plist` prints its launchd job. The last section lists
-the modules. On the Cowboy it serves the Yudame workspace (`T0B6E8JPE3C`):
-Tom's DMs, and #general (`C0B67T44KEF`), a mentions-only team chat for
-general Yudame business, listed in `projects/valor.toml` because that Mac
-runs the one bridge holding the Yudame tokens (Tom, 2026-10-23).
+the modules. It serves the Yudame workspace (`T0B6E8JPE3C`), one bridge per
+Mac, each on that Mac's own app. The Cowboy's receives Tom's DM, #general
+(`C0B67T44KEF`, a mentions-only team chat for general Yudame business;
+Tom, 2026-10-23), and its projects' dev channels; each other Mac's, its
+own projects' dev channels.
+
+**Dev channels** (Tom, 2026-10-25: "private dev channels for each
+project ... named like x-dev. They are equivalent to Eng: x telegram
+groups"). Each is private, made by Valor with Tom invited, listed in its
+project's spec, not mentions-only, its room and Slack description its Eng
+group's:
+
+| Channel | Project, Mac |
+|---|---|
+| `#valor-dev` (`C0CBTQ76PRB`) | valor, the Cowboy |
+| `#popoto-dev` (`C0C1P5GLBGR`, Tom's own, from 2026-09) | popoto, the Cowboy |
+| `#gato-os-dev` (`C0CBYTEST8A`) | gato-os, the Pirate |
+| `#mondayflowers-dev` (`C0CBSS3RW03`) | mondayflowers, the Pirate |
+| `#counsell-home-dev` (`C0CC2PX7QTW`) | counsell-home, the Pirate |
+| `#yudame-dev` (`C0CBX4MBN1L`, "Engineering on the yuda.me site": no Eng group) | yudame, the Pirate |
+| `#cuttlefish-dev` (`C0CBHMQBYET`) | cuttlefish, the Captain |
+| `#psyoptimal-dev` (`C0CC2PWM8E8`) | psyoptimal, the Captain |
+| `#mastery-dev` (`C0CBHMR5FHV`) | mastery, the Captain |
+| `#cyndra-dev` (`C0CC2PWDETE`) | cyndra, the Bald |
+| `#satsol-dev` (`C0CCTEEG7FA`) | satsol, no Mac yet, so unanswered |
+
+`skills` and `work-vault` have no Eng group and no dev channel.
 
 ## What it serves
 
@@ -27,29 +50,56 @@ runs the one bridge holding the Yudame tokens (Tom, 2026-10-23).
 ## The account
 
 **One identity.** The bridge acts as Valor's own Slack user, through a
-user token (`xoxp`), not a bot. Each workspace creates a small internal
-app once, from `python -m bridges.slack manifest`, signed in as Valor at
+user token (`xoxp`), not a bot. Each Mac has a small internal app in the
+workspace, from `python -m bridges.slack manifest`, signed in as Valor at
 api.slack.com: Socket Mode on, installed to Valor's account, with the
-workspace admin's approval where the workspace requires it. The app is
-never distributed: a distributed app outside the Marketplace gets one
-request a minute on `conversations.history` and `conversations.replies`,
-and an internal app keeps Tier 3, which gap fill assumes.
+workspace admin's approval where the workspace requires it (Yudame's did
+not). The app is never distributed: a distributed app outside the
+Marketplace gets one request a minute on `conversations.history` and
+`conversations.replies`, and an internal app keeps Tier 3, which gap fill
+assumes.
+
+**One app per Mac.** A chat is answered only on the Mac its project
+names, and Slack splits one Socket Mode app's events between the
+connections open on its token, so one token runs on one bridge. Each Mac
+runs its own bridge on its own app: "Valor" (`A0C97117R5F`) on the
+Cowboy, "Valor Pirate" (`A0CBTPN2T4M`), "Valor Captain"
+(`A0CBYSURU8J`), "Valor Bald" (`A0CBTPN8BTP`). All four are Valor's
+user, so every app gets every message Valor can see; each bridge receives
+only what its Mac's specs list. The other way, the Cowboy receiving for
+every Mac, needs a path from one kernel to another that does not exist.
 
 The manifest asks for these user scopes: `channels:history`,
 `groups:history`, `im:history`, `mpim:history`, `channels:read`,
-`groups:read`, `im:read`, `mpim:read`, `im:write`, `chat:write`,
+`groups:read`, `groups:write` (making the dev channels, inviting to them,
+setting their description), `im:read`, `mpim:read`, `im:write`, `chat:write`,
 `files:read`, `files:write`, `users:read`, `reactions:write`,
 `search:read`; and these
 user events:
 `message.channels`, `message.groups`, `message.im`, `message.mpim`.
 
-**The tokens.** `python -m bridges.slack keys` copies `SLACK_APP_TOKEN`
-and `SLACK_USER_TOKEN` from the vault `.env` into `slack-keys` in the
-kernel key directory (mode 600), each under the team id `auth.test` names
-for the user token (`T0ABC_SLACK_APP_TOKEN`), printing each name with
-`written`, `kept`, or `missing` and never a value. `run` refuses to start
-with no workspace's tokens, or with more than one workspace in the file:
-the bridge serves one.
+**The tokens.** `python -m bridges.slack keys` copies this Mac's pair,
+`SLACK_APP_TOKEN_<MACHINE>` and `SLACK_USER_TOKEN_<MACHINE>` (the machine's
+name upper-cased, each run of other characters `_`:
+`SLACK_APP_TOKEN_VALOR_THE_PIRATE`), from the vault `.env` into
+`slack-keys` in the kernel key directory (mode 600), each under the team
+id `auth.test` names for the user token (`T0ABC_SLACK_APP_TOKEN`),
+printing each name with `written`, `kept`, or `missing` and never a value,
+and exits 1 when one is missing. It never reads another Mac's pair, and
+no Mac's is unsuffixed. `run` refuses to start with no workspace's tokens,
+or with more than one workspace in the file: the bridge serves one.
+
+**Every update makes sure of it** (Tom, 2026-10-25: "makes sure it's
+Slack comms is working, the same way it ensures Telegram is connected").
+On a Mac whose specs list a Slack chat, the update's setup check
+(`core.permissions.slack`) runs `keys`; with none in the vault it reports
+`slack: no keys` and starts nothing. A missing `com.valor.kernel.slack`
+job is written from `--plist` with the settings of the Mac's Telegram
+job, and loaded; a job whose keys changed is reloaded. The update then
+names each bridge `connected since` the second its own connection came
+up, or `not connected` ([telegram.md](telegram.md#the-outbox),
+Connected), in its `rollout.ended` row, its reply in the room and `core
+update --wait`.
 
 **The connection.** `slack_sdk`'s aiohttp `SocketModeClient` for events
 and `AsyncWebClient` for the Web API, with no Bolt. `auth.test` at connect
@@ -64,8 +114,10 @@ the send decides (below).
 
 **Who is received.** The same rule as Telegram:
 
-- Tom's DMs, owned through `VALOR_OPERATOR_SLACK_IDS` (a comma list of
-  `<team>/<user>`, one per workspace), whatever the operator channel;
+- Tom's DM, listed in `projects/valor.toml` as `slack:<team>/<his id>`, so
+  only the Cowboy's bridge takes it; `VALOR_OPERATOR_SLACK_IDS` (a comma
+  list of `<team>/<user>`, one per workspace) is who Tom is, on every Mac,
+  and owns nothing by itself;
 - the operator chat, when `VALOR_OPERATOR_CHANNEL=slack`
   (`VALOR_OPERATOR_CHAT`, uppercased like every Slack id);
 - every member's message in a channel a project spec on this machine lists
@@ -330,3 +382,5 @@ file's name.
   live, the socket delivers it.
 - **One workspace.** `slack-keys` is keyed by team id, so a second
   workspace is data; its connection is later work.
+- **No Mac for SATSOL.** `#satsol-dev` is listed, as Eng: SATSOL is, and
+  answered once its spec names a Mac.

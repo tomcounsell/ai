@@ -27,7 +27,8 @@ workspaces for (`python -m core start ... --project NAME`).
   every sender at that domain unless an address is listed,
   `slack:<team id>/<channel or user id>`), and `machine` the
   machine whose bridges receive them; none means the default machine, so
-  each chat has one owner. In a group chat or someone else's DM listed
+  each chat has one owner. Tom's own DMs are owned this way too
+  (`valor.toml`), so only the Cowboy's bridges take them. In a group chat or someone else's DM listed
   here, anyone's message is heard, not only Tom's (a team chat,
   [telegram.md](../docs/bridges/telegram.md)).
 - `rooms` maps some of those chats to a description of what the chat is

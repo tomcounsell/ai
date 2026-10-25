@@ -140,6 +140,15 @@ process, on the caller's connection when one is given: it reads the `task.stoppe
 fence, writes the intent, calls the performer, and writes the outcome. A
 refused release writes `effect.refused` once and is not yielded again. The bridge calls nothing the outbox did not yield.
 
+**Connected.** Before each round the outbox asks the bridge's
+`connected()` (Telegram's MTProto client, Slack's socket; a bridge without
+one is up while its outbox runs) and names its listening connection
+`valor-<channel>-up@<epoch>`, the second it came up, while it is up, and
+`valor-<channel>-listen` while it is down, a listener `wait` replaces
+included. The dashboard's Services row and every update's report read
+that name (`rollout.services`): the lock connection exists from start,
+before the bridge connects, so it says only that the process runs.
+
 ### Operator notices
 
 Some messages are the kernel speaking to Tom about his own work: a question a
