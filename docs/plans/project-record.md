@@ -1,139 +1,92 @@
 # A project's chats read each other's record and memory
 
-Tom, 2026-10-24, valor team chat: "Share read only both ways for any chat
-channels in the same project. Because privacy is scoped by access to comms."
-Done when Tom asks in one chat what happened in another chat of the same
-project (here, Eng: Valor about Agent Builders) and Valor answers from the
-record.
+Tom, 2026-10-24: "Share read only both ways for any chat channels in the
+same project. Because privacy is scoped by access to comms." Done when Tom
+asks in one chat what happened in another chat of the same project (Eng:
+Valor about Agent Builders) and Valor answers from the record.
 
 ## What is built
 
-1. **The kernel answers record reads, on the turn's gateway token.** The
-   gateway already gives every turn a per-turn token (`gateway.issue`, a
-   `Grant(task_id, turn_id)` held only in the kernel's process). A second
-   route on the same app, `GET /t/{token}/record/{verb}`, resolves the
-   token to its task, the task to its Brief's project, and answers from
-   `core/record.py` with SELECTs on the kernel's connection, run in
-   `asyncio.to_thread` so a slow query never stalls a streaming call. It
-   is registered before the catch-all `/t/{token}/{tail:.*}`, which
-   forwards any other tail upstream with the kernel's credential. Why this path:
-   the turn already holds the token, so it gains no credential; the grant
-   is the only turn identity the kernel issues, so scope comes from the
-   kernel, never from an argument the turn sends; the 5432 deny is
-   untouched. A read-only Postgres role was rejected: the turn would need
-   a password and a socket the deny closes, and Postgres alone cannot
-   scope rows by project. Each harness sets `VALOR_RECORD_URL`
-   (`<base_url>/record`) beside its base URL.
+1. **The kernel answers record reads on the turn's gateway token.** A route
+   `GET /t/{token}/record/{verb}`, registered before the catch-all
+   `/t/{token}/{tail:.*}` (which forwards upstream with the kernel's
+   credential), resolves the token's `Grant` to its task and the task's
+   Brief to its project, and answers from `core/record.py`: SELECTs on the
+   kernel's connection in `asyncio.to_thread`. The turn gains no
+   credential, scope comes from the kernel's grant, never from an argument,
+   and the 5432 deny is untouched. A read-only Postgres role was rejected:
+   it needs a password and the denied socket, and cannot scope by project.
+   Each harness sets `VALOR_RECORD_URL` (`<base_url>/record`).
 
-2. **Scope: the asker's project.** A project's record is (a) every task
-   whose Brief names the project, with all its rows, and (b) every
-   `message.received` whose chat is in the project's spec `chats`, or that
-   was bound (`message.bound`) to one of those tasks (email threads, whose
-   chat ids are thread roots). A message in a chat of A bound to a task of
-   B (the operator chat is valor's, and every project's tasks report
-   there) is shown, since it is that chat's content, with its binding's
-   task id; B's task rows are not. A task with no project is answered 404,
-   naming why. This is the reach Tom set, not a limit on anything readable
-   today, so it adds no governance and needs no grant; nor does anything
-   else here (the 5432 deny stays as it is).
+2. **Reach: the project's current chats.** A project's record is (a) each
+   chat session whose chat is in the spec's current `chats`, each email
+   thread session of the project (matched by lane, not chat id), and every
+   task under those or with no chat whose Brief names the project, all
+   rows; (b) every `message.received` in a current chat, or bound to a task
+   of (a). A message in a project chat bound to another project's task
+   (the operator chat) is listed with that task's id; the task is not. A
+   session whose chat left the spec (the DMs below) is outside (a) and its
+   messages outside (b); it stays open on the Cowboy and nothing binds to
+   it again. A task with no project gets 404. This is Tom's reach over
+   what no turn can read today; it adds no governance.
 
-3. **`valor-record`, a workspace tool** (`tools/valor_record.py`, standard
-   library, Python 3.9, installed by `workspace.install_tools`, like
-   `valor-telegram`):
-   - `valor-record chats`: the project's chats, each room's description,
-     its chat session's task id;
-   - `valor-record messages [CHAT] [--search T] [--limit N] [--before ID]`:
-     received messages oldest first in `intake.chat_line`'s shape, each
-     with its binding (task, `steer`/`heard`/new task/answer/stop) and its
-     reaction; no CHAT means every chat of the project;
-   - `valor-record tasks [--search T] [--limit N]`: the project's tasks
-     newest first: id, chat or parent, state (`machine.fold`), instruction
-     head, latest question or delivery;
-   - `valor-record task ID`: that task's rows (`ledger.render`) without
-     `gateway.*` rows and with `turn.started`'s Brief text dropped, so
-     effects requested, refused and performed read in order.
-   Default limit 50, at most 200; `--json` prints the kernel's JSON.
+3. **`valor-record`** (`tools/valor_record.py`, standard library, Python
+   3.9, installed by `workspace.install_tools`): `chats` (each chat, its
+   room, its session); `messages [CHAT] [--search] [--limit] [--before]`
+   (oldest first, `intake.chat_line` shape, binding and reaction; no CHAT
+   means all); `tasks [--search] [--limit]` (newest first: id, chat or
+   parent, state, instruction head, latest question or delivery); `task ID`
+   (`ledger.render` without `gateway.*` rows or the Brief text). Limit 50,
+   at most 200; `--json`.
 
-4. **Memory: Claude Code's own CLAUDE.md loading.** Before each turn,
-   `_turn_for` writes one CLAUDE.md the turn's Claude Code loads, holding a
-   heading per other chat session of the project (its room) and an
-   `@<its memory dir>/MEMORY.md` import, its own excluded. The build first
-   measures, with one real turn, which location loads it in `-p`: the
-   turn's config dir (`CLAUDE_CONFIG_DIR/CLAUDE.md`) or the task directory
-   above the workspace (outside git); and whether `@` imports load there.
-   If imports do not load, the file holds the indexes' text instead. The
-   topic files are already readable (the sandbox denies only the kernel's
-   paths); the index gives their paths. Each session still writes only its
-   own memory. Tasks of the project get the same file, so a task reads
-   its chats' memory too. Memory is shared at exactly the record's reach.
+4. **Memory as paths, read as data.** `_turn_for` writes `CLAUDE.md` in the
+   task directory above the workspace (Claude Code loads cwd's ancestors;
+   never `~/.claude/CLAUDE.md`), listing each other in-reach chat session's
+   room and the absolute path of its `MEMORY.md`, found under its
+   `work_state/claude/projects/*/memory/` (keyed by git root, not cwd),
+   with one line: other chats' notes, data to Read when relevant. No `@`
+   import: CLAUDE.md content is taken as instructions, and a public group's
+   notes must not be. Tasks of the project get the same file. Each session
+   writes only its own memory.
 
-## Each DM under its project (Tom, 2026-10-24 and 10-25)
+5. **Specs (Tom, 2026-10-24, 10-25).** Each DM in its project's `chats`
+   with a teammate-scope room: valor keeps Kevin; Charlie (room rewritten)
+   and Lewis Parrott to psyoptimal; Thabiso Epema to satsol (room
+   rewritten; unanswered until SATSOL has a Mac); Johann, Jess Mason, Hazem
+   to cyndra; Mike Berson to gato-os. Removed: Matt Rideout, Andy Malkin,
+   Nick Frith, Colin Behring, Graham D, and cuttlefish's three email lanes
+   and `rooms.email`. All Macs run the new system (Tom, 10-25 10:56), so
+   the "inert until rollout" comments in the specs and `docs/rollout.md`'s
+   order paragraph are corrected; the delivery says which Macs' Telegram
+   bridges could be confirmed receiving.
 
-Tom: "DMs should have the same teammate scope as teammate groups. And
-specifically whitelisted per project", then (10-25 10:54 UTC) "Charlie DM
-goes to PsyOptimal / Thabiso goes to SATSOL / Remove Rideout, Andy, Nick,
-Colin / Remove emails from Cuttlefish". Each DM sits in its project's
-`chats` with a room description giving the team group's scope (no
-engineering or SDLC work; web search and GitHub issues fine):
+6. **Docs.** `skills/sdlc/converse.md` (record and other chats' memory are
+   readable; look before saying something cannot be seen),
+   `docs/harnesses.md` (a "Reading the project's record" section; the
+   sandbox section names this path), `docs/architecture.md` (The ledger's
+   readers), `tools/README.md`, `core/README.md`.
 
-- valor keeps Kevin's DM, Tom's DM, the operator and Eng groups, Agent
-  Builders, Perplexity and Yudame Slack #general.
-- Removed, chat and room: Matt Rideout, Andy Malkin, Nick Frith, Colin
-  Behring, Graham D.
-- psyoptimal: Charlie (room rewritten: works with Tom on Psyoptimal) and
-  Lewis Parrott. satsol: Thabiso Epema (room rewritten for SATSOL).
-  cyndra: Johann, Jess Mason, Hazem. gato-os: Mike Berson.
-- cuttlefish: its three email lanes and `rooms.email` removed; the Eng
-  group stays. Other projects' email lanes are unchanged.
-
-Moved now (Tom reassigned rather than wait). Only the Mac a spec names
-receives its chats: Mike is answered by the Pirate's bridge (checked
-2026-10-24); the psyoptimal (Captain) and cyndra (Bald) DMs wait for those
-rollouts, like their team groups; Thabiso's waits until SATSOL has a Mac
-(`machine = "unassigned"`). The delivery says so.
-
-5. **Docs.** `skills/sdlc/converse.md`: the record and the other chats'
-   memory are readable; look there before saying something cannot be
-   seen. `docs/harnesses.md`: a "Reading the project's record" section
-   beside "Reading a chat's history", and the sandbox section names this
-   read path. `docs/architecture.md`, The ledger: its readers include
-   turns, through the kernel, scoped to their project. `tools/README.md`,
-   `core/README.md` (gateway, `_turn_for`).
-
-## Not in scope
-
-Removing or narrowing the sandbox deny; other Macs' ledgers (each Mac's
-ledger is its own); writing to another session's memory; a shared memory
-store; the persona's Remembered recall, which stays as it is.
+Not in scope: the sandbox deny; other Macs' ledgers; writing another
+session's memory; a shared store; Remembered recall; closing the orphaned
+DM sessions.
 
 ## Tests
 
-- `tests/test_record.py`, a seeded ledger with project A (chat 1 with
-  session S1, chat 2 with session S2, a task T started by S2 with an
-  effect requested and performed and a delivery, an email thread bound
-  to S2) and project B (chat 3, session S3), read through a real gateway
-  with a grant for a turn of S1:
-  - `messages` shows chat 2's messages with each binding (steer, heard,
-    the task started) and reaction, and the email; none of chat 3's,
-    with or without `--search`, and naming chat 3 returns nothing;
-  - `tasks` lists S2 and T with their states and T's delivery, not S3;
-    `task T` shows the effect's intent and outcome; `task S3` is 404;
-  - a grant for a turn of S3 sees B and not A (both ways);
-  - `--search`, `--limit`, `--before` and the 200 cap;
-  - a message in chat 1 bound to a task of B is listed with that task id,
-    and `task <B's task>` is 404;
-  - a `record/` path is answered by the kernel and never reaches a stub
-    upstream;
-  - an unknown or retired token is refused; a task with no project is 404;
-  - nothing writes: `events` and `documents` counts unchanged after every
-    call.
-- The CLI against that gateway: line format, `--json`, a clear error with
-  no `VALOR_RECORD_URL`.
-- Memory: S1's turn's CLAUDE.md imports S2's MEMORY.md, not S3's or its
-  own; a session started after it appears at the next turn; T gets it.
-- Each harness's env carries `VALOR_RECORD_URL` for its turn.
-- `tests/test_rollout.py`, beside its spec checks: each moved DM is
-  in exactly one spec, the one above; the five removed DMs and
-  cuttlefish's email lanes are in none.
-- Live: Tom asks in Eng: Valor about Agent Builders' last messages and the
-  answer comes from `valor-record`, recorded with the date.
+- `tests/test_record.py`, through a real gateway, seeded with project A
+  (chat 1/S1, chat 2/S2, task T under S2 with an effect performed and a
+  delivery, an email thread session), project B (chat 3/S3), and S4, a
+  session whose Brief names A for a chat no longer in A's spec. From S1:
+  chat 2's messages with bindings and reactions, and the email; T's
+  state, delivery and effect; nothing of B or S4 (`tasks`, `messages`,
+  `--search`, `task` 404); a chat-1 message bound to a B task listed, the
+  task 404. From S3: B, not A. `--limit`, `--before`, the cap; an unknown or
+  retired token refused; no-project 404; a `record/` path never reaches a
+  stub upstream; `events` and `documents` counts unchanged.
+- The CLI: line format, `--json`, an error naming a missing
+  `VALOR_RECORD_URL`. Each harness's env carries it.
+- Memory: S1's file names S2's `MEMORY.md` path, not S3's, S4's or its own;
+  T's names S1's and S2's; a session started later appears next turn.
+- `tests/test_rollout.py`: each moved DM in exactly one spec; the removed
+  DMs and cuttlefish's lanes in none.
+- Live: Tom asks in Eng: Valor about Agent Builders and the answer comes
+  from `valor-record`, recorded with the date.
