@@ -1,89 +1,116 @@
+---
+status: Planning
+type: feature
+appetite: Large
+owner: Valor
+created: 2026-10-26
+tracking: https://github.com/tomcounsell/ai/issues/2902
+last_comment_id: none
+---
+
 # Valor in Google Meet
 
-**Ask.** Tom, 2026-10-26: Valor joins Google Meet calls. First he connects,
-then he answers when he is addressed in a group; video comes last. Real-time
-speech to text that knows who is speaking, and speech back. "full duplex is
-more important than voice quality". Tool use and subagents still work,
-faster: "named worker agents that are mostly read-only and high token
-rates". Whether he is addressed: "a decision (Jev-like) model". "Valor
-should join just like any other user would join. he has a full google
-workspace pro seat", and "as human-like as possible in his turn taking and
-usefulness (not visually)".
+**Ask.** Tom, 2026-10-26: Valor joins Meet calls "just like any other user
+would join" (valor@yuda.me, a Workspace seat); first connecting, then
+answering when addressed in a group; video last. "full duplex is more
+important than voice quality". Turn taking and usefulness "as human-like
+as possible (not visually)". Tools and subagents still work, faster:
+"named worker agents that are mostly read-only and high token rates".
+Whether to speak: "a decision (Jev-like) model". And: when he has a quick
+answer, or needs time for tools, he types it in the chat "anytime" rather
+than interrupting.
+
+**Freshness and prior art.** #2902 (2026-08-20, old system) asks for a
+chat-only Meet participant. Every file it cites is gone with the rebuild
+(baseline b3d8f08d7); its product rules carry over (precision over
+recall, never block listening on thinking, a late answer refers back to
+its question). Its design branch (`claude/live-streaming-bridge-design-63h5bt`)
+chose a browser participant reading Meet's captions. Dropped from #2902:
+the per-hour cap, cooldown and ownership check (governance with no
+incident or grant), the post-nothing shadow phase (rule 5), and
+`read_the_room` (gone; Jev sees what Valor already posted).
 
 **Premise, checked 2026-10-26.**
-- Google's Meet Media API is a developer preview, needs every participant
-  enrolled, and documents no way to send audio. **Rejected.**
-- Attendee (attendee-labs/attendee, Elastic License 2.0, active) joins Meet
-  in a full Chrome in Docker. Over a websocket it sends 16 kHz PCM per
-  participant, each stream tagged with a participant whose join event
-  carries the display name, and it speaks PCM sent back
-  (`docs/realtime_audio.md`). The bot's own voice is not in what it hears,
-  so no echo cancellation is needed. **Reused** (rule 10).
-- Attendee signs in to Meet only through SAML SSO: the Workspace sends the
-  bot user's sign-in to Attendee as identity provider. For valor@yuda.me
-  that would route all of Valor's Google sign-ins, Chrome's and gws's
-  included, through Attendee, and it is an admin change on yuda.me.
-  **Rejected.** Instead, Valor signs in once in the bot Chrome's own
-  profile, as on a new laptop, and the profile is kept (a patch to
-  Attendee's Chrome launch, `bots/web_bot_adapter`). Unverified: does
-  Google keep that session alive in a container?
-- Speech stays on `tools/voice.py`'s models: Parakeet in, Kokoro out (one
-  mechanism). Turn timing comes from Pipecat (Silero VAD, Smart Turn v3,
-  stopping when interrupted), reused, not written.
-- When to speak is a judgement task through `core/judgement.py` with Jev,
-  not a second classifier.
-- The Cowboy: Apple M4, 16 GB, no Docker. Attendee's container, Parakeet
-  (1.7 GB) and Kokoro (0.6 GB) next to the kernel and its turns is tight.
-  Step 1 measures it.
+- Meet Media API: preview, every participant enrolled, no way to send
+  audio. **Rejected.**
+- Attendee (attendee-labs/attendee @ 5acfb99, ELv2) as a server: Docker VM
+  of about 5 GB, its own Postgres, Redis and celery, an amd64-only Chrome
+  134 (arm64 only in open PR #1064), sign-in only by SAML SSO through it.
+  **Rejected.** Its in-page payloads are what we need and run in any
+  Chrome: `google_meet_chromedriver_payload.js` hooks `RTCPeerConnection`
+  for audio per received stream, labelled with the loudest speaker;
+  `shared_chromedriver_payload.js` overrides `getUserMedia` with a virtual
+  mic; chat is read from Meet's messages and typed to everyone (Meet has
+  no private chat). **Reused**, vendored at that commit with its notice.
+- Pipecat 1.9.0 installs on 3.14 without torch but models one user per
+  pipeline. **Not adopted**; its Smart Turn v3 (`local_smart_turn_v3.py`,
+  `_whisper_features.py`, model file; BSD-2; 43 ms per check here) is
+  copied. Silero VAD comes from onnx-asr, already used.
+- Jev on the Cowboy, 3,566 calls: median 389 ms, 90% under 637 ms. The
+  fallback (Qwen3-235B): median 6.0 s.
+- The Cowboy: M4, 16 GB, no Docker. Native Chrome (1.5 to 2.5 GB), Parakeet
+  (1.7 GB) and Kokoro (0.6 GB) fit beside the kernel; the Docker route did
+  not comfortably.
 
 ## What is built
 
-1. **Join and hear.** OrbStack on the Cowboy, Attendee self-hosted, its
-   Chrome profile signed in as valor@yuda.me. Started with a Meet URL, it
-   joins as Valor and writes a live transcript, each line with the
-   speaker's name: per-participant audio, cut by VAD, through Parakeet.
-2. **Speak when asked, write when useful.** A judgement task `meet.speak`
-   asks Jev, at each turn's end, about the last few lines (with speakers),
-   whether Valor spoke last, and what he has already posted. Labels: asked
-   Valor (he speaks), something he can usefully add (he posts it in the
-   Meet chat through Attendee's `send_chat_message`, never interrupting),
-   someone else's turn, nothing for him (both silent). Abstain is silence.
-   A fallback answer that arrives after the turn has moved on is dropped.
-   He reads the chat too (`chat_messages.update`), and a message to him
-   there is answered there. Human-like turn taking:
-   - he speaks after a natural gap, never over someone;
-   - he stops within a word when the person he answers talks, and does not
-     stop for other people's side talk;
-   - his answers are short, addressed to the person by name, and offer
-     more;
-   - he makes no "mm-hm" sounds.
-3. **Answer with tools.** A front model (Haiku 5.5, streamed through the
-   gateway) drafts while Jev decides, and the draft is dropped on a no. It
-   has one tool: ask a named worker. The workers are mostly read-only
-   (repo, calendar and mail, web, memory), kept warm on a fast model.
-   A spoken question whose answer needs a worker gets a short spoken
-   line ("I'll put it in the chat"), and the full answer is posted there
-   when it is ready, however far the talk has moved on.
-4. **Useful after.** At the end, the transcript and what he promised in
-   the call become a task, the way a chat message does.
-5. **Video**, last: Attendee shows a page as his camera or screen; a
-   caption card on his tile is decided then, not as a second channel now.
+1. **The Meet bridge, `bridges/meet/`.** A dedicated Chrome profile on the
+   Cowboy (not BYOB's: a call would hold BYOB for its length), signed in
+   once as valor@yuda.me, driven by Playwright with the vendored payloads.
+   `python -m bridges.meet join URL` joins as Valor, camera off. I/O only:
+   per-speaker PCM and chat in, PCM and chat out. A call is a task;
+   speaking and posting are `act` effects the broker releases to it.
+2. **Hearing.** Per speaker: Silero VAD, Smart Turn v3 at each pause,
+   Parakeet on the finished turn. `tools/voice.py` takes PCM (`/listen`)
+   and speaks (`/speak`, Kokoro streamed by sentence) on separate threads,
+   so hearing never waits on speaking. One copy of each model.
+3. **Deciding.** At each turn's end the judgement task `meet.speak` asks
+   Jev about the recent lines (with speakers), whether Valor spoke last,
+   and what he posted. Labels: asked Valor (speak), something useful to
+   add (post in chat), someone else's turn, nothing for him. Abstain is
+   silence; an answer older than the current turn is dropped, so the
+   fallback rarely speaks.
+4. **Answering.** A front model (Haiku 5.5, streamed through the gateway)
+   drafts while Jev decides; the draft is dropped on a no. Its one tool
+   asks a named, mostly read-only worker (repo, mail and calendar, web,
+   memory), Claude Code sessions kept warm for the call on a fast model.
+   A spoken question that needs a worker gets "I'll put it in the chat",
+   and the answer is posted when ready, naming the question it answers.
+   Human-like timing: a natural gap before speaking; he stops within a
+   word when the person he answers talks, not for side talk; short
+   answers by name; no "mm-hm".
+5. **After the call**, the transcript and what he promised become a task.
+6. **Video**, last, its own plan.
 
-**Out of scope.** Telling apart people who share one laptop's microphone;
-Zoom and Teams; joining from the calendar by himself (next, after this
-works); a speech engine of our own.
+**No-Gos.** [ORDERED] joining from the calendar on his own, after Tom has
+used this. [SEPARATE] Zoom, Teams; telling apart people sharing one mic.
+Two calls at once (one profile, one call).
+
+**Risks.** Meet's page changes break the payloads: one seam, re-vendored
+from Attendee. Crosstalk mislabels the quieter speaker. Google may
+challenge the automated profile: sign in by hand once, keep the profile.
+A broker release per reply adds a few milliseconds; measured in step 2.
+**Races.** Barge-in cancels the playing reply and the effect records the
+part spoken; a draft started before Jev answered is discarded unless the
+turn is still current.
 
 **Governance.** None added.
 
-## Tests
+## Tests and verification
 
-Attendee's websocket mocked: per-speaker transcript lines; `meet.speak`
-inputs and routes (speak, post, silent); a chat question answered in
-chat; a worker's late answer posted; stopping when the addressed speaker talks but not for
-side talk; a dropped late answer; a dropped draft. Live on the Cowboy:
-Valor joins a test Meet signed in, plus memory and latency measured at
-each step.
+A local page with two `RTCPeerConnection`s stands in for Meet: per-speaker
+audio in, virtual-mic audio out, chat both ways. Turn ends on recorded
+speech; `meet.speak` routes (speak, post, silent, abstain, stale); barge-in
+by the addressed speaker but not by side talk; a worker's late answer
+posted; one Parakeet and Kokoro copy; hearing while speaking. Live
+(`VALOR_LIVE=1`): Valor joins a test Meet signed in; memory and
+latency logged. `uv run pytest -q -n auto`, ruff, `tests/test_bloat.py`.
 
 **Done** when Tom has a real Meet call with Valor in it, Valor joins as
-himself, answers when it is his turn with a tool where needed, and Tom
-records the date.
+himself and speaks or posts when it is his turn, with a tool where
+needed, and Tom records the date.
+
+## Open Questions
+
+1. Should Valor say in the chat when he joins that he is an AI? Joining
+   "like any other user" suggests no; people in the call may expect it.
