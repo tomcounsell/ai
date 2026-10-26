@@ -29,6 +29,10 @@ chat session's `task.steer`/`task.start` effects all read as `task`.
    today; Slack its standard name. "Full set" is read as any emoji either
    platform can place, curated to a palette a closed classifier can pick
    from (a PICK question over ~1,900 labels is not askable of either leg).
+   Before fixing the palette the builder reads, with Valor's account,
+   Telegram's standard list (`GetAvailableReactionsRequest`) and
+   `SearchCustomEmojiRequest` for each glyph off it, and drops any glyph
+   with neither; the build record lists each glyph's result.
 2. **Two judgement sites** in `core/judgement_tasks.py`, both `Kind.PICK`
    over the palette's labels (one rubric each: glyph and when it fits),
    `error_cost` low, quiet (`ledger.QUIET_SITES`). **Floor 0.08 on both
@@ -45,8 +49,10 @@ chat session's `task.steer`/`task.start` effects all read as `task`.
      `replied`, `outcome` (`done`, `errored`, `task ended`, or the binding:
      `none`, `start`, `stop`). `replied` is one of: "a reply to this
      message: <text>", "replied in this chat to message N: <text>", or "no
-     text sent". "Pick the reaction that shows what came of it; with no
-     text sent, the reaction is the answer (👍 for a yes, ❤ for thanks)."
+     text sent". "Pick the reaction that shows what came of it. No text
+     sent means Valor agreed or acknowledged (a session answers anything
+     else in text, `converse.md`), so pick an affirmative or warm emoji
+     then (👍 for a yes, ❤ for thanks), never a doubtful one (🤔 🤷)."
    **Truthfulness** (Tom, 2026-10-17: plain questions got 👨‍💻): each
    activity emoji's rubric (👨‍💻 🔍 🧐 ✍ 📊 🎫 📅 📤 🫡) says it fits only
    when `did` names that activity, and the question says so too. The
@@ -71,7 +77,13 @@ chat session's `task.steer`/`task.start` effects all read as `task`.
    `outcome`. It reads `did` from the transcript before `record`'s
    collection transaction and appends the rows inside it, after
    `turn.collected` (or its reduced or bare form), so a crash leaves both
-   or neither and `_recollect` redoes both. `on_bound` writes 👀 and an
+   or neither and `_recollect` redoes both. The window is computed there,
+   from the fold over the rows including `turn.collected` and
+   `turn.ended`: seen rows after `steer_since` as it stood before the
+   turn began, up to the turn's prompt row (`turn_rows[turn_id]`), plus
+   its taken steers. A turn that spent them (`steer_since` moved to its
+   prompt row) owes `done`; one that did not (errored) owes `stalled` on
+   the same window, which the next turn's `done` replaces. `on_bound` writes 👀 and an
    owed `done` at binding for `start` (handed to a task), `none` and
    `stop` (👌 at once goes; a stop now gets 👀 then its done). `serve`
    regains the shaping jobs removed on 2026-10-17 (`Kernel.shape`, apart
@@ -83,9 +95,18 @@ chat session's `task.steer`/`task.start` effects all read as `task`.
    `reaction.requested`; abstain, no port, or both legs failing
    `judgement.UNANSWERED_RUNS` times writes `noted` 📝. A compaction turn
    is not collected; the turn after it reads the messages.
+   **Stopped tasks** cannot be billed (`spending.open_call` raises
+   `tasks.TaskStopped`). An item whose task is stopped is not judged: it
+   gets its done at once with a fixed label, 👌 for the `stop` binding and
+   📝 otherwise; a `TaskStopped` raised mid-judgement does the same. Once
+   written, `pending` no longer lists it.
+   **Refused reactions.** A `reaction.failed` on a `done` or `stalled`
+   row is listed by `pending` and gets a `noted` stage row (ranked
+   highest), 📝, unjudged. A refused 📝 writes nothing more: the message
+   keeps what it shows, which the delivery names per chat if it happens.
 5. **Removed:** the `shape` stage for new rows, 🫡-at-start, 👌-at-stop,
    `final`, and `on_turn`'s single target. Old rows still read (`shape`
-   ranks as `handling`).
+   ranks as `handling`). `noted` ranks above `done`.
 6. **The session knows.** `reactions.shown`/`why` give each line, through
    `intake.chat_line`: `reacted 🤔 (handling: you read it as a question to
    think over)`, `reacted 👍 (done: no text sent; you answered with the
@@ -97,7 +118,8 @@ chat session's `task.steer`/`task.start` effects all read as `task`.
    `previous`), `docs/judgement-layer.md` (two sites, their floor),
    `reactions-activity.md` (a line pointing here), and
    `skills/sdlc/converse.md`: a plain yes or acknowledgement gets no text,
-   the completed reaction answers it; the reaction on each line is what
+   the completed reaction answers it; a no, a doubt, or anything with
+   content gets text; the reaction on each line is what
    the kernel set from what you did; asked about one, say which and why.
 
 ## Out of scope
@@ -123,6 +145,17 @@ calibration against human labels (the floor above stands until rows exist); emai
   `heard` message gets no owed row and no reaction; a turn with empty
   `did` sends the completed rubric stating the activity emoji need the
   activity, and `did` of code passes `code`.
+- Errored turn: a turn that errors after reading two steers writes
+  `stalled` for both and nothing for a steer bound after its prompt row;
+  the next done turn writes `done` for all three.
+- Stopped: a `stop` ends on a placed 👌 done and a steer to a task stopped
+  before its turn on a placed 📝 done, with no judgement row and nothing
+  listed on the next `pending` pass; a port raising `TaskStopped`
+  mid-judgement gives the same.
+- No text: a no-send turn on "can we ship tomorrow?" is judged with
+  `replied` "no text sent" and the rubric's agreement rule in the request.
+- Refused: a `reaction.failed` on a done gives a placed 📝 `noted` row; a
+  refused 📝 writes nothing further.
 - Crash: `record` killed after its transaction leaves `turn.collected` and
   the owed rows together; killed before, `_recollect` writes both.
 - Outbox: a handling requested after the done is placed is closed
