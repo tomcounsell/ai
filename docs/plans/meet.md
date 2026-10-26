@@ -60,7 +60,9 @@ incident or grant), the post-nothing shadow phase (rule 5), and
    Cowboy (not BYOB's: a call would hold BYOB for its length), signed in
    once as valor@yuda.me, driven by Playwright with the vendored payloads.
    `python -m bridges.meet join URL` joins as Valor, camera off; `leave`
-   ends it. I/O only, through `core/bridge.py`'s port: per-speaker PCM and
+   ends it. On joining he posts "I'm keeping a transcript of this call
+   for follow-ups." (all-party consent law covers the transcript; that
+   he is an AI is known, Tom 2026-10-26). I/O only, through `core/bridge.py`'s port: per-speaker PCM and
    chat in, PCM and chat out. A call is a task; speaking and posting are
    `act` effects the broker releases to it. Whatever way `join` exits, it
    closes Chrome and ends the task. It logs frames per speaker every 10 s,
@@ -129,10 +131,3 @@ himself and speaks or posts when it is his turn, with a tool where
 needed, and Tom records the date with what he saw: barge-in worked, no
 unprompted speech in side talk, the reply delay heard, which posts were
 worth reading.
-
-## Open Questions
-
-1. Should Valor say in the chat when he joins that he is an AI? Joining
-   "like any other user" suggests no; people in the call may expect it.
-   The critique recommends a one-line chat note on join as the default
-   before any call with outside people.
