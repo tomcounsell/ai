@@ -352,7 +352,12 @@ so each role its password file covers logs in with its own line. It carries Valo
 `gh` login, git credential helper, and SSH agent.
 
 It also carries Valor's Google sign-in, valor@yuda.me, which `gws` uses
-for Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks. The refresh
+for Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Contacts, Chat,
+Forms, and Meet. It signs in through the OAuth client "Valor Desktop
+Client" in the Google Cloud project Yudame General
+(`quickstart-1586433403044`, owned by tom@yuda.me), whose consent screen,
+"Yudame Workspace", is Internal: only yuda.me accounts can sign in, with
+no Google review and no user cap (Tom, 2026-10-26). The refresh
 token is `~/.config/gws/credentials.json`, mode 600: gws's plaintext
 store, so it does not depend on a keychain key and copies to any Mac.
 `token_cache.json` beside it holds the short-lived access token,

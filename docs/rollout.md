@@ -103,8 +103,10 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `for F in credentials.json client_secret.json; do ssh valorengels@valor-the-cowboy cat .config/gws/$F > ~/.config/gws/$F; chmod 600 ~/.config/gws/$F; done`;
    `gws gmail users getProfile --params '{"userId":"me"}'` names valor@yuda.me.
    To sign in afresh (on the Cowboy, or after a revocation), Valor needs
-   no one at the screen: `gws auth logout`, then
-   `gws auth login --scopes https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/tasks,openid,https://www.googleapis.com/auth/userinfo.email`,
+   no one at the screen: `gws auth logout`, then, over SSH, where the login
+   keychain is locked, with `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` set
+   for this and the export,
+   `gws auth login --scopes https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/tasks,https://www.googleapis.com/auth/contacts,https://www.googleapis.com/auth/chat.messages,https://www.googleapis.com/auth/chat.spaces,https://www.googleapis.com/auth/forms.body,https://www.googleapis.com/auth/forms.responses.readonly,https://www.googleapis.com/auth/meetings.space.created,https://www.googleapis.com/auth/meetings.space.readonly,openid,https://www.googleapis.com/auth/userinfo.email`,
    run in the background, and its printed URL opened and approved as
    valor@yuda.me in byob Chrome (choose the account, Continue, Allow; byob's
    auth-domain flag must be set, [browser.md](browser.md)), then
