@@ -6,6 +6,8 @@ owner: Valor
 created: 2026-10-26
 tracking: https://github.com/tomcounsell/ai/issues/2902
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-10-26T08:58:16Z
 ---
 
 # Valor in Google Meet
@@ -57,23 +59,38 @@ incident or grant), the post-nothing shadow phase (rule 5), and
 1. **The Meet bridge, `bridges/meet/`.** A dedicated Chrome profile on the
    Cowboy (not BYOB's: a call would hold BYOB for its length), signed in
    once as valor@yuda.me, driven by Playwright with the vendored payloads.
-   `python -m bridges.meet join URL` joins as Valor, camera off. I/O only:
-   per-speaker PCM and chat in, PCM and chat out. A call is a task;
-   speaking and posting are `act` effects the broker releases to it.
-2. **Hearing.** Per speaker: Silero VAD, Smart Turn v3 at each pause,
-   Parakeet on the finished turn. `tools/voice.py` takes PCM (`/listen`)
-   and speaks (`/speak`, Kokoro streamed by sentence) on separate threads,
-   so hearing never waits on speaking. One copy of each model.
-3. **Deciding.** At each turn's end the judgement task `meet.speak` asks
-   Jev about the recent lines (with speakers), whether Valor spoke last,
-   and what he posted. Labels: asked Valor (speak), something useful to
-   add (post in chat), someone else's turn, nothing for him. Abstain is
-   silence; an answer older than the current turn is dropped, so the
-   fallback rarely speaks.
-4. **Answering.** A front model (Haiku 5.5, streamed through the gateway)
-   drafts while Jev decides; the draft is dropped on a no. Its one tool
-   asks a named, mostly read-only worker (repo, mail and calendar, web,
-   memory), Claude Code sessions kept warm for the call on a fast model.
+   `python -m bridges.meet join URL` joins as Valor, camera off; `leave`
+   ends it. I/O only, through `core/bridge.py`'s port: per-speaker PCM and
+   chat in, PCM and chat out. A call is a task; speaking and posting are
+   `act` effects the broker releases to it. Whatever way `join` exits, it
+   closes Chrome and ends the task. It logs frames per speaker every 10 s,
+   so a dead payload shows. Step 1 records Meet's captions beside the
+   labelled audio on one real call and keeps whichever names speakers
+   better in crosstalk; the other is deleted.
+2. **Hearing**, in `core/call.py`, which holds the call loop (turn ends,
+   deciding, drafting, barge-in). Per speaker: Silero VAD, Smart Turn v3
+   at each pause, Parakeet on the finished turn. `tools/voice.py`: one
+   cached `_asr()`; `listen` splits into decode and recognize-from-samples,
+   which `/transcribe` and the call's PCM share; Kokoro loads there too
+   (docstring updated). The call's hearing and speaking each get their own
+   worker, apart from the file worker, so neither waits on the other or on
+   a voice note.
+3. **Deciding.** At each turn's end the judgement task `meet.speak`, a
+   `pick` question, asks Jev about the recent lines (with speakers),
+   whether Valor spoke last, and what he posted. Labels: asked Valor
+   (speak), something useful to add (post in chat), someone else's turn,
+   nothing for him; the last two do nothing. Abstain and the failure route
+   are silence, recorded in `judgement.*` rows. Each answer carries its
+   speaker's turn id, which any new speech from that speaker advances;
+   `core/call.py` drops an answer or draft whose turn id is no longer
+   current, a late fallback answer included.
+4. **Answering**, front model first, workers second. A front model (Haiku
+   5.5, streamed through the gateway) drafts while Jev decides; the draft
+   is dropped on a no. A turn's startup is too slow for a live reply
+   (step 4 measures it against a warm session). Its one tool asks a
+   named, mostly read-only worker (repo, mail and calendar, web, memory),
+   a Claude Code session started at join through the harness, so it is
+   metered, on a fast model.
    A spoken question that needs a worker gets "I'll put it in the chat",
    and the answer is posted when ready, naming the question it answers.
    Human-like timing: a natural gap before speaking; he stops within a
@@ -91,8 +108,7 @@ from Attendee. Crosstalk mislabels the quieter speaker. Google may
 challenge the automated profile: sign in by hand once, keep the profile.
 A broker release per reply adds a few milliseconds; measured in step 2.
 **Races.** Barge-in cancels the playing reply and the effect records the
-part spoken; a draft started before Jev answered is discarded unless the
-turn is still current.
+part spoken; a stale answer or draft is dropped by turn id (item 3).
 
 **Governance.** None added.
 
@@ -100,17 +116,23 @@ turn is still current.
 
 A local page with two `RTCPeerConnection`s stands in for Meet: per-speaker
 audio in, virtual-mic audio out, chat both ways. Turn ends on recorded
-speech; `meet.speak` routes (speak, post, silent, abstain, stale); barge-in
-by the addressed speaker but not by side talk; a worker's late answer
-posted; one Parakeet and Kokoro copy; hearing while speaking. Live
+speech; three talkers over fewer streams; `meet.speak` routes (speak,
+post, silent, abstain, failed, stale turn id); barge-in by the addressed
+speaker but not by side talk; a worker's late answer posted; one Parakeet
+and Kokoro copy; transcript latency while speaking and while a voice note
+transcribes; `leave` and a crashed `join` both end the task. Live
 (`VALOR_LIVE=1`): Valor joins a test Meet signed in; memory and
 latency logged. `uv run pytest -q -n auto`, ruff, `tests/test_bloat.py`.
 
 **Done** when Tom has a real Meet call with Valor in it, Valor joins as
 himself and speaks or posts when it is his turn, with a tool where
-needed, and Tom records the date.
+needed, and Tom records the date with what he saw: barge-in worked, no
+unprompted speech in side talk, the reply delay heard, which posts were
+worth reading.
 
 ## Open Questions
 
 1. Should Valor say in the chat when he joins that he is an AI? Joining
    "like any other user" suggests no; people in the call may expect it.
+   The critique recommends a one-line chat note on join as the default
+   before any call with outside people.
