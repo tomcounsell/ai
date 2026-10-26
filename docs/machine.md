@@ -282,7 +282,13 @@ a message. `op` signs in with the 1Password service account,
 `OP_SERVICE_ACCOUNT_TOKEN`, which a turn's environment carries (checked
 2026-10-21) and which the vault `.env` holds for a process that lacks it
 (`scripts/deploy-site.sh`, `mercury.py`). A credential Valor makes for
-itself goes into `m-valor`.
+itself goes into `m-valor`. Valor's own logins (Instagram, its personal
+Gmail) are in its employee vault. The service account can't see that vault:
+on 2026-10-26, `op vault list` showed only `m-valor`, `Valor env` and
+`Yudame Secrets`. Valor's 1Password user sign-in, `valor@yuda.me` on
+`yudame.1password.com`, likely holds the employee vault (unconfirmed), but `op` under it waits
+for the 1Password app to unlock, which a turn can't do. So a turn uses the
+sessions Tom signs in, and a login it must read goes into `m-valor`.
 
 | Secret | Read by | Today |
 |---|---|---|

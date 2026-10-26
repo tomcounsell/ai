@@ -33,6 +33,33 @@ any byob extension page,
 is loaded unpacked, so its `<id>` differs per Mac; `chrome://extensions`
 shows it.
 
+**A login form refuses the debugger.** On a page with a login form, the
+1Password extension adds `com-1password-button` and
+`com-1password-notification`, each holding a frame from its own extension.
+Chrome then refuses byob's debugger with "Cannot access a chrome-extension://
+URL of different extension". byob reports this as `cdp_attach_failed` and
+blames DevTools, which is wrong, and its `browser_eval` fallback returns
+`null` on Instagram. The page itself still answers `chrome.scripting`. Run
+`browser_eval` on byob's own extension tab
+(`chrome-extension://<id>/manifest.json`) and call
+`chrome.scripting.executeScript({target: {tabId}, world: 'MAIN', func, args})`.
+Values given in `args` don't appear in the transcript. Pages without a
+login form, a signed-in Instagram among them, take byob's tools as usual.
+
+**Instagram.** Valor's account is `@valorengels`. Its recovery email is
+Valor's personal Gmail, `v*********s@gmail.com`; the work accounts are
+`valor@yuda.me` and `valor@cyndra.ai`. It's reached through the byob Chrome
+on the Cowboy, signed in by Tom on 2026-10-26 with "Save login info"
+accepted. Its password is in Valor's employee 1Password vault, not in
+`Common Login` ([machine.md](machine.md)). A turn uses the open session and
+signs in only if it has lapsed. Desktop and mobile web can like, follow and
+**Repost** (the reel then appears on the profile's Reposts tab). Neither
+can share someone else's reel to a story (checked 2026-10-26): Share offers
+only DMs and outside apps. That needs the iPhone app. Reset links go by SMS
+to `+66…82`, which reaches Messages on the Cowboy
+(`~/Library/Messages/chat.db`) only while the iPhone forwards texts. No
+text reached it on 2026-10-25.
+
 **The browser.** `settings.browser` (`VALOR_BROWSER`) names one fixed build,
 `chromium_headless_shell-1208` in `~/Library/Caches/ms-playwright/`, never the
 newest in the cache. A turn that
