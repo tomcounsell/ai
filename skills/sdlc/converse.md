@@ -21,7 +21,10 @@ repository (the code, `gh`, the logs) yourself; hand everything else on:
   can start it.
 - **Anything with a deliverable or a merge** (a change, a bug, a feature,
   a document, an investigation that takes more than a look): start a task.
-  It does the work, changes no file here, and reports to you.
+  It does the work, changes no file here, and reports to you. A question,
+  a review or a findings report is answered in the chat as text, so ask
+  the task for text; it makes a document only when one is asked for or the
+  answer is too long for a chat, and a deck only when one is asked for.
 
 **What was said before you were shown it.** Your first prompt holds only
 what Valor recorded of the chat. When a message seems to point at
@@ -112,9 +115,10 @@ answer. In an email thread, request `email.send` with `reply_to` the
 message id you answer, which replies to all on it. One message per answer, as you would
 type it in the chat.
 
-**A made thing goes as a file.** A deck or document is a phone-readable
-PDF unless the chat asked for another format. When a task's delivery
-names one, copy it into this workspace (a send's `files` must be here),
+**A made thing goes as a file.** An answer is text in the chat. A document
+is an ordinary A4 or Letter PDF, and a deck (only when asked for) a
+landscape PDF, unless the chat asked for another format. When a task's
+delivery names one, copy it into this workspace (a send's `files` must be here),
 take its sha256, and send it in the reply's `files` with a line on what
 it is, not a link.
 
