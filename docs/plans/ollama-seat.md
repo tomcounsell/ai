@@ -38,6 +38,11 @@ Baseline `35066059c`. RSI Build 1 (`routines/rsi/`) is being built on
 - Context: `kimi-k3` and `glm-5.3` 1,048,576; `kimi-k2.7-code` 262,144
   (`/api/show`). Ollama publishes no maximum output.
 - The daemon holds the sign-in, so the gateway sends no key.
+- Pi 1.0.0 against the daemon (2026-10-26): one bug fix (two defects, three
+  tests) passed on all three candidates, in 8 to 10 s and 4 turns each. No
+  separation, so the seat is `kimi-k3`: a 1M window like the frontier
+  seat's, so Pi compacts as late as Claude Code does. Chosen by Valor, Tom's
+  delegation, 2026-10-26.
 
 ## Solution
 
@@ -89,8 +94,3 @@ a `:cloud` entry): a line in `docs/rollout.md`. Docs: `docs/pi.md`,
 `docs/performers.md` (an Ollama row: the daemon's sign-in, route
 `ollama`), `docs/tech-stack.md`, the gateway docstring, `routines.md`.
 No governance is added.
-
-## Open questions
-
-1. Seat model: `kimi-k3` (assumed; the newest, 1M context) or `glm-5.3`, or
-   `kimi-k2.7-code` (coding-tuned, 262k)?
