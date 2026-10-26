@@ -38,7 +38,7 @@ without asking are in [valor-rebuild-decided.md](valor-rebuild-decided.md).
   read from settings, default 3.
 - **Bridges.** Telegram, email, Slack and a local chat bridge. Telegram
   carries messages both ways and is the one tested bridge. Reactions mark
-  arrival and the work done for the message. Each team chat, each email thread,
+  arrival, what Valor understood, and what came of the message. Each team chat, each email thread,
   and Tom's own chat (his Telegram and Slack DMs, the operator chat, the
   local chat) has one
   long-lived chat session, and every message there that does not bind to

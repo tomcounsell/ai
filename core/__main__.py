@@ -376,7 +376,7 @@ async def _serve() -> None:
 
     setup = functools.partial(permissions.ensure, serve.LABEL)
     try:
-        await serve.serve(runners(judgement_port), _performers, setup=setup)
+        await serve.serve(runners(judgement_port), _performers, setup=setup, judgement_port=judgement_port)
     except rollout.Restart as exc:
         raise SystemExit(str(exc)) from None  # status 1: launchd starts the merged code
 

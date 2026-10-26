@@ -83,8 +83,7 @@ def marker(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-# The reaction a shape reaction replaces, and the name a row written before
-# rows named their Slack emoji is placed as.
+# The name a row written before rows named their Slack emoji is placed as.
 SEEN_NAME = "eyes"
 
 
@@ -326,8 +325,9 @@ class Sender:
 
     async def react(self, item, outbox) -> None:
         """Add one due reaction by its Slack name (the row's `emoji`; `eyes`
-        for a row with no label, written before rows named it); a `shape`
-        reaction then removes `eyes`, so the message carries one. A 429 or a
+        for a row with no label, written before rows named it), then remove
+        each name its message's earlier stages placed (`previous`) that
+        differs from it, so the message carries one. A 429 or a
         lost connection leaves it unmarked for a later wake, as a notice is;
         Slack's refusal (`missing_scope`, `message_not_found`, `invalid_name`)
         is its result."""
@@ -335,8 +335,9 @@ class Sender:
         try:
             channel = await self._channel(self._target(item.chat_id))
             await self.wire.react(channel, item.message_id, name)
-            if item.stage == "shape" and name != SEEN_NAME:
-                await self.wire.unreact(channel, item.message_id, SEEN_NAME)
+            for gone in dict.fromkeys(item.previous):
+                if gone != name:
+                    await self.wire.unreact(channel, item.message_id, gone)
         except self.kernel.Failed as e:
             await outbox.reacted(item, str(e))
             return

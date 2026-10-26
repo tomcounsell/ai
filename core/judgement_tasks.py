@@ -11,7 +11,7 @@ on. Every judgement row carries both that and the task's current digest, so
 a declaration changed after its record shows on every row it answers.
 """
 
-from core import machine
+from core import machine, reactions
 from core.judgement import JudgementTask, Kind, Question
 
 JUDGE = JudgementTask(
@@ -195,5 +195,81 @@ OVERLAP = JudgementTask(
     calibrated=None,
 )
 
-TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, OVERLAP)
+# The two reaction questions pick one emoji of about forty, several of which
+# often fit, so the probability splits: the top label is taken unless the
+# split is near flat (about three times 1/40). A wrong pick costs a mark.
+_REACTION_FLOOR = {"primary": 0.08, "fallback": 0.08}
+_MESSAGE = {
+    "message": "the message's text, from its message.received row",
+    "thread": "the earlier messages of its reply chain, oldest first, one per line",
+    "bound_as": "what message.bound bound it as: start, answer, feedback, steer, none, or stop",
+}
+HANDLING = JudgementTask(
+    site="reaction.handling",
+    questions=(
+        Question(
+            id="reaction",
+            text=(
+                "Valor has just read this message and puts one emoji reaction on it while he handles it. "
+                "Pick the reaction that shows he understood what is asked: the mood of the message, or "
+                "the work it plainly asks for (a request for bigger work: that activity, or the "
+                "hourglass). A question or a chat is not work: pick for its mood. Make it fun and fitting."
+            ),
+            kind=Kind.PICK,
+            labels=dict(reactions.PICKS),
+            proceed=frozenset(reactions.PICKS),
+        ),
+    ),
+    inputs=dict(_MESSAGE),
+    error_cost="low",
+    floor=dict(_REACTION_FLOOR),
+    on_abstain="caution",
+    on_failure="caution",
+    consumer={
+        "proceed": "the picked emoji replaces 👀 as the message's handling reaction (core/reactions.py)",
+        "caution": "📝 replaces 👀",
+    },
+    serves="Mission item 6",
+    guard="none: a label, no gate",
+    calibrated=None,
+)
+COMPLETED = JudgementTask(
+    site="reaction.completed",
+    questions=(
+        Question(
+            id="reaction",
+            text=(
+                "Valor has finished handling this message and puts one emoji reaction on it. Pick the "
+                "reaction that shows what came of it, fun and fitting. An activity emoji fits only when "
+                "`did` names that activity (or, for `bound_as` start, the task it was handed to). "
+                "`replied` says whether Valor sent text. No text sent means he agreed or acknowledged "
+                "(he answers anything else in text), so the reaction is his answer: pick an affirmative "
+                "or warm one (a thumbs up for a yes, a heart for thanks), never a doubtful one."
+            ),
+            kind=Kind.PICK,
+            labels=dict(reactions.PICKS),
+            proceed=frozenset(reactions.PICKS),
+        ),
+    ),
+    inputs={
+        **_MESSAGE,
+        "handling": "the reaction on the message while it was handled, or none",
+        "did": "what the turn that handled it did, its activities (core/reactions.py ORDER), or nothing",
+        "replied": "the text the turn sent in reply to it, in its chat to another message, or no text sent",
+        "outcome": "done, the turn ended in an error, or what binding did with it",
+    },
+    error_cost="low",
+    floor=dict(_REACTION_FLOOR),
+    on_abstain="caution",
+    on_failure="caution",
+    consumer={
+        "proceed": "the picked emoji is the message's done reaction (core/reactions.py)",
+        "caution": "📝 is its done reaction",
+    },
+    serves="Mission item 6",
+    guard="none: a label, no gate",
+    calibrated=None,
+)
+
+TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, OVERLAP, HANDLING, COMPLETED)
 BY_SITE = {t.site: t for t in TASKS}

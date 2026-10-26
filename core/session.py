@@ -325,9 +325,9 @@ def mid_turn(rows: list[dict], read_upto: int, chat: bool) -> list[tuple[int, st
 def chat_prompt(rows: list[dict]) -> str:
     """What reached a chat session since its last finished turn began,
     oldest first: each message as `intake.chat_line` renders it, with the
-    reaction on it; each reaction set since on a message an earlier turn
-    read, such as the activity of the last turn's work (quiet, it wakes
-    nothing); and each task's report under its task id."""
+    reaction on it; the reaction now on a message an earlier turn read,
+    when it was set since, such as the done the last turn earned (quiet, it
+    wakes nothing); and each task's report under its task id."""
     from core import intake
 
     f = machine.fold(rows)
@@ -336,6 +336,7 @@ def chat_prompt(rows: list[dict]) -> str:
     # heard messages before it (`mid_turn`): the session has read them.
     upto = max((i for i in f.spent if i > since), default=since)
     shown = reactions.shown(rows)
+    now = reactions.current(rows)
     read = {
         r["payload"].get("received_id"): r["payload"].get("message_id")
         for r in rows
@@ -348,7 +349,12 @@ def chat_prompt(rows: list[dict]) -> str:
         p = r["payload"]
         if r["type"] == "message.heard" and r["id"] < upto:
             continue
-        if r["type"] == "reaction.requested" and p.get("stage") == "shape" and p.get("received_id") in read:
+        if (
+            r["type"] == "reaction.requested"
+            and p.get("stage") != "seen"
+            and p.get("received_id") in read
+            and now.get(p["received_id"]) is p
+        ):
             lines.append(
                 f"- Your reaction on message {read[p['received_id']]} is now {reactions.emoji_of(p)}: "
                 f"{reactions.why(p)}"
@@ -781,8 +787,8 @@ async def record(
     written again; when it still refuses, the largest part left is
     answered and the row written again, alone, until it is stored
     (`_reduce`), and failing that, one `turn.collected` holding nothing the
-    turn wrote is (`_bare`). Last, the reaction for what the turn did
-    (`reactions.on_turn`). Returns the verdict recorded. For a task with a kernel
+    turn wrote is (`_bare`); in the same transaction, the reactions owed
+    the messages the turn read (`reactions.owe`). Returns the verdict recorded. For a task with a kernel
     mirror, a plan commit or a candidate counts only once it is fetched
     into the mirror.
     The verdict, with its git calls and that fetch, is read in a worker
@@ -811,6 +817,7 @@ async def record(
             )
             entry = {**entry, "effect_id": outcome.effect_id, "kind": outcome.kind, "error": outcome.error}
         effects.append(entry)
+    did = await reactions.did(conn, task_id, turn_id, effects)
     async with conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         current = machine.fold(await ledger.read(conn, task_id)).state
@@ -843,7 +850,7 @@ async def record(
                 await ledger.append(conn, task_id, "turn.collected", collected)
             else:
                 collected = reduced
-    await reactions.on_turn(conn, task_id, turn_id, effects)
+        await reactions.owe(conn, task_id, turn_id, effects, did)
     return collected["verdict"]
 
 

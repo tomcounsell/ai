@@ -20,7 +20,7 @@ from harnesses import claude_code
 from tests import bridges, test_kernel
 from tests.test_kernel import audit, new_task
 from tests.test_kernel import said as in_team
-from tests.test_reactions import effect, requested, worked
+from tests.test_reactions import effect, worked
 
 pytestmark = pytest.mark.spend(usd=0)
 team = test_kernel.team  # the kernel tests' fixture: a project's team chats
@@ -357,7 +357,7 @@ def test_a_chat_turn_that_took_its_only_message_is_not_woken_again():
     assert not session.chat_waiting(rows) and session.chat_prompt(rows) == ""
 
 
-def test_a_message_taken_mid_turn_gets_that_turns_activity(dsn, team):
+def test_a_message_taken_mid_turn_is_owed_that_turns_done(dsn, team):
     async def go():
         first = await in_team(dsn, "valor, find the florist's supplier")
         task = first["task_id"]
@@ -379,8 +379,9 @@ def test_a_message_taken_mid_turn_gets_that_turns_activity(dsn, team):
             await ledger.append(
                 conn, task, "turn.ended", {"turn_id": turn_id, "outcome": "done", "result": {}}
             )
-            label = await reactions.on_turn(conn, task, turn_id, [effect("task.start")])
-        return label, await requested(dsn, m["received_id"])
+            took = [effect("task.start")]
+            n = await reactions.owe(conn, task, turn_id, took, await reactions.did(conn, task, turn_id, took))
+        return n, await bridges.of_type(dsn, "reaction.owed", received_id=m["received_id"])
 
-    label, rows = run(go())
-    assert label == "task" and [r["label"] for r in rows] == ["seen", "task"]
+    n, rows = run(go())
+    assert n == 1 and [(r["stage"], r["did"]) for r in rows] == [("done", ["task"])]

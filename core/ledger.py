@@ -63,9 +63,9 @@ QUIET = (
 )
 
 # Judgement sites whose rows sit beside a task's work without moving it:
-# `response.shape`, which picked a reaction for a message until 2026-10-17
-# (its rows stay in the ledger), decided nothing.
-QUIET_SITES = ("response.shape",)
+# the reaction questions, and `response.shape`, which picked a reaction for
+# a message until 2026-10-17 (its rows stay in the ledger), decide nothing.
+QUIET_SITES = ("reaction.handling", "reaction.completed", "response.shape")
 
 
 def quiet(row: dict[str, Any]) -> bool:

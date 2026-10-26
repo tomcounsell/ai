@@ -26,7 +26,9 @@ On start it recovers (`recover`) what a killed kernel left:
 
 Then it starts the gateway, listens on `valor_events`, and on each wake (a
 row, or `settings.serve_tick_s` with none) binds every recorded message
-(`intake.bind`), requests the notices each task owes (`notices.owe`),
+(`intake.bind`), starts a job for each message's next reaction
+(`reactions.pending`; kept in `reacting`, apart from the task jobs, so a
+task's step never waits on one), requests the notices each task owes (`notices.owe`),
 rolls the kernel forward to its own merges (`roll`), and schedules jobs
 (`schedule`). A job is one step of one task
 (`router.step`), a provisioning, or the collection recover could not
@@ -111,9 +113,11 @@ from core import (
     db,
     git,
     intake,
+    judgement,
     ledger,
     machine,
     notices,
+    reactions,
     rollout,
     router,
     routines,
@@ -561,6 +565,7 @@ class Kernel:
         sync: Callable[[], None] | None = None,
         backup: Callable[[str], None] | None = None,
         setup: Callable[[], dict[str, list[str]]] | None = None,
+        judgement_port: judgement.JudgementPort | None = None,
     ):
         self.gateway, self.runners, self.performers, self.dsn = gateway, runners, performers, dsn
         # The checkout this process runs from and its commit then; with no
@@ -579,6 +584,11 @@ class Kernel:
         # job before the task is stepped.
         self.uncollected: set[str] = set(uncollected or ())
         self.jobs: dict[str, asyncio.Task] = {}
+        # Reaction jobs by `received_id` (`core/reactions.py`), apart from
+        # `jobs`: a task's step is scheduled while its message's reaction is
+        # judged. A job that raised is asked again on a later wake.
+        self.judgement_port = judgement_port
+        self.reacting: dict[str, asyncio.Task] = {}
         self.harness: set[str] = set()  # the foreground tasks whose harness jobs run
         self.background: set[str] = set()  # the background tasks whose harness jobs run
         self.services: dict[str, router._Services] = {}
@@ -604,6 +614,10 @@ class Kernel:
             self.waiting.clear()
             self.parked_at = now
         await intake.bind(conn)
+        try:
+            await self.react(conn)
+        except Exception as exc:  # noqa: BLE001  the reactions are read again on the next wake
+            _log(f"reactions failed: {exc!r}")
         for task_id in await self.active(conn):
             try:
                 await notices.owe(conn, task_id)
@@ -634,6 +648,27 @@ class Kernel:
                 continue
             if await workspace.reclaim(conn, task_id, by="kernel", via="serve", before=before):
                 _log(f"task {task_id}: removed its finished workspace")
+
+    async def react(self, conn) -> None:
+        """A job of its own for each message's next reaction not already
+        being written (`reactions.pending`)."""
+        for item in await reactions.pending(conn):
+            rid = item["row"]["received_id"]
+            if rid in self.reacting:
+                continue
+            job = asyncio.create_task(self._react(item))
+            self.reacting[rid] = job
+
+            def finished(job, rid=rid):
+                self.reacting.pop(rid, None)
+                if not job.cancelled() and job.exception() is not None:
+                    _log(f"reaction for message {rid}: {job.exception()!r}")
+
+            job.add_done_callback(finished)
+
+    async def _react(self, item: dict[str, Any]) -> None:
+        async with await db.connect(self.dsn) as conn:
+            await reactions.react(self.judgement_port, conn, item, self.dsn)
 
     def _holding(self) -> bool:
         """A job other than a background turn's is running."""
@@ -1115,7 +1150,7 @@ class Kernel:
                 await services.close()
 
     async def close(self) -> None:
-        jobs = list(self.jobs.values())
+        jobs = [*self.jobs.values(), *self.reacting.values()]
         for job in jobs:
             job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
@@ -1202,13 +1237,15 @@ async def serve(
     credential: str | Path | None = None,
     kick: Callable[[str], str | None] | None = rollout.kick,
     setup: Callable[[], dict[str, list[str]]] | None = None,
+    judgement_port: judgement.JudgementPort | None = None,
 ) -> None:
     """Run the kernel until killed, or until a rollout of its own merge
     raises `rollout.Restart`. `checkout` is the checkout it runs from and
     rolls forward; `credential` the GitHub key file for the fetch
     (default `settings.github_keyfile`); `kick` restarts a bridge's
     launchd job at start (`restart_bridges`); `setup` checks this Mac's
-    setup on every update (`permissions.ensure`)."""
+    setup on every update (`permissions.ensure`); `judgement_port` picks
+    the reactions."""
     dsn = dsn or settings.dsn()
     started = None
     if checkout is not None:
@@ -1242,6 +1279,7 @@ async def serve(
             migrate=migrate,
             credential=credential if credential is not None else settings.github_keyfile,
             setup=setup,
+            judgement_port=judgement_port,
         )
         await listener.execute("LISTEN valor_events")
         listening = asyncio.create_task(_listen(listener, kernel.wake))

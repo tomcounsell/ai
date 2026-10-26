@@ -76,7 +76,7 @@ class JudgementTask:
     questions: tuple[Question, ...]
     inputs: dict[str, str]  # field -> where the kernel reads it
     error_cost: str  # high, medium, low
-    floor: dict[str, float]  # per leg, in (0.5, 1)
+    floor: dict[str, float]  # per leg, in (0.5, 1); a `pick` question's may sit lower, in (0, 1)
     on_abstain: str  # always "caution"
     on_failure: str  # "caution" or "no_verdict"
     consumer: dict[str, str]  # each action -> what the kernel does with it
@@ -205,7 +205,8 @@ def normalize(probs: Mapping[str, float]) -> dict[str, float] | None:
 def decide(question: Question, probs: Mapping[str, float], floor: float) -> dict[str, Any]:
     """One question's answer from one leg: the gate on the summed probability
     of the labels that proceed. A `pick` question is gated on its top
-    label's probability instead, and abstains under the floor."""
+    label's probability instead, and abstains under the floor; over many
+    labels that floor may sit under 0.5 (the reaction sites' 0.08)."""
     label = max(sorted(probs), key=lambda k: probs[k])
     if question.kind is Kind.PICK:
         p = round(probs[label], 9)

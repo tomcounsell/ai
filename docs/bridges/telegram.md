@@ -182,37 +182,45 @@ message of Tom's in his own chat, every message in a team chat that wakes
 its session (in a `mentions` chat, one naming Valor or replying to him), and
 none that is only heard. Binding writes `reaction.requested` with 👀, and
 the outbox places it at once: on a row's wake it yields before it
-reconciles and runs the gap fill. Nothing is guessed on arrival. When a
-turn of the task is collected, what the turn actually did (the effects it
-requested, the tool calls in its transcript) sets the reaction that
-replaces 👀 on one message its prompt read (those that arrived since the
-last turn that took the steering, and the steers it took mid-turn; the one a send of the turn replies to,
-else the newest; a fresh, compaction, or errored turn sets none): `task` 🫡,
-`code` 👨‍💻, `web_search` 🔍, `lookup` 🧐, `document` ✍, `present` 📊,
-`issue` 🎫, `schedule` 📅, `send` 📤. A turn that only replied leaves 👀;
-writing its own `.valor/` files or Claude Code's memory is not work. A message that
-starts a task gets 🫡 at once after 👀; a `stop` gets 👌; Tom's reply to
-finished work keeps 👀 for good. The emoji per label is
-`reactions.REACTIONS`, one table for both platforms. The outbox yields each
-as a `ReactionDue`, and the bridge sets it with `Wire.react`
-(`SendReactionRequest` with one reaction). An emoji on Telegram's reaction
-list (`GetAvailableReactionsRequest`, read and logged on the first
-reaction) is sent as `ReactionEmoji`; any other as `ReactionCustomEmoji`,
-the first custom emoji Telegram's search gives for the glyph
-(`SearchCustomEmojiRequest`, logged and kept), which needs the account's
-Premium (logged on connect). Setting the account's list replaces its
-earlier reaction, so the message shows one. Like a notice, a reaction is
-not an effect: no approval, no report. The session reads the reaction
-beside each message (`intake.chat_line`), and what set it.
+reconciles and runs the gap fill. Then the reaction classifier (the
+judgement port, `reaction.handling`) picks a handling reaction that shows
+Valor understood the message: 🤔 for a question to think over, 🙏 for a
+favour, ⏳ or an activity's emoji for bigger work. When a turn of the task
+is collected, every message with 👀 it read (those that arrived since the
+last turn that took the steering, and the steers it took mid-turn; a fresh
+or compaction turn reads none) owes a done reaction, which the classifier
+picks (`reaction.completed`) from the message, what the turn did (the
+effects it requested and the tool calls in its transcript, read as `task`,
+`code`, `web_search`, `lookup`, `document`, `present`, `issue`,
+`schedule`, or `send`), and whether it sent text: a plain yes answered by
+👍 alone, 🔍 after a web search, 🫡 for work handed to a task. A turn that
+ended in an error leaves a `stalled` reaction, which the next turn's done
+replaces. A message that starts a task, and Tom's reply to finished work,
+owe their done at once; a `stop` gets 👌. An abstain, a failed judgement,
+or a stopped task (which cannot be billed) gives 📝, as does a done the
+chat refuses. Both questions pick from one palette of about forty emoji,
+`reactions.PALETTE`, one table for both platforms (`reactions.REACTIONS`).
+The outbox yields each as a `ReactionDue`, and the bridge sets it with
+`Wire.react` (`SendReactionRequest` with one reaction). An emoji on
+Telegram's reaction list (`GetAvailableReactionsRequest`, read and logged
+on the first reaction) is sent as `ReactionEmoji`; any other (🔍 🧐 📤 🎫
+📊 📅 ✅ 🚀 ⏳ 📝) as `ReactionCustomEmoji`, the first custom emoji
+Telegram's search gives for the glyph (`SearchCustomEmojiRequest`, logged
+and kept), which needs the account's Premium (logged on connect). Setting
+the account's list replaces its earlier reaction, so the message shows one.
+Like a notice, a reaction is not an effect: no approval, no report. The
+session reads the reaction beside each message (`intake.chat_line`), and
+what set it.
 
 A reaction is marked through `outbox.reacted`: `reaction.placed`, or
 `reaction.failed` with Telegram's refusal (`REACTION_INVALID`, a chat
-that limits reactions or refuses custom emoji; the message keeps 👀). A
-flood wait is held and a lost connection logged, and either leaves the
-reaction unmarked, so the outbox yields it again. The outbox yields a
-message's reactions in order, 👀 first, and never skips one; only a 👀
-whose activity reaction is already placed (a 👀 delayed by a flood wait)
-is closed `superseded`, so it never lands over the activity.
+that limits reactions or refuses custom emoji; a refused done is replaced
+by 📝). A flood wait is held and a lost connection logged, and either
+leaves the reaction unmarked, so the outbox yields it again. The outbox
+yields a message's reactions in order, 👀 first, and never skips one; a
+👀 whose later reaction is already placed (a 👀 delayed by a flood wait),
+and any other reaction below one already requested (a slow handling behind
+its done), is closed `superseded`, so it never lands over the later one.
 
 ### The port in code
 

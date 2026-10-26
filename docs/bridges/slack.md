@@ -295,20 +295,21 @@ is found and marked sent, not posted again. A notice that cannot be sent is
 logged once and tried on the next wake.
 
 **Reactions.** The kernel marks a message it acts on (`core/reactions.py`;
-the Telegram port's Reactions section says when). The outbox yields each
+the Telegram port's Reactions section says when): 👀, then the
+classifier's handling reaction, then its done. The outbox yields each
 `reaction.requested` row as a `ReactionDue`; the bridge adds it by the
-Slack name the row carries (`reactions.REACTIONS`: `eyes`, then
-`saluting_face`, `technologist`, `mag`, `face_with_monocle`,
-`writing_hand`, `bar_chart`, `ticket`, `date`, `outbox_tray`, or
-`ok_hand`; a row with no label, written before rows named their emoji, as
-`eyes`) with `reactions.add`, and a shape reaction then removes `eyes`, so
-the message carries one.
+Slack name the row carries (`reactions.REACTIONS`, from the one palette:
+`eyes`, `thinking_face`, `+1`, `tada`, `mag`, `saluting_face`, `memo` and
+the rest; a row with no label, written before rows named their emoji, as
+`eyes`) with `reactions.add`, then removes each name the message's earlier
+stages placed (`ReactionDue.previous`) that differs from it, so the message
+carries one, and a done that repeats its handling keeps it.
 `already_reacted` and `no_reaction` count as done. Slack's refusal
 (`missing_scope` until the app is reinstalled with `reactions:write`) is
 written as `reaction.failed`; a 429 or a lost connection leaves the
-reaction for the next wake, as a notice. A 👀 whose message's activity
-reaction is already placed is closed `superseded` by the outbox and never
-added.
+reaction for the next wake, as a notice. A reaction below a later one of
+its message (a 👀 once that is placed, any other once it is requested) is
+closed `superseded` by the outbox and never added.
 
 ## Stop and recovery
 

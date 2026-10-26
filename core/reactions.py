@@ -1,43 +1,54 @@
-"""Reactions: 👀 on a message Valor reads, then, once work is done for it,
-an emoji for that work (docs/plans/reactions-activity.md).
+"""Reactions: 👀 on a message Valor reads, then a `handling` reaction that
+shows he understood it, then a `done` reaction that shows what came of it,
+both picked by the reaction classifier (docs/plans/reactions-fun.md).
 
 Binding (`core/intake.py`) calls `on_bound` in the binding's transaction.
 A Telegram or Slack message bound to a task as `start`, `answer`,
-`feedback`, `steer`, or `none` with a task (Tom's reply to merged or
-stopped work) gets a `seen` reaction, 👀, at once. A `start` started a
-task, so its `shape` reaction 🫡 follows at once; a `stop` gets 👌 at
-once instead of 👀. A message bound `none` with no task, or `heard`, and
-any message on a channel that does not react (email, local), gets
-nothing; so in a team chat whose spec lists it under `mentions`, only a
-message that names Valor or replies to him is marked.
+`feedback`, `steer`, `stop`, or `none` with a task (Tom's reply to merged
+or stopped work) gets a `seen` reaction, 👀, at once. A `start` (handed to
+a new task) and a `none` owe their `done` at once (`reaction.owed`); a
+`stop` gets 👌 as its done at once. A message bound `none` with no task, or
+`heard`, and any message on a channel that does not react (email, local),
+gets nothing; so in a team chat whose spec lists it under `mentions`, only
+a message that names Valor or replies to him is marked.
 
-Nothing is guessed on arrival. When a turn of the task is collected
-(`core/session.py`, `record`), `on_turn` reads what the turn actually did:
-the effects it requested and the tools its transcript shows it called
-(`did`). The most specific activity (`ORDER`) becomes the `shape` reaction
-of one message still showing 👀 that the turn read (its prompt's window,
-since the last turn that spent the steering, and the steers it took
-mid-turn; a fresh, compaction, or errored turn sets nothing): the one a send of the turn replies to, else the newest. A turn that only replied in the chat
-did nothing, so 👀 stays. A `none`-bound message's 👀 is `final` and never
-changes.
+When a turn of the task is collected (`core/session.py`, `record`),
+`owe` writes, in the collection's transaction, a `reaction.owed` row for
+every message with 👀 the turn read (its prompt's window, since the last
+turn that spent the steering, and the steers it took mid-turn; a fresh or
+compaction turn reads none): `done`, or `stalled` for a turn that ended in
+an error, which the next turn's `done` replaces. It carries what the turn
+did (`did`: the effects it requested and the tools its transcript shows,
+`effect_did`/`tool_did`, in `ORDER`) and whether it sent text in reply.
 
-`REACTIONS` is the one mapping, per channel, from a label (`seen`, `stop`,
-and each activity) to what the bridge places: on Telegram the emoji's exact
-code points, which the bridge sends as a standard reaction when Telegram's
-list has it and as a Premium custom emoji for that glyph when not
-(`bridges/telegram/wire.py`); on Slack the emoji's name. Each
-`reaction.requested` row carries the `label` and that `emoji`.
+The resident kernel (`core/serve.py`) asks the classifier for what is due
+(`pending`, `react`): a `handling` for a message with 👀 and nothing owed
+(`reaction.handling`), and each owed reaction (`reaction.completed`). Both
+pick from one palette (`PALETTE`); the activity emoji fit only work the
+message asks for or the turn did. An abstain, no port, or both legs
+failing `judgement.UNANSWERED_RUNS` times gives `noted` 📝. A message on a
+stopped task, which cannot be billed, gets its done unjudged: 📝. A done
+the platform refuses is replaced by 📝 (stage `noted`). A message bound
+before 2026-10-26 (a 👀 row with no `completes`) is left as it is.
+
+`REACTIONS` is the one mapping, per channel, from a label to what the
+bridge places: on Telegram the emoji's exact code points, which the bridge
+sends as a standard reaction when Telegram's list has it and as a Premium
+custom emoji for that glyph when not (`bridges/telegram/wire.py`); on Slack
+the emoji's name. Each `reaction.requested` row carries the `label`, that
+`emoji`, its `stage`, and `why` it was set.
 
 The bridge places each `reaction.requested` row through its outbox
 (`core/bridge.py`, `ReactionDue`) with its own account, as it sends
-notices, and writes `reaction.placed` or `reaction.failed`. There is no
-broker effect, approval, or report: a reaction is a reversible mark in a
+notices, and writes `reaction.placed` or `reaction.failed`; a row below a
+later stage of the same message is closed `superseded` (`RANK`). There is
+no broker effect, approval, or report: a reaction is a reversible mark in a
 chat Tom owns and carries no text. Every reaction row is quiet
 (`ledger.quiet`), so none moves the task it sits on.
 
 The session reads the reaction on each message beside it (`shown`, through
-`intake.chat_line`), and what it was set for, so asked about an emoji
-Valor says what he did.
+`intake.chat_line`), and what set it, so asked about an emoji Valor says
+why.
 """
 
 import json
@@ -48,42 +59,79 @@ from typing import Any
 
 import psycopg
 
-from core import channels, ledger, machine, transcripts
+from core import channels, judgement, ledger, machine, tasks, transcripts
 
-# Telegram: exact code points, none with the U+FE0F variation selector,
-# which Telegram can refuse. Slack: the emoji's name.
-REACTIONS = {
-    "telegram": {
-        "seen": "\U0001f440",  # 👀
-        "stop": "\U0001f44c",  # 👌
-        "task": "\U0001fae1",  # 🫡
-        "code": "\U0001f468‍\U0001f4bb",  # 👨‍💻
-        "web_search": "\U0001f50d",  # 🔍
-        "lookup": "\U0001f9d0",  # 🧐
-        "document": "✍",  # ✍
-        "present": "\U0001f4ca",  # 📊
-        "issue": "\U0001f3ab",  # 🎫
-        "schedule": "\U0001f4c5",  # 📅
-        "send": "\U0001f4e4",  # 📤
-    },
-    "slack": {
-        "seen": "eyes",
-        "stop": "ok_hand",
-        "task": "saluting_face",
-        "code": "technologist",
-        "web_search": "mag",
-        "lookup": "face_with_monocle",
-        "document": "writing_hand",
-        "present": "bar_chart",
-        "issue": "ticket",
-        "schedule": "date",
-        "send": "outbox_tray",
-    },
+# The palette both classifier questions pick from: per label, the Telegram
+# glyph (exact code points, none with the U+FE0F variation selector, which
+# Telegram can refuse), the Slack name, and when it fits. Telegram's
+# standard reaction list (logged by the bridge, 2026-10-25) has all but
+# 🔍 🧐 📤 🎫 📊 📅 ✅ 🚀 ⏳ 📝, which go as Premium custom emoji.
+_DID = "only when `did` names it, or for a handling, when the message plainly asks for it"
+PALETTE = {
+    "seen": ("\U0001f440", "eyes", "read"),  # 👀, placed at binding, never picked
+    "noted": ("\U0001f4dd", "memo", "noted: nothing else fits"),
+    "code": ("\U0001f468\u200d\U0001f4bb", "technologist", f"a change to code or a running system, {_DID}"),
+    "web_search": ("\U0001f50d", "mag", f"searching or reading the web, {_DID}"),
+    "lookup": ("\U0001f9d0", "face_with_monocle", f"looking up the code, chat history or records, {_DID}"),
+    "document": ("\u270d", "writing_hand", f"writing a document or report, {_DID}"),
+    "present": ("\U0001f4ca", "bar_chart", f"making a deck, explainer or video, {_DID}"),
+    "issue": ("\U0001f3ab", "ticket", f"filing or updating an issue, {_DID}"),
+    "schedule": ("\U0001f4c5", "date", f"scheduling a meeting, reminder or routine, {_DID}"),
+    "send": ("\U0001f4e4", "outbox_tray", f"sending an email, a file, or a message elsewhere, {_DID}"),
+    "task": ("\U0001fae1", "saluting_face", f"on it: the work handed to a task, {_DID}"),
+    "working": ("\u23f3", "hourglass_flowing_sand", "bigger work under way (a handling only)"),
+    "thumbs_up": ("\U0001f44d", "+1", "yes, agreed, sounds good, will do"),
+    "ok": ("\U0001f44c", "ok_hand", "understood, okay, as you say"),
+    "check": ("\u2705", "white_check_mark", "confirmed, done, checked off"),
+    "heart": ("\u2764", "heart", "thanks, kindness, something lovely"),
+    "love": ("\U0001f60d", "heart_eyes", "love it"),
+    "fire": ("\U0001f525", "fire", "impressive, exciting, hot news"),
+    "party": ("\U0001f389", "tada", "a celebration: shipped, launched, a win"),
+    "champagne": ("\U0001f37e", "champagne", "a big win worth popping a bottle"),
+    "trophy": ("\U0001f3c6", "trophy", "an achievement or milestone"),
+    "rocket": ("\U0001f680", "rocket", "launch, deploy, ship it"),
+    "hundred": ("\U0001f4af", "100", "exactly right, full agreement"),
+    "clap": ("\U0001f44f", "clap", "applause for someone's work"),
+    "handshake": ("\U0001f91d", "handshake", "a deal, an agreement, teamwork"),
+    "pray": ("\U0001f64f", "pray", "gratitude for a favour, a please, a hope"),
+    "hug": ("\U0001f917", "hugging_face", "warm support, a welcome, comfort"),
+    "grin": ("\U0001f601", "grin", "a cheerful message or light joke"),
+    "rofl": ("\U0001f923", "rolling_on_the_floor_laughing", "something really funny"),
+    "star_struck": ("\U0001f929", "star-struck", "delighted, amazing"),
+    "cool": ("\U0001f60e", "sunglasses", "smooth, nailed it"),
+    "zap": ("\u26a1", "zap", "fast, urgent, done in a flash"),
+    "nerd": ("\U0001f913", "nerd_face", "a technical deep cut"),
+    "mind_blown": ("\U0001f92f", "exploding_head", "astonishing news"),
+    "thinking": ("\U0001f914", "thinking_face", "a question or idea to think over (never with no text sent)"),
+    "raised_eyebrow": ("\U0001f928", "face_with_raised_eyebrow", "something odd or suspicious"),
+    "sad": ("\U0001f622", "cry", "bad news, a loss, a disappointment"),
+    "oops": ("\U0001f648", "see_no_evil", "an embarrassing slip, a mistake owned up to"),
+    "angel": ("\U0001f607", "innocent", "a good deed, a sorry, an innocent ask"),
+    "shrug": ("\U0001f937", "shrug", "nobody can know (never with no text sent)"),
+    "yawn": ("\U0001f971", "yawning_face", "late at night, tired, or dull"),
+    "moai": ("\U0001f5ff", "moyai", "deadpan, unbothered acknowledgement"),
+    "unicorn": ("\U0001f984", "unicorn_face", "something rare, magical or whimsical"),
+    "dove": ("\U0001f54a", "dove_of_peace", "calm, peace, a conflict settled"),
 }
+REACTIONS = {
+    "telegram": {label: glyph for label, (glyph, _, _) in PALETTE.items()},
+    "slack": {label: name for label, (_, name, _) in PALETTE.items()},
+}
+# What the classifier picks from: all but 👀.
+PICKS = {label: f"{glyph} {fits}" for label, (glyph, _, fits) in PALETTE.items() if label != "seen"}
+NOTED = "noted"
+# A message's stages, lowest first: a row is closed `superseded` below a
+# later one (`core/bridge.py`). `shape` is a row's of 2026-10-17 to 26.
+RANK = {"seen": 0, "shape": 1, "handling": 1, "stalled": 2, "done": 3, "noted": 4}
 # The activities, the one a turn shows first: what the sender would see.
 ORDER = ("code", "present", "document", "issue", "schedule", "send", "task", "web_search", "lookup")
-# What a message is bound as for it to get 👀.
-SEEN = ("start", "answer", "feedback", "steer", "none")
+# What a message is bound as for it to get 👀; of those, what owes its
+# done at binding, and what that done is told.
+SEEN = ("start", "answer", "feedback", "steer", "none", "stop")
+BOUND = {"start": "handed to a new task, which does the work",
+         "none": "a reply to finished work: the kernel answers it with a notice"}  # fmt: skip
+# A reply's text as the completed question reads it.
+REPLY_CHARS = 400
 
 # An effect's activity by its action type; a chat send is a reply unless it
 # goes to another chat or carries a file other than a voice note.
@@ -112,18 +160,21 @@ COMMANDS = (
 
 
 async def on_bound(conn, p: dict[str, Any], task_id: str | None, as_: str) -> None:
-    """The reaction a binding owes, in the binding's transaction: 👀 for a
-    message read (final for one bound `none`), then 🫡 for one that started
-    a task; 👌 for a `stop`."""
+    """The reactions a binding owes, in the binding's transaction: 👀 for a
+    message read; then, for one handed to a new task or bound `none`, its
+    done owed at once; for a `stop`, 👌 as its done."""
     row = channels.get(p["channel"])
-    if task_id is None or row is None or not row.reacts:
+    if task_id is None or row is None or not row.reacts or as_ not in SEEN:
         return
-    if as_ in SEEN:
-        await _request(conn, task_id, p, "seen", "seen", **({"final": True} if as_ == "none" else {}))
-    if as_ == "start":
-        await _request(conn, task_id, p, "task", "shape", reason="a task started")
-    elif as_ == "stop":
-        await _request(conn, task_id, p, "stop", "shape", reason="stop")
+    await _request(conn, task_id, p, "seen", "seen", completes=True)
+    if as_ == "stop":
+        await _request(conn, task_id, p, "ok", "done", why="done: you stopped the work, as asked")
+    elif as_ in BOUND:
+        await _owe(conn, task_id, p, "done", outcome=BOUND[as_], did=[], replied="no text sent")
+
+
+def _message(p: dict[str, Any]) -> dict[str, Any]:
+    return {k: p[k] for k in ("received_id", "channel", "chat_id", "message_id")}
 
 
 async def _request(conn, task_id: str, p: dict[str, Any], label: str, stage: str, **extra) -> str | None:
@@ -139,10 +190,7 @@ async def _request(conn, task_id: str, p: dict[str, Any], label: str, stage: str
                 "reaction.requested",
                 {
                     "reaction_id": reaction_id,
-                    "received_id": p["received_id"],
-                    "channel": p["channel"],
-                    "chat_id": p["chat_id"],
-                    "message_id": p["message_id"],
+                    **_message(p),
                     "emoji": REACTIONS[p["channel"]][label],
                     "label": label,
                     "stage": stage,
@@ -152,6 +200,17 @@ async def _request(conn, task_id: str, p: dict[str, Any], label: str, stage: str
     except psycopg.errors.UniqueViolation:
         return None
     return reaction_id
+
+
+async def _owe(conn, task_id: str, p: dict[str, Any], stage: str, **what) -> None:
+    """One `reaction.owed` row; a reply text the ledger refuses (in a
+    savepoint, so a turn's collection stands) is left out."""
+    row = {**_message(p), "stage": stage, **what}
+    _, why = await ledger.try_append(conn, task_id, "reaction.owed", row)
+    if why is not None:
+        await ledger.append(
+            conn, task_id, "reaction.owed", {**row, "replied": f"a reply the ledger refused: {why}"}
+        )
 
 
 def _ext(path: str) -> str:
@@ -218,56 +277,248 @@ def tool_calls(text: bytes, since: datetime) -> list[tuple[str, dict[str, Any]]]
     return calls
 
 
-async def on_turn(conn, task_id: str, turn_id: str, effects: list[dict[str, Any]]) -> str | None:
-    """The activity reaction a collected turn owes: what it did (`effects`,
-    the entries `record` made, and its transcript's tool calls), on one
-    message still showing 👀 that it read. The label written, or None."""
+async def did(conn, task_id: str, turn_id: str, effects: list[dict[str, Any]]) -> list[str]:
+    """What a collected turn did, in `ORDER`: the activities of `effects`
+    (the entries `record` made) and of its transcript's tool calls. A chat
+    send is a reply in any chat that reacts, so only a send elsewhere or
+    with a file counts."""
     rows = await ledger.read(conn, task_id)
-    start = next(
-        (r for r in rows if r["type"] == "turn.started" and r["payload"].get("turn_id") == turn_id), None
-    )
+    start, ended = _turn(rows, turn_id)
     if start is None:
-        return None
-    # The messages this turn read: its prompt's steering window (`steer_since`
-    # before it began, up to the last row its prompt read) and the steers it
-    # took mid-turn, and only when the turn spent them (a fresh, compaction,
-    # or errored turn leaves them to the next).
-    f = machine.fold(rows)
-    if turn_id not in f.turn_rows or f.steer_since != f.turn_rows[turn_id]:
-        return None
-    since = machine.fold([r for r in rows if r["id"] < start["id"]]).steer_since
-    took = {p.get("received_id") for i, p in f.steered if i in f.taken.get(turn_id, set())}
-    shaped = {r["payload"]["received_id"] for r in rows if r["type"] == "reaction.requested"
-              and r["payload"].get("stage") == "shape"}  # fmt: skip
-    waiting = [r["payload"] for r in rows if r["type"] == "reaction.requested"
-               and (since < r["id"] <= f.turn_rows[turn_id] or r["payload"].get("received_id") in took)
-               and r["payload"].get("stage") == "seen" and not r["payload"].get("final")
-               and r["payload"]["received_id"] not in shaped]  # fmt: skip
-    if not waiting:
-        return None
-    chats = {str(p["chat_id"]) for p in waiting}
-    requested = [
-        e["request"] for e in effects if "request" in e and not e.get("error") and e.get("kind") != "refused"
-    ]
-    did = {a for r in requested if (a := effect_did(r, chats))}
-    ended = next(
-        (r["payload"] for r in rows if r["type"] == "turn.ended" and r["payload"].get("turn_id") == turn_id),
-        {},
-    )
+        return []
+    chats = {str(r["payload"]["chat_id"]) for r in rows if r["type"] == "reaction.requested"}
+    found = {a for r in _requested(effects) if (a := effect_did(r, chats))}
     for f in (ended.get("transcript") or {}).get("files", []):
         for name, given in tool_calls(await transcripts.joined(conn, turn_id, f["name"]), start["at"]):
             if a := tool_did(name, given):
-                did.add(a)
-    label = next((a for a in ORDER if a in did), None)
-    if label is None:
+                found.add(a)
+    return [a for a in ORDER if a in found]
+
+
+def _turn(rows: list[dict], turn_id: str) -> tuple[dict | None, dict[str, Any]]:
+    """A turn's `turn.started` row and its `turn.ended` payload ({} when none)."""
+    mine = [
+        r
+        for r in rows
+        if r["type"] in ("turn.started", "turn.ended") and r["payload"].get("turn_id") == turn_id
+    ]
+    start = next((r for r in mine if r["type"] == "turn.started"), None)
+    return start, next((r["payload"] for r in mine if r["type"] == "turn.ended"), {})
+
+
+def _requested(effects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        e["request"] for e in effects if "request" in e and not e.get("error") and e.get("kind") != "refused"
+    ]
+
+
+def _replied(p: dict[str, Any], requested: list[dict[str, Any]]) -> str:
+    """What the turn sent for this message: a reply to it, a reply in its
+    chat to another, or no text."""
+    sends = [
+        r for r in requested if r.get("action_type") in SENDS and str(r.get("target")) == str(p["chat_id"])
+    ]
+    for r in sends:
+        payload = r.get("payload") or {}
+        if str(payload.get("reply_to")) == str(p["message_id"]):
+            return f"a reply to this message: {str(payload.get('text') or '')[:REPLY_CHARS]}"
+    for r in sends:
+        payload = r.get("payload") or {}
+        to = payload.get("reply_to")
+        return (
+            f"replied in this chat to {f'message {to}' if to else 'no message'}: "
+            + str(payload.get("text") or "")[:REPLY_CHARS]
+        )
+    return "no text sent"
+
+
+async def owe(conn, task_id: str, turn_id: str, effects: list[dict[str, Any]], done: list[str]) -> int:
+    """The reactions a collected turn owes, in `record`'s transaction after
+    its `turn.collected`: one `reaction.owed` for each message with 👀 it
+    read and no done owed, `done` or, for a turn that ended in an error,
+    `stalled`. `done` is what it did (`did`). How many it wrote."""
+    rows = await ledger.read(conn, task_id)
+    f = machine.fold(rows)
+    start, ended = _turn(rows, turn_id)
+    if start is None or f.turn_states.get(turn_id) in (machine.FRESH, machine.COMPACTION):
+        return 0
+    ok = ended.get("outcome") == "done" and not (ended.get("result") or {}).get("is_error")
+    stage = "done" if ok else "stalled"
+    since = machine.fold([r for r in rows if r["id"] < start["id"]]).steer_since
+    took = {p.get("received_id") for i, p in f.steered if i in f.taken.get(turn_id, set())}
+    owed: dict[str, int] = {}
+    for r in rows:
+        p = r["payload"]
+        if r["type"] in ("reaction.owed", "reaction.requested") and p.get("stage") in RANK:
+            owed[p["received_id"]] = max(owed.get(p["received_id"], 0), RANK[p["stage"]])
+    requested = _requested(effects)
+    written = 0
+    for r in rows:
+        p = r["payload"]
+        if r["type"] != "reaction.requested" or p.get("stage") != "seen" or p.get("final"):
+            continue
+        if not (since < r["id"] <= f.turn_rows[turn_id] or p["received_id"] in took):
+            continue
+        if owed.get(p["received_id"], 0) >= RANK[stage]:
+            continue
+        outcome = "done" if ok else "the turn ended in an error; it is tried again"
+        await _owe(conn, task_id, p, stage, turn_id=turn_id, outcome=outcome, did=done,
+                   replied=_replied(p, requested))  # fmt: skip
+        owed[p["received_id"]] = RANK[stage]
+        written += 1
+    return written
+
+
+# -- what is due, and the classifier's pick ------------------------------------
+
+# Every message with reactions still to come: one with a `completes` 👀 or a
+# reaction owed, and no done (placed or due) nor `noted`. Its task id (the
+# 👀's or the owed row's), whether that task is stopped, and its reaction
+# rows, oldest first.
+OPEN = (
+    "WITH open AS (SELECT DISTINCT ON (e.payload->>'received_id') e.payload->>'received_id' AS rid, e.task_id "
+    "FROM events e WHERE ((e.type = 'reaction.requested' AND e.payload->>'stage' = 'seen' "
+    "AND e.payload ? 'completes') OR e.type = 'reaction.owed') AND NOT EXISTS (SELECT 1 FROM events d "
+    "WHERE d.type = 'reaction.requested' AND d.payload->>'received_id' = e.payload->>'received_id' "
+    "AND (d.payload->>'stage' = 'noted' OR (d.payload->>'stage' = 'done' AND NOT EXISTS (SELECT 1 FROM events x "
+    "WHERE x.type = 'reaction.failed' AND x.payload->>'reaction_id' = d.payload->>'reaction_id')))) "
+    "ORDER BY e.payload->>'received_id', e.id) "
+    "SELECT o.rid, o.task_id, EXISTS (SELECT 1 FROM events s WHERE s.task_id = o.task_id "
+    "AND s.type = 'task.stopped'), r.type, r.payload FROM open o JOIN events r "
+    "ON r.type IN ('reaction.requested', 'reaction.owed', 'reaction.failed') "
+    "AND r.payload->>'received_id' = o.rid ORDER BY r.id"
+)
+
+
+def due(rows: list[dict[str, Any]], stopped: bool) -> tuple[str, dict[str, Any]] | None:
+    """What one message's reaction rows (oldest first) are owed next: the
+    stage, and the row it is read from (a `seen` or `reaction.owed`
+    payload); None when nothing is. A refused done is replaced by `noted`;
+    an owed done comes first, then a stopped task's done, then an owed
+    `stalled`, then a `handling` for a message with nothing owed."""
+    failed = {r["payload"].get("reaction_id") for r in rows if r["type"] == "reaction.failed"}
+    asked = [r["payload"] for r in rows if r["type"] == "reaction.requested"]
+    stages = {p.get("stage") for p in asked}
+    owed = [r["payload"] for r in rows if r["type"] == "reaction.owed"]
+    seen = next((p for p in asked if p.get("stage") == "seen"), None)
+    done = [p for p in asked if p.get("stage") == "done"]
+    if done and all(p.get("reaction_id") in failed for p in done):
+        return "noted", done[-1]
+    if done:
         return None
-    replied = {
-        str((r.get("payload") or {}).get("reply_to")) for r in requested if r.get("action_type") in SENDS
+    if owing := [p for p in owed if p.get("stage") == "done"]:
+        return "done", owing[-1]
+    if stopped and (seen or owed):
+        return "done", seen or owed[-1]
+    if (owing := [p for p in owed if p.get("stage") == "stalled"]) and "stalled" not in stages:
+        return "stalled", owing[-1]
+    if not owed and seen is not None and seen.get("completes") and stages == {"seen"}:
+        return "handling", seen
+    return None
+
+
+async def pending(conn) -> list[dict[str, Any]]:
+    """Each message's next reaction (`due`): `stage`, `task_id`, whether its
+    task is `stopped`, and the row it is read from, oldest first."""
+    by: dict[str, tuple[str, bool, list[dict[str, Any]]]] = {}
+    for rid, task_id, stopped, kind, payload in await (await conn.execute(OPEN)).fetchall():
+        by.setdefault(rid, (task_id, stopped, []))[2].append({"type": kind, "payload": payload})
+    out = []
+    for task_id, stopped, rows in by.values():
+        if (next_ := due(rows, stopped)) is not None:
+            out.append({"stage": next_[0], "task_id": task_id, "stopped": stopped, "row": next_[1]})
+    return out
+
+
+async def inputs(conn, item: dict[str, Any]) -> dict[str, str]:
+    """A classifier question's inputs for a due reaction: the message's
+    text, its reply chain oldest first, what it was bound as, and for a
+    done what the turn did and sent and the handling on it."""
+    rid = item["row"]["received_id"]
+    received = await (
+        await conn.execute(
+            "SELECT payload FROM events WHERE type = 'message.received' AND payload->>'received_id' = %s",
+            (rid,),
+        )
+    ).fetchone()
+    bound = await (
+        await conn.execute(
+            "SELECT payload->>'as' FROM events WHERE type = 'message.bound' AND payload->>'received_id' = %s",
+            (rid,),
+        )
+    ).fetchone()
+    p = received[0] if received else {}
+    thread = "\n".join(str(m.get("text") or "") for m in p.get("thread") or [] if isinstance(m, dict))
+    got = {"message": str(p.get("text") or ""), "thread": thread, "bound_as": bound[0] if bound else ""}
+    if item["stage"] == "handling":
+        return got
+    shown = await current_for(conn, [rid])
+    owed = item["row"]
+    return {
+        **got,
+        "handling": emoji_of(shown[rid]) if rid in shown else "none",
+        "did": ", ".join(owed.get("did") or []) or "nothing beyond reading and replying",
+        "replied": str(owed.get("replied") or "no text sent"),
+        "outcome": str(owed.get("outcome") or "done"),
     }
-    target = next((p for p in reversed(waiting) if str(p["message_id"]) in replied), waiting[-1])
-    written = await _request(conn, task_id, target, label, "shape", turn_id=turn_id,
-                             did=[a for a in ORDER if a in did])  # fmt: skip
+
+
+async def react(port: judgement.JudgementPort | None, conn, item: dict[str, Any], dsn: str) -> str | None:
+    """Write the reaction `item` (`pending`) is owed; the label written, or
+    None when none is (a failed judgement asked again later). `conn` writes
+    it; the port opens its own connections on `dsn`."""
+    from core.judgement_tasks import COMPLETED, HANDLING
+
+    stage, task_id, p = item["stage"], item["task_id"], item["row"]
+    if stage == "noted":
+        why = f"noted: your reaction {emoji_of(p)} was refused by the chat"
+        return NOTED if await _request(conn, task_id, p, NOTED, "noted", why=why) else None
+    if item["stopped"] or port is None:
+        why = f"{stage}: noted, " + (
+            "its task was stopped" if item["stopped"] else "the classifier was not asked"
+        )
+        return NOTED if await _request(conn, task_id, p, NOTED, stage, why=why) else None
+    task = HANDLING if stage == "handling" else COMPLETED
+    ref = {"received_id": p["received_id"], "stage": stage}
+    try:
+        j = await port.judge(task, await inputs(conn, item), task_id=task_id, ref=ref, dsn=dsn)
+    except tasks.TaskStopped:
+        why = f"{stage}: noted, its task was stopped"
+        return NOTED if await _request(conn, task_id, p, NOTED, stage, why=why) else None
+    if not j.answered and await _failures(conn, task_id, ref) < judgement.UNANSWERED_RUNS:
+        return None
+    label = (j.payload.get("picked") or {}).get(task.questions[0].id) if j.answered else None
+    if label not in PICKS:
+        label = NOTED
+    why = _why(stage, label, p)
+    written = await _request(conn, task_id, p, label, stage, why=why, judgement_id=j.judgement_id)
     return label if written else None
+
+
+async def _failures(conn, task_id: str, ref: dict[str, Any]) -> int:
+    row = await (
+        await conn.execute(
+            "SELECT count(*) FROM events WHERE task_id = %s AND type = 'judgement.failed' AND payload->'ref' = %s::jsonb",
+            (task_id, json.dumps(ref)),
+        )
+    ).fetchone()
+    return row[0]
+
+
+def _why(stage: str, label: str, p: dict[str, Any]) -> str:
+    """What a judged reaction tells the session of why it was set."""
+    fits = "no pick, so noted" if label == NOTED else f"read as {PICKS[label].split(' ', 1)[1]}"
+    if stage == "handling":
+        return f"handling, the classifier's pick: {fits}"
+    if not p.get("turn_id"):
+        return f"{stage}, the classifier's pick: {fits} ({p.get('outcome')})"
+    replied = str(p.get("replied") or "no text sent")
+    sent = (
+        "no text sent, so the reaction is your answer" if replied == "no text sent"
+        else "you replied to it" if replied.startswith("a reply to this") else "you " + replied.split(":", 1)[0]
+    )  # fmt: skip
+    did = ", ".join(p.get("did") or []) or "nothing beyond replying"
+    return f"{stage}, the classifier's pick after your turn ({sent}; you did {did}): {fits}"
 
 
 def emoji_of(p: dict[str, Any]) -> str:
@@ -278,7 +529,10 @@ def emoji_of(p: dict[str, Any]) -> str:
 
 
 def why(p: dict[str, Any]) -> str:
-    """What a `shape` reaction was set for."""
+    """What a reaction past 👀 was set for (rows of 2026-10-17 to 26 by
+    their own fields)."""
+    if p.get("why"):
+        return str(p["why"])
     if p.get("turn_id"):
         return f"your turn did {p.get('label')}"
     if p.get("reason"):
@@ -286,28 +540,35 @@ def why(p: dict[str, Any]) -> str:
     return f"the reaction classifier read it as {p.get('label')}" if p.get("judged") else str(p.get("label"))
 
 
-def shown(rows: list[dict]) -> dict[str, str]:
-    """By `received_id`, what a session reads of the reaction on the
-    message now: the newest requested reaction that did not fail, and what
-    set it."""
+def current(rows: list[dict]) -> dict[str, dict[str, Any]]:
+    """By `received_id`, the reaction on the message now: of its requested
+    reactions that did not fail, the latest stage's (`RANK`)."""
     failed = {r["payload"].get("reaction_id") for r in rows if r["type"] == "reaction.failed"}
-    out: dict[str, str] = {}
+    out: dict[str, dict[str, Any]] = {}
     for r in rows:
         p = r["payload"]
         if r["type"] != "reaction.requested" or p.get("reaction_id") in failed:
             continue
-        e = emoji_of(p)
-        out[p.get("received_id")] = (
-            f"reacted {e} (read)" if p.get("stage") == "seen" else f"reacted {e}: {why(p)}"
-        )
+        held = out.get(p.get("received_id"))
+        if held is None or RANK.get(p.get("stage"), 0) >= RANK.get(held.get("stage"), 0):
+            out[p.get("received_id")] = p
     return out
 
 
-async def shown_for(conn, received_ids: list[str]) -> dict[str, str]:
-    """`shown` for these messages, read from the ledger wherever their
-    rows sit."""
+def shown(rows: list[dict]) -> dict[str, str]:
+    """By `received_id`, what a session reads of the reaction on the
+    message now (`current`), and what set it."""
+    return {
+        rid: f"reacted {emoji_of(p)} (read)"
+        if p.get("stage") == "seen"
+        else f"reacted {emoji_of(p)}: {why(p)}"
+        for rid, p in current(rows).items()
+    }
+
+
+async def _rows_for(conn, received_ids: list[str]) -> list[dict]:
     if not received_ids:
-        return {}
+        return []
     found = await (
         await conn.execute(
             "SELECT type, payload FROM events WHERE type IN ('reaction.requested', 'reaction.failed') "
@@ -315,4 +576,16 @@ async def shown_for(conn, received_ids: list[str]) -> dict[str, str]:
             (received_ids,),
         )
     ).fetchall()
-    return shown([{"type": t, "payload": p} for t, p in found])
+    return [{"type": t, "payload": p} for t, p in found]
+
+
+async def current_for(conn, received_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """`current` for these messages, read from the ledger wherever their
+    rows sit."""
+    return current(await _rows_for(conn, received_ids))
+
+
+async def shown_for(conn, received_ids: list[str]) -> dict[str, str]:
+    """`shown` for these messages, read from the ledger wherever their
+    rows sit."""
+    return shown(await _rows_for(conn, received_ids))

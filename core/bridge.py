@@ -55,7 +55,7 @@ from typing import Any, Protocol
 import psycopg
 from aiohttp import web
 
-from core import broker, db, git, ledger, mail, tasks
+from core import broker, db, git, ledger, mail, reactions, tasks
 from core import workspace as ws
 from core.settings import settings
 
@@ -393,9 +393,10 @@ class ReactionDue:
     chat_id: str
     message_id: str
     emoji: str  # the channel's own: Telegram's code points, Slack's name (`core/reactions.py`)
-    stage: str  # `seen` (👀) or `shape`, which replaces it
+    stage: str  # `seen` (👀), `handling`, `stalled`, `done`, or `noted`, each replacing the last (`reactions.RANK`)
     at: str  # the reaction.requested row's at
     label: str | None = None  # `reactions.REACTIONS`'s; None on a row written before labels
+    previous: tuple[str, ...] = ()  # the emoji of the message's lower stages placed
 
 
 class Bridge(Protocol):
@@ -523,26 +524,32 @@ class Outbox:
 
     async def _reactions(self) -> list[ReactionDue]:
         """This channel's reactions with no result, oldest first, so a
-        message's 👀 is placed before the reaction that replaces it. A `seen`
-        reaction whose message's `shape` reaction is already placed is
-        closed here instead, `reaction.placed` with `superseded` and nothing
-        sent, so a 👀 retried after a flood wait never lands over its
-        shape."""
+        message's 👀 is placed before the reaction that replaces it. One
+        below a later stage of its message (`reactions.RANK`) is closed here
+        instead, `reaction.placed` with `superseded` and nothing sent: a 👀
+        once that stage is placed (a flood wait's retry), any other once it
+        is requested and not refused, so a slow handling never lands over a
+        done. Each carries the names of its message's lower stages placed
+        (`previous`), which Slack removes."""
         rows = await (
             await self.conn.execute(
-                "SELECT r.task_id, r.payload, r.at, EXISTS (SELECT 1 FROM events h "
-                "JOIN events d ON d.type = 'reaction.placed' "
-                "AND d.payload->>'reaction_id' = h.payload->>'reaction_id' "
-                "WHERE h.type = 'reaction.requested' AND h.payload->>'stage' = 'shape' "
-                "AND h.payload->>'received_id' = r.payload->>'received_id') "
-                "FROM events r WHERE r.type = 'reaction.requested' AND r.payload->>'channel' = %s "
+                "SELECT r.task_id, r.payload, r.at, (SELECT coalesce(jsonb_agg(jsonb_build_object("
+                "'p', o.payload, 'result', x.type, 'superseded', x.payload->'superseded') ORDER BY o.id), '[]') "
+                "FROM events o LEFT JOIN events x ON x.type IN ('reaction.placed', 'reaction.failed') "
+                "AND x.payload->>'reaction_id' = o.payload->>'reaction_id' "
+                "WHERE o.type = 'reaction.requested' AND o.payload->>'received_id' = r.payload->>'received_id' "
+                "AND o.id <> r.id) FROM events r WHERE r.type = 'reaction.requested' AND r.payload->>'channel' = %s "
                 "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type IN ('reaction.placed', 'reaction.failed') "
                 "AND e.payload->>'reaction_id' = r.payload->>'reaction_id') ORDER BY r.id",
                 (self.channel,),
             )
         ).fetchall()
         due = []
-        for task_id, p, at, shaped in rows:
+        for task_id, p, at, others in rows:
+            rank = reactions.RANK.get(p["stage"], 0)
+            above = [o for o in others if reactions.RANK.get(o["p"].get("stage"), 0) > rank
+                     and o["result"] != "reaction.failed"]  # fmt: skip
+            placed = [o for o in others if o["result"] == "reaction.placed" and not o["superseded"]]
             item = ReactionDue(
                 p["reaction_id"],
                 task_id,
@@ -553,8 +560,13 @@ class Outbox:
                 p["stage"],
                 at.isoformat(),
                 p.get("label"),
+                tuple(
+                    o["p"]["emoji"] if o["p"].get("label") else reactions.REACTIONS["slack"]["seen"]
+                    for o in placed
+                    if reactions.RANK.get(o["p"].get("stage"), 0) < rank
+                ),
             )
-            if p["stage"] == "seen" and shaped:
+            if any(o in placed for o in above) or (p["stage"] != "seen" and above):
                 await self.reacted(item, superseded=True)
             else:
                 due.append(item)

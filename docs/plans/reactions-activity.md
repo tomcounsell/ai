@@ -1,5 +1,8 @@
 # Reactions show the activity, use each platform's full set, and are known to the session
 
+**Superseded 2026-10-26** by [reactions-fun.md](reactions-fun.md): the classifier picks a
+handling and a done reaction for every message, and no 👀 is left.
+
 **Ask.** Tom, valor team chat, 2026-10-17 13:30 and 13:35 UTC: every message
 in DMs and Eng groups gets a reaction; in team groups only when Valor is
 named or tagged. On Telegram 👀 means read; a plain reply keeps it; work

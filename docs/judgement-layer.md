@@ -354,6 +354,7 @@ holds or redirects work. Status says where each stands.
 | 8 | Test breadth | Three booleans in one call: does the change leave unexercised a record in a non-obvious state (`gap_state`), a member of an enumeration the code branches on (`gap_enum`), or an existing test whose bounds encode the old behavior (`gap_bound`)? | `boolean` each | yes | Mission 1 | Built (`checks.test.breadth`), an SDLC stage by Tom's decision of 2026-10-01; its floors are provisional until 1.4's calibration record |
 | 10 | Failure kind | What caused this failed turn, where the deterministic signals leave it open? | `infrastructure`, `harness`, `model`, `unknown` | no | Mission 6 ("investigates failures") | Candidate |
 | 11 | Response shape | What activity will Valor's response to this message mainly take? | `reply`, `task`, `code`, `web_search`, `lookup`, `document`, `present`, `issue`, `schedule`, `send` (a `pick`) | no | Mission 6 | Retired 2026-10-17: it guessed on arrival and got plain questions wrong; the reaction now comes from what a turn did (`core/reactions.py`) |
+| 13 | Reaction | Which emoji shows Valor understood this message (`reaction.handling`), and which shows what came of it once a turn handled it (`reaction.completed`)? | the palette's labels, about forty (`reactions.PICKS`; a `pick`, floor 0.08) | no | Mission 6 | Built 2026-10-26 (Tom: "the classifier should choose reactions for both handling and completed in all cases"), uncalibrated; an abstain or a failure gives 📝 |
 | 12 | Ask overlap | Does an open task on the ask's project already do what it asks, or touch the same work? Which listed task, and should the ask run before or after it? | `decision`: `covered`, `supersedes`, `overlaps`, `split`, `distinct`; `task`: `1` to `8` (the numbered open tasks, the 8 most recently active) or `none`; `placement`: `before`, `after`, `none` (each a `pick`) | no, in shadow | Mission 6, 1 | Built (`intake.overlap`), uncalibrated: asked in the `judge` step before the judge, recorded as `reconcile.decided` (an abstain or both legs failing is `distinct` with a note), and holds nothing; its placement proposes a queue place when the writer gives none. Holding an ask for the writer waits for its calibration record and Tom's grant ([docs/plans/ask-reconciliation.md](plans/ask-reconciliation.md)) |
 
 Notes per shape:
@@ -398,8 +399,20 @@ Notes per shape:
     plain questions as code changes. The reaction is now set from what a
     collected turn did, with no judgement (`core/reactions.py`). Its rows
     stay in the ledger and stay quiet (`ledger.QUIET_SITES`).
+    Shape 13 replaced it on 2026-10-26.
+13. Two `pick` questions over one palette (`core/reactions.py`,
+    `PALETTE`), asked by the resident kernel's reaction jobs and metered on
+    the message's task. The handling one reads the message, its reply chain
+    and what it was bound as; the completed one also reads the handling on
+    it, what the turn did (`reactions.did`), what it sent, and how it ended.
+    Several emoji often fit one message and split the probability, so the
+    floor is 0.08 (a `pick` floor may sit under 0.5: the top label is taken
+    unless the split is near flat); a wrong pick costs a mark. An activity
+    emoji's rubric says it fits only work done or plainly asked for, and the
+    completed question says that no text sent means agreement. Rows are
+    quiet (`ledger.QUIET_SITES`).
 
-Shapes 2 to 5, 10, and 11 label and route; they add no governance. Shapes 7 and 8 are checks the plan
+Shapes 2 to 5, 10, 11, and 13 label and route; they add no governance. Shapes 7 and 8 are checks the plan
 or Tom's decisions already require. Shape 1 is the one guard granted on its own incident.
 
 ## The first task: the request-underspecification classifier
