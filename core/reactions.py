@@ -70,6 +70,8 @@ _DID = "only when `did` names it, or for a handling, when the message plainly as
 PALETTE = {
     "seen": ("\U0001f440", "eyes", "read"),  # 👀, placed at binding, never picked
     "noted": ("\U0001f4dd", "memo", "noted: nothing else fits"),
+    # 📝 is off Telegram's standard list: where the chat refuses it too, ✍.
+    "kept": ("\u270d", "writing_hand", "noted, where the chat refuses 📝"),
     "code": ("\U0001f468\u200d\U0001f4bb", "technologist", f"a change to code or a running system, {_DID}"),
     "web_search": ("\U0001f50d", "mag", f"searching or reading the web, {_DID}"),
     "lookup": ("\U0001f9d0", "face_with_monocle", f"looking up the code, chat history or records, {_DID}"),
@@ -117,12 +119,14 @@ REACTIONS = {
     "telegram": {label: glyph for label, (glyph, _, _) in PALETTE.items()},
     "slack": {label: name for label, (_, name, _) in PALETTE.items()},
 }
-# What the classifier picks from: all but 👀.
-PICKS = {label: f"{glyph} {fits}" for label, (glyph, _, fits) in PALETTE.items() if label != "seen"}
+# What the classifier picks from: all but 👀 and ✍'s stand-in for 📝.
+PICKS = {
+    label: f"{glyph} {fits}" for label, (glyph, _, fits) in PALETTE.items() if label not in ("seen", "kept")
+}
 NOTED = "noted"
 # A message's stages, lowest first: a row is closed `superseded` below a
 # later one (`core/bridge.py`). `shape` is a row's of 2026-10-17 to 26.
-RANK = {"seen": 0, "shape": 1, "handling": 1, "stalled": 2, "done": 3, "noted": 4}
+RANK = {"seen": 0, "shape": 1, "handling": 1, "stalled": 2, "done": 3, "noted": 4, "kept": 5}
 # The activities, the one a turn shows first: what the sender would see.
 ORDER = ("code", "present", "document", "issue", "schedule", "send", "task", "web_search", "lookup")
 # What a message is bound as for it to get 👀; of those, what owes its
@@ -203,14 +207,7 @@ async def _request(conn, task_id: str, p: dict[str, Any], label: str, stage: str
 
 
 async def _owe(conn, task_id: str, p: dict[str, Any], stage: str, **what) -> None:
-    """One `reaction.owed` row; a reply text the ledger refuses (in a
-    savepoint, so a turn's collection stands) is left out."""
-    row = {**_message(p), "stage": stage, **what}
-    _, why = await ledger.try_append(conn, task_id, "reaction.owed", row)
-    if why is not None:
-        await ledger.append(
-            conn, task_id, "reaction.owed", {**row, "replied": f"a reply the ledger refused: {why}"}
-        )
+    await ledger.append(conn, task_id, "reaction.owed", {**_message(p), "stage": stage, **what})
 
 
 def _ext(path: str) -> str:
@@ -372,16 +369,16 @@ async def owe(conn, task_id: str, turn_id: str, effects: list[dict[str, Any]], d
 # -- what is due, and the classifier's pick ------------------------------------
 
 # Every message with reactions still to come: one with a `completes` 👀 or a
-# reaction owed, and no done (placed or due) nor `noted`. Its task id (the
-# 👀's or the owed row's), whether that task is stopped, and its reaction
-# rows, oldest first.
+# reaction owed, and no done or `noted` that was not refused, nor `kept`.
+# Its task id (the 👀's or the owed row's), whether that task is stopped,
+# and its reaction rows, oldest first.
 OPEN = (
     "WITH open AS (SELECT DISTINCT ON (e.payload->>'received_id') e.payload->>'received_id' AS rid, e.task_id "
     "FROM events e WHERE ((e.type = 'reaction.requested' AND e.payload->>'stage' = 'seen' "
     "AND e.payload ? 'completes') OR e.type = 'reaction.owed') AND NOT EXISTS (SELECT 1 FROM events d "
     "WHERE d.type = 'reaction.requested' AND d.payload->>'received_id' = e.payload->>'received_id' "
-    "AND (d.payload->>'stage' = 'noted' OR (d.payload->>'stage' = 'done' AND NOT EXISTS (SELECT 1 FROM events x "
-    "WHERE x.type = 'reaction.failed' AND x.payload->>'reaction_id' = d.payload->>'reaction_id')))) "
+    "AND (d.payload->>'stage' = 'kept' OR (d.payload->>'stage' IN ('done', 'noted') AND NOT EXISTS ("
+    "SELECT 1 FROM events x WHERE x.type = 'reaction.failed' AND x.payload->>'reaction_id' = d.payload->>'reaction_id')))) "
     "ORDER BY e.payload->>'received_id', e.id) "
     "SELECT o.rid, o.task_id, EXISTS (SELECT 1 FROM events s WHERE s.task_id = o.task_id "
     "AND s.type = 'task.stopped'), r.type, r.payload FROM open o JOIN events r "
@@ -390,30 +387,40 @@ OPEN = (
 )
 
 
-def due(rows: list[dict[str, Any]], stopped: bool) -> tuple[str, dict[str, Any]] | None:
+def _instead(p: dict[str, Any]) -> str:
+    """What replaces a refused reaction: 📝, or ✍ for a refused 📝."""
+    return "kept" if p.get("label") == NOTED else NOTED
+
+
+def due(rows: list[dict[str, Any]], stopped: bool) -> tuple[str, dict[str, Any], str | None] | None:
     """What one message's reaction rows (oldest first) are owed next: the
-    stage, and the row it is read from (a `seen` or `reaction.owed`
-    payload); None when nothing is. A refused done is replaced by `noted`;
-    an owed done comes first, then a stopped task's done, then an owed
-    `stalled`, then a `handling` for a message with nothing owed."""
+    stage, the row it is read from (a reaction or `reaction.owed` payload),
+    and the label it gets unjudged when a refusal sets it (`_instead`);
+    None when nothing is. A refused done is replaced (stage `noted`, then
+    `kept`); an owed done comes first, then a stopped task's done, then an
+    owed `stalled` (a refused one replaced by a `handling`), then a
+    `handling` for a message with nothing owed."""
     failed = {r["payload"].get("reaction_id") for r in rows if r["type"] == "reaction.failed"}
     asked = [r["payload"] for r in rows if r["type"] == "reaction.requested"]
     stages = {p.get("stage") for p in asked}
+    refused = {p.get("stage"): p for p in asked if p.get("reaction_id") in failed}
     owed = [r["payload"] for r in rows if r["type"] == "reaction.owed"]
     seen = next((p for p in asked if p.get("stage") == "seen"), None)
-    done = [p for p in asked if p.get("stage") == "done"]
-    if done and all(p.get("reaction_id") in failed for p in done):
-        return "noted", done[-1]
-    if done:
+    if "done" in stages:
+        for stage, after in (("done", "noted"), ("noted", "kept")):
+            if stage in refused and after not in stages and refused[stage].get("label") != "kept":
+                return after, refused[stage], _instead(refused[stage])
         return None
     if owing := [p for p in owed if p.get("stage") == "done"]:
-        return "done", owing[-1]
+        return "done", owing[-1], None
     if stopped and (seen or owed):
-        return "done", seen or owed[-1]
+        return "done", seen or owed[-1], None
     if (owing := [p for p in owed if p.get("stage") == "stalled"]) and "stalled" not in stages:
-        return "stalled", owing[-1]
+        return "stalled", owing[-1], None
+    if "stalled" in refused and "handling" not in stages:
+        return "handling", refused["stalled"], _instead(refused["stalled"])
     if not owed and seen is not None and seen.get("completes") and stages == {"seen"}:
-        return "handling", seen
+        return "handling", seen, None
     return None
 
 
@@ -426,7 +433,8 @@ async def pending(conn) -> list[dict[str, Any]]:
     out = []
     for task_id, stopped, rows in by.values():
         if (next_ := due(rows, stopped)) is not None:
-            out.append({"stage": next_[0], "task_id": task_id, "stopped": stopped, "row": next_[1]})
+            stage, row, label = next_
+            out.append({"stage": stage, "task_id": task_id, "stopped": stopped, "row": row, "label": label})
     return out
 
 
@@ -470,9 +478,9 @@ async def react(port: judgement.JudgementPort | None, conn, item: dict[str, Any]
     from core.judgement_tasks import COMPLETED, HANDLING
 
     stage, task_id, p = item["stage"], item["task_id"], item["row"]
-    if stage == "noted":
-        why = f"noted: your reaction {emoji_of(p)} was refused by the chat"
-        return NOTED if await _request(conn, task_id, p, NOTED, "noted", why=why) else None
+    if item.get("label"):
+        why = f"{stage}: your reaction {emoji_of(p)} was refused by the chat"
+        return item["label"] if await _request(conn, task_id, p, item["label"], stage, why=why) else None
     if item["stopped"] or port is None:
         why = f"{stage}: noted, " + (
             "its task was stopped" if item["stopped"] else "the classifier was not asked"

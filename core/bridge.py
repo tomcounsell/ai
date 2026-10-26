@@ -560,11 +560,7 @@ class Outbox:
                 p["stage"],
                 at.isoformat(),
                 p.get("label"),
-                tuple(
-                    o["p"]["emoji"] if o["p"].get("label") else reactions.REACTIONS["slack"]["seen"]
-                    for o in placed
-                    if reactions.RANK.get(o["p"].get("stage"), 0) < rank
-                ),
+                tuple(o["p"]["emoji"] for o in placed if reactions.RANK.get(o["p"].get("stage"), 0) < rank),
             )
             if any(o in placed for o in above) or (p["stage"] != "seen" and above):
                 await self.reacted(item, superseded=True)

@@ -132,7 +132,7 @@ def test_one_palette_on_each_platform_is_what_both_questions_pick_from():
         assert set(table) == labels, channel
         assert all("️" not in e for e in table.values()), channel
     assert reactions.REACTIONS["slack"]["seen"] == "eyes" and reactions.REACTIONS["telegram"]["noted"] == MEMO
-    assert set(reactions.PICKS) == labels - {"seen"} and set(reactions.ORDER) <= set(reactions.PICKS)
+    assert set(reactions.PICKS) == labels - {"seen", "kept"} and set(reactions.ORDER) <= set(reactions.PICKS)
     for site in (HANDLING, COMPLETED):
         (q,) = site.questions
         assert (
@@ -434,27 +434,72 @@ def test_a_message_on_a_stopped_task_ends_on_noted(dsn, team):
     assert raced == [[("handling", "noted")]] and n_rows[-1]["why"] == "handling: noted, its task was stopped"
 
 
-def test_a_refused_done_is_replaced_by_noted_once(dsn, team):
+async def refuse(dsn, m, *refused) -> None:
+    """The bridge's part for `m`: its due reactions placed, those at
+    `refused` stages refused."""
+    async with bridges.outbox(dsn, bridges.FakeBridge("telegram")) as box:
+        for d in await box._reactions():
+            if d.received_id == m["received_id"]:
+                await box.reacted(d, "REACTION_INVALID" if d.stage in refused else None)
+
+
+def test_a_refused_done_is_replaced_by_noted_then_by_writing_hand(dsn, team):
+    """A done the chat refuses gets 📝, unjudged; where 📝 (off Telegram's
+    standard list) is refused too, ✍, which is on it; nothing after."""
+
     async def go():
         m = await said(dsn, "valor, nice work")
         await worked(dsn, m["task_id"])
         await react_all(dsn, Port(completed="unicorn"), m)
-        async with bridges.outbox(dsn, bridges.FakeBridge("telegram")) as box:
-            for d in await box._reactions():
-                if d.received_id == m["received_id"]:
-                    await box.reacted(d, "REACTION_INVALID" if d.stage == "done" else None)
-        replaced = await react_all(dsn, Port(), m)
-        async with bridges.outbox(dsn, bridges.FakeBridge("telegram")) as box:
-            for d in await box._reactions():
-                if d.received_id == m["received_id"]:
-                    await box.reacted(d, "REACTION_INVALID")
-        after = await react_all(dsn, Port(), m)
-        return replaced, after, await requested(dsn, m["received_id"])
+        await refuse(dsn, m, "done")
+        port = Port()
+        replaced = await react_all(dsn, port, m)
+        await refuse(dsn, m, "noted")
+        kept = await react_all(dsn, port, m)
+        await refuse(dsn, m, "kept")
+        after = await react_all(dsn, port, m)
+        return replaced, kept, after, port.asked, await requested(dsn, m["received_id"])
 
-    replaced, after, rows = run(go())
-    assert replaced == [("noted", "noted")] and after == []
-    assert stages(rows) == [("seen", "seen"), ("done", "unicorn"), ("noted", "noted")]
-    assert rows[-1]["why"] == "noted: your reaction \U0001f984 was refused by the chat"
+    replaced, kept, after, asked, rows = run(go())
+    assert replaced == [("noted", "noted")] and kept == [("kept", "kept")] and after == [] and asked == []
+    assert stages(rows) == [("seen", "seen"), ("done", "unicorn"), ("noted", "noted"), ("kept", "kept")]
+    assert rows[2]["why"] == "noted: your reaction \U0001f984 was refused by the chat"
+    assert (
+        rows[3]["emoji"] == "\u270d"
+        and rows[3]["why"] == f"kept: your reaction {MEMO} was refused by the chat"
+    )
+
+
+def test_a_refused_noted_done_goes_straight_to_writing_hand(dsn, team):
+    async def go():
+        m = await said(dsn, "valor, hm")
+        await worked(dsn, m["task_id"])
+        await react_all(dsn, Port(completed=None), m)
+        await refuse(dsn, m, "done")
+        return await react_all(dsn, Port(), m), await requested(dsn, m["received_id"])
+
+    replaced, rows = run(go())
+    assert replaced == [("noted", "kept")] and stages(rows)[-2:] == [("done", "noted"), ("noted", "kept")]
+
+
+def test_a_refused_stalled_is_replaced_by_a_handling(dsn, team):
+    """An errored turn's reaction the chat refuses gives a 📝 handling, so
+    the message does not keep 👀 until the next turn's done."""
+
+    async def go():
+        await new_session(dsn)
+        m = await said(dsn, "valor, look into the 500s")
+        await worked(dsn, m["task_id"], outcome="failed")
+        await react_all(dsn, Port(completed="sad"), m)
+        await refuse(dsn, m, "stalled")
+        replaced = await react_all(dsn, Port(), m)
+        await worked(dsn, m["task_id"])
+        done = await react_all(dsn, Port(completed="check"), m)
+        return replaced, done, await requested(dsn, m["received_id"])
+
+    replaced, done, rows = run(go())
+    assert replaced == [("handling", "noted")] and done == [("done", "check")]
+    assert [s for s, _ in stages(rows)] == ["seen", "stalled", "handling", "done"]
 
 
 def test_a_message_bound_before_the_change_is_left_as_it_is(dsn):

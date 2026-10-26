@@ -19,13 +19,16 @@ a stopped task kept 👀; chat sessions' `task.steer` effects made most ends �
    👀; Telegram glyph and Slack name each. Telegram's standard list, as the
    bridge logged it on 2026-10-25, has all but 🔍 🧐 📤 🎫 📊 📅 ✅ 🚀 ⏳ 📝,
    which go as Premium custom emoji (🔍 🧐 📤 found by the search before).
+   Not tried live (a second client on Valor's session risks its key): where
+   📝 has no custom emoji, ✍ (standard) stands in, so no message keeps 👀.
 2. **Two `pick` sites**, `reaction.handling` (message, thread, bound_as) and
    `reaction.completed` (also handling, `did`, `replied`, `outcome`), quiet,
    floor 0.08 (several emoji split the probability; a `pick` floor may sit
    under 0.5, said in `JudgementTask`, `decide` and the judgement doc). An
    activity emoji fits only when `did` names it; no text sent means
    agreement, so a doubtful emoji never answers a yes.
-3. **Stages** `seen` < `handling` < `stalled` < `done` < `noted` (`RANK`).
+3. **Stages** `seen` < `handling` < `stalled` < `done` < `noted` < `kept`
+   (`RANK`; `kept` is ✍, on Telegram's standard list, for a refused 📝).
    The outbox closes a row `superseded` below a later one: a 👀 once that is
    placed, any other once it is requested and not refused (a slow handling
    behind its done in one batch). `ReactionDue.previous` names the lower
@@ -38,7 +41,8 @@ a stopped task kept 👀; chat sessions' `task.steer` effects made most ends �
    message, a reply in its chat to message N, or no text. `on_bound` owes a
    `start` or `none` its done at once; a `stop` gets 👌. The resident kernel
    (`Kernel.react`, jobs apart from task jobs) writes each `pending` item:
-   a refused done → 📝 `noted`; an owed done; a stopped task's message (not
+   a refused done → 📝 `noted`, a refused 📝 → ✍ `kept`, a refused stalled →
+   a 📝 handling; an owed done; a stopped task's message (not
    billable) → 📝; an owed stalled; else a handling. An abstain, no port, or
    two failed judgements give 📝. **Rollout:** only a 👀 written with
    `completes` (from this change) is ever due without an owed row, so no
@@ -61,7 +65,7 @@ gets 👀 (heard: nothing owed); handling pick, abstain, two failures, no
 port; three messages one turn, each its own done and `replied`; no text on a
 yes-or-no question; errored turn → stalled → done; fresh/compaction owe
 none; stop 👌; start owes its done; stopped task → 📝, also mid-judgement;
-refused done → 📝 once; pre-change rows left alone; `record` writes owed
+refused done → 📝 → ✍, refused stalled → 📝 handling; pre-change rows left alone; `record` writes owed
 rows with `turn.collected` or neither; outbox: 👀 first, a handling behind
 its done closed, `previous`; Slack keeps a repeated name; the session's
 lines; the kernel's job. Live (rule 5): Tom sees a handling then a done, a

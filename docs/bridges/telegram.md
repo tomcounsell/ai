@@ -215,7 +215,8 @@ what set it.
 A reaction is marked through `outbox.reacted`: `reaction.placed`, or
 `reaction.failed` with Telegram's refusal (`REACTION_INVALID`, a chat
 that limits reactions or refuses custom emoji; a refused done is replaced
-by 📝). A flood wait is held and a lost connection logged, and either
+by 📝, a refused 📝 by ✍, which is on the standard list, and a refused
+`stalled` by a 📝 handling). A flood wait is held and a lost connection logged, and either
 leaves the reaction unmarked, so the outbox yields it again. The outbox
 yields a message's reactions in order, 👀 first, and never skips one; a
 👀 whose later reaction is already placed (a 👀 delayed by a flood wait),
