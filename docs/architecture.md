@@ -30,7 +30,8 @@ stops there.
 persona orchestrates and workers do the work. Each chat's session, a team chat's, an email
 thread's, or Tom's own chat's, reads and dispatches; the tasks it starts use the skills and report
 to it, and only it speaks in its chat. A root task that is no session (from the CLI or a routine)
-reports to the operator chat's session (The task and its Brief, the signal channel).
+reports to the operator chat's session (The task and its Brief, the signal channel), or, when that chat is
+one of Tom's DMs that no spec on this Mac lists, straight to it.
 
 The off switch and the bounds live in the kernel because an agent's
 incentive to accept correction depends on its uncertainty and is fragile

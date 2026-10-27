@@ -108,7 +108,8 @@ On a Mac whose specs list a Slack chat, the update's setup check
 (`core.permissions.slack`) runs `keys`; with none in the vault it reports
 `slack: no keys` and starts nothing. A missing `com.valor.kernel.slack`
 job is written from `--plist` with the settings of the Mac's Telegram
-job, and loaded; a job whose keys changed is reloaded. The update then
+job, and loaded; a job whose keys changed is reloaded, and one that is
+written but not loaded is enabled and loaded. The update then
 names each bridge `connected since` the second its own connection came
 up, or `not connected` ([telegram.md](telegram.md#the-outbox),
 Connected), in its `rollout.ended` row, its reply in the room and `core

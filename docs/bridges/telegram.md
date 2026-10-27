@@ -158,7 +158,10 @@ Every task reports to a Valor session (next section): a task a chat
 session started reports to that session, in a team chat or in Tom's own
 chat, and a root task that is no session (from the CLI, a routine, or his
 email) reports to the operator chat's session, started for it when none
-is open. The kinds that stay Tom's go to him directly: the push credential
+is open, except where the operator chat is one of Tom's DMs and no spec
+placed on this Mac lists it: there it has no session, since that Mac's
+bridge never receives his replies, and its notices go to the DM directly.
+The kinds that stay Tom's go to him directly: the push credential
 request, a binding notice, and a rollout's. Those, and any notice with no
 session to take it, go to the chat where Tom started the work, when that
 is his own chat (a session's own chat, or its child's session's), and
@@ -446,7 +449,7 @@ notice or send binds to that task as above; every other message of his
 there, a reply to the session's own post included, is the session's next
 prompt, and a reply to another chat's session's post binds to that session
 as a reply. Root tasks that are no session report to the operator chat's
-session. So the work he asks for in his DM is a task the session starts,
+session (on a Mac whose specs do not list his DM, to the DM directly). So the work he asks for in his DM is a task the session starts,
 which reports to the session, and the session tells him.
 
 ### Started tasks
