@@ -195,3 +195,19 @@ def test_keys_copies_this_machines_own_pair_and_never_anothers(tmp_path, monkeyp
     with pytest.raises(SystemExit, match="SLACK_USER_TOKEN_VALOR_THE_BALD is missing"):
         slack_main.copy(vault, keyfile, "Valor the Bald")
     assert "groups:write" in slack_main.manifest()["oauth_config"]["scopes"]["user"]  # creating the dev channels
+
+
+def test_granted_reads_the_databases_there_are_and_skips_one_that_is_absent(tmp_path, monkeypatch):
+    """A Mac without a user TCC database (the Bald, 2026-10-22) still reports
+    the grants the system database holds."""
+    import sqlite3
+
+    service, target, _, name = permissions.GRANTS[0]
+    system = tmp_path / "TCC.db"
+    with sqlite3.connect(system) as conn:
+        conn.execute("CREATE TABLE access (service, client, indirect_object_identifier, auth_value)")
+        conn.execute("INSERT INTO access VALUES (?, ?, ?, 2)", (service, permissions.BUNDLE_ID, target))
+    monkeypatch.setattr(permissions, "DATABASES", (system, tmp_path / "absent" / "TCC.db"))
+    state = permissions.granted()
+    assert state[name] is True
+    assert all(v is None for n, v in state.items() if n != name)

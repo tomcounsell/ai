@@ -180,12 +180,15 @@ def granted() -> dict[str, bool | None]:
     Reading the databases needs Full Disk Access."""
     found: dict[tuple[str, str], int] = {}
     for db in DATABASES:
-        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
-            rows = conn.execute(
-                "SELECT service, indirect_object_identifier, auth_value FROM access WHERE client = ?",
-                (BUNDLE_ID,),
-            )
-            found |= {(s, target): value for s, target, value in rows}
+        try:
+            with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+                rows = conn.execute(
+                    "SELECT service, indirect_object_identifier, auth_value FROM access WHERE client = ?",
+                    (BUNDLE_ID,),
+                ).fetchall()
+        except sqlite3.OperationalError:
+            continue  # absent on this Mac, or Full Disk Access not yet on
+        found |= {(s, target): value for s, target, value in rows}
     return {
         name: None if (service, target) not in found else found[service, target] == 2
         for service, target, _, name in GRANTS
