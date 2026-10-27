@@ -29,6 +29,7 @@ class Kernel:
     claimed: Any
     owns: Any
     owned: Any
+    operators: tuple[str, ...]  # Tom's `<team>/<user>` ids, whose reactions are records
     conn: Any  # an async context manager giving one connection
     inbound_dir: str
     transcribe: Any  # attachment -> attachment, with its transcript when it is audio; blocks
@@ -64,6 +65,7 @@ def from_core(dsn: str | None = None) -> Kernel:
         claimed=intake.claimed,
         owns=intake.owns,
         owned=intake.owned,
+        operators=settings.operator_slack_ids,
         conn=conn,
         inbound_dir=str(Path(settings.inbound_dir).expanduser()),
         transcribe=bridge.transcribe,

@@ -28,6 +28,8 @@ lint = ".venv/bin/flake8 apps settings"
 # "Eng: Monday Flowers".
 # #mondayflowers-dev in the Yudame Slack, the Slack twin of its Eng group (Tom, 2026-10-25).
 chats = ["telegram:-5302491300", "slack:T0B6E8JPE3C/C0CBSS3RW03"]
+# The decision board: this channel's canvas of the decisions open for Tom (Tom, 2026-10-27).
+board = "slack:T0B6E8JPE3C/C0CBSS3RW03"
 # What each chat is for, rendered into every turn of its chat session;
 rooms."telegram:-5302491300" = "The Monday Flowers site, a client's flower subscription."
 rooms."slack:T0B6E8JPE3C/C0CBSS3RW03" = "The Monday Flowers site, a client's flower subscription."

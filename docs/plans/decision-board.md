@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: built (2026-10-27); boards, chat and reaction answers waiting on Tom's use; calls wait on Meet
 type: feature
 appetite: Medium
 owner: Valor

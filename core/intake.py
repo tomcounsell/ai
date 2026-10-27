@@ -142,7 +142,7 @@ class Inbound:
     sender_id: str  # Telegram: user id as text; email: From address, lowercased; Slack: `<team>/<user>`
     sender_name: str
     sent_at: str  # ISO 8601, UTC
-    kind: str = "message"
+    kind: str = "message"  # or "reaction": Tom's reaction on Valor's Slack post, its text the emoji's name
     text: str = ""  # email: the subject, a blank line, then the body
     reply_to: str | None = None  # Telegram: replied message id; email: In-Reply-To; Slack: thread root
     thread: list[dict] = field(default_factory=list)  # {id, text, attachments}, oldest first
@@ -802,6 +802,7 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
         "sender_id",
         "sender_name",
         "sent_at",
+        "kind",
         "text",
         "attachments",
     )
@@ -942,12 +943,14 @@ async def _chat_start(
 def chat_line(m: dict[str, Any], reaction: str | None = None) -> str:
     """One chat message as a chat session reads it: when, who, its id and
     the message it replies to, the reaction on it (`reactions.shown`), its
-    words, and its files."""
+    words, and its files; Tom's reaction on a post, as that."""
     try:
         when = datetime.fromisoformat(str(m.get("sent_at"))).astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
     except ValueError:
         when = "an unknown time"
     who = m.get("sender_name") or m.get("sender_id") or "someone"
+    if m.get("kind") == "reaction":
+        return f"[{when}] {who} reacted {m.get('text')} to your post {m.get('reply_to')}"
     ids = f"message {m.get('message_id')}" + (f", replying to {m['reply_to']}" if m.get("reply_to") else "")
     ids += f"; {reaction}" if reaction else ""
     files = _files(m.get("attachments") or [])

@@ -44,10 +44,12 @@ SCOPES = [
     "files:read",
     "files:write",
     "users:read",
+    "reactions:read",
     "reactions:write",
     "search:read",
+    "canvases:write",
 ]
-EVENTS = ["message.channels", "message.groups", "message.im", "message.mpim"]
+EVENTS = ["message.channels", "message.groups", "message.im", "message.mpim", "reaction_added"]
 
 
 def manifest() -> dict:

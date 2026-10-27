@@ -39,6 +39,10 @@ workspaces for (`python -m core start ... --project NAME`).
 - `mentions` lists those chats where only a message naming Valor, or a
   reply to his post, wakes the chat session, as the old teammate groups
   did; the rest reach it with the next.
+- `board` names the one of its Slack channels whose canvas is the
+  project's decision board: that chat's session keeps it, from the
+  project's open questions and recent answers in the ledger
+  (`core/board.py`, [slack.md](../docs/bridges/slack.md)).
 - `knowledge_base` names the business's folder in `~/work-vault`, where its
   description lives. A working task's turns read and write that folder
   (`VALOR_KNOWLEDGE_BASE` names it to them).

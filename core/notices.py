@@ -15,7 +15,8 @@ and has not requested, to the session it reports to (below), else to the
 task's home chat (`home`), the chat its work came in from, else to
 `settings.operator_channel` and `settings.operator_chat`:
 
-- `question` (`about_key` `question:<id>`): the open question.
+- `question` (`about_key` `question:<id>`): the open question; none to
+  its project's board session, whose board row carries it (`core/board.py`).
 - `ended` (`ended:<row>`): the task ended without merging: what was built,
   and why it stopped, in plain words. A reply to it is feedback. A chat
   session's, when its steps kept failing on a message, replies to it.
@@ -29,8 +30,8 @@ left. A merge's says what shipped; a send's carries its channel,
 recipients, and text. A push owes none (a step inside the task), nor does
 a send that itself reached Tom (to the operator chat or Tom's Telegram id,
 an email only to Tom's addresses, any local send), nor does a chat
-session's send to its own chat (`intake.chat_session`; an email thread's
-session's reply in its thread), which the chat saw.
+session's send or canvas write to its own chat (`intake.chat_session`;
+an email thread's session's reply in its thread), which the chat saw.
 A reply to a merge's report is feedback.
 
 Every task reports to a Valor session, never to a chat (Tom's rule of
@@ -212,7 +213,9 @@ async def owe(conn, task_id: str) -> list[str]:
     if f.legacy or f.calibration or f.state in (State.STOPPED, State.MERGED):
         return []
     made: list[str | None] = []
-    if f.state is State.WAITING and f.open_question:
+    from core import board
+
+    if f.state is State.WAITING and f.open_question and not await board.here(conn, task_id):
         asked = next(
             (r["payload"] for r in rows if r["type"] == "question.asked"
              and r["payload"].get("question_id") == f.open_question),
@@ -433,12 +436,14 @@ def _to_tom(effect: dict[str, Any]) -> bool:
 
 
 def _own_chat(chat: dict[str, str], kind: str, effect: dict[str, Any]) -> bool:
-    """Whether a chat session's send went to its own chat: by email, a
-    reply in its thread, whose `References` start at the thread's root."""
+    """Whether a chat session's send, or its canvas write, went to its own
+    chat: by email, a reply in its thread, whose `References` start at the
+    thread's root."""
     if kind == "email.send":
         refs = (effect.get("payload") or {}).get("references") or []
         return chat["channel"] == "email" and refs[:1] == [chat["chat_id"]]
-    return kind == f"{chat['channel']}.send_message" and str(effect.get("target")) == chat["chat_id"]
+    sends = (f"{chat['channel']}.send_message", f"{chat['channel']}.write_canvas")
+    return kind in sends and str(effect.get("target")) == chat["chat_id"]
 
 
 async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, Any]) -> str | None:

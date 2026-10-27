@@ -232,6 +232,15 @@ async def _refuse_slack(conn, action: broker.Action) -> str | None:
     return None
 
 
+async def _refuse_canvas(conn, action: broker.Action) -> str | None:
+    markdown = action.payload.get("markdown")
+    if not isinstance(markdown, str) or not markdown.strip():
+        return "the canvas needs its markdown"
+    if action.payload.get("files"):
+        return "a canvas write names no files"
+    return None
+
+
 async def _refuse_email(conn, action: broker.Action) -> str | None:
     if not _strings(action.payload, ("subject", "body", "in_reply_to"), ("to", "cc", "references")):
         return EMAIL_SHAPE
@@ -308,6 +317,17 @@ DECLARED: dict[str, Declared] = {
         ),
         owner="slack",
         check=_refuse_slack,
+    ),
+    "slack.write_canvas": Declared(
+        action_type="slack.write_canvas",
+        effect_class="act",
+        usage=(
+            '`slack.write_canvas`: target `<team id>/<channel id>`, payload `{"markdown": "..."}`; writes the '
+            "channel's decision board canvas whole (made the first time), replacing what it held; it leaves "
+            "when you request it."
+        ),
+        owner="slack",
+        check=_refuse_canvas,
     ),
     "local.send_message": Declared(
         action_type="local.send_message",

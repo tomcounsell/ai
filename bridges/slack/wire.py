@@ -131,8 +131,8 @@ class SlackWire:
 
     async def connect(self, on_message: Handler, on_hello: Callable[[], None]) -> None:
         """`auth.test`, then the socket. `on_message(envelope_id, event)`
-        runs as its own task for each `message` event and acks it itself;
-        every other envelope is acked here on arrival. `on_hello()` is
+        runs as its own task for each `message` and `reaction_added` event
+        and acks it itself; every other envelope is acked here on arrival. `on_hello()` is
         called on each new socket session."""
         from slack_sdk.http_retry.builtin_async_handlers import (
             AsyncConnectionErrorRetryHandler,
@@ -159,7 +159,7 @@ class SlackWire:
 
         async def request(client, req) -> None:
             event = (req.payload or {}).get("event") or {}
-            if req.type == "events_api" and event.get("type") == "message":
+            if req.type == "events_api" and event.get("type") in ("message", "reaction_added"):
                 self._spawn(on_message(req.envelope_id, event))
             else:
                 await self.ack(req.envelope_id)
@@ -322,6 +322,53 @@ class SlackWire:
         except Refused as e:
             if e.error != "no_reaction":
                 raise
+
+    async def canvas_tab(self, channel: str, title: str) -> str | None:
+        """The file id of the channel's canvas tab titled `title`, by the
+        tab's label, else the canvas's own title (a tab someone added keeps
+        an empty label); None when it has none."""
+        out = await self._read("conversations_info", channel=channel)
+        for tab in ((out.get("channel") or {}).get("properties") or {}).get("tabs") or []:
+            file_id = (tab.get("data") or {}).get("file_id")
+            if tab.get("type") != "canvas" or not file_id:
+                continue
+            if tab.get("label") == title:
+                return file_id
+            if ((await self._read("files_info", file=file_id)).get("file") or {}).get("title") == title:
+                return file_id
+        return None
+
+    async def create_canvas(self, channel: str, title: str, markdown: str) -> str:
+        """A canvas in the channel's tabs, holding `markdown`; its id."""
+        out = await self._write(
+            "conversations_canvases_create",
+            channel_id=channel,
+            title=title,
+            document_content={"type": "markdown", "markdown": markdown},
+        )
+        return out["canvas_id"]
+
+    async def replace_canvas(self, canvas_id: str, markdown: str) -> None:
+        """The canvas's whole content replaced by `markdown`."""
+        content = {"type": "markdown", "markdown": markdown}
+        await self._write(
+            "canvases_edit",
+            canvas_id=canvas_id,
+            changes=[{"operation": "replace", "document_content": content}],
+        )
+
+    async def members(self, channel: str) -> list[str]:
+        """The user ids of the channel's members."""
+        found, cursor = [], None
+        while True:
+            out = await self._read("conversations_members", **_drop_none(channel=channel, cursor=cursor))
+            found += out.get("members") or []
+            cursor = (out.get("response_metadata") or {}).get("next_cursor") or None
+            if cursor is None:
+                return found
+
+    async def permalink(self, file_id: str) -> str:
+        return ((await self._read("files_info", file=file_id)).get("file") or {}).get("permalink") or ""
 
     async def upload(self, channel: str, name: str, data: bytes, *, thread_ts: str | None) -> str:
         """The two-step upload, shared to `channel`; the file id."""

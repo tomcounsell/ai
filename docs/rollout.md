@@ -176,7 +176,10 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    hand: every update copies the keys and installs and loads it
    ([bridges/slack.md](bridges/slack.md), One app per Mac). When the
    manifest gains a scope, update each app's (`apps.manifest.update`, or
-   the app's OAuth page) and reinstall it to Valor's account.
+   the app's OAuth page), and for a new user event its Event
+   Subscriptions page, then reinstall it to Valor's account; the user
+   token stays the same. The four apps were brought to the manifest
+   (`reactions:read`, `canvases:write`, `reaction_added`) on 2026-10-27.
    A kernel crash-looping after a rollout or an update: take the checkout
    back to the commit it rolled from (`from` on its `rollout.restarting`
    row), `git -C ~/src/ai reset --keep <from>`, then

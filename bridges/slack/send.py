@@ -1,4 +1,5 @@
-"""`slack.send_message`: perform, lookup, the notice send, and reactions.
+"""`slack.send_message` and `slack.write_canvas`: perform, lookup, the
+notice send, and reactions.
 
 A payload is `{text, reply_to, files: [{path, sha256}]}`; the target is
 `<team>/<channel>`, or `<team>/<user>` for a DM. Text is split by the
@@ -82,6 +83,9 @@ def same(stored: str, requested: str) -> bool:
 def marker(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
+
+# The title of a channel's decision board canvas.
+BOARD = "Valor Decisions"
 
 # The name a row written before rows named their Slack emoji is placed as.
 SEEN_NAME = "eyes"
@@ -302,6 +306,40 @@ class Sender:
             out += [m for m in page if m.get("user") == self.wire.user_id]
             if cursor is None:
                 return out
+
+    # -- the decision board ------------------------------------------------
+
+    async def write_canvas(self, action, key: str) -> dict[str, Any]:
+        """`slack.write_canvas`: the channel's board, the canvas tab titled
+        `BOARD` (Tom made #valor-dev's himself), written whole; made as a
+        channel canvas when there is none. The result names who can read
+        it: the channel's members other than Valor."""
+        channel = self._target(action.target).partition("/")[2]
+        markdown = action.payload["markdown"]
+        try:
+            canvas = await self.wire.canvas_tab(channel, BOARD)
+            if canvas is None:
+                canvas = await self.wire.create_canvas(channel, BOARD, markdown)
+            else:
+                await self.wire.replace_canvas(canvas, markdown)
+            others = [u for u in await self.wire.members(channel) if u != self.wire.user_id]
+            readers = [await self.wire.user_name(u) for u in others]
+            return {"canvas_id": canvas, "url": await self.wire.permalink(canvas), "readers": readers}
+        except Refused as e:
+            raise self.kernel.Failed(e.error) from None
+        except (NotConnected, RateLimited) as e:
+            raise self.kernel.Failed(str(e)) from None
+        except InDoubt as e:
+            raise self.kernel.Unknown(str(e)) from None
+
+    async def canvas_lookup(self, action, key: str, since: str) -> dict[str, Any] | None:
+        """A whole replace is the same write however often it lands, and a
+        canvas made in doubt is found by its title, so a write in doubt is
+        written again; one Slack refuses is None."""
+        try:
+            return await self.write_canvas(action, key)
+        except self.kernel.Failed:
+            return None
 
     # -- notices -----------------------------------------------------------
 

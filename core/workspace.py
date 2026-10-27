@@ -98,7 +98,8 @@ class Spec:
     starts work only when it names Valor; a reply to Valor's post binds
     anywhere. `rooms` maps some of its chats to a description of what the
     chat is for, rendered into every turn of its chat session
-    (`intake.room`).
+    (`intake.room`). `board` names the one of its Slack channels whose
+    canvas is the project's decision board (`core/board.py`).
 
     `knowledge_base` names the business's folder in `~/work-vault`, which a
     working task's turns read and write.
@@ -123,6 +124,7 @@ class Spec:
     chats: tuple[str, ...] = ()
     mentions: tuple[str, ...] = ()
     rooms: dict[str, str] = field(default_factory=dict)
+    board: str | None = None
     machine: str | None = None
     knowledge_base: str | None = None
     client: str | None = None
@@ -181,6 +183,13 @@ class Spec:
             channel, _, ident = chat.partition(":")
             row = channels.get(channel)
             rooms[f"{channel}:{row.normal(ident)}" if row is not None and ident else chat] = str(text).strip()
+        board = raw.get("board")
+        if board is not None:
+            channel, _, ident = board.partition(":") if isinstance(board, str) else ("", "", "")
+            row = channels.get(channel)
+            board = f"{channel}:{row.normal(ident)}" if channel == "slack" and ident else None
+            if board not in normal:
+                raise Refused(f"board names {raw['board']!r}, which is not one of the spec's Slack chats")
         machine = raw.get("machine")
         if machine is not None and (not isinstance(machine, str) or not machine):
             raise Refused("machine names a machine")
@@ -210,6 +219,7 @@ class Spec:
             chats=tuple(normal),
             mentions=tuple(mentions),
             rooms=rooms,
+            board=board,
             machine=machine,
             knowledge_base=kb,
             client=client,

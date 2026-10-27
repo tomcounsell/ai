@@ -37,6 +37,16 @@ group's:
 
 `skills` and `work-vault` have no Eng group and no dev channel.
 
+**Decision boards** (Tom, 2026-10-27: "more like a todo board that can be
+reorganized and evolve"; "I won't do work on the board. I'll chat with
+you or call you, or leave emoji reactions"). Each dev channel above but
+`#satsol-dev` is its project's `board` (projects/README.md): its session
+keeps a canvas tab, "Valor Decisions", of the decisions open for Tom on
+that project, rewritten whole from the ledger (`core/board.py`,
+`skills/sdlc/converse.md`). Tom made `#valor-dev`'s himself; the bridge
+writes into it. Tom answers in the channel, or with 👍 on a decision's
+post, which the bridge receives (below).
+
 ## What it serves
 
 | Mechanism | Serves |
@@ -73,10 +83,13 @@ The manifest asks for these user scopes: `channels:history`,
 `groups:history`, `im:history`, `mpim:history`, `channels:read`,
 `groups:read`, `groups:write` (making the dev channels, inviting to them,
 setting their description), `im:read`, `mpim:read`, `im:write`, `chat:write`,
-`files:read`, `files:write`, `users:read`, `reactions:write`,
-`search:read`; and these
+`files:read`, `files:write`, `users:read`, `reactions:read`,
+`reactions:write`, `search:read`, `canvases:write`; and these
 user events:
-`message.channels`, `message.groups`, `message.im`, `message.mpim`.
+`message.channels`, `message.groups`, `message.im`, `message.mpim`,
+`reaction_added`. All four apps had `reactions:read`, `canvases:write`
+and `reaction_added` added and were reinstalled to Valor's account on
+2026-10-27; a reinstall keeps the user token, so no key changed.
 
 **The tokens.** `python -m bridges.slack keys` copies this Mac's pair,
 `SLACK_APP_TOKEN_<MACHINE>` and `SLACK_USER_TOKEN_<MACHINE>` (the machine's
@@ -128,6 +141,16 @@ A DM from anyone else, and a channel no project lists, is not received.
 Valor's own posts (the event's `user` is the token's own id) are dropped,
 live and in gap fill; so are bot messages, and every subtype but none,
 `file_share`, `thread_broadcast`, and `me_message`.
+
+**Tom's reactions.** A `reaction_added` by one of
+`VALOR_OPERATOR_SLACK_IDS` on Valor's own post, in a chat this bridge
+owns, is a record of kind `reaction`: `message_id` is `<post ts>/<emoji
+name>`, `text` the name as Slack writes it (`:+1:`), `reply_to` and
+`topic_id` the post's `ts`, so it binds as a reply to the post (in a team
+chat, a steer of its session) and the session reads `Tom reacted :+1: to
+your post <ts>`. It gets no reaction of its own. It is acked once its
+receive commits; a redelivery is the same record. Anyone else's reaction,
+and one on someone else's post, is acked and dropped.
 
 **The record.** Slack fills the port's fields this way:
 
@@ -231,6 +254,22 @@ is a target, owned or not. Its payload:
 
 A target in a workspace other than the connected one is `broker.Failed`
 ("`<team>` is not a connected workspace"), and nothing is posted.
+
+**The board canvas.** `slack.write_canvas` is `act`, target
+`<team>/<channel>`, payload `{"markdown"}`. The bridge reads the
+channel's tabs (`conversations.info`) for a canvas titled "Valor
+Decisions" (the tab's label, else the canvas's own title, since a tab
+someone added keeps an empty label), and replaces its whole content
+(`canvases.edit`); with none, it makes one (`conversations.canvases.create`).
+Its result is `{canvas_id, url, readers}`, `readers` the names of the
+channel's members other than Valor (`conversations.members`), which the
+board row shows the session. Slack's refusal is `broker.Failed`; a write
+cut after it was sent is `broker.Unknown`, and lookup writes it again (a
+whole replace lands the same however often; a canvas made in doubt is
+found by its title). A session's write to its own chat owes Tom no report.
+Checked live on 2026-10-27 with the reinstalled Cowboy app: a replace of
+`#valor-dev`'s canvas and a new canvas in `#popoto-dev`, both private
+channels, were accepted.
 
 **Posts.** Text is split by the port's `split_text` at 4,000 characters a
 post (Slack's guidance for `chat.postMessage`), at a newline, else a space;
@@ -360,11 +399,11 @@ file's name.
 
 | Module | Holds |
 |---|---|
-| `bridges/slack/wire.py` | The only module importing `slack_sdk`: the socket, the read and write clients, the IM and name caches, uploads, downloads with the host check, and `reactions.add` and `reactions.remove` |
-| `bridges/slack/inbound.py` | One message to the `Inbound` fields; `person`, the one function that builds a person's id |
+| `bridges/slack/wire.py` | The only module importing `slack_sdk`: the socket, the read and write clients, the IM and name caches, uploads, downloads with the host check, `reactions.add` and `reactions.remove`, and the canvas calls |
+| `bridges/slack/inbound.py` | One message, or Tom's reaction, to the `Inbound` fields; `person`, the one function that builds a person's id |
 | `bridges/slack/bridge.py` | `SlackBridge`: connect, the live handler and its acks, gap fill, the outbox loop, and SIGTERM |
 | `bridges/slack/gap.py` | The per-method budget and a chat's pass in progress |
-| `bridges/slack/send.py` | `slack.send_message` perform and lookup, the notice send, and reactions |
+| `bridges/slack/send.py` | `slack.send_message` and `slack.write_canvas` perform and lookup, the notice send, and reactions |
 | `bridges/slack/state.py` | `slack-seen.json` |
 | `bridges/slack/kernel.py` | The port gathered into one object, so the bridge imports only `core.bridge`, `core.broker`, `core.db`, `core.intake`, `core.settings`, and `core.credentials` |
 | `bridges/slack/__main__.py` | The verbs `run`, `keys`, `manifest`, and `--plist` |
@@ -383,5 +422,11 @@ file's name.
   live, the socket delivers it.
 - **One workspace.** `slack-keys` is keyed by team id, so a second
   workspace is data; its connection is later work.
+- **Reactions while the bridge is down** are missed: gap fill reads
+  history, and history carries no reaction events. Tom says it in the
+  channel instead.
+- **A reaction undone** (`reaction_removed`) is not received: a 👍
+  passed on stays passed on, and Tom corrects it in the channel. The same
+  emoji removed and added again on one post is the record already made.
 - **No Mac for SATSOL.** `#satsol-dev` is listed, as Eng: SATSOL is, and
   answered once its spec names a Mac.

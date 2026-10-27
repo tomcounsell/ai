@@ -27,6 +27,8 @@ chats = [
     "telegram:577036901", "slack:T0B6E8JPE3C/C0B67T44KEF",
     "slack:T0B6E8JPE3C/C0CBTQ76PRB", "slack:T0B6E8JPE3C/U0B78H17XQ8",
 ]
+# The decision board: this channel's canvas of the decisions open for Tom (Tom, 2026-10-27).
+board = "slack:T0B6E8JPE3C/C0CBTQ76PRB"
 # Team chats wait to be mentioned (Tom, 2026-10-17).
 mentions = ["telegram:-1003879986445", "telegram:-1003936769817", "slack:T0B6E8JPE3C/C0B67T44KEF"]
 # What each chat is for, rendered into every turn of its chat session;

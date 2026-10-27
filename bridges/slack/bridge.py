@@ -82,7 +82,10 @@ class SlackBridge:
         self._tasks: set[asyncio.Task] = set()
 
     def performers(self):
-        return {"slack.send_message": (self.sender.perform, self.sender.lookup)}
+        return {
+            "slack.send_message": (self.sender.perform, self.sender.lookup),
+            "slack.write_canvas": (self.sender.write_canvas, self.sender.canvas_lookup),
+        }
 
     async def read(self, chat: str, q: str | None, limit: int, before: str | None) -> list[dict]:
         """A chat's messages for a turn (`core.bridge.reads`), newest first.
@@ -192,8 +195,11 @@ class SlackBridge:
     # -- receiving ---------------------------------------------------------
 
     async def handle(self, envelope_id: str, event: dict[str, Any]) -> None:
-        """One `message` envelope, run as its own task; acked once its
-        receive commits, or at once when it is not wanted."""
+        """One `message` or `reaction_added` envelope, run as its own task;
+        acked once its receive commits, or at once when it is not wanted."""
+        if event.get("type") == "reaction_added":
+            await self._reaction(envelope_id, event)
+            return
         channel = event.get("channel") or ""
         dm = event.get("channel_type") == "im"
         if not inbound.wanted(event, self.wire.user_id):
@@ -205,6 +211,24 @@ class SlackBridge:
             return
         if await self._take(chat, channel, event, dm=dm):
             await self.wire.ack(envelope_id)
+
+    async def _reaction(self, envelope_id: str, event: dict[str, Any]) -> None:
+        """Tom's reaction on Valor's post in an owned chat, recorded once (a
+        redelivery is the same record) and acked; any other is acked at
+        once. A receive that fails is not acked, so Slack retries it; gap
+        fill reads no reactions."""
+        fields = await inbound.reaction(self.wire, event, self.kernel.operators)
+        if fields is None or not self.kernel.owns("slack", fields["chat_id"]):
+            await self.wire.ack(envelope_id)
+            return
+        try:
+            async with self.kernel.conn() as conn:
+                await self.kernel.receive(conn, self.kernel.Inbound(**fields))
+        except Exception:
+            log.exception("receive of the reaction %s failed; Slack retries it", fields["message_id"])
+            return
+        log.info("reaction %s by %s in %s recorded", fields["text"], fields["sender_id"], fields["chat_id"])
+        await self.wire.ack(envelope_id)
 
     async def _take(self, chat: str, channel: str, msg: dict[str, Any], *, dm: bool) -> bool:
         """Receive one message once in this process: while its `(chat,

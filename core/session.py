@@ -361,6 +361,9 @@ def chat_prompt(rows: list[dict]) -> str:
             )
         elif r["type"] not in CHAT_ROWS:
             continue
+        elif r["type"] == "child.reported" and p.get("kind") == "board":
+            lines.append("- The decision board changed:")
+            lines += ["  " + line if line else "" for line in str(p.get("text") or "").splitlines()]
         elif r["type"] == "child.reported":
             lines.append(f"- Your task {p.get('child_id')} reports ({p.get('kind')}):")
             lines += ["  " + line if line else "" for line in str(p.get("text") or "").splitlines()]

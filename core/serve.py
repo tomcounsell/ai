@@ -107,6 +107,7 @@ import psycopg
 
 from core import (
     backup,
+    board,
     bridge,
     broker,
     credentials,
@@ -623,6 +624,10 @@ class Kernel:
                 await notices.owe(conn, task_id)
             except Exception as exc:  # noqa: BLE001  one task's notice fails alone
                 _log(f"task {task_id}: notices failed: {exc!r}")
+        try:
+            await board.owe(conn)
+        except Exception as exc:  # noqa: BLE001  the boards are read again on the next wake
+            _log(f"decision boards failed: {exc!r}")
         try:
             await self.roll(conn)
         except rollout.Restart:

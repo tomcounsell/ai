@@ -1,4 +1,5 @@
-"""From one Slack `message` event to the fields of the port's `Inbound`.
+"""From one Slack `message` event, or Tom's reaction on Valor's post, to
+the fields of the port's `Inbound`.
 
 The bridge decides nothing here: text is Slack's `text` as stored, Tom is
 a `<team>/<user>` id the kernel compares, and a file is named by its
@@ -47,6 +48,39 @@ def wanted(msg: dict[str, Any], own: str) -> bool:
         and msg.get("user") != own
         and not msg.get("bot_id")
     )
+
+
+async def reaction(
+    wire: SlackWire, event: dict[str, Any], operators: tuple[str, ...]
+) -> dict[str, Any] | None:
+    """The `Inbound` fields of Tom's reaction (a `reaction_added` by one
+    of `operators`) on one of Valor's own posts; None for any other. It is
+    a record of kind `reaction`: its id is the post's `ts` and the emoji's
+    name, its text the name as Slack writes it (`:+1:`), and it replies to
+    the post, a real message, which its thread is."""
+    item = event.get("item") or {}
+    user = event.get("user")
+    if item.get("type") != "message" or event.get("item_user") != wire.user_id or not user:
+        return None
+    sender = person(wire.team_id, event)
+    if sender not in operators:
+        return None
+    dm = str(item.get("channel", "")).startswith("D")
+    post, name = item["ts"], event.get("reaction", "")
+    return {
+        "channel": "slack",
+        "chat_id": sender if dm else f"{wire.team_id}/{item['channel']}",
+        "chat_kind": "dm" if dm else "group",
+        "message_id": f"{post}/{name}",
+        "sender_id": sender,
+        "sender_name": await wire.user_name(user),
+        "sent_at": datetime.fromtimestamp(float(event.get("event_ts") or post), UTC).isoformat(),
+        "kind": "reaction",
+        "text": f":{name}:",
+        "reply_to": post,
+        "topic_id": post,
+        "headers": {},
+    }
 
 
 def named(text: str, own: str) -> str:
