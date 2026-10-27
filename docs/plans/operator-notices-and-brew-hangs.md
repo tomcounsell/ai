@@ -77,10 +77,11 @@ With the launcher, nothing waits on a prompt.
 **Ollama.** Ollama.app rejects the AppleScript quit (`-10004` privilege
 violation, tried on the Cowboy), so every run times out and skips it.
 SIGTERM quits it and its server in 1 s, and `open -a` brings it back
-(tried). `quit_app_gracefully`: when the quit is refused with
-`-10004`, send SIGTERM to the app's own process, then wait as now. Apps
-that accept the event, or whose Automation is not granted (`-1743`),
-are unchanged, so iTerm is never signalled.
+(tried). Under launchd the refusal is `-128`, not `-10004` (the Captain,
+2026-10-27), so `quit_app_gracefully` names the apps that get SIGTERM in
+place of the quit event (`TERM_QUIT_APPS`, Ollama alone) rather than
+matching an error code: iTerm's code is untested, and SIGTERM there would
+end its sessions.
 
 The script and `SETUP.md` live in the vault (`~/Desktop/Valor/brew`), not
 this repo: they reach the Cowboy and the Pirate at their next 04:00
