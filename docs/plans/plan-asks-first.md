@@ -58,8 +58,15 @@ governance is added.
 
 ## Out of scope
 
-`clarify.md` (it already asks in one batch), `critique.md`, the persona's
-"Absorb ambiguity", `core/board.py`, the machine.
+`critique.md`, the persona's "Absorb ambiguity", `core/board.py`, the
+machine.
+
+**Critique round 2, taken in the build.** `clarify.md`'s goal had the same
+Tom-only-else-advisor split and takes the same stakeholder wording. The
+stakeholder is the session the task reports to (`core/notices.py`
+`reports_to`): the chat session that started it, or else the operator
+chat's. In a board chat, a question asked in another chat is one canvas
+line naming where, until answered.
 
 ## Tests
 

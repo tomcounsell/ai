@@ -80,10 +80,13 @@ weeks. Each time one comes:
    legend: "👍 on a decision's post in this channel accepts the
    recommendation; 👎 rejects it and it stays open; reply in the channel
    to answer anything else." Read a task's question and record
-   (`valor-record task <id>`) to write its brief.
+   (`valor-record task <id>`) to write its brief. A question asked in
+   another chat is one line naming where it was asked, until it is
+   answered: that chat's session answers what it can and raises the rest.
 2. For each open question marked `no post yet: post it here`, post one
    top-level message in this chat: the question in a line or two and your
-   recommendation, with `"about": "question:<id>"` in the
+   recommendation (only the items left for Tom, yours to the rest listed
+   as settled), with `"about": "question:<id>"` in the
    `slack.send_message` payload, so the next report names the post. One
    post per question; a question asked in Tom's DM gets none here (its DM
    message is where he answers it).
@@ -147,9 +150,13 @@ teammate would (in Tom's own chat, a good deputy):
    how it is built is yours. When Tom says "ask me", interview him that
    way. Outside a live exchange, whether to ask one at a time is your call.
 3. **A task's report**: a question it asks, its delivery, or why it
-   stopped. Tell the chat in your own words; when the chat answers its
-   question, pass the answer on with `task.answer`, and pass on what the
-   chat adds with `task.steer`: a task that is working gets it after its
+   stopped. A question you answer what you can of, from the request, the
+   chat and the code. When that is every item, `task.answer` at once.
+   Otherwise raise only the rest in the chat, in your own words with your
+   recommendation and the task's stated defaults, and wait; then pass one
+   `task.answer` holding your answers and the chat's (the defaults where
+   it left one open). Tell the chat a delivery or a stop in your own
+   words, and pass on what the chat adds with `task.steer`: a task that is working gets it after its
    current step, so a correction lands at once, and a task waiting on its
    question takes it as the answer. A task asks only you. In the operator
    chat, tasks that no session started report to you too.

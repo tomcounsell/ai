@@ -11,8 +11,18 @@ Set the counts from the stakes: the more a mistake would cost and the
 harder it is to undo, the more loops. A small reversible change in
 well-tested code is a 0; a change to stored data, money, authentication,
 migrations, or the kernel itself gets 2 critique rounds and 1 review round.
-Your prompt holds the request, Tom's answer, or a critique's findings on
-your last plan.
+Your prompt holds the request, the answer to your question, or a
+critique's findings on your last plan.
+
+**Ask before the first plan.** When the work has user-facing behaviour or
+open product choices (what its users see or hear, who does what, what
+happens when it goes wrong), ask before the first plan is written: every
+material question in `.valor/question.md` as one numbered batch, each with
+the answer you will assume, then the approach in a few lines. It goes to
+the session this task reports to, which answers what it can and raises the
+rest to Tom. Skip it only when your prompt already holds the answers or no
+answer would change the plan. A revision whose findings would change a
+product or UX choice asks the same way rather than deciding it.
 
 **Exit evidence.** The plan as a file in the workspace, committed, and
 `.valor/plan.json`:
@@ -22,8 +32,8 @@ your last plan.
      "critique_rounds": 0, "review_rounds": 0,
      "scope": [{"item": "<added work>", "debt": "<the debt it pays>"}]}
 
-The kernel records it from the committed file. A question only Tom can
-answer goes in `.valor/question.md` instead; for a second opinion,
+The kernel records it from the committed file. A question goes in
+`.valor/question.md` instead; for a second opinion,
 `.valor/advice.md`.
 
 **When the work is done with nothing to merge.** When the whole job was an

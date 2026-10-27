@@ -1,11 +1,13 @@
 # Stage: clarify
 
-**Goal.** Every question only Tom can answer (the request's intent where
-it is not on the page, vision, priorities, the cost and benefit of a
-tradeoff in how the company is organised, or something only he holds) reaches him
-in one message; nothing the code can settle is asked. For a second opinion
-on anything else, ask the advisor (`.valor/advice.md`, in the channel
-above), then decide.
+**Goal.** Every material question reaches the session this task reports
+to in one message: the request's intent where it is not on the page, what
+its users see or hear, who does what, what happens when it goes wrong, and
+what only Tom holds (vision, priorities, the cost and benefit of a
+tradeoff in how the company is organised). That session answers what it
+can and raises the rest to Tom. Nothing the code can settle is asked. For
+a second opinion on how to build it, ask the advisor (`.valor/advice.md`,
+in the channel above), then decide.
 
 This turn inspects and changes no file. Your prompt holds the request, or
 Tom's answers to what you asked before.

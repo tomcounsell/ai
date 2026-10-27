@@ -1411,6 +1411,26 @@ def test_a_tasks_channel_says_no_one_holds_the_merge_and_each_signal_is_taken(ds
     assert "taking each file" in text and "is written again" in text
 
 
+def test_a_plan_turn_asks_the_session_it_reports_to_before_the_first_plan(dsn, tmp_path):
+    # 991c42b25472: a feature plan revised four times and asked nothing,
+    # its channel sending product and UX questions to the advisor.
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="test", workspace=str(tmp_path)))
+            return (await tasks.dispatch(conn, task, state=State.PLAN))["text"]
+
+    text = " ".join(run(go()).split())
+    assert "# Stage: plan" in text and "user-facing behaviour or open product choices" in text
+    assert "ask before the first plan is written" in text and "one numbered batch" in text
+    assert "A revision whose findings would change a product or UX choice asks" in text
+    stakeholder = "the operator chat's), which answers what it can and raises the rest to Tom"
+    assert stakeholder in text and "what its users see or hear, who does what" in text
+    assert "for anything else, ask the advisor" not in text and "For how to build it, ask the advisor" in text
+    clarify = " ".join(tasks.stage_text(State.CLARIFY).split())
+    assert "That session answers what it can and raises the rest to Tom" in clarify
+    assert "what its users see or hear" in clarify and "on anything else, ask the advisor" not in clarify
+
+
 def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team, tmp_path):
     from core import signals, verdicts
     from tools import chat_tasks
@@ -1430,6 +1450,9 @@ def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team
     assert "# How this task reaches Tom" not in text
     assert "`yudame-dev:ask-me`" in text and "Anything I missed? If not, I'll go ahead." in text
     assert "one at a time in a live chat" in text and "One batch from a task" in text
+    flat = " ".join(text.split())
+    assert "Otherwise raise only the rest in the chat" in flat and "pass one `task.answer`" in flat
+    assert "only the items left for Tom" in flat and "one line naming where it was asked" in flat
     asked = session._stage_verdict(State.CLARIFY, signals.Signals(question="?"), None, "t", True, b)
     assert asked == ("idle", {}, ["question means nothing in a chat session; ignored"])
     assert (

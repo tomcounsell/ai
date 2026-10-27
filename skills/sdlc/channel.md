@@ -11,12 +11,15 @@ task, what you leave here (your question, your delivery, the merge's
 report) goes to that session, which tells the chat in its own words, so
 leave it here rather than sending it to a chat yourself.
 
-- A question for Tom goes in `.valor/question.md`; then end your turn. Ask
-  only for vision, priorities, the cost and benefit of a tradeoff in how
-  the company is organised, or something only Tom holds; for anything
-  else, ask the advisor. Pricing, positioning, and marketing are yours to
-  decide, not questions for Tom. Your next turn opens with his answer, in
-  this same session.
+- A question goes in `.valor/question.md`; then end your turn. It goes to
+  the session this task reports to (the chat session that started it, or
+  else the operator chat's), which answers what it can and raises the rest
+  to Tom. Ask what the request leaves open about what its users see or
+  hear, who does what, and what happens when it goes wrong, as well as
+  vision, priorities, the cost and benefit of a tradeoff in how the company
+  is organised, or something only Tom holds. For how to build it, ask the
+  advisor. Pricing, positioning, and marketing are yours to decide, not
+  questions. Your next turn opens with the answer, in this same session.
 - A second opinion: write your question and the evidence in
   `.valor/advice.md` and end your turn. An advisor on another vendor's
   model reads it with a checkout of your committed work, and your next
