@@ -510,3 +510,9 @@ PROGRESS.md
 # Fit-path staged heads (#3420): data/ is ignored above; named here so the intent is explicit
 data/classification_eval/heads/
 .wrangler/
+
+# Native Mac apps under apps/: their Icon Composer JSON and real-log test
+# fixtures are source.
+!apps/**/*.json
+!apps/**/*.log
+/out/

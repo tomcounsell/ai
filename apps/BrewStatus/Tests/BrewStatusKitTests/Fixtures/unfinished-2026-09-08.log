@@ -1,0 +1,30 @@
+[2026-09-08 16:32:52] === brew nightly update start ===
+[2026-09-08 16:32:52] --- brew update ---
+==> Updating Homebrew...
+Already up-to-date.
+[2026-09-08 16:32:56] --- brew bundle (vault manifest) ---
+Error: SIGTERM
+/opt/homebrew/Library/Homebrew/bundle/dsl.rb:49:in 'Pathname#read'
+/opt/homebrew/Library/Homebrew/bundle/dsl.rb:49:in 'Homebrew::Bundle::Dsl#initialize'
+/opt/homebrew/Library/Homebrew/bundle/brewfile.rb:52:in 'Homebrew::Bundle::Brewfile.read'
+/opt/homebrew/Library/Homebrew/bundle/subcommand/install.rb:70:in 'Homebrew::Cmd::Bundle::InstallSubcommand#run'
+/opt/homebrew/Library/Homebrew/bundle/subcommand.rb:51:in 'Homebrew::Cmd::Bundle.dispatch'
+/opt/homebrew/Library/Homebrew/cmd/bundle.rb:65:in 'Homebrew::Cmd::Bundle#run'
+/opt/homebrew/Library/Homebrew/brew.rb:143:in '<main>'
+Please report this issue:
+  https://docs.brew.sh/Troubleshooting
+[2026-09-08 16:38:47] === brew nightly update start ===
+[2026-09-08 16:38:47] --- brew update ---
+==> Updating Homebrew...
+Already up-to-date.
+[2026-09-08 16:38:49] --- brew bundle (vault manifest) ---
+Error: SIGTERM
+/opt/homebrew/Library/Homebrew/bundle/dsl.rb:49:in 'Pathname#read'
+/opt/homebrew/Library/Homebrew/bundle/dsl.rb:49:in 'Homebrew::Bundle::Dsl#initialize'
+/opt/homebrew/Library/Homebrew/bundle/brewfile.rb:52:in 'Homebrew::Bundle::Brewfile.read'
+/opt/homebrew/Library/Homebrew/bundle/subcommand/install.rb:70:in 'Homebrew::Cmd::Bundle::InstallSubcommand#run'
+/opt/homebrew/Library/Homebrew/bundle/subcommand.rb:51:in 'Homebrew::Cmd::Bundle.dispatch'
+/opt/homebrew/Library/Homebrew/cmd/bundle.rb:65:in 'Homebrew::Cmd::Bundle#run'
+/opt/homebrew/Library/Homebrew/brew.rb:143:in '<main>'
+Please report this issue:
+  https://docs.brew.sh/Troubleshooting

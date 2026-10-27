@@ -1,0 +1,262 @@
+[2026-10-27 04:00:05] === brew nightly update start ===
+[2026-10-27 04:00:05] --- setup ---
+[2026-10-27 04:00:06] --- brew update ---
+==> Updating Homebrew...
+==> Downloading https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:43ff285a82f48c84a06d0676a3800815a19d290d32e44182ddd7a6e95478e18e
+#=#=#                                                                          ##O#-#                                                                                                                                                    0.4%######                                                                     9.3%#################                                                         23.8%###############################                                           43.9%################################################                          67.0%#############################################################             85.8%#####################################################################     95.8%######################################################################## 100.0%
+==> Pouring portable-ruby-4.0.9.arm64_big_sur.bottle.tar.gz
+Updated 1 tap (homebrew/cask).
+==> New Casks
+diri: Terminal workspace for running coding agents in parallel
+keyboop: Keyboard layout switcher with local voice dictation
+peel: App uninstaller and disk space cleaner
+==> Outdated Formulae
+python@3.12
+python@3.13
+python@3.14
+redis
+==> Outdated Casks
+anythingllm
+cursor
+figma
+github
+kitty
+notion-calendar
+ollama-app
+superwhisper
+
+You have 4 outdated formulae and 8 outdated casks installed.
+You can upgrade them with brew upgrade
+or list them with brew outdated.
+[2026-10-27 04:00:13] --- brew bundle (vault manifest) ---
+Warning: Formulae dependency graph sorting found a circular dependency:
+  libtiff, webp
+This is usually caused by stale dependency data in installed keg tabs.
+If it persists, run the following commands and try again:
+  brew update
+  brew uninstall --ignore-dependencies --force libtiff webp
+  brew install libtiff webp
+Using getsentry/tools
+Using caddy
+Using cloudflared
+Using cocoapods
+Using colima
+Using ffmpeg
+Using gh
+Using node
+Using openjdk@17
+Using pandoc
+Using pango
+Using pgvector
+Using pipx
+Using pocket-id
+Using poppler
+Using postgresql@15
+Using python@3.12
+Using sshpass
+Using uv
+Using 1password
+Using 1password-cli
+Using chatgpt
+Using claude
+Using cmux
+Using cursor
+Using flutter
+Using gcloud-cli
+Using github
+Using google-chrome
+Using handy
+Using iterm2
+Using notion
+Using obsidian
+Using ollama-app
+Using slack
+Using zed
+Using postgresql@18
+Using redis
+Using tailscale
+`brew bundle` complete! 39 Brewfile dependencies now installed.
+[2026-10-27 04:00:14] --- brew upgrade (formulae) ---
+Warning: The following taps are not trusted:
+  getsentry/tools
+
+Homebrew is currently ignoring formulae, casks and commands
+from these taps because tap trust is required.
+Untap them with:
+  brew untap getsentry/tools
+Trust specific formulae, casks and commands with:
+  brew trust --formula <user>/<tap>/<formula>
+  brew trust --cask <user>/<tap>/<cask>
+  brew trust --command <user>/<tap>/<command>
+Whole-tap trust is broader and includes all current and future formulae,
+casks and commands from the listed taps. Trust whole taps with:
+  brew trust getsentry/tools
+For more information, see:
+  https://docs.brew.sh/Tap-Trust
+==> Downloading bottle manifests
+✔︎ Bottle Manifest redis (8.10.3)
+✔︎ Bottle Manifest python@3.13 (3.13.18)
+✔︎ Bottle Manifest python@3.12 (3.12.16)
+==> Fetching downloads for: redis, python@3.13 and python@3.12
+==> Would upgrade 3 outdated packages
+redis        8.10.2_1  -> 8.10.3   (8.8MB)
+python@3.13  3.13.17   -> 3.13.18  (18.5MB)
+python@3.12  3.12.15_1 -> 3.12.16  (18MB)
+==> 1 Pinned formula
+python@3.14 3.14.8_1 -> 3.14.10
+✔︎ Bottle redis (8.10.3)
+✔︎ Bottle python@3.13 (3.13.18)
+✔︎ Bottle python@3.12 (3.12.16)
+==> Upgrading redis
+  8.10.2_1 -> 8.10.3 
+==> Pouring redis--8.10.3.arm64_tahoe.bottle.tar.gz
+🍺  /opt/homebrew/Cellar/redis/8.10.3: 19 files, 26.4MB
+==> Upgrading python@3.13
+  3.13.17 -> 3.13.18 
+==> Pouring python@3.13--3.13.18.arm64_tahoe.bottle.tar.gz
+🍺  /opt/homebrew/Cellar/python@3.13/3.13.18: 3,643 files, 71.5MB
+==> Upgrading python@3.12
+  3.12.15_1 -> 3.12.16 
+==> Pouring python@3.12--3.12.16.arm64_tahoe.bottle.tar.gz
+🍺  /opt/homebrew/Cellar/python@3.12/3.12.16: 3,618 files, 68.5MB
+==> Cleanup
+Removing: /opt/homebrew/Cellar/redis/8.10.2_1... (19 files, 26.4MB)
+Removing: /opt/homebrew/Cellar/python@3.13/3.13.17... (3,642 files, 71.4MB)
+Removing: /opt/homebrew/Cellar/python@3.12/3.12.15_1... (3,856 files, 74.2MB)
+Removing: /Users/valorengels/Library/Caches/Homebrew/python@3.13--3.13.17... (18.5MB)
+Removing: /Users/valorengels/Library/Caches/Homebrew/python@3.13_bottle_manifest--3.13.17... (98.1KB)
+Removing: /Users/valorengels/Library/Caches/Homebrew/python@3.12--3.12.15_1... (18MB)
+Removing: /Users/valorengels/Library/Caches/Homebrew/python@3.12_bottle_manifest--3.12.15_1... (111.2KB)
+==> Caveats
+==> redis
+To restart redis after an upgrade:
+  brew services restart redis
+Or, if you don't want/need a background service you can just run:
+  /opt/homebrew/opt/redis/bin/redis-server /opt/homebrew/etc/redis.conf
+==> python@3.12
+Python is installed as
+  /opt/homebrew/bin/python3.12
+
+Unversioned and major-versioned symlinks `python`, `python3`, `python-config`, `python3-config`, `pip`, `pip3`, etc. pointing to
+`python3.12`, `python3.12-config`, `pip3.12` etc., respectively, are installed into
+  /opt/homebrew/opt/python@3.12/libexec/bin
+
+If you do not need a specific version of Python, and always want Homebrew's `python3` in your PATH:
+  brew install python3
+
+`idle3.12` requires tkinter, which is available separately:
+  brew install python-tk@3.12
+
+`dbm.gnu` is available separately:
+  brew install python-gdbm@3.12
+
+For more information about Homebrew and Python, see: https://docs.brew.sh/Homebrew-and-Python
+==> Upgraded 3 outdated packages
+redis        8.10.2_1  -> 8.10.3
+python@3.13  3.13.17   -> 3.13.18
+python@3.12  3.12.15_1 -> 3.12.16
+==> 1 Pinned formula
+python@3.14 3.14.8_1 -> 3.14.10
+[2026-10-27 04:00:28] frozen (local + vault): claude anythingllm android-studio notion-calendar figma superwhisper kitty docker-desktop zoom
+[2026-10-27 04:00:28] --- brew upgrade (casks) ---
+[2026-10-27 04:00:28] SKIP (frozen): anythingllm
+[2026-10-27 04:00:28] SKIP (frozen): claude
+[2026-10-27 04:00:28] UPGRADE: cursor
+==> Fetching downloads for: cursor
+✔︎ Cask cursor (3.27.14,69b724ebc67ec522c1b5d287a5025f7a7e81be97)
+==> Upgrading cursor
+  3.27.12,df132ffba90dfc15a12e6b8f020ba4e5d026c4be -> 3.27.14,69b724ebc67ec522c1b5d287a5025f7a7e81be97
+==> Backing up App 'Cursor.app' to '/opt/homebrew/Caskroom/cursor/3.27.12,df132ffba90dfc15a12e6b8f020ba4e5d026c4be/Cursor.app'
+==> Removing App '/Applications/Cursor.app'
+==> Unlinking Binary '/opt/homebrew/bin/cursor'
+==> Moving App 'Cursor.app' to '/Applications/Cursor.app'
+==> Linking Binary 'code' to '/opt/homebrew/bin/cursor'
+==> Purging files for version 3.27.12,df132ffba90dfc15a12e6b8f020ba4e5d026c4be of Cask cursor
+🍺  cursor was successfully upgraded!
+==> Cleanup
+Removing: /Users/valorengels/Library/Caches/Homebrew/Cask/cursor--3.27.12,df132ffba90dfc15a12e6b8f020ba4e5d026c4be.zip... (328.1MB)
+[2026-10-27 04:01:11] SKIP (frozen): figma
+[2026-10-27 04:01:11] UPGRADE: github
+==> Fetching downloads for: github
+✔︎ Cask github (3.6.10-ffeefe5d)
+==> Upgrading github
+  3.6.9-e0ba6bb8 -> 3.6.10-ffeefe5d
+==> Backing up App 'GitHub Desktop.app' to '/opt/homebrew/Caskroom/github/3.6.9-e0ba6bb8/GitHub Desktop.app'
+==> Removing App '/Applications/GitHub Desktop.app'
+==> Unlinking Binary '/opt/homebrew/bin/github'
+==> Moving App 'GitHub Desktop.app' to '/Applications/GitHub Desktop.app'
+==> Linking Binary 'github.sh' to '/opt/homebrew/bin/github'
+==> Purging files for version 3.6.9-e0ba6bb8 of Cask github
+🍺  github was successfully upgraded!
+==> Cleanup
+Removing: /Users/valorengels/Library/Caches/Homebrew/Cask/github--3.6.9-e0ba6bb8.zip... (537.6MB)
+[2026-10-27 04:01:41] SKIP (frozen): kitty
+[2026-10-27 04:01:41] SKIP (frozen): notion-calendar
+[2026-10-27 04:01:41] QUIT: Ollama.app (for ollama-app upgrade)
+[2026-10-27 04:02:18] TIMEOUT quitting Ollama.app after 30s
+[2026-10-27 04:02:18] SKIP (ollama-app): could not safely quit and restart Ollama.app — leaving it outdated
+[2026-10-27 04:02:18] SKIP (frozen): superwhisper
+[2026-10-27 04:02:18] --- App Store (mas) ---
+[2026-10-27 04:02:18] mas not installed; skipping App Store apps
+[2026-10-27 04:02:18] --- Claude Code plugins (yudame) ---
+Updating marketplace: yudame...Refreshing marketplace cache (timeout: 120s)…
+Cloning repository (timeout: 120s): https://github.com/yudame/skills.git
+Replacing the existing marketplace clone…
+Clone complete, validating marketplace…
+✔ Successfully updated marketplace: yudame
+Checking for updates for plugin "yudame@yudame"…
+✔ Plugin "yudame" updated from f784327cf36a to 566f1df5f31d for scope user. Restart to apply changes.
+Checking for updates for plugin "yudame-dev@yudame"…
+✔ Plugin "yudame-dev" updated from f784327cf36a to 566f1df5f31d for scope user. Restart to apply changes.
+[2026-10-27 04:02:24] --- cleanup ---
+Warning: Permission denied @ apply2files - /opt/homebrew/Cellar/tailscale/1.102.3/bin/tailscale
+Error: python@3.14 is pinned. You must unpin it to uninstall.
+Error: Could not cleanup old kegs! Fix your permissions on:
+  /opt/homebrew/Cellar/tailscale/1.102.3
+Removing: /opt/homebrew/Cellar/tailscale/1.102.3... (12 files, 39.3MB)
+==> Autoremoving 1 unneeded formula:
+python@3.14
+Removing: /Users/valorengels/Library/Caches/Homebrew/bootsnap/d643bfa061b34d2638ecbdbc8018f88ea8423f686460396aa2c28f155589680f... (1,132 files, 11.4MB)
+Removing: /opt/homebrew/Library/Homebrew/vendor/portable-ruby/4.0.7_1... (1,707 files, 34.6MB)
+==> This operation has freed approximately 85.3MB of disk space.
+Please note that these warnings are just used to help the Homebrew maintainers
+with debugging if you file an issue. If everything you use Homebrew for is
+working fine: please don't worry or file an issue; just ignore this. Thanks!
+
+Warning: A newer Command Line Tools release is available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+  sudo xcode-select --install
+
+Alternatively, manually download them from:
+  https://developer.apple.com/download/all/.
+You should download the Command Line Tools for Xcode 27.0.
+
+Warning: Some installed formulae are deprecated or disabled.
+You should find replacements for the following formulae:
+
+  gemini-cli
+
+Warning: You have the following deprecated, official taps tapped:
+  Homebrew/homebrew-services
+
+Untap them with `brew untap`.
+
+Warning: You have unlinked kegs in your Cellar.
+Leaving kegs unlinked can lead to build-trouble and cause formulae that depend on
+those kegs to fail to run properly once built.
+
+Run `brew link` on these:
+  gemini-cli
+
+Warning: Your Command Line Tools (CLT) does not support macOS 26.
+It is either outdated or was modified.
+
+Please update your Command Line Tools (CLT) or delete it if no updates are available.
+Update them from Software Update in System Settings.
+
+If that doesn't show you any updates, run:
+  sudo rm -rf /Library/Developer/CommandLineTools
+[2026-10-27 04:02:38] === brew nightly update done ===
