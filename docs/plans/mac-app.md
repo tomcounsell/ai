@@ -109,3 +109,15 @@ Mac shows its own and the other Macs' last run, read from a status file
 the script writes to `~/Desktop/Valor/brew/` (default); (3) read-only plus
 "Run now" (default); (4) no notifications (default); (5) first app: this
 one, since it needs no Developer ID (default).
+
+## Tom's answers and the first two apps (2026-10-27, Telegram 11741)
+
+Three desks (work, home, cafe), snap on screen connect, cafe when nothing
+is connected; Chrome windows stack; Magnet's shortcuts copied; never force
+a window that won't resize; the tiler ships in "Yudame Tools", a menu-bar
+super app for team tools. Brew screen: each Mac its own runs, a CLI, view
+only plus Run now, no notifications. Built with `valor:mac-app`:
+- `apps/BrewStatus/` here (Valor's own Macs), installed on the Cowboy;
+  another Mac runs `./build.sh --open` there.
+- Yudame Tools in github.com/yudame/yudame-tools (private), unsigned
+  test build until the Developer ID certificate is in m-valor.
