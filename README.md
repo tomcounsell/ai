@@ -112,6 +112,7 @@ Everything runs Mac native on a MacBook Air M4 with 16 GB of RAM: launchd for sc
 - [`tools/`](tools/README.md): non-core and vendor-dependent tooling, each declaring its effect class and acting through the broker.
 - [`api/`](api/README.md): programmatic interfaces such as MCP servers and HTTP surfaces; reserved.
 - [`ui/`](ui/README.md): the read-only dashboard.
+- `apps/`: native Mac apps for Valor's own Macs, built with `valor:mac-app`: [`BrewStatus/`](apps/BrewStatus/README.md), the menu bar status of the nightly Homebrew job, and its `brew-status` CLI.
 - [`site/`](site/index.html): the public site, valorengels.com, served by the Cloudflare Worker in `src/index.js` (`wrangler.jsonc`) and deployed by hand with `scripts/deploy-site.sh`.
 - [`docs/`](docs/README.md): the governing docs ([architecture](docs/architecture.md), [mission](docs/mission.md), and the rest listed there), plans, and records.
 - [`tests/`](tests/README.md): integration first, no mocks, real Postgres, real bridges on test accounts.
