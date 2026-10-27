@@ -2,6 +2,7 @@
 Valor's web agent, subagents to any depth, and the Brief in every subagent."""
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -94,3 +95,23 @@ def test_every_subagent_but_the_web_agent_opens_with_the_brief():
 
     assert json.loads(opens("general-purpose"))["hookSpecificOutput"]["additionalContext"].endswith("Brief ü")
     assert opens("valor:web") == ""
+
+
+def test_the_mac_app_agent_alone_reads_bamas_skills():
+    """docs/plans/mac-app.md: BAMA's skills are vendored beside Valor's plugin
+    skills, read by path from `valor:mac-app`'s prompt, and listed to no session."""
+    agent = (Path(VALOR_PLUGIN) / "agents" / "mac-app.md").read_text()
+    front, prompt = agent.split("---")[1], agent.split("---", 2)[2]
+    assert "name: mac-app" in front.splitlines()
+    description = next(line for line in front.splitlines() if line.startswith("description:"))
+    assert all(word in description for word in ("building", "changing", "packaging", "Mac app"))
+    bama = Path(VALOR_PLUGIN) / "bama"
+    vendored = {p.parent.relative_to(bama / "skills").as_posix() for p in bama.glob("skills/*/*/SKILL.md")}
+    named = set(re.findall(r"`((?:start|plan|code|design|ship)/[a-z-]+)`", prompt))
+    assert len(vendored) == 21 and named == vendored
+    assert (bama / "specs" / "window-snapper.md").is_file()
+    assert (bama / "LICENSE").read_text().startswith("MIT License\n\nCopyright (c) 2026 Dave Ebbelaar")
+    names = {s.rsplit("/", 1)[1] for s in vendored}
+    for plugin in settings.plugin_dirs:
+        listed = Path(plugin) / "skills"
+        assert not names & {p.parent.name for p in listed.glob("*/SKILL.md")}, plugin

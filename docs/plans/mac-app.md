@@ -76,13 +76,20 @@ plugin dirs lists its skills, and none is BAMA's; (b) `valor:mac-app`,
 asked how to start a new project, names `new-mac-app` and resolves an
 existing `new-app.sh` path; (c) `new-app.sh` scaffolds a throwaway app in
 `$TMPDIR`, which `swift build` compiles. Full suite under 5 minutes.
+Build finding: SwiftPM's manifest sandbox cannot start under the turn's
+`sandbox-exec`, so the prompt says to pass `--disable-sandbox`.
 
 ## Delivered to Tom with the work
 
 The invite: App Store Connect, Users and Access, People, +: Valor Engels,
 valor@yuda.me, role **Admin** (Certificates, Identifiers & Profiles by
 default; lets Valor make its development certificate and a team notary
-key). The Account Holder creates a Developer ID Application certificate
+key), plus "Access to Cloud Managed Developer ID Certificate" if offered.
+Apple says any email can carry the invite; Valor accepts it signed in as
+valor.engels@pm.me, the Apple Account on this Mac (build: whether
+valor@yuda.me is a sign-in address there could not be read, since screen
+capture returns black in a turn). Cloud signing runs only through Xcode's
+archive flow, and BAMA signs with `codesign`, so the .p12 stays the route. The Account Holder creates a Developer ID Application certificate
 and saves the .p12 and its password to m-valor as "Apple Developer ID
 Application". Also needed: Valor's Apple Account sign-in in m-valor, which
 the vaults lack. Then the app questions below, each with its default.
@@ -94,6 +101,8 @@ desk and press "Save for this desk", keyed by the connected displays
 menu item (default); (4) apps with several windows: first window to its
 place, the rest left alone (default); (5) halves/thirds shortcuts out of v1
 (default); (6) name "Desks" (default).
+The tiler needs Accessibility permission on Tom's Mac, which macOS ties
+to the signature, so it waits on the Developer ID certificate.
 Brew UI: (1) a menu-bar icon (green/amber/red) opening last run: time,
 upgrades with versions, failures, warnings, next run (default); (2) each
 Mac shows its own and the other Macs' last run, read from a status file

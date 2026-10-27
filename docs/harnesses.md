@@ -720,6 +720,15 @@ and further harnesses"). The stage instructions are plain files in
 `skills/sdlc/`, one per stage, which the kernel renders into the Brief as
 text, so they need nothing harness-specific.
 
+**The Mac-app agent** ([plans/mac-app.md](plans/mac-app.md)). `valor:mac-app`
+(`skills/valor/agents/mac-app.md`) builds, changes and packages native Mac
+apps with BAMA's 21 skills, vendored at `skills/valor/bama/`. They are read
+by path from the agent's prompt (`${CLAUDE_PLUGIN_ROOT}` expands there), not
+loaded as skills: Claude Code, Codex and Pi list only a plugin's `skills/`,
+so no session sees them. Claude Code's agent `skills:` preload, measured on
+2.1.309, does not load a skill marked `disable-model-invocation`, and any
+skill it can load is listed to every session.
+
 **The web agent** ([plans/orchestration.md](plans/orchestration.md)).
 WebFetch and WebSearch run only inside `valor:web`, the leaf agent in Valor's
 plugin (`skills/valor/agents/web.md`) whose tools are those two alone. The
