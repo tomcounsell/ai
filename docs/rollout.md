@@ -100,7 +100,10 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    encrypted credential is loaded ahead of the copy (checked 2026-10-17)
    and is dead: `gws auth logout`
    (it keeps `client_secret.json`), then
-   `for F in credentials.json client_secret.json; do ssh valorengels@valor-the-cowboy cat .config/gws/$F > ~/.config/gws/$F; chmod 600 ~/.config/gws/$F; done`;
+   `ssh valorengels@valor-the-cowboy cat .config/gws/credentials.json > ~/.config/gws/credentials.json; chmod 600 ~/.config/gws/credentials.json`
+   and the OAuth client from 1Password,
+   `op read --out-file ~/.config/gws/client_secret.json 'op://Yudame Secrets/Google Oauth Client Valor Desktop Client/client_secret_json'`
+   (mode 600; anyone at yuda.me signs in their own account through it);
    `gws gmail users getProfile --params '{"userId":"me"}'` names valor@yuda.me.
    To sign in afresh (on the Cowboy, or after a revocation), Valor needs
    no one at the screen: `gws auth logout`, then, over SSH, where the login
