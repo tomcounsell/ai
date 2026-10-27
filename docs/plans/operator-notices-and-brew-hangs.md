@@ -14,8 +14,11 @@ two variables, which is how three Macs were set up without them. The
 notice is written by the kernel (`serve._rollout_text`) with the channel and
 chat in the row, and a bridge sends any due notice on its channel with no
 ownership check (`core/bridge.py` `due`), so only the kernel job needs
-them. The bridges' jobs are left alone, and `intake.owned` never puts
-Tom's DM on a second Mac. Separately, the
+them. The bridges' jobs are left alone, so no bridge's `intake.owned`
+puts Tom's DM on a second Mac (the kernel's does, which only its
+`operator_session` reads). A rollout notice is one of `notices.TOMS`, so
+it skips `operator_session` and is written straight to the operator chat:
+the variables alone deliver it. Separately, the
 **Pirate has no Slack bridge running**, so it could not send a Slack notice.
 Its `com.valor.kernel.slack` has
 been launchd-disabled since 2026-10-16. `permissions._reload` bootstraps
@@ -23,20 +26,27 @@ without `launchctl enable` ("Bootstrap failed: 5", kernel.log), and
 `_slack` returns early once the plist exists, so no later update retries.
 
 **Code (with tests):**
-- `intake.operator_session`: None when this machine does not own the
-  operator chat (`owns`). Otherwise a non-owning Mac's root-task notices
-  open a Valor session in Tom's DM whose replies no bridge there receives;
-  with None they go to the chat directly as kernel text.
-- `permissions._reload`: `launchctl enable` before bootstrap (rollout.md
-  step 9 already does this by hand). `_slack`: a plist that exists but
-  whose job is not loaded is loaded.
+- `intake.operator_session`, for the notices of root tasks that are no
+  session (a CLI or routine task's `question`, `ended`, `report`): when
+  the operator chat is one of Tom's DMs (`operator_telegram_id`,
+  `operator_slack_ids`), it is None unless a spec placed on this machine
+  lists that chat (`_project_chats`), as the intake docstring already
+  says of his DMs. The Cowboy's `projects/valor.toml` lists both; no spec
+  on the other three does. With None those notices go to the DM as kernel
+  text instead of opening a session there whose replies that Mac's bridge
+  never receives. A group or local operator chat is unchanged.
+- `permissions.slack`: a plist that exists but whose job is not loaded
+  (`launchctl print` fails) is enabled (`launchctl enable`) and loaded;
+  the enable is only on the Slack job, so `_reload` never re-enables a
+  job rollout.md disabled.
 - `docs/rollout.md` step 9: the kernel job carries
   `VALOR_OPERATOR_CHANNEL=slack` and `VALOR_OPERATOR_CHAT=<Tom's Slack DM>`
   on every Mac (`serve.PLIST_ENV` keeps them across rewrites).
 
 **Per machine (build, over ssh):** on the Pirate, the Captain and the
 Bald, add the two variables to `com.valor.kernel.plist` only, and reload
-the kernel; enable and load the Pirate's Slack job.
+the kernel. The Pirate's Slack job is enabled and loaded by hand the
+same way; its next update would do it once the merge lands.
 
 ## 2. Nightly Homebrew runs (`com.valor.brew-nightly`)
 
@@ -81,15 +91,17 @@ The Captain's 1Password and iTerm quit timeouts (30 s each, no hang).
 Why `com.valor.kernel.slack` was disabled on Oct 16.
 
 ## Tests
-- `test_kernel.py`: `operator_session` is None on a Mac that does not own the operator chat,
-  and opens a session on the owner. A rollout notice there is requested
-  to the operator chat with no `notice.undeliverable`.
-- `test_permissions.py`: `_reload` runs `launchctl enable` before
-  bootstrap. `_slack` loads an existing plist whose job is not loaded, and
-  leaves a loaded one alone.
+- `test_kernel.py`, with the real `owned()` and the repo's specs: with
+  the operator chat Tom's Slack DM, `operator_session` is None on the
+  Pirate and opens a session on the Cowboy; with a Telegram group
+  operator chat no spec lists, it still opens one. A root task's `ended`
+  notice on the Pirate is requested to the DM with no
+  `notice.undeliverable`.
+- `test_permissions.py`: `slack` enables and loads an existing plist whose
+  job is not loaded, and runs no launchctl for a loaded one.
 - Live: on each of the three Macs, `core settings` in the kernel's env
-  shows the operator chat, and `owned("slack")` there still lacks Tom's
-  DM. The Pirate's Slack log shows "connected". One notice
+  shows the operator chat, and the Slack bridge's `owned("slack")` (its
+  own job's env) still lacks Tom's DM. The Pirate's Slack log shows "connected". One notice
   goes to Valor's own Slack DM through each Mac's bridge (same send path,
   without messaging Tom). `notice.sent` is recorded.
 - Live: the kickstarted brew runs on the Captain and the Bald end in
