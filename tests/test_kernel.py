@@ -1759,6 +1759,42 @@ def test_toms_slack_dm_is_owned_only_on_the_mac_valor_is_placed_on():
             assert (slack <= ids) if mac == mine else not (slack & ids), (name, mac)
 
 
+def test_toms_dm_as_operator_chat_has_a_session_only_on_the_mac_its_spec_is_placed_on(dsn, tmp_path):
+    """Every Mac's kernel names Tom's Slack DM as its operator chat, so its
+    notices reach him (the Bald's update failures of 2026-10-26 had no
+    chat). Only the Cowboy, where `valor.toml` lists the DM, opens a
+    session there; a root task's notice on the Pirate goes to the DM
+    itself. A group operator chat no spec lists keeps its session."""
+    root = pathlib.Path(__file__).parent.parent / "projects"
+
+    def mac(name, **more):
+        values = dict(projects_dir=str(root), work_dir=str(tmp_path / "work"), machine=name, default_machine=name,
+                      operator_telegram_id="179144806", operator_slack_ids=(TOM_SLACK,),
+                      operator_channel="slack", operator_chat=TOM_SLACK) | more  # fmt: skip
+        return bridges.configure(**values)
+
+    async def go():
+        task = await new_task(dsn)
+        async with await db.connect(dsn) as conn:
+            with mac("Valor the Pirate"):
+                assert TOM_SLACK in intake.owned("slack")  # the kernel's own view, which owns nothing by it
+                pirate = await intake.operator_session(conn)
+                await notices.request(conn, task, kind="ended", about_key="ended:1", text="Stopped.")
+            with mac("Valor the Pirate", operator_channel="telegram", operator_chat="-1009999"):
+                group = await intake.operator_session(conn)
+            with mac("Valor the Cowboy"):
+                cowboy = await intake.operator_session(conn)
+                b = await tasks.brief(conn, cowboy)
+        return pirate, group, cowboy, b, await bridges.rows(dsn, task)
+
+    pirate, group, cowboy, b, rows = run(go())
+    assert pirate is None and group is not None and cowboy is not None
+    assert b.chat == {"channel": "slack", "chat_id": TOM_SLACK}
+    (notice,) = bridges.typed(rows, "notice.requested")
+    assert (notice["channel"], notice["chat_id"], notice["kind"]) == ("slack", TOM_SLACK, "ended")
+    assert bridges.typed(rows, "notice.undeliverable") == []
+
+
 def test_in_a_slack_dev_channel_every_message_wakes_the_session_and_tom_is_tom(dsn, tmp_path):
     """As in an Eng group: anyone's message steers the one session, naming
     its sender; Tom, by his Slack id, is `tom`."""

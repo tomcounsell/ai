@@ -160,6 +160,11 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    8790 first, `lsof -ti tcp:8790 | xargs kill`, or the job crash-loops),
    and `core routine NAME` for each routine, `update` and `invoices` included (a `task` routine starts work only on the Mac its project is placed on, so it is installed on every Mac): `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
+   `core serve`'s also needs `VALOR_OPERATOR_CHANNEL=slack` and
+   `VALOR_OPERATOR_CHAT=T0B6E8JPE3C/U0B78H17XQ8` (Tom's Slack DM) on every
+   Mac, or its update-failure notices go nowhere (the Pirate, the Captain
+   and the Bald ran without them until 2026-10-27); only the Mac whose spec
+   lists the DM opens a session there. The bridges' jobs do not take them.
    A plist takes only `PLIST_ENV` from the shell, so when regenerating a
    job that ran before, export its recorded plist's variables except
    `PATH` and `HOME` first (`plutil -extract EnvironmentVariables json -o - $CUT/<label>.plist`)

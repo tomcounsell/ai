@@ -860,11 +860,16 @@ async def open_session(
 async def operator_session(conn) -> str | None:
     """The session of the operator chat (`settings.operator_channel` and
     `operator_chat`), started when it has none open; None when that chat
-    is not Tom's own chat or has no project to work under."""
+    is not Tom's own chat or has no project to work under, or is one of
+    his DMs that no spec placed on this machine lists: owned only through
+    a spec, its replies reach another Mac's bridge, never this one's."""
     channel = settings.operator_channel
     chat = LOCAL_CHAT if channel == "local" else settings.operator_chat
     p = {"channel": channel, "chat_id": chat, "sender_id": ""}
     if not chat or not _toms_own(p):
+        return None
+    dm = chat == settings.operator_telegram_id or chat in settings.operator_slack_ids
+    if dm and chat not in (ident for ident, _ in _project_chats(channel)):
         return None
     found = await chat_session(conn, channel, chat)
     if found is not None:

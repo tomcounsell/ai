@@ -25,7 +25,8 @@ Slack chat (`slack`, Tom, 2026-10-25): `python -m bridges.slack keys`
 copies this Mac's own app's tokens from the vault (none: `slack: no keys`,
 and nothing is started), a missing `com.valor.kernel.slack` job is written
 from `python -m bridges.slack --plist` with the settings of this Mac's
-Telegram job, and loaded, and a job whose keys changed is reloaded. Each
+Telegram job, and loaded, and a job whose keys changed or that is not
+loaded is enabled and (re)loaded. Each
 Mac has its own app, so this never starts a second bridge on one token.
 """
 
@@ -135,10 +136,14 @@ def slack(
         why = (keys.stderr.strip() or keys.stdout.strip()).splitlines()[-1:] or [f"status {keys.returncode}"]
         failed.append(f"slack: no keys ({why[0]})")
         return
+    target = f"gui/{os.getuid()}/{SLACK}"
     if plist.exists():
-        if ": written" not in keys.stdout:
+        if ": written" in keys.stdout:
+            fixed.append(f"{SLACK}: new keys")
+        elif run(["launchctl", "print", target], capture_output=True).returncode == 0:
             return
-        fixed.append(f"{SLACK}: new keys")
+        else:
+            fixed.append(f"{SLACK}: not loaded")
     else:
         made = run([sys.executable, "-m", "bridges.slack", "--plist"], cwd=ROOT, env=env, capture_output=True)
         if made.returncode != 0:
@@ -146,6 +151,8 @@ def slack(
             return
         plist.write_bytes(made.stdout)
         fixed.append(SLACK)
+    # A disabled job's bootstrap fails (the Pirate's, 2026-10-16 to 10-27).
+    run(["launchctl", "enable", target], capture_output=True)
     if why := reload(SLACK, plist, False):
         failed.append(f"{SLACK}: {why}")
 

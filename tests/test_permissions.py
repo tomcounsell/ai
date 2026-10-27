@@ -114,11 +114,15 @@ def slack_mac(tmp_path, chats='["slack:T0ABC/C0DEV"]'):
     return lambda: bridges.configure(projects_dir=str(projects), machine="m-test", default_machine="m-test"), agents, env
 
 
-def keys_said(stdout: str, code: int = 0):
-    """`python -m bridges.slack keys` answering `stdout`; `--plist` runs for real."""
+def keys_said(stdout: str, code: int = 0, loaded: bool = True):
+    """`python -m bridges.slack keys` answering `stdout`; `--plist` runs for
+    real; `launchctl print` finds the Slack job when `loaded`."""
     calls = []
 
     def run(argv, **kw):
+        if argv[0] == "launchctl":
+            calls.append((argv[1], None))
+            return subprocess.CompletedProcess(argv, 0 if loaded or argv[1] != "print" else 113, "", "")
         calls.append((argv[-1], kw["env"]))
         if argv[-1] == "keys":
             return subprocess.CompletedProcess(argv, code, stdout, "SLACK_USER_TOKEN_M_TEST is missing" if code else "")
@@ -141,18 +145,31 @@ def test_the_update_installs_the_slack_job_with_the_telegram_jobs_settings(tmp_p
     assert {k: job["EnvironmentVariables"][k] for k in env if k in slack_main.PLIST_ENV} == {
         k: v for k, v in env.items() if k in slack_main.PLIST_ENV
     }
-    assert [c for c, _ in calls] == ["keys", "--plist"] and calls[0][1]["VALOR_MACHINE"] == "m-test"
+    assert [c for c, _ in calls] == ["keys", "--plist", "enable"] and calls[0][1]["VALOR_MACHINE"] == "m-test"
     assert (fixed, failed, reloaded) == ([permissions.SLACK], [], [permissions.SLACK])
 
     fixed.clear(), reloaded.clear()
     with config():
         permissions.slack(agents, lambda *a: reloaded.append(a[0]), fixed, failed, run)
     assert (fixed, reloaded) == ([f"{permissions.SLACK}: new keys"], [permissions.SLACK])
-    run, _ = keys_said("T0ABC_SLACK_APP_TOKEN: kept\nT0ABC_SLACK_USER_TOKEN: kept\n")
+    run, calls = keys_said("T0ABC_SLACK_APP_TOKEN: kept\nT0ABC_SLACK_USER_TOKEN: kept\n")
     fixed.clear(), reloaded.clear()
     with config():
         permissions.slack(agents, lambda *a: reloaded.append(a[0]), fixed, failed, run)
-    assert (fixed, failed, reloaded) == ([], [], [])
+    assert (fixed, failed, reloaded) == ([], [], []) and [c for c, _ in calls] == ["keys", "print"]
+
+
+def test_the_update_enables_and_loads_a_slack_job_that_is_written_but_not_loaded(tmp_path):
+    """The Pirate's job was disabled from 2026-10-16, so its bootstrap
+    failed, and every later update saw the plist and did nothing."""
+    config, agents, _ = slack_mac(tmp_path)
+    (agents / f"{permissions.SLACK}.plist").write_bytes(plistlib.dumps({"Label": permissions.SLACK}))
+    run, calls = keys_said("T0ABC_SLACK_APP_TOKEN: kept\nT0ABC_SLACK_USER_TOKEN: kept\n", loaded=False)
+    reloaded, fixed, failed = [], [], []
+    with config():
+        permissions.slack(agents, lambda *a: reloaded.append(a[0]), fixed, failed, run)
+    assert [c for c, _ in calls] == ["keys", "print", "enable"]
+    assert (fixed, failed, reloaded) == ([f"{permissions.SLACK}: not loaded"], [], [permissions.SLACK])
 
 
 def test_the_update_starts_no_slack_job_without_a_slack_chat_or_its_own_keys(tmp_path):
