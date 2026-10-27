@@ -1768,10 +1768,11 @@ def test_toms_dm_as_operator_chat_has_a_session_only_on_the_mac_its_spec_is_plac
     root = pathlib.Path(__file__).parent.parent / "projects"
 
     def mac(name, **more):
-        values = dict(projects_dir=str(root), work_dir=str(tmp_path / "work"), machine=name, default_machine=name,
-                      operator_telegram_id="179144806", operator_slack_ids=(TOM_SLACK,),
-                      operator_channel="slack", operator_chat=TOM_SLACK) | more  # fmt: skip
-        return bridges.configure(**values)
+        return bridges.configure(**{
+            "projects_dir": str(root), "work_dir": str(tmp_path / "work"), "machine": name, "default_machine": name,
+            "operator_telegram_id": "179144806", "operator_slack_ids": (TOM_SLACK,),
+            "operator_channel": "slack", "operator_chat": TOM_SLACK, **more,
+        })  # fmt: skip
 
     async def go():
         task = await new_task(dsn)
