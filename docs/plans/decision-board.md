@@ -4,7 +4,7 @@ type: feature
 appetite: Medium
 owner: Valor
 created: 2026-10-27
-revision: 1 (critique round 1; Tom 03:28)
+revision: 2 (critique rounds 1 and 2; Tom 03:28)
 ---
 
 # Decision board: a canvas per project channel
@@ -32,10 +32,13 @@ Not checked live: that the Yudame plan allows `conversations.canvases.create`.
 
 ## What is built
 
-**First, live, before the rest:** add `reactions:read` and `reaction_added` to
-the manifest, update and reinstall the Cowboy's app from Valor's account, and
-show a real 👍 from Tom on a post of Valor's in `#valor-dev` reaching the
-bridge (its log line and the recorded row). That result leads the delivery.
+**First, live, before the rest:** add `reactions:read`, `canvases:write` and
+`reaction_added` to the manifest, update and reinstall the Cowboy's app from
+Valor's account, then (a) a real 👍 from Tom on a post of Valor's in
+`#valor-dev` reaches the bridge (log line, recorded row), and (b)
+`conversations.canvases.create` makes a canvas in `#valor-dev` (a private
+channel). Both results lead the delivery; if (b) fails, the build stops there
+and the delivery says what the plan allows.
 
 1. **`board` in each spec**: `board = "slack:<team>/<channel>"`, its dev
    channel, in the ten specs that list one (satsol waits on a Mac). The board
@@ -50,13 +53,15 @@ bridge (its log line and the recorded row). That result leads the delivery.
    `about_key` `board:<row id>`, payload `digest`, text the snapshot plus the
    last canvas link. `tasks.reporting` skips rows with no `child_id`;
    `session.py` renders it as "The decision board changed:" and the snapshot.
-3. **One post per question in the board chat.** `notices.owe` writes no
-   `question` report to a session that is its project's board session; the
-   board wake carries the question there instead. The session posts one
-   top-level message per open question with no post yet, with
+3. **One post per question, one place.** A question whose report goes to the
+   board session (a task started in the board channel) gets no `question`
+   report there; the board wake carries it, and the session posts one
+   top-level message for it: the question and Valor's recommendation, with
    `slack.send_message` payload `about: "question:<id>"` (stored, ignored by
-   the bridge), so the snapshot knows the post. Other parent sessions (Tom's
-   DM) relay as now.
+   the bridge), so the snapshot knows the post. A question relayed elsewhere
+   (Tom's DM, the operator session) gets no board post: its relay there is its
+   one message and reaction target; the canvas lists it, marked "asked in your
+   DM".
 4. **The canvas, `slack.write_canvas`** (`act`, target `<team>/<channel>`,
    payload `{"markdown"}`): `conversations.info`; no canvas, then
    `conversations.canvases.create`; else `canvases.edit` replacing the whole.
@@ -67,7 +72,9 @@ bridge (its log line and the recorded row). That result leads the delivery.
    `:<name>:`, `reaction` the name. It binds by the table (a team chat: steer).
    `reactions.on_bound` owes none for a record with `reaction`; `chat_line`
    renders it "Tom reacted :+1: to your post <ts> (about question <id> of task
-   <t>)", the post being the anchor. Its thread is the post's, a real one.
+   <t>)", the post being the anchor. Its thread is the post's, a real one. It
+   wakes the session wherever it lands (DM, team chat, a delivery); a reaction
+   on a post that is no open question gets no reply and no effect.
 6. **`task.answer` from the board session.** It also takes a task of the
    session's project with an open question, only when the session is that
    project's board session; payload gains `via` (default `chat`), e.g.
@@ -75,11 +82,15 @@ bridge (its log line and the recorded row). That result leads the delivery.
 7. **`skills/sdlc/converse.md`, a board section.** Rebuild the canvas on each
    `board` report: Open, most blocking first, related items grouped, each with
    what is decided, why now, context, recommendation, options; Decided; the
-   legend: 👍 (`+1`, palette `thumbs_up`) accepts the recommendation, 👎 (`-1`)
-   rejects it and keeps it open for chat or a call, a chat reply answers.
-   Everyone in the channel reads the canvas: on a channel with anyone but Tom
-   and Valor, a decision about the client relationship (pricing, terms, its
-   people) shows as one line pointing to Tom's DM. A decision only Tom holds
+   legend: 👍 (`+1`, palette `thumbs_up`) on a question's post answers with
+   that post's recommendation, quoted ("Accepted: <recommendation as
+   posted>", `via` `slack reaction :+1:`), never the canvas's later wording;
+   👎 (`-1`) rejects it and keeps it open for chat or a call; a chat reply
+   answers. Everyone in the channel reads the canvas and the posts: on a
+   channel with anyone but Tom and Valor, a client-relationship question or
+   answer (pricing, terms, its people), on the canvas, in a post or under
+   Decided, is one line pointing to Tom's DM, and so is anything asked or
+   answered in his DM. A decision only Tom holds
    with no task waiting becomes a task whose question it is.
 8. **Rollout and docs.** Scope `canvases:write` too; the other three apps
    updated and reinstalled, noted in `docs/rollout.md` beside the
@@ -94,8 +105,9 @@ snapshot as the agenda; answers go back by `task.answer`, `via` `meet call`.
 Nothing of the call part is built here.
 
 **Out of scope.** Canvas edits (dropped, above); #728's wiki; the memory
-Postgres; Telegram reactions; reactions made while the bridge is down (gap
-fill reads no reaction events; named in the doc's Gaps).
+Postgres; Telegram reactions. In the doc's Gaps: reactions made while the
+bridge is down (gap fill reads no reaction events), and `reaction_removed`
+(Tom undoing a 👍 after it was passed on is not seen; he says so in chat).
 
 **Governance.** None added. Item 6 widens a refusal for one session; item 3
 moves where a notice goes; nothing new refuses.
@@ -109,11 +121,15 @@ moves where a notice goes; nothing new refuses.
 - A board row renders as the board line, not "Your task None"; `reporting`
   holds no None.
 - A dev-channel task's question: no `question` report on the board session,
-  the board row lists it; a DM-started task's still reports to the DM session.
+  the board row lists it with no post; a DM-started task's still reports to
+  the DM session, and the board row lists it marked as asked in the DM.
   A send with `about` puts its ts on that question in the next snapshot.
 - `task.answer`: the board session answers a same-project task not reporting,
   `via` recorded; another chat session of the same project is refused; another
   project's task, or one with no open question, is refused.
+- Skill examples in `converse.md`: a 👍 answer quoting the post's
+  recommendation; a DM-asked pricing question shown as a pointer line on a
+  channel with a client member.
 - Reactions: Tom's on Valor's post records once (a redelivery lands once),
   steers the session, owes no `reaction.requested`, and `threads` lists only
   the post's ts; anyone else's, on another's post, in an unowned chat: none.
