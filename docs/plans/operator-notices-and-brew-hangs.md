@@ -9,36 +9,34 @@ Task 2bb12eb511b2. Two faults found installing Brew Status (8b86d911c550).
 Tom's Slack DM, in its kernel, Slack and Telegram plists). The other three
 resolve to `telegram`/`None`, so every rollout notice there is
 `notice.undeliverable`. The Bald's of 2026-10-26 03:02 is one, and the Pirate
-and the Captain each have one too. It is per-machine config, but copying
-it as-is is unsafe: `intake.owned()` adds the operator chat to what a
-bridge receives, so the Bald's Slack bridge would also take Tom's DM. That
-DM is placed on the Cowboy by `projects/valor.toml`, and the intake
-docstring says Tom's DMs are owned "only through a spec". Separately, the
-**Pirate has no Slack bridge running**. Its `com.valor.kernel.slack` has
+and the Captain each have one too. Nothing in `docs/rollout.md` names the
+two variables, which is how three Macs were set up without them. The
+notice is written by the kernel (`serve._rollout_text`) with the channel and
+chat in the row, and a bridge sends any due notice on its channel with no
+ownership check (`core/bridge.py` `due`), so only the kernel job needs
+them. The bridges' jobs are left alone, and `intake.owned` never puts
+Tom's DM on a second Mac. Separately, the
+**Pirate has no Slack bridge running**, so it could not send a Slack notice.
+Its `com.valor.kernel.slack` has
 been launchd-disabled since 2026-10-16. `permissions._reload` bootstraps
 without `launchctl enable` ("Bootstrap failed: 5", kernel.log), and
 `_slack` returns early once the plist exists, so no later update retries.
 
 **Code (with tests):**
-- `intake.owned`: the operator chat is added only when it is not one of
-  Tom's DMs (`operator_telegram_id`, `operator_slack_ids`). Those stay
-  owned only through a spec, as documented.
 - `intake.operator_session`: None when this machine does not own the
-  operator chat. A non-owning Mac's root-task notices then go straight
-  to the chat as kernel text, instead of opening a second Valor session
-  in Tom's DM that never hears his replies.
+  operator chat (`owns`). Otherwise a non-owning Mac's root-task notices
+  open a Valor session in Tom's DM whose replies no bridge there receives;
+  with None they go to the chat directly as kernel text.
 - `permissions._reload`: `launchctl enable` before bootstrap (rollout.md
   step 9 already does this by hand). `_slack`: a plist that exists but
   whose job is not loaded is loaded.
+- `docs/rollout.md` step 9: the kernel job carries
+  `VALOR_OPERATOR_CHANNEL=slack` and `VALOR_OPERATOR_CHAT=<Tom's Slack DM>`
+  on every Mac (`serve.PLIST_ENV` keeps them across rewrites).
 
 **Per machine (build, over ssh):** on the Pirate, the Captain and the
-Bald, add the Cowboy's two operator variables to the kernel, Slack and
-Telegram plists. Then reload the kernel and the bridges, and enable and
-load the Pirate's Slack job. Order: the kernel plists get the variables first. The bridges get
-them only once the merged `owned()` is on that Mac, so no bridge takes
-Tom's DM in between. The only interim exposure is a non-owning kernel
-opening an operator session (fixed by the merge); the update routine
-brings the merge to all three.
+Bald, add the two variables to `com.valor.kernel.plist` only, and reload
+the kernel; enable and load the Pirate's Slack job.
 
 ## 2. Nightly Homebrew runs (`com.valor.brew-nightly`)
 
@@ -53,7 +51,14 @@ most likely an App Management prompt (unconfirmed).
 
 **Fix.** On the Captain and the Bald: stop the hung run, then install the vault
 script and vault plist (with Valor.app's `valor-run`), bootout and bootstrap,
-and kickstart one run. It must end in minutes. The setup step keeps them
+and kickstart one run. It must end in minutes. Valor.app's Desktop
+access is confirmed: on both Macs the kernel, run through the same
+launcher, copied the Slack keys from `~/Desktop/Valor/.env` at its last
+update (`slack-keys` of 2026-10-27, `setup: fixed com.valor.kernel.slack`).
+App Management is not confirmed. If the kickstarted run has not ended
+after 15 minutes, the build samples it and its children to find the
+prompt; a grant only a person at that Mac can click goes to Tom as a
+blocker, named, and that Mac stays open in the delivery. The setup step keeps them
 current from then on. `SETUP.md` in the vault names Valor.app instead of the
 retired BrewNightly.app, and says an old copy needs this one-time install.
 **No per-step timeout:** it would turn a missing grant into a silent skip.
@@ -76,18 +81,15 @@ The Captain's 1Password and iTerm quit timeouts (30 s each, no hang).
 Why `com.valor.kernel.slack` was disabled on Oct 16.
 
 ## Tests
-- `test_kernel.py`: with `operator_channel="slack"` and
-  `operator_chat=TOM_SLACK` on the Pirate, the DM is not in `owned("slack")`.
-  It is on the Cowboy (spec). The same holds for Telegram with
-  `operator_telegram_id`. A Telegram group operator chat is still owned.
-- `operator_session` is None on a Mac that does not own the operator chat,
+- `test_kernel.py`: `operator_session` is None on a Mac that does not own the operator chat,
   and opens a session on the owner. A rollout notice there is requested
   to the operator chat with no `notice.undeliverable`.
 - `test_permissions.py`: `_reload` runs `launchctl enable` before
   bootstrap. `_slack` loads an existing plist whose job is not loaded, and
   leaves a loaded one alone.
 - Live: on each of the three Macs, `core settings` in the kernel's env
-  shows the operator chat. The Slack log shows "connected". One notice
+  shows the operator chat, and `owned("slack")` there still lacks Tom's
+  DM. The Pirate's Slack log shows "connected". One notice
   goes to Valor's own Slack DM through each Mac's bridge (same send path,
   without messaging Tom). `notice.sent` is recorded.
 - Live: the kickstarted brew runs on the Captain and the Bald end in
