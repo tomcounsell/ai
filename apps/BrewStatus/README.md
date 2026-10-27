@@ -23,6 +23,13 @@ else ad hoc), installs `~/Applications/BrewStatus.app`, links
 launch the app adds itself to Login Items (`SMAppService.mainApp`); turn it
 off in System Settings > General > Login Items and it stays off.
 
+A Mac without Xcode 26 (the Pirate and the Bald have only Swift 6.0
+Command Line Tools) gets the build of one that has it, over ssh: zip the
+bundle with `ditto -c -k --keepParent`, unpack it into `~/Applications`
+with `ditto -x -k`, link `~/.local/bin/brew-status` to
+`BrewStatus.app/Contents/MacOS/brew-status`, and `open` the app. The
+first launch adds the login item there too.
+
 ## Status rule
 
 - **Red**: the newest run never finished, no run finished in the last 26
