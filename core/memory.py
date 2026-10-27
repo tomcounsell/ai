@@ -21,6 +21,8 @@ and a rebuild is every Mac ingesting its own again.
 - `recall(conn, task_id, fresh)` returns the Remembered section, the empty
   string, `Memory: unavailable: <reason>`, or, when the store cannot be
   reached, `Memory: recall skipped: ...`, without waiting for it.
+- `search(conn, spec, query, limit, offset)` is a turn's search of the
+  same memory recall reads (`valor-record memory`, `core/record.py`).
 - `mark(conn, record, by=..., via=...)` records Valor's judgement that a
   record is a standard of working, recalled for any client's task.
 - `import_old(conn, lines)` appends one `memory.imported` row per line of
@@ -161,6 +163,36 @@ async def recall(conn, task_id: str, fresh: str | None) -> str:
         )
     except Exception as exc:  # noqa: BLE001  rendered in the Brief; the turn runs
         return f"Memory: unavailable: {_reason(exc)}"
+
+
+class Unavailable(Exception):
+    """Memory is off, or its store cannot be reached."""
+
+
+async def search(conn, spec, query: str, limit: int, offset: int) -> dict[str, Any]:
+    """A page of the records recall would choose from for a task of
+    `spec`'s project and client, everything ingested so far, best match to
+    `query` first (`memory.recall.search`). Reads only."""
+    if not on():
+        raise Unavailable("memory is off on this Mac")
+    mdsn = dsn_for(conn)
+    why = await asyncio.to_thread(unreachable, mdsn)
+    if why:
+        raise Unavailable(f"the memory store could not be reached ({why})")
+    from memory import recall as m
+
+    name = ledger_name(conn)
+    return await asyncio.to_thread(
+        lambda: m.search(
+            mdsn,
+            ledger=name,
+            project=spec.repo,
+            client=spec.client or "",
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
+    )
 
 
 async def mark(conn, record: str, *, by: str = "valor", via: str = "the command line") -> int:

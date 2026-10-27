@@ -17,6 +17,10 @@ A project's reach is the chats its spec lists now (`chats`):
   operator chat, where every project reports) shows that task's id; the
   task itself is outside.
 
+Its memory (`memory`) is what recall reads for its tasks (core/memory.py,
+`search`): the project's records, and standards of working from any
+client.
+
 Everything here is a SELECT.
 """
 
@@ -26,6 +30,8 @@ from typing import Any
 from core import db, ledger, machine, reactions, workspace
 
 LIMIT, MOST = 50, 200
+# A memory search's page: popoto's context assembler's ten, at most fifty.
+MEMORY_LIMIT, MEMORY_MOST = 10, 50
 
 
 class NotFound(Exception):
@@ -71,12 +77,12 @@ async def reach(conn, spec: workspace.Spec) -> dict[str, dict[str, Any]]:
     return {t: b for t, b in bodies.items() if inside(t)}
 
 
-def _limit(query: dict[str, str]) -> int:
+def _limit(query: dict[str, str], default: int = LIMIT, most: int = MOST) -> int:
     try:
-        n = int(query.get("limit") or LIMIT)
+        n = int(query.get("limit") or default)
     except ValueError:
         raise NotFound(f"limit {query['limit']!r} is not a number") from None
-    return max(1, min(n, MOST))
+    return max(1, min(n, most))
 
 
 async def chats(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query) -> list[dict[str, Any]]:
@@ -189,7 +195,27 @@ async def task(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], que
     return found
 
 
-VERBS = {"chats": chats, "messages": messages, "tasks": task_list, "task": task}
+async def memory_search(
+    conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query
+) -> dict[str, Any]:
+    """A page of the project's memory matching `q`, best first, from rank
+    `offset`, and the offset of the next page."""
+    from core import memory
+
+    if not (query.get("q") or "").strip():
+        raise NotFound("search memory for some words")
+    offset = query.get("offset") or "0"
+    if not offset.isdigit():
+        raise NotFound(f"offset {offset!r} is not a number")
+    try:
+        return await memory.search(
+            conn, spec, query["q"], _limit(query, MEMORY_LIMIT, MEMORY_MOST), int(offset)
+        )
+    except memory.Unavailable as exc:
+        raise NotFound(str(exc)) from None
+
+
+VERBS = {"chats": chats, "messages": messages, "tasks": task_list, "task": task, "memory": memory_search}
 
 
 async def answer(dsn: str, task_id: str, verb: str, query: dict[str, str]) -> Any:

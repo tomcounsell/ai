@@ -57,7 +57,7 @@ workspace's Postgres is its own, with password auth.
 **Readers.** The kernel's own folds (state, spending, attention, memory's ingest), the status
 page, and turns: a turn reads its own project's record (every chat the project's spec lists, both
 ways; Tom, 2026-10-24) through the gateway, which answers `valor-record` on the turn's token from
-`core/record.py`, so the turn never holds a ledger credential ([harnesses.md](harnesses.md),
+`core/record.py` (and searches the project's memory the same way, `valor-record memory`), so the turn never holds a ledger credential ([harnesses.md](harnesses.md),
 Reading the project's record).
 
 ## The task and its Brief

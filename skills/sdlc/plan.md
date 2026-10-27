@@ -12,7 +12,9 @@ harder it is to undo, the more loops. A small reversible change in
 well-tested code is a 0; a change to stored data, money, authentication,
 migrations, or the kernel itself gets 2 critique rounds and 1 review round.
 Your prompt holds the request, the answer to your question, or a
-critique's findings on your last plan.
+critique's findings on your last plan. Before choosing an approach, search
+memory for earlier work on the same thing (`valor-record memory
+"<words>"`): what was tried, decided, or corrected there.
 
 **Ask before the first plan.** When the work has user-facing behaviour or
 open product choices (what its users see or hear, who does what, what

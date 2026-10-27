@@ -12,8 +12,12 @@ estimated tokens), and rendered in ledger order: the task's own ledger's
 first, then other ledgers' by time. Every record is data: its body is
 quoted line by line and escaped, so no record line can open a heading,
 close the section, or reach column 0.
+
+A turn's search (`search`, `valor-record memory`) takes the same
+candidates, without the start of the task as a bound, and the same ranking.
 """
 
+from datetime import UTC, datetime
 from typing import Any
 
 from popoto.fields._tokenizer import tokenize
@@ -34,16 +38,18 @@ HEADER = (
 
 
 def candidates(
-    *, ledger: str, project: str, client: str, cutoff: int, started_at: float
+    *, ledger: str, project: str, client: str, cutoff: int | None = None, started_at: float = 0.0
 ) -> dict[str, Record]:
     """Every record recall may choose from, by popoto key, for a task of
     `client` and `project` whose `task.started` is row `cutoff` of `ledger`,
-    written at `started_at` (epoch seconds)."""
-    found = {
-        r.db_key.redis_key: r
-        for r in Record.query.filter(project=project, ledger_id__lt=cutoff)
-        if r.ledger == ledger and r.origin != "correction"
-    }
+    written at `started_at` (epoch seconds); with no `cutoff`, every record
+    ingested so far, as `search` reads them."""
+    own = (
+        Record.query.filter(project=project)
+        if cutoff is None
+        else Record.query.filter(project=project, ledger_id__lt=cutoff)
+    )
+    found = {r.db_key.redis_key: r for r in own if r.ledger == ledger and r.origin != "correction"}
     confined = {c.record for c in Confined.query.all()}
     for name in sorted({s.record for s in Standard.query.all()}):
         at_ledger, key = split(name)
@@ -52,7 +58,9 @@ def candidates(
                 continue
             if name in confined and (r.client or "") != client:
                 continue
-            if r.ledger == ledger:
+            if cutoff is None:
+                before = True
+            elif r.ledger == ledger:
                 before = int(r.ledger_id) < cutoff
             else:
                 before = float((r.meta or {}).get("ledger_at") or 0) < started_at
@@ -68,15 +76,8 @@ def render(
     `query`; the empty string when nothing is found."""
     backend = use(dsn)
     found = candidates(ledger=ledger, project=project, client=client, cutoff=cutoff, started_at=started_at)
-    tokens = tokenize(query)
-    if not found or not tokens:
-        return ""
-    scored = backend.keyword_search(
-        Record._meta.spec, "words", tokens, limit=LIMIT, allowed=list(found), stats="corpus"
-    )
     chosen, total = [], 0
-    for rid, _score in scored:
-        record = found[rid.canonical]
+    for record in ranked(backend, found, query, LIMIT):
         text = entry(record)
         cost = _estimate_tokens(text)
         if chosen and total + cost > MAX_TOKENS:
@@ -95,6 +96,49 @@ def render(
 
     chosen.sort(key=order)
     return HEADER + "\n\n" + "\n".join(text for _, text in chosen)
+
+
+def ranked(backend, found: dict[str, Record], query: str, limit: int) -> list[Record]:
+    """The first `limit` of `found` by BM25 over `query`, best first."""
+    tokens = tokenize(query)
+    if not found or not tokens:
+        return []
+    scored = backend.keyword_search(
+        Record._meta.spec, "words", tokens, limit=limit, allowed=list(found), stats="corpus"
+    )
+    return [found[rid.canonical] for rid, _score in scored]
+
+
+def search(dsn: str, *, ledger: str, project: str, client: str, query: str, limit: int, offset: int) -> dict:
+    """A turn's memory search: recall's candidates, everything ingested so
+    far, ranked as recall ranks them, from rank `offset` on. A page holds
+    `limit` records at most and stops before the one that would pass
+    recall's token budget (it always holds one); `next` is the offset of the
+    page after it, None when there is none."""
+    backend = use(dsn)
+    found = candidates(ledger=ledger, project=project, client=client)
+    hits = ranked(backend, found, query, offset + limit + 1)[offset:]
+    page, total = [], 0
+    for record in hits[:limit]:
+        text = entry(record)
+        cost = _estimate_tokens(text)
+        if page and total + cost > MAX_TOKENS:
+            break
+        total += cost
+        at = float((record.meta or {}).get("ledger_at") or 0)
+        page.append(
+            {
+                "record": ref(record.ledger, record.key),
+                "origin": record.origin,
+                "project": record.project,
+                "at": datetime.fromtimestamp(at, UTC).isoformat(),
+                "label": label(record.origin, record.meta or {}, ref(record.ledger, record.key)),
+                "text": record.text or "",
+                "entry": text,
+            }
+        )
+    more = len(hits) > len(page)
+    return {"records": page, "next": offset + len(page) if more else None}
 
 
 def _index(key: str) -> int:

@@ -3,12 +3,15 @@
 valor-record messages [CHAT] [--search TEXT] [--limit N] [--before RECORD] [--json]
 valor-record tasks [--search TEXT] [--limit N] [--json]
 valor-record task ID [--json]
+valor-record memory WORDS [--limit N] [--offset N] [--json]
 
 Reads the ledger of this turn's own project: its chats, the messages each
 received and what they were bound to, its tasks and what became of them.
 The kernel answers (`core/record.py`) at `$VALOR_RECORD_URL`, which carries
 the turn's own gateway token, so the project is the kernel's to say. CHAT
-is `<channel>:<id>` as `chats` prints it. Messages print oldest first.
+is `<channel>:<id>` as `chats` prints it. Messages print oldest first. `memory` searches what Valor remembers for
+this project (the records recall reads, and standards of working), best
+match first, each record quoted as data.
 Standard library only, and Python 3.9 (macOS's own `python3`), so it runs
 in any workspace.
 """
@@ -69,6 +72,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--limit", "-n", type=int, default=50, help="how many (at most 200)")
     one = sub.add_parser("task", help="one task's ledger rows")
     one.add_argument("id")
+    mem = sub.add_parser("memory", help="search this project's memory, best match first")
+    mem.add_argument("words", nargs="+", help="what to search for")
+    mem.add_argument("--limit", "-n", type=int, default=10, help="how many (at most 50)")
+    mem.add_argument("--offset", type=int, help="skip this many matches, for the next page")
     for p in sub.choices.values():
         p.add_argument("--json", action="store_true", help="print the kernel's JSON")
     args = parser.parse_args(argv)
@@ -79,7 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     query = {
         "chat": getattr(args, "chat", None),
-        "q": getattr(args, "search", None),
+        "q": " ".join(args.words) if args.verb == "memory" else getattr(args, "search", None),
+        "offset": getattr(args, "offset", None),
         "limit": getattr(args, "limit", None),
         "before": (getattr(args, "before", None) or "").lstrip("#") or None,
         "id": getattr(args, "id", None),
@@ -100,6 +108,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.json:
         print(json.dumps(out, indent=2, ensure_ascii=False))
+    elif args.verb == "memory":
+        for r in out["records"]:
+            print(r["entry"])
+        if not out["records"]:
+            print("nothing found")
+        elif out["next"] is not None:
+            print(f"(more: --offset {out['next']})")
     elif not out:
         print("nothing found")
     elif args.verb == "chats":

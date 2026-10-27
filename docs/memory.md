@@ -53,6 +53,26 @@ Mac's own kernel database, as memory's role.
   recall, does not wait, and its Brief records `Memory: recall skipped:
   the store could not be reached (<reason>)`; the ingest after the turn is
   skipped too, and its rows are taken by the next ingest that reaches it.
+- **Search.** Tom, 2026-10-27: "memory search is critical. it should be
+  a readily avialable skill just like chat history search". Any turn, a
+  chat session or a task in any stage, runs `valor-record memory "<words>"
+  [--limit N] [--offset N] [--json]`. The kernel answers it on the turn's
+  gateway token, as it answers the rest of `valor-record` ([harnesses.md](harnesses.md),
+  Reading the project's record): `core/record.py`'s `memory` verb takes the
+  project and client from the asking task's spec and calls
+  `core/memory.py` `search`, which runs recall's own candidates and BM25
+  ranking (`memory/recall.py`). The scope is recall's: the project's
+  records on this Mac's ledger, plus standards of working from any client
+  and ledger, a confined record only for its own client, never a
+  correction. Unlike recall it has no start-of-task bound, so a long chat
+  session finds what was ingested after it opened. A page is ten records
+  (at most fifty) and stops before the one that would pass recall's 4000
+  estimated tokens, saying the offset of the next; each record prints as
+  its Remembered entry, quoted as data. It reads only: no ingest, no
+  write. Memory off, or a store that cannot be reached, answers with the
+  reason. A chat message's own words are not a record (a turn's prompt is
+  left out of its transcript entries); `valor-record messages --search`
+  finds them.
 - **The old system's memory.** `scripts/memory_import_prep.py EXPORT...
   OUT/` chooses the old records Tom kept (human and agent, not superseded,
   no session summaries), maps each to its project, drops by `claude -p`

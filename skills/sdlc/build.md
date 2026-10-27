@@ -2,7 +2,9 @@
 
 **Goal.** A candidate that does what the plan says, with the tests the plan
 named, committed in the workspace. Your prompt holds the critique's
-verdict and any findings it left for the build.
+verdict and any findings it left for the build. When the code holds a
+choice you cannot explain, search memory for why (`valor-record memory
+"<words>"`) before changing it.
 
 **Exit evidence.** Every change committed (nothing left uncommitted or
 untracked), then `.valor/done.md`. It opens with a note to Tom, then a

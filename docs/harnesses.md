@@ -584,8 +584,9 @@ Tom (2026-10-24): "Share read only both ways for any chat channels in the
 same project. Because privacy is scoped by access to comms."
 
 The workspace has `valor-record` (`tools/valor_record.py`): `chats`,
-`messages [CHAT] [--search] [--limit] [--before]`, `tasks [--search]`, and
-`task ID`. The kernel answers it: each harness sets `VALOR_RECORD_URL`, the
+`messages [CHAT] [--search] [--limit] [--before]`, `tasks [--search]`,
+`task ID`, and `memory WORDS [--limit] [--offset]`, which searches the
+project's memory as recall reads it ([memory.md](memory.md), Search). The kernel answers it: each harness sets `VALOR_RECORD_URL`, the
 turn's gateway base URL with `/record`, and the gateway's `record/` route
 (before the catch-all that forwards upstream) resolves the turn's token to
 its task, the task to its project, and reads `core/record.py`'s SELECTs on a
