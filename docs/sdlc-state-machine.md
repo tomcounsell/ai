@@ -270,7 +270,10 @@ works, including the cases beyond the obvious one.
 
 **Exit evidence.** The plan as a file in the workspace, committed, and `plan.written`: its commit,
 its digest, the stakes sentence, both counts, and the scope additions. A revision writes a new
-`plan.written`. A material question found while planning is `asked`.
+`plan.written`. A material question found while planning is `asked`: when the work has user-facing
+behaviour or open product choices, the first plan turn asks its questions as one numbered batch with
+defaults before writing a plan, and a revision that would change a product or UX choice asks rather
+than decides (`skills/sdlc/plan.md`).
 
 **Why.** Mission items 1 and 3. Its size follows the work: on the baseline's small items a few lines
 carried what the old plan documents did.

@@ -419,7 +419,8 @@ with a send to the chat, threaded; stays quiet by sending nothing; and
 starts, answers and stops tasks (`task.start`, `task.answer`,
 `task.stop`, `tools/chat_tasks.py`). A task it started reports its
 questions, deliveries and ends to the session (`child.reported`), never
-to a chat, and the session tells the chat; a project's board session
+to a chat; the session answers what it can of a question, raises only the
+rest in the chat, and passes one `task.answer`; a project's board session
 (`board` in its spec) gets its tasks' questions in its board row instead
 ([slack.md](slack.md)). Its workspace is the project's
 checkout with no setup and no services, brought up to the project's
