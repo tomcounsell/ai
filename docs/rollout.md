@@ -198,7 +198,12 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    pulls, or clones, `~/src/brew-status` and runs its `build.sh`; the
    Pirate and the Bald download the latest release's `BrewStatus.zip`
    (`gh release download`), so a change reaches them only once it is
-   released. The update also links `~/.config/brew-status/local.sh` to
+   released.
+   Brew Status's code moved into Yudame Tools on 2026-10-28 (its
+   Homebrew Updates tool, github.com/yudame/yudame-tools); the archived
+   `yudame/brew-status` still serves this step until the switch to Yudame
+   Tools, which is open in yudame/yudame-tools#2 (Tom: packaging and
+   deployment are part of a later Yudame Tools build). The update also links `~/.config/brew-status/local.sh` to
    `scripts/brew-status-local.sh` (`permissions.brew_status_local`: the
    vault's Brewfile floor and frozen list, the Python restart, the yudame
    plugins). Its 04:00 job is set up once per Mac:

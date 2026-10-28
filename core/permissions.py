@@ -29,7 +29,9 @@ Telegram job, and loaded, and a job whose keys changed or that is not
 loaded is enabled and (re)loaded. Each
 Mac has its own app, so this never starts a second bridge on one token.
 
-And it keeps Brew Status (`yudame/brew-status`, the menu bar app that runs
+And it keeps Brew Status (`yudame/brew-status`, archived: its code is now
+Yudame Tools' Homebrew Updates, the switch open in yudame/yudame-tools#2;
+the menu bar app that runs
 the nightly Homebrew update) installed and current (Tom, 2026-10-28): a
 Mac whose Swift builds it (6.2, Xcode 26) pulls `~/src/brew-status`,
 cloning it when missing, and runs its `build.sh` when the app's

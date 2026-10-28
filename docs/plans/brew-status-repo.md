@@ -1,5 +1,13 @@
 # Brew Status: a Yudame team app in yudame/brew-status
 
+**Superseded 2026-10-28 (Tom, Telegram 11758, 11760):** Brew Status is one
+tool of Yudame Tools, not its own app. Its code, docs and history are in
+github.com/yudame/yudame-tools (`main` b371b09, the Homebrew Updates tool,
+tools switched on or off in Settings); yudame/brew-status is archived with
+a pointer. Packaging, the release, and switching teammates and Valor's
+four Macs (which keep running BrewStatus.app until then) are open in
+yudame/yudame-tools#2.
+
 Tom, Telegram 11748/11750/11751 (2026-10-28), answers to six questions the
 same day (all defaults). For Tom, Charlie and Thabi as much as for Valor: a
 nice install, a first launch that sets up the nightly update itself, plain
