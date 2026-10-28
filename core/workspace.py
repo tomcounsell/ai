@@ -101,6 +101,12 @@ class Spec:
     (`intake.room`). `board` names the one of its Slack channels whose
     canvas is the project's decision board (`core/board.py`).
 
+    `projects` names the other projects whose repositories its chats work
+    in too: a chat session's `task.start` may start a task under any of
+    them, the session's Brief lists them (`Repos:`), and the board covers
+    their tasks (Tom, 2026-10-28). A listed project runs on the Mac
+    holding the chat, so it is placed on the same machine.
+
     `knowledge_base` names the business's folder in `~/work-vault`, which a
     working task's turns read and write.
 
@@ -125,6 +131,7 @@ class Spec:
     mentions: tuple[str, ...] = ()
     rooms: dict[str, str] = field(default_factory=dict)
     board: str | None = None
+    projects: tuple[str, ...] = ()
     machine: str | None = None
     knowledge_base: str | None = None
     client: str | None = None
@@ -190,6 +197,10 @@ class Spec:
             board = f"{channel}:{row.normal(ident)}" if channel == "slack" and ident else None
             if board not in normal:
                 raise Refused(f"board names {raw['board']!r}, which is not one of the spec's Slack chats")
+        projects = tuple(raw.get("projects") or ())
+        for name in projects:
+            if not isinstance(name, str) or name in ("", ".", "..") or any(c in name for c in '/"\\\n'):
+                raise Refused(f"projects names {name!r}, which is not a project name")
         machine = raw.get("machine")
         if machine is not None and (not isinstance(machine, str) or not machine):
             raise Refused("machine names a machine")
@@ -220,6 +231,7 @@ class Spec:
             mentions=tuple(mentions),
             rooms=rooms,
             board=board,
+            projects=projects,
             machine=machine,
             knowledge_base=kb,
             client=client,

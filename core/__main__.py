@@ -247,7 +247,7 @@ def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
 def _reading_env(b: tasks.Brief) -> dict[str, str]:
     """What `valor-telegram read`, `valor-slack read` and a spoken reply
     need: the bridges' read ports, `VALOR_CHAT` (the session's own chat,
-    else the project's first), and the voice the present skill's `tts.py`
+    else the chat whose session started the task, else the project's first), and the voice the present skill's `tts.py`
     speaks in, `KOKORO_MODELS_DIR` and `VALOR_TTS_VOICE`."""
     env = {"VALOR_TELEGRAM_READ_PORT": str(settings.telegram_read_port),
            "VALOR_SLACK_READ_PORT": str(settings.slack_read_port),
@@ -255,6 +255,8 @@ def _reading_env(b: tasks.Brief) -> dict[str, str]:
            "VALOR_TTS_VOICE": settings.tts_voice}  # fmt: skip
     if b.chat:
         return {**env, "VALOR_CHAT": f"{b.chat['channel']}:{b.chat['chat_id']}"}
+    if (b.project or {}).get("chat"):
+        return {**env, "VALOR_CHAT": b.project["chat"]}
     try:
         chats = workspace.Spec.load(b.project["name"]).chats if b.project else ()
     except workspace.Refused:

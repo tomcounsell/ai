@@ -3,7 +3,9 @@
 
 A chat session (`core/intake.py`) does no work itself. It starts a task
 for the work, as a child of itself, with the request as written and who
-asked; answers a task's open question with what the chat said; steers a
+asked, under its own project or one its spec lists in `projects` (the
+repository the request is about), carrying the session's chat so the
+child reads it (`project.chat`); answers a task's open question with what the chat said; steers a
 task with what the chat added; and stops a task. A steer of a task waiting
 on its question answers it, since a waiting task reads nothing else. A steer of a task that has
 delivered (`merged` or `ended`) is feedback (`session.feedback`), as a
@@ -28,7 +30,7 @@ by the question it answered, a steer by its key on the `message.steered`,
 `feedback.given` or `question.answered` row, a stop by the task's stop.
 """
 
-from core import board, db, ledger, machine, session, tasks
+from core import board, db, ledger, machine, session, tasks, workspace
 from core.machine import State
 from core.settings import resolve_seat
 
@@ -39,6 +41,7 @@ class _ChatTask:
     def __init__(self, brief: tasks.Brief, dsn: str | None = None):
         self.session = brief.id
         self.project = brief.project
+        self.chat = f"{brief.chat['channel']}:{brief.chat['chat_id']}" if brief.chat else None
         self.dsn = dsn
 
     async def _child(self, conn, task_id: str) -> tasks.Brief:
@@ -52,9 +55,9 @@ class _ChatTask:
 
     async def refuse(self, conn, action) -> str | None:
         if self.action_type == "task.start":
-            return (
-                None if str(action.payload.get("instruction") or "").strip() else "the request has no words"
-            )
+            if not str(action.payload.get("instruction") or "").strip():
+                return "the request has no words"
+            return self._project_refused(action.payload.get("project"))
         try:
             await self._child(conn, action.target)
         except ValueError as exc:
@@ -66,9 +69,30 @@ class TaskStart(_ChatTask):
     action_type = "task.start"
     usage = (
         '`task.start`: target "work", payload `{"instruction": "<the request as written, with what the chat '
-        'said it needs>", "by": "<who asked>"}`; starts a task on this project that does the work and '
-        "reports to you. Your next prompt names it."
+        'said it needs>", "by": "<who asked>", "project": null}`; starts a task that does the work and '
+        "reports to you, under this project, or under one of the projects your Repos line names when "
+        '`"project"` names it. Your next prompt names it.'
     )
+
+    def _own(self) -> str | None:
+        return (self.project or {}).get("name")
+
+    def _project_refused(self, name) -> str | None:
+        """Why the child cannot start under `name`: none given or the
+        session's own project is fine, as is one its spec lists."""
+        if name is None or name == self._own():
+            return None
+        try:
+            listed = workspace.Spec.load(self._own()).projects if self._own() else ()
+        except workspace.Refused:
+            listed = ()
+        if name not in listed:
+            return f"project {name!r} is not one of this chat's repositories ({', '.join([self._own() or '', *listed])})"
+        try:
+            workspace.Spec.load(name)
+        except workspace.Refused as exc:
+            return f"project {name!r} has no spec that loads: {exc}"
+        return None
 
     async def perform(self, action, key: str) -> dict:
         seat, model = resolve_seat("frontier")
@@ -82,9 +106,17 @@ class TaskStart(_ChatTask):
                 instruction=str(action.payload["instruction"]).strip(),
                 model=model,
                 harness_name=seat,
-                project=self.project,
+                project=self._child_project(action.payload.get("project")),
             )
         return {"task_id": child}
+
+    def _child_project(self, name) -> dict | None:
+        """The child's project: the named one, else the session's own, with
+        the session's chat, which the child reads (`_reading_env`)."""
+        if self.project is None and name is None:
+            return None
+        found = {"name": name or self._own()}
+        return {**found, "chat": self.chat} if self.chat else found
 
     async def lookup(self, action, key: str) -> dict | None:
         async with await db.connect(self.dsn) as conn:

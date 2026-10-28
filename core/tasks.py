@@ -15,7 +15,7 @@ from typing import Any
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from core import corrections, git, ledger, machine, memory, outcomes, persona, record
+from core import corrections, git, ledger, machine, memory, outcomes, persona, record, workspace
 from core.settings import resolve_model, settings
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
@@ -310,7 +310,10 @@ async def brief(conn, task_id: str) -> Brief:
         )
     ).fetchone()
     if made is not None:
-        body = {**body, **made[0]}
+        # Provisioning remakes `project` from the spec; a key the spec does
+        # not own, given at start (`chat`, `tools/chat_tasks.py`), stays.
+        project = {**(body.get("project") or {}), **(made[0].get("project") or {})}
+        body = {**body, **made[0], **({"project": project} if project else {})}
     return Brief.load(body)
 
 
@@ -320,6 +323,28 @@ def stage_text(state: machine.State | str) -> str | None:
     name = state.value if isinstance(state, machine.State) else str(state)
     path = Path(settings.stages_dir) / f"{name}.md"
     return path.read_text().strip() if path.is_file() else None
+
+
+def repos(name: str | None) -> str | None:
+    """The chat's repositories, for a chat session whose project lists
+    `projects`: its own first, each with its repository, and how
+    `task.start` chooses one. None for a project listing none."""
+    try:
+        own = workspace.Spec.load(name) if name else None
+    except workspace.Refused:
+        return None
+    if own is None or not own.projects:
+        return None
+    found = [f"{own.name} ({own.repo})"]
+    for listed in own.projects:
+        try:
+            found.append(f"{listed} ({workspace.Spec.load(listed).repo})")
+        except workspace.Refused:
+            continue
+    return (
+        "; ".join(found) + f". A task starts under {own.name} unless task.start names another of these in "
+        '"project"; pick the one the request is about, and ask in the chat when it is unclear.'
+    )
 
 
 def channel_text(offered: list[str], name: str = "channel.md") -> str:
@@ -375,6 +400,9 @@ async def dispatch(
         found = room(b.chat["channel"], b.chat["chat_id"], (b.project or {}).get("name"))
         if found:
             head += f"\nRoom: {found}"
+        listed = repos((b.project or {}).get("name"))
+        if listed:
+            head += f"\nRepos: {listed}"
     head += f"\nEffect ceiling: {b.max_effect_class}"
     if b.workspace and not fresh:
         head += f"\nWorkspace: {b.workspace}"

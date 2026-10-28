@@ -43,6 +43,16 @@ workspaces for (`python -m core start ... --project NAME`).
   project's decision board: that chat's session keeps it, from the
   project's open questions and recent answers in the ledger
   (`core/board.py`, [slack.md](../docs/bridges/slack.md)).
+- `projects` names other project specs whose repositories the project's
+  chats work in too (`yudame` lists `yudame-tools`). A chat session's
+  `task.start` takes `"project"` to start its task under one of them, its
+  Brief lists them on a `Repos:` line, and its board covers their tasks.
+  Every chat of the project gets them, its team chats too; their room
+  line is what keeps engineering out of a team chat. A child runs on the
+  Mac holding the chat session, whatever the listed spec's `machine`, so a
+  listed project is placed on the same machine as the one listing it
+  (`tests/test_projects.py` holds this for the real specs). Another
+  repository is one spec and one name here.
 - `knowledge_base` names the business's folder in `~/work-vault`, where its
   description lives. A working task's turns read and write that folder
   (`VALOR_KNOWLEDGE_BASE` names it to them).

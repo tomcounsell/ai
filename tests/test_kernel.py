@@ -1604,7 +1604,9 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
         return session_id, child, cb, refused, found, *[await rows_of(dsn, t) for t in (session_id, child)]
 
     session_id, child, cb, refused, found, parent_rows, child_rows = run(go())
-    assert cb.parent_id == session_id and cb.project == {"name": "flowers"} and found == {"task_id": child}
+    # The child carries the chat it came from, which it reads (`_reading_env`).
+    assert cb.parent_id == session_id and cb.project == {"name": "flowers", "chat": "telegram:-1001"}
+    assert found == {"task_id": child}
     (started,) = [r["payload"] for r in child_rows if r["type"] == "task.started"]
     assert started["provenance"]["by"] == "Rain"
     reported = [p["kind"] for p in bridges.typed(parent_rows, "child.reported") if p["child_id"] == child]
@@ -1737,7 +1739,12 @@ def test_each_project_has_a_slack_dev_channel_answering_as_its_eng_group():
         channels.add(chat)
         assert chat not in spec.mentions, name
         room = spec.rooms[chat]
-        assert room == (spec.rooms[f"telegram:{eng[name]}"] if eng[name] else "Engineering on the yuda.me site.")
+        assert room == (
+            spec.rooms[f"telegram:{eng[name]}"]
+            if eng[name]
+            else "Engineering on the yuda.me company site (yudame/yuda.me) and the Yudame Tools menu-bar Mac app "
+            "(yudame/yudame-tools)."
+        )
     assert len(channels) == len(eng)
 
 
