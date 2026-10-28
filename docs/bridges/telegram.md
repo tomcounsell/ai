@@ -455,7 +455,8 @@ which reports to the session, and the session tells him.
 ### Started tasks
 
 A task starts when a chat session asks for one (`task.start`, under the
-session's project or one its spec lists in `projects`; the child carries
+project its `"project"` names, one its Brief's `Repos:` line lists, else
+the session's own; the child carries
 the session's chat as `project.chat`, the chat it reads), or from a
 message of Tom's that is not a reply and has no chat session to go to: an
 email, or a chat no project lists when there is no `valor` spec. Before
