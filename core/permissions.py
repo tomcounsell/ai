@@ -18,7 +18,11 @@ iCloud and app-data rows, so only four are asked for.
 Every update checks this Mac's setup (`ensure`): it builds Valor.app when
 it is missing, puts the launcher first in every `com.valor.*` job that
 still runs a bare Python, and reloads those jobs, the kernel's own last,
-from a one-shot job of its own, since a job cannot reload itself.
+from a one-shot job of its own, since a job cannot reload itself. Any
+other `com.valor.*` job whose plist is in place but is not loaded is
+loaded: a turn's sandbox cannot bootstrap one (the Cowboy's
+`com.valor.brew-nightly`, put back by a turn on 2026-10-28), and launchd
+would otherwise read it only at the next login.
 
 It also makes sure Slack is served where this Mac's projects list a
 Slack chat (`slack`, Tom, 2026-10-25): `python -m bridges.slack keys`
@@ -85,6 +89,7 @@ def ensure(
     agents: Path = AGENTS,
     exe: Path | None = None,
     reload: Callable[[str, Path, bool], str | None] | None = None,
+    loaded: Callable[[str], bool] | None = None,
 ) -> dict[str, list[str]]:
     """Every update's check of this Mac's setup (module docstring). `own` is
     the label of the job running this, reloaded by a one-shot job of its
@@ -92,6 +97,7 @@ def ensure(
     job not reloaded with why; empty ones left out."""
     exe = exe or Path(settings.launcher)
     reload = reload or _reload
+    loaded = loaded or _loaded
     fixed, failed = [], []
     if not exe.exists():
         build(exe)
@@ -101,11 +107,14 @@ def ensure(
     for plist in jobs:
         job = plistlib.loads(plist.read_bytes())
         argv = job.get("ProgramArguments", [])
-        if len(argv) < 2 or not Path(argv[0]).name.startswith("python") or argv[1] != "-m":
+        if len(argv) >= 2 and Path(argv[0]).name.startswith("python") and argv[1] == "-m":
+            job["ProgramArguments"] = [str(exe), *argv]
+            plist.write_bytes(plistlib.dumps(job))
+            fixed.append(plist.stem)
+        elif loaded(plist.stem):
             continue
-        job["ProgramArguments"] = [str(exe), *argv]
-        plist.write_bytes(plistlib.dumps(job))
-        fixed.append(plist.stem)
+        else:
+            fixed.append(f"{plist.stem}: not loaded")
         if why := reload(plist.stem, plist, plist.stem == own):
             failed.append(f"{plist.stem}: {why}")
     return {k: v for k, v in (("fixed", fixed), ("failed", failed)) if v}
@@ -155,6 +164,11 @@ def slack(
     run(["launchctl", "enable", target], capture_output=True)
     if why := reload(SLACK, plist, False):
         failed.append(f"{SLACK}: {why}")
+
+
+def _loaded(label: str) -> bool:
+    done = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True, check=False)
+    return done.returncode == 0
 
 
 def _reload(label: str, plist: Path, own: bool) -> str | None:

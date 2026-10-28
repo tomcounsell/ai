@@ -82,7 +82,7 @@ def test_ensure_puts_every_python_job_on_the_launcher_and_reloads_its_own_last(e
         reloaded.append((label, own))
         return "5: Input/output error" if label == "com.valor.voice" else None
 
-    done = permissions.ensure("com.valor.kernel", tmp_path, exe, reload)
+    done = permissions.ensure("com.valor.kernel", tmp_path, exe, reload, lambda label: True)
     assert done == {
         "fixed": ["com.valor.voice", "com.valor.kernel"],
         "failed": ["com.valor.voice: 5: Input/output error"],
@@ -92,7 +92,28 @@ def test_ensure_puts_every_python_job_on_the_launcher_and_reloads_its_own_last(e
     assert argv["com.valor.kernel"] == [str(exe), *jobs["com.valor.kernel"]]
     assert argv["com.valor.done"] == jobs["com.valor.done"]
     assert argv["com.valor.brew-nightly"] == jobs["com.valor.brew-nightly"]
-    assert permissions.ensure("com.valor.kernel", tmp_path, exe, reload) == {}
+    assert permissions.ensure("com.valor.kernel", tmp_path, exe, reload, lambda label: True) == {}
+
+
+def test_ensure_loads_a_job_whose_plist_is_in_place_but_not_loaded(exe, tmp_path):
+    """The Cowboy's com.valor.brew-nightly, put back from a turn's sandbox,
+    which cannot bootstrap (2026-10-28): loaded as written, not wrapped."""
+    argv = [str(exe), "/bin/bash", "brew-nightly-update.sh"]
+    for label in ("com.valor.brew-nightly", "com.valor.backup"):
+        (tmp_path / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": argv}))
+    up = {"com.valor.backup"}
+    reloaded = []
+
+    def reload(label, plist, own):
+        reloaded.append((label, own))
+        up.add(label)
+
+    done = permissions.ensure("com.valor.kernel", tmp_path, exe, reload, up.__contains__)
+    assert done == {"fixed": ["com.valor.brew-nightly: not loaded"]}
+    assert reloaded == [("com.valor.brew-nightly", False)]
+    plist = plistlib.loads((tmp_path / "com.valor.brew-nightly.plist").read_bytes())
+    assert plist["ProgramArguments"] == argv
+    assert permissions.ensure("com.valor.kernel", tmp_path, exe, reload, up.__contains__) == {}
 
 
 # -- Slack on every Mac whose projects list a Slack chat (Tom, 2026-10-25) ----

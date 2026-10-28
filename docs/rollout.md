@@ -196,7 +196,9 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    run keeps its own copy and plist current with the vault. Over ssh the
    vault is not readable, so a remote Mac is installed by copying the
    script to `~/.local/bin` and the plist, with its home, to
-   `~/Library/LaunchAgents` and bootstrapping it. Brew Status
+   `~/Library/LaunchAgents` and bootstrapping it; a plist put in place
+   from a turn, whose sandbox cannot bootstrap, is loaded by the next
+   update (`permissions.ensure`). Brew Status
    (`yudame/brew-status`) ran it from 2026-10-28 morning and was removed
    from all four Macs that day (Tom, Telegram 11762); Yudame Tools'
    Homebrew Updates replaces this job once it is deployed

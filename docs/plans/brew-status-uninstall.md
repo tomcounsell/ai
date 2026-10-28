@@ -92,6 +92,13 @@ It goes back to the vault job until yudame/yudame-tools#2 deploys.
    job `com.valor.brew-nightly` until Yudame Tools is deployed, then switch
    over (`gh issue comment`, as Valor).
 
+**Found in the build.** A turn's sandbox cannot bootstrap a launchd job
+(`Bootstrap failed: 5`, even `/usr/bin/true`), so the Cowboy's job is put
+in place but loaded by Valor's kernel: `permissions.ensure` now loads any
+`com.valor.*` plist that is not loaded (only the Cowboy's
+`com.valor.brew-nightly` on the three Macs checked), at this merge's
+rollout or the 03:00 update, before 04:00. Tested.
+
 ## Out of scope
 
 Packaging or deploying Yudame Tools (#2). `yudame/brew-status` stays
