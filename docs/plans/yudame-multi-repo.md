@@ -23,8 +23,8 @@ yudame/yudame-tools, running its suite on the Pirate.
 
 - `Spec.projects` lists other specs whose repositories a project's chats work
   in. `yudame.toml` lists `yudame-tools`.
-- `task.start` takes `"project"`: none or its own starts under the session's
-  project, as before, and a listed name starts under that project. The child
+- `task.start` takes `"project"`: none starts under the session's
+  project, as before, and a named one starts under that project. The child
   carries the session's chat as `project.chat`. `tasks.brief` keeps it through
   provisioning, and the child reads that chat (`_reading_env`). This
   changes every project's chat-started tasks: a child used to read its
@@ -40,23 +40,19 @@ yudame/yudame-tools, running its suite on the Pirate.
 
 ## Governance check
 
-Not governance. Before this branch, task.start's only refusal was "the
-request has no words", and a `"project"` key was ignored (undocumented,
-never offered). Now a `"project"` outside the session's own and its
-listed ones is refused, with no task: that refusal is new, and the commit
-message's "else refused as before" is wrong. The set it holds to is the
-scope Tom named in his own words ("several repositories including yuda.me
-... as well as yudame-tools"), written in `yudame.toml`, not an allowlist
-Valor added, and nothing that worked by design before is refused.
+No limit is added. A `"project"` key was ignored before; now the child
+starts under the project it names, else the session's own. Nothing checks
+the name against the list: an earlier version refused an unlisted one,
+which was a new refusal with no grant, so review removed it. The `Repos:`
+line and the usage text steer the session to the listed ones, and a name
+with no spec fails at provisioning (`Spec.load`), as any task's does.
 `Spec.load` checks a `projects` entry only as a non-empty string, as it
-checks `machine` (critique: the path-character check guarded a failure
-that cannot happen, so it is cut).
+checks `machine`.
 
 ## Remaining work
 
 1. **Review fixes**: the builder reads the diff against the request and fixes
-   what it finds. One item is already found: `_project_refused`'s message
-   joins `''` when there is no own project.
+   what it finds.
 2. **Live check before merge**: on the Pirate, clone yudame/yudame-tools
    (private; the Pirate's git reaches it) and run the spec's `suite` line, so
    the JUnit report lands at the path given. The yudame-tools suite must pass,
@@ -78,8 +74,7 @@ description. Packaging Yudame Tools (yudame/yudame-tools#2).
 The branch already holds tests for:
 
 - `projects` defaulting to empty, and rejecting a bad name;
-- `task.start` with no project, its own project, a listed project, and an
-  unlisted project (refused, no task);
+- `task.start` with no project, its own project by name, and a listed one;
 - a listed child's checkout of its own repo, keeping `chat` once provisioned;
 - a child reading its own chat, else the one it came from, else its
   project's first;

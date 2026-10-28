@@ -3,8 +3,8 @@
 
 A chat session (`core/intake.py`) does no work itself. It starts a task
 for the work, as a child of itself, with the request as written and who
-asked, under its own project or one its spec lists in `projects` (the
-repository the request is about), carrying the session's chat so the
+asked, under its own project or the one it names (its Brief's `Repos:`
+line lists its spec's `projects`, the repository the request is about), carrying the session's chat so the
 child reads it (`project.chat`); answers a task's open question with what the chat said; steers a
 task with what the chat added; and stops a task. A steer of a task waiting
 on its question answers it, since a waiting task reads nothing else. A steer of a task that has
@@ -30,7 +30,7 @@ by the question it answered, a steer by its key on the `message.steered`,
 `feedback.given` or `question.answered` row, a stop by the task's stop.
 """
 
-from core import board, db, ledger, machine, session, tasks, workspace
+from core import board, db, ledger, machine, session, tasks
 from core.machine import State
 from core.settings import resolve_seat
 
@@ -55,9 +55,9 @@ class _ChatTask:
 
     async def refuse(self, conn, action) -> str | None:
         if self.action_type == "task.start":
-            if not str(action.payload.get("instruction") or "").strip():
-                return "the request has no words"
-            return self._project_refused(action.payload.get("project"))
+            return (
+                None if str(action.payload.get("instruction") or "").strip() else "the request has no words"
+            )
         try:
             await self._child(conn, action.target)
         except ValueError as exc:
@@ -73,23 +73,6 @@ class TaskStart(_ChatTask):
         "reports to you, under this project, or under one of the projects your Repos line names when "
         '`"project"` names it. Your next prompt names it.'
     )
-
-    def _own(self) -> str | None:
-        return (self.project or {}).get("name")
-
-    def _project_refused(self, name) -> str | None:
-        """Why the child cannot start under `name`: none given or the
-        session's own project is fine, as is one its spec lists."""
-        if name is None or name == self._own():
-            return None
-        try:
-            listed = workspace.Spec.load(self._own()).projects if self._own() else ()
-        except workspace.Refused:
-            listed = ()
-        if name not in listed:
-            here = [n for n in (self._own(), *listed) if n]
-            return f"project {name!r} is not one of this chat's repositories ({', '.join(here) or 'none'})"
-        return None
 
     async def perform(self, action, key: str) -> dict:
         seat, model = resolve_seat("frontier")
@@ -112,7 +95,7 @@ class TaskStart(_ChatTask):
         the session's chat, which the child reads (`_reading_env`)."""
         if self.project is None and name is None:
             return None
-        found = {"name": name or self._own()}
+        found = {"name": name or self.project["name"]}
         return {**found, "chat": self.chat} if self.chat else found
 
     async def lookup(self, action, key: str) -> dict | None:

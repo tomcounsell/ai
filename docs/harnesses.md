@@ -575,7 +575,7 @@ bridge ([bridges/telegram.md](bridges/telegram.md), Reading history for a
 turn). The kernel installs every workspace tool into the shared `bin/`
 before each turn (`workspace.install_tools`), so a session provisioned
 before a tool changed has the current one, and sets the turn's
-`VALOR_CHAT` (the session's chat, else the project's first), the read
+`VALOR_CHAT` (the session's chat, else the chat whose session started the task, else the project's first), the read
 ports, and the voice a spoken reply uses (below).
 
 ## Reading the project's record

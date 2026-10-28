@@ -7,7 +7,6 @@ lists the repositories; the board covers their tasks."""
 import asyncio
 import pathlib
 import uuid
-from types import SimpleNamespace
 
 import pytest
 
@@ -17,7 +16,6 @@ from core.settings import settings
 from tests import bridges, scripted, test_kernel
 from tests.test_board import ask, board_rows, channel, owe, session_task
 from tests.test_kernel import new_task
-from tools.chat_tasks import TaskStart
 
 dm = test_kernel.dm  # Tom's Slack DM and the operator, as a fixture
 
@@ -81,49 +79,28 @@ def test_a_spec_lists_other_projects_by_name_and_none_by_default():
 # -- task.start under a listed project -----------------------------------------------
 
 
-def test_task_start_runs_under_the_named_listed_project_and_refuses_any_other(dsn, dm, tmp_path):
+def test_task_start_runs_under_the_named_project_else_the_sessions_own(dsn, dm, tmp_path):
     """No `project` is the session's own; a listed one or its own by name
-    is taken; an unlisted spec, a missing one, and any other name from a
-    session listing none are refused, with no child."""
-    chat, plain_chat = channel(), channel()
+    is taken. Nothing is refused for its project (no new limit)."""
+    chat = channel()
     site, app = names()
     spec(site, chats=[chat], projects=[app])
     spec(app)
-    other = f"other{uuid.uuid4().hex[:6]}"
-    spec(other, chats=[plain_chat])
 
     async def go():
         here = await session_task(dsn, chat)
         default = await started(dsn, here)
         own = await started(dsn, here, site)
         listed = await started(dsn, here, app)
-        p = await performer(dsn, here)
-        plain = await performer(dsn, await session_task(dsn, plain_chat))
-        async with await db.connect(dsn) as conn:
-            before = len(await tasks.reporting(conn, here))
-            refusals = [
-                await p.refuse(conn, start(other)),
-                await p.refuse(conn, start("nosuchproject")),
-                await plain.refuse(conn, start(site)),
-            ]
-            after = len(await tasks.reporting(conn, here))
-        return [await brief_of(dsn, t) for t in (default, own, listed)], refusals, before, after
+        return [await brief_of(dsn, t) for t in (default, own, listed)]
 
-    briefs, refusals, before, after = run(go())
+    briefs = run(go())
     assert [b.project for b in briefs] == [
         {"name": site, "chat": f"slack:{chat}"},
         {"name": site, "chat": f"slack:{chat}"},
         {"name": app, "chat": f"slack:{chat}"},
     ]
     assert all(b.chat is None for b in briefs)  # a child is no chat session
-    assert all(r and "is not one of this chat's repositories" in r for r in refusals)
-    assert before == after
-
-
-def test_a_session_with_no_project_names_none_when_it_refuses_one():
-    p = TaskStart(SimpleNamespace(id="s", project=None, chat=None))
-    assert p._project_refused(None) is None
-    assert p._project_refused("yudame") == "project 'yudame' is not one of this chat's repositories (none)"
 
 
 def test_a_listed_projects_child_checks_out_its_repo_and_keeps_its_chat_once_provisioned(dsn, dm, tmp_path):
