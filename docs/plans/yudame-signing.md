@@ -36,8 +36,11 @@ Application: Yudame, Inc." (rule 5).
    even if the items never come.
 2. **Wait inside the turn, without re-stepping.**
    - Poll `op item list --vault m-valor` for both titles, sleeping 9 minutes
-     per Bash call, for up to 48 hours.
-   - If either item is still missing after 48 hours, end with a delivery
+     per Bash call, for up to 12 hours.
+   - The wait holds one of the Cowboy's two turn slots (`max_turns` 2), so
+     other tasks run at half throughput while it lasts. Twelve hours caps
+     that cost; the delivery names it.
+   - If either item is still missing after 12 hours, end with a delivery
      that says the setup is unfinished and why, with the doc paragraph
      merged. That is a status, not a new question.
    - An idle turn is re-stepped with no delay and no bound, so ending a
@@ -54,14 +57,20 @@ Application: Yudame, Inc." (rule 5).
    - Steps:
      1. Generate a password and store it in m-valor as "Yudame signing
         keychain".
-     2. Create the keychain and run `set-keychain-settings` with no timeout
+     2. Create the keychain with the password fed twice on stdin
+        (`printf '%s\n%s\n'`). `create-keychain` prompts for it and its
+        retype, and a single line leaves it with an empty password and
+        exit 0 (probed). Then run `set-keychain-settings` with no timeout
         and no lock on sleep.
      3. Set the user search list explicitly to both keychains: `security
         list-keychains -d user -s ~/Library/Keychains/login.keychain-db
         ~/Library/Keychains/yudame-signing.keychain-db`. `-s` replaces the
         list, so login stays first. Read the list back afterwards.
      4. Import the .p12 with `-T /usr/bin/codesign`.
-     5. Set the partition list to `apple-tool:,apple:`.
+     5. Set the partition list to `apple-tool:,apple:`, with the password
+        on stdin. A wrong password prints "passphrase you entered is not
+        correct" without a reliable exit code, so the output is checked
+        for that text. The headless re-sign test is the real evidence.
    - The .p12 is written only to `$TMPDIR`, mode 600, and deleted right
      after import.
 4. **Notary profile `yudame-notary`**, stored in the dedicated keychain with
@@ -116,6 +125,8 @@ Application: Yudame, Inc." (rule 5).
   - `syspolicy_check distribution`.
   A quarantined launch waits for a click on screen, so the launch test
   uses a copy without quarantine: `open`, `pgrep`, then quit.
+- Keychain password is real: lock the keychain. An empty password and a
+  wrong one both fail to unlock it, and the m-valor password succeeds.
 - Headless edge: lock the dedicated keychain, then unlock it the way the
   agent doc says (stdin), and re-sign a scratch copy without any prompt. This shows
   a build after a reboot works.
