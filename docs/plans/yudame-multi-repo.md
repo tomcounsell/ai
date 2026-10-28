@@ -26,7 +26,10 @@ yudame/yudame-tools, running its suite on the Pirate.
 - `task.start` takes `"project"`: none or its own starts under the session's
   project, as before, and a listed name starts under that project. The child
   carries the session's chat as `project.chat`. `tasks.brief` keeps it through
-  provisioning, and the child reads that chat (`_reading_env`).
+  provisioning, and the child reads that chat (`_reading_env`). This
+  changes every project's chat-started tasks: a child used to read its
+  project's first chat, and now reads the chat that started it (for
+  #yudame-dev's children, the channel instead of the Telegram team chat).
 - The chat session's Brief gets a `Repos:` line. The board (`board_spec`,
   `snapshot`) covers the listed projects' tasks.
 - `projects/yudame-tools.toml`: plain repo, the Swift Testing suite
@@ -37,12 +40,17 @@ yudame/yudame-tools, running its suite on the Pirate.
 
 ## Governance check
 
-The diff adds no limit. Before it, a chat session could start tasks only
-under its own project. Now it can also start them under the listed projects.
-A `"project"` naming anything else gets an error and no task. That error is
-the edge of the new capability, so nothing that worked before is now
-refused. `Spec.load` rejecting a malformed `projects` entry follows how it
-already parses `board`, `machine` and the other fields. No grant needed.
+Not governance. Before this branch, task.start's only refusal was "the
+request has no words", and a `"project"` key was ignored (undocumented,
+never offered). Now a `"project"` outside the session's own and its
+listed ones is refused, with no task: that refusal is new, and the commit
+message's "else refused as before" is wrong. The set it holds to is the
+scope Tom named in his own words ("several repositories including yuda.me
+... as well as yudame-tools"), written in `yudame.toml`, not an allowlist
+Valor added, and nothing that worked by design before is refused.
+`Spec.load` checks a `projects` entry only as a non-empty string, as it
+checks `machine` (critique: the path-character check guarded a failure
+that cannot happen, so it is cut).
 
 ## Remaining work
 

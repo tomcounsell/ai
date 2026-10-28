@@ -87,7 +87,8 @@ class TaskStart(_ChatTask):
         except workspace.Refused:
             listed = ()
         if name not in listed:
-            return f"project {name!r} is not one of this chat's repositories ({', '.join([self._own() or '', *listed])})"
+            here = [n for n in (self._own(), *listed) if n]
+            return f"project {name!r} is not one of this chat's repositories ({', '.join(here) or 'none'})"
         return None
 
     async def perform(self, action, key: str) -> dict:

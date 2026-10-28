@@ -7,6 +7,7 @@ lists the repositories; the board covers their tasks."""
 import asyncio
 import pathlib
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ from core.settings import settings
 from tests import bridges, scripted, test_kernel
 from tests.test_board import ask, board_rows, channel, owe, session_task
 from tests.test_kernel import new_task
+from tools.chat_tasks import TaskStart
 
 dm = test_kernel.dm  # Tom's Slack DM and the operator, as a fixture
 
@@ -71,7 +73,7 @@ def test_a_spec_lists_other_projects_by_name_and_none_by_default():
     base = {"name": "s", "repo": "r", "kind": "plain", "suite": "true"}
     assert workspace.Spec.from_dict(base).projects == ()
     assert workspace.Spec.from_dict({**base, "projects": ["a", "b-c"]}).projects == ("a", "b-c")
-    for bad in (["../valor"], ["a/b"], [""], [3]):
+    for bad in ([""], [3]):
         with pytest.raises(workspace.Refused, match="not a project name"):
             workspace.Spec.from_dict({**base, "projects": bad})
 
@@ -116,6 +118,12 @@ def test_task_start_runs_under_the_named_listed_project_and_refuses_any_other(ds
     assert all(b.chat is None for b in briefs)  # a child is no chat session
     assert all(r and "is not one of this chat's repositories" in r for r in refusals)
     assert before == after
+
+
+def test_a_session_with_no_project_names_none_when_it_refuses_one():
+    p = TaskStart(SimpleNamespace(id="s", project=None, chat=None))
+    assert p._project_refused(None) is None
+    assert p._project_refused("yudame") == "project 'yudame' is not one of this chat's repositories (none)"
 
 
 def test_a_listed_projects_child_checks_out_its_repo_and_keeps_its_chat_once_provisioned(dsn, dm, tmp_path):

@@ -199,7 +199,7 @@ class Spec:
                 raise Refused(f"board names {raw['board']!r}, which is not one of the spec's Slack chats")
         projects = tuple(raw.get("projects") or ())
         for name in projects:
-            if not isinstance(name, str) or name in ("", ".", "..") or any(c in name for c in '/"\\\n'):
+            if not isinstance(name, str) or not name:
                 raise Refused(f"projects names {name!r}, which is not a project name")
         machine = raw.get("machine")
         if machine is not None and (not isinstance(machine, str) or not machine):
