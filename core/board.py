@@ -15,7 +15,9 @@ one on the latest board row, it writes a `child.reported` row with kind
 `board` and no `child_id` on the board session, started when none is open,
 which wakes it; the row's text is the snapshot, with each question's board
 post and the canvas's link, which the digest leaves out. Projects never
-mix: a snapshot reads its own project's tasks only.
+mix: a snapshot reads its own project's tasks only, and those of the
+projects its spec lists in `projects`, whose repositories its chats work
+in (`board_spec`).
 
 A question whose task reports to the board session gets no `question`
 report there (`notices.owe` asks `here`): the board row carries it, and
@@ -42,6 +44,16 @@ def spec_of(name: str | None) -> workspace.Spec | None:
         return None
 
 
+def board_spec(name: str | None) -> workspace.Spec | None:
+    """The spec whose board covers project `name`: its own when it names a
+    board, else the first of this Mac's specs, by name, that lists it in
+    `projects` and names a board."""
+    spec = spec_of(name)
+    if spec is not None and spec.board is not None:
+        return spec
+    return next((s for s in workspace.Spec.here() if name in s.projects and s.board is not None), spec)
+
+
 async def session_of(conn, spec: workspace.Spec | None) -> str | None:
     """The project's board session: its board chat's open session."""
     if spec is None or spec.board is None:
@@ -55,7 +67,7 @@ async def here(conn, task_id: str) -> bool:
     board chat's session started."""
     b = await tasks.brief(conn, task_id)
     return b.parent_id is not None and b.parent_id == await session_of(
-        conn, spec_of((b.project or {}).get("name"))
+        conn, board_spec((b.project or {}).get("name"))
     )
 
 
@@ -67,22 +79,22 @@ async def answers(conn, session_id: str, task_id: str) -> bool:
         b = await tasks.brief(conn, task_id)
     except KeyError:
         return False
-    if session_id != await session_of(conn, spec_of((b.project or {}).get("name"))):
+    if session_id != await session_of(conn, board_spec((b.project or {}).get("name"))):
         return False
     return machine.fold(await ledger.read(conn, task_id)).state is State.WAITING
 
 
 async def snapshot(conn, spec: workspace.Spec) -> dict[str, Any]:
-    """The project's open questions and recent answers, oldest first, each
-    with its task and the task's request."""
+    """The project's open questions and recent answers, and its listed
+    projects', oldest first, each with its task and the task's request."""
     since = datetime.now(UTC) - timedelta(days=DECIDED_DAYS)
     rows = await (
         await conn.execute(
             "SELECT e.task_id, e.type, e.payload, e.at, d.body->>'instruction' FROM events e "
             "JOIN documents d ON d.kind = 'task' AND d.id = e.task_id "
-            "WHERE d.body->'project'->>'name' = %s AND e.type IN ('question.asked', 'question.answered') "
+            "WHERE d.body->'project'->>'name' = ANY(%s) AND e.type IN ('question.asked', 'question.answered') "
             "ORDER BY e.id",
-            (spec.name,),
+            ([spec.name, *spec.projects],),
         )
     ).fetchall()
     asked: dict[tuple[str, str], dict[str, Any]] = {}

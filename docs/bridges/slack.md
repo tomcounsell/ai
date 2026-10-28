@@ -47,6 +47,14 @@ that project, rewritten whole from the ledger (`core/board.py`,
 writes into it. Tom answers in the channel, or with 👍 on a decision's
 post, which the bridge receives (below).
 
+**A channel over several repositories** (Tom, 2026-10-28: "scope this
+channel to several repositories"). `#yudame-dev` covers yuda.me and the
+Yudame Tools Mac app: `yudame.toml` lists `yudame-tools` in `projects`
+(projects/README.md), so its session's Brief carries a `Repos:` line,
+`task.start` takes `"project"` to start the task in the repository the
+request is about, and the board covers both. Another repository is one
+spec and one name in that list.
+
 ## What it serves
 
 | Mechanism | Serves |

@@ -198,7 +198,7 @@ def test_toms_dm_session_starts_the_work_and_tells_him_of_its_merge(dsn, tmp_pat
         bound, first, second, done, sent, (cb, tb), chat_rows, task_rows = run(go())
     assert bound["as"] == "steer" and cb.chat == {"channel": "telegram", "chat_id": tom}
     assert (first["status"], second["status"]) == ("listening", "listening")
-    assert tb.parent_id == cb.id and tb.project == {"name": "valor"}
+    assert tb.parent_id == cb.id and tb.project == {"name": "valor", "chat": f"telegram:{tom}"}
     assert done.kind == "done" and git(origin, "rev-parse", "main") == machine.fold(task_rows).candidate.sha
     assert not bridges.typed(task_rows, "notice.requested")
     reported = [p for p in bridges.typed(chat_rows, "child.reported") if p["child_id"] == tb.id]
