@@ -190,6 +190,22 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    Subscriptions page, then reinstall it to Valor's account; the user
    token stays the same. The four apps were brought to the manifest
    (`reactions:read`, `canvases:write`, `reaction_added`) on 2026-10-27.
+   Brew Status (`yudame/brew-status`, the menu bar app that runs the
+   nightly Homebrew update) is not installed by hand either: every update
+   (`permissions.brew_status`) installs `~/Applications/BrewStatus.app`
+   when it is missing and replaces it when its `BrewStatusCommit` is
+   behind, reopening a running copy. A Mac with Swift 6.2 (Xcode 26)
+   pulls, or clones, `~/src/brew-status` and runs its `build.sh`; the
+   Pirate and the Bald download the latest release's `BrewStatus.zip`
+   (`gh release download`), so a change reaches them only once it is
+   released. Its 04:00 job is set up once per Mac, at the switch from
+   `com.valor.brew-nightly`: copy `scripts/brew-status-local.sh` to
+   `~/.config/brew-status/local.sh`, `launchctl bootout $D/com.valor.brew-nightly`
+   and remove its plist, then
+   `brew-status setup --launcher ~/Applications/Valor.app/Contents/MacOS/valor-run`
+   (through Valor.app, which holds App Management; nobody is at the Mac
+   to answer the app's own question). Two jobs at 04:00 would run brew
+   twice at once.
    A kernel crash-looping after a rollout or an update: take the checkout
    back to the commit it rolled from (`from` on its `rollout.restarting`
    row), `git -C ~/src/ai reset --keep <from>`, then

@@ -28,11 +28,22 @@ from `python -m bridges.slack --plist` with the settings of this Mac's
 Telegram job, and loaded, and a job whose keys changed or that is not
 loaded is enabled and (re)loaded. Each
 Mac has its own app, so this never starts a second bridge on one token.
+
+And it keeps Brew Status (`yudame/brew-status`, the menu bar app that runs
+the nightly Homebrew update) installed and current (Tom, 2026-10-28): a
+Mac whose Swift builds it (6.2, Xcode 26) pulls `~/src/brew-status`,
+cloning it when missing, and runs its `build.sh` when the app's
+`BrewStatusCommit` is not the checkout's; any other Mac (the Pirate, the
+Bald) downloads the latest release's `BrewStatus.zip` and installs it when
+its commit differs. A copy that was running is reopened. Setting up its
+04:00 job is the migration's (`docs/rollout.md`), not this.
 """
 
 import ctypes
 import os
 import plistlib
+import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -60,6 +71,7 @@ WAIT_S = 900
 AGENTS = Path.home() / "Library/LaunchAgents"
 SLACK = "com.valor.kernel.slack"  # `bridges/slack/__main__.py`'s LABEL
 TELEGRAM = "com.valor.kernel.telegram"
+BREW_STATUS = "yudame/brew-status"
 
 
 def build(exe: Path) -> None:
@@ -97,6 +109,7 @@ def ensure(
         build(exe)
         fixed.append(exe.parents[2].name)
     slack(agents, reload, fixed, failed)
+    brew_status(fixed, failed)
     jobs = sorted(agents.glob("com.valor.*.plist"), key=lambda p: p.stem == own)
     for plist in jobs:
         job = plistlib.loads(plist.read_bytes())
@@ -155,6 +168,80 @@ def slack(
     run(["launchctl", "enable", target], capture_output=True)
     if why := reload(SLACK, plist, False):
         failed.append(f"{SLACK}: {why}")
+
+
+def brew_status(
+    fixed: list[str],
+    failed: list[str],
+    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+    home: Path | None = None,
+) -> None:
+    """Brew Status installed and at its latest commit (module docstring);
+    each change or failure appended to `fixed` or `failed`."""
+    home = home or Path.home()
+    app = home / "Applications/BrewStatus.app"
+    have = _commit(app)
+
+    def step(argv: list, **kw) -> subprocess.CompletedProcess | None:
+        done = run([str(a) for a in argv], capture_output=True, text=True, **kw)
+        if done.returncode != 0:
+            why = (done.stderr.strip() or done.stdout.strip()).splitlines()[-1:] or [f"status {done.returncode}"]
+            failed.append(f"BrewStatus: {' '.join([Path(str(argv[0])).name, *map(str, argv[1:2])])}: {why[0]}")
+            return None
+        return done
+
+    with tempfile.TemporaryDirectory(prefix="brew-status-") as work:
+        clone = home / "src/brew-status"
+        if _swift(run) >= (6, 2):
+            pulled = step(["git", "-C", clone, "pull", "--ff-only", "-q"] if clone.exists()
+                          else ["gh", "repo", "clone", BREW_STATUS, clone, "--", "-q"])  # fmt: skip
+            head = pulled and step(["git", "-C", clone, "rev-parse", "HEAD"])
+            if not head or head.stdout.strip() == have:
+                return
+            running = run(["pgrep", "-x", "BrewStatus"], capture_output=True).returncode == 0
+            if not step([clone / "build.sh"], cwd=clone):
+                return
+        else:
+            download = ["gh", "release", "download", "--repo", BREW_STATUS, "--pattern", "BrewStatus.zip"]
+            if not step([*download, "--dir", work]):
+                return
+            if not step(["ditto", "-x", "-k", Path(work) / "BrewStatus.zip", Path(work) / "x"]):
+                return
+            new = Path(work) / "x/BrewStatus.app"
+            if _commit(new) == have:
+                return
+            running = run(["pgrep", "-x", "BrewStatus"], capture_output=True).returncode == 0
+            run(["pkill", "-x", "BrewStatus"], capture_output=True)
+            shutil.rmtree(app, ignore_errors=True)
+            app.parent.mkdir(parents=True, exist_ok=True)
+            if not step(["ditto", new, app]):
+                return
+            link = home / ".local/bin/brew-status"
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.unlink(missing_ok=True)
+            link.symlink_to(app / "Contents/MacOS/brew-status")
+    fixed.append(f"BrewStatus: {have[:7] if have else 'installed'} -> {_commit(app)[:7]}")
+    if running:
+        run(["pkill", "-x", "BrewStatus"], capture_output=True)
+        run(["open", str(app)], capture_output=True)
+
+
+def _commit(app: Path) -> str:
+    """The commit a Brew Status bundle was built from; empty when there is none."""
+    try:
+        return plistlib.loads((app / "Contents/Info.plist").read_bytes()).get("BrewStatusCommit", "")
+    except OSError, plistlib.InvalidFileException:
+        return ""
+
+
+def _swift(run: Callable[..., subprocess.CompletedProcess]) -> tuple[int, int]:
+    """This Mac's Swift version, (0, 0) when there is none."""
+    try:
+        said = run(["swift", "--version"], capture_output=True, text=True)
+    except OSError:
+        return (0, 0)
+    found = re.search(r"Swift version (\d+)\.(\d+)", said.stdout + said.stderr)
+    return (int(found[1]), int(found[2])) if found else (0, 0)
 
 
 def _reload(label: str, plist: Path, own: bool) -> str | None:

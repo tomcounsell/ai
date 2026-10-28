@@ -67,7 +67,8 @@ def test_every_routine_runs_through_the_launcher():
     assert job["ProgramArguments"][0] == settings.launcher
 
 
-def test_ensure_puts_every_python_job_on_the_launcher_and_reloads_its_own_last(exe, tmp_path):
+def test_ensure_puts_every_python_job_on_the_launcher_and_reloads_its_own_last(exe, tmp_path, monkeypatch):
+    monkeypatch.setattr(permissions, "brew_status", lambda fixed, failed: None)
     jobs = {
         "com.valor.kernel": ["/opt/homebrew/bin/python3.14", "-m", "core.serve"],
         "com.valor.voice": ["/opt/homebrew/bin/python3.14", "-m", "tools.voice"],
@@ -228,3 +229,108 @@ def test_granted_reads_the_databases_there_are_and_skips_one_that_is_absent(tmp_
     state = permissions.granted()
     assert state[name] is True
     assert all(v is None for n, v in state.items() if n != name)
+
+
+# -- Brew Status installed and current on every Mac (Tom, 2026-10-28) --------
+
+
+def brew_mac(tmp_path, swift: str, release: str = "", head: str = "", running: bool = False):
+    """A Mac whose `swift --version` says `swift`, whose latest Brew Status
+    release is a zip of an app built from `release`, and whose clone's HEAD
+    is `head`. Its `build.sh` installs an app built from `head`; ditto runs
+    for real. Returns the fake `run` and its calls, first three words each."""
+    calls = []
+
+    def app(at: Path, commit: str) -> None:
+        (at / "Contents/MacOS").mkdir(parents=True)
+        (at / "Contents/MacOS/brew-status").write_text("")
+        (at / "Contents/Info.plist").write_bytes(plistlib.dumps({"BrewStatusCommit": commit}))
+
+    def run(argv, **kw):
+        argv = [str(a) for a in argv]
+        calls.append(" ".join(argv[:3]))
+        said = ""
+        if argv[0] == "swift":
+            said = f"Apple Swift version {swift} (swiftlang)"
+        elif argv[:3] == ["gh", "release", "download"]:
+            made = tmp_path / "made" / "BrewStatus.app"
+            if not made.exists():
+                app(made, release)
+            zipped = ["ditto", "-c", "-k", "--keepParent", str(made), f"{argv[-1]}/BrewStatus.zip"]
+            subprocess.run(zipped, check=True)
+        elif argv[0] == "ditto":
+            return subprocess.run(argv, check=False, **kw)
+        elif argv[0] == "git" and "rev-parse" in argv:
+            said = head + "\n"
+        elif argv[0].endswith("build.sh"):
+            app(tmp_path / "Applications/BrewStatus.app", head)
+        elif argv[0] == "pgrep":
+            return subprocess.CompletedProcess(argv, 0 if running else 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, said, "")
+
+    return run, calls
+
+
+def test_a_mac_without_swift_6_2_installs_the_latest_release_and_links_its_cli(tmp_path):
+    run, calls = brew_mac(tmp_path, "6.0.3", release="b" * 40)
+    fixed, failed = [], []
+    permissions.brew_status(fixed, failed, run, tmp_path)
+    app = tmp_path / "Applications/BrewStatus.app"
+    assert (fixed, failed) == (["BrewStatus: installed -> bbbbbbb"], [])
+    assert permissions._commit(app) == "b" * 40
+    assert (tmp_path / ".local/bin/brew-status").resolve() == (app / "Contents/MacOS/brew-status").resolve()
+    assert not any(c.startswith("open") for c in calls)  # it was not running
+
+    fixed.clear()
+    permissions.brew_status(fixed, failed, run, tmp_path)
+    assert (fixed, failed) == ([], [])  # it has that release
+
+
+def test_a_mac_with_swift_6_2_pulls_and_builds_when_behind_and_reopens_a_running_copy(tmp_path):
+    clone = tmp_path / "src/brew-status"
+    clone.mkdir(parents=True)
+    run, calls = brew_mac(tmp_path, "6.2.3", head="c" * 40, running=True)
+    fixed, failed = [], []
+    permissions.brew_status(fixed, failed, run, tmp_path)
+    assert (fixed, failed) == (["BrewStatus: installed -> ccccccc"], [])
+    assert calls[1:] == [f"git -C {clone}", f"git -C {clone}", "pgrep -x BrewStatus", f"{clone}/build.sh",
+                         "pkill -x BrewStatus", f"open {tmp_path}/Applications/BrewStatus.app"]  # fmt: skip
+    assert not any("release" in c for c in calls)
+
+    calls.clear(), fixed.clear()
+    permissions.brew_status(fixed, failed, run, tmp_path)
+    assert (fixed, failed) == ([], []) and not any("build.sh" in c for c in calls)
+
+
+def test_a_mac_with_swift_6_2_and_no_clone_clones_it_first(tmp_path):
+    run, calls = brew_mac(tmp_path, "6.2", head="d" * 40)
+    fixed, failed = [], []
+    permissions.brew_status(fixed, failed, run, tmp_path)
+    assert "gh repo clone" in calls and any(c.endswith("build.sh") for c in calls)
+    assert fixed == ["BrewStatus: installed -> ddddddd"]
+
+
+def test_a_failed_download_is_reported_and_installs_nothing(tmp_path):
+    def run(argv, **kw):
+        if argv[0] == "swift":
+            return subprocess.CompletedProcess(argv, 0, "Apple Swift version 6.0", "")
+        return subprocess.CompletedProcess(argv, 1, "", "HTTP 404: release not found")
+
+    fixed, failed = [], []
+    permissions.brew_status(fixed, failed, run, tmp_path)
+    assert (fixed, failed) == ([], ["BrewStatus: gh release: HTTP 404: release not found"])
+    assert not (tmp_path / "Applications/BrewStatus.app").exists()
+
+
+def test_a_failed_build_is_reported(tmp_path):
+    (tmp_path / "src/brew-status").mkdir(parents=True)
+    built, _ = brew_mac(tmp_path, "6.2", head="e" * 40)
+
+    def run(argv, **kw):
+        if str(argv[0]).endswith("build.sh"):
+            return subprocess.CompletedProcess(argv, 1, "error: no such module 'SwiftUI'\nbuild failed\n", "")
+        return built(argv, **kw)
+
+    fixed, failed = [], []
+    permissions.brew_status(fixed, failed, run, tmp_path)
+    assert (fixed, failed) == ([], ["BrewStatus: build.sh: build failed"])
