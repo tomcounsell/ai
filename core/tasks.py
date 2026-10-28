@@ -336,11 +336,7 @@ def repos(name: str | None) -> str | None:
     if own is None or not own.projects:
         return None
     found = [f"{own.name} ({own.repo})"]
-    for listed in own.projects:
-        try:
-            found.append(f"{listed} ({workspace.Spec.load(listed).repo})")
-        except workspace.Refused:
-            continue
+    found += [f"{listed} ({workspace.Spec.load(listed).repo})" for listed in own.projects]
     return (
         "; ".join(found) + f". A task starts under {own.name} unless task.start names another of these in "
         '"project"; pick the one the request is about, and ask in the chat when it is unclear.'

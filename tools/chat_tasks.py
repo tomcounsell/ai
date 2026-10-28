@@ -88,10 +88,6 @@ class TaskStart(_ChatTask):
             listed = ()
         if name not in listed:
             return f"project {name!r} is not one of this chat's repositories ({', '.join([self._own() or '', *listed])})"
-        try:
-            workspace.Spec.load(name)
-        except workspace.Refused as exc:
-            return f"project {name!r} has no spec that loads: {exc}"
         return None
 
     async def perform(self, action, key: str) -> dict:
