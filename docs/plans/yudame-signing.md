@@ -26,37 +26,64 @@ Application: Yudame, Inc." (rule 5).
 
 ## What is done
 
-1. **Wait for the items.** At the start of the build stage, `op item get`
-   both items. If either is missing, end the turn without asking again
-   (Tom's instruction).
-2. **Import the identity into a dedicated keychain,
-   `~/Library/Keychains/yudame-signing.keychain-db`.**
-   - Not the login keychain. Letting codesign use a private key without a
-     GUI prompt needs `security set-key-partition-list`, which needs that
-     keychain's password. I don't hold the Cowboy's login password.
-   - The new keychain's password is generated and stored in m-valor as
-     "Yudame signing keychain".
-   - It has no auto-lock (`set-keychain-settings` with no timeout), is
-     added to the user search list, and is imported with `-T
-     /usr/bin/codesign`, then given a partition list of `apple-tool:,apple:`.
-   - The .p12 is only ever written to `$TMPDIR` with mode 600 and is
-     deleted right after import.
-   - If Tom's directive to use the login keychain turns out to work without
-     a prompt (unlikely), use it instead and drop the extra keychain.
-3. **Notary profile `yudame-notary`.** `xcrun notarytool store-credentials
-   yudame-notary --key <p8> --key-id <id> --issuer <issuer>`, into the login
-   keychain, which is unlocked in the session. If that fails, pass
-   `--keychain` to the dedicated one. The .p8 temp file is deleted
-   afterwards.
-4. **Signed test build.** In `~/src/yudame-tools`, run
+1. **Agent doc first.** In `mac-app.md:42`, name the identity prefix
+   "Developer ID Application: Yudame, Inc.", the keychain
+   `~/Library/Keychains/yudame-signing.keychain-db`, and how to unlock it
+   after a reboot (`op read "op://m-valor/Yudame signing keychain/password" |
+   security unlock-keychain <path>`, which reads the password on stdin; this
+   was tested). Also name the `yudame-notary` profile. Only `op://`
+   references appear, never a value. Commit this, so the paragraph lands
+   even if the items never come.
+2. **Wait inside the turn, without re-stepping.**
+   - Poll `op item list --vault m-valor` for both titles, sleeping 9 minutes
+     per Bash call, for up to 48 hours.
+   - If either item is still missing after 48 hours, end with a delivery
+     that says the setup is unfinished and why, with the doc paragraph
+     merged. That is a status, not a new question.
+   - An idle turn is re-stepped with no delay and no bound, so ending a
+     turn to wait would loop.
+3. **Dedicated keychain, decided up front.**
+   - It is not the login keychain Tom named ("import the .p12 into Valor's
+     login keychain"). Headless codesign needs `set-key-partition-list`
+     with that keychain's password, and I don't hold the Cowboy's login
+     password. Without it, codesign raises a GUI prompt that would hang the
+     turn.
+   - Nothing is imported into the login keychain, not even as a trial.
+     This deviation is listed under Decisions in the delivery, quoting
+     Tom.
+   - Steps:
+     1. Generate a password and store it in m-valor as "Yudame signing
+        keychain".
+     2. Create the keychain and run `set-keychain-settings` with no timeout
+        and no lock on sleep.
+     3. Set the user search list explicitly to both keychains: `security
+        list-keychains -d user -s ~/Library/Keychains/login.keychain-db
+        ~/Library/Keychains/yudame-signing.keychain-db`. `-s` replaces the
+        list, so login stays first. Read the list back afterwards.
+     4. Import the .p12 with `-T /usr/bin/codesign`.
+     5. Set the partition list to `apple-tool:,apple:`.
+   - The .p12 is written only to `$TMPDIR`, mode 600, and deleted right
+     after import.
+4. **Notary profile `yudame-notary`**, stored in the dedicated keychain with
+   `notarytool store-credentials --keychain <path>`, after step 3 has put
+   that keychain on the search list. That is how `package.sh`'s
+   `--keychain-profile` finds it without a change. The .p8 temp file is
+   deleted afterwards.
+5. **Signed test build.** In `~/src/yudame-tools`, run
    `SIGN_IDENTITY="Developer ID Application: Yudame, Inc. (<TEAMID>)"
    NOTARY_PROFILE=yudame-notary tools/package.sh`. Copy the zip into this
-   workspace (`out/`, which is gitignored) for delivery.
-5. **Agent doc.** In `mac-app.md`'s signing paragraph, name the identity,
-   the keychain and how to unlock it (`security unlock-keychain -p "$(op
-   read ...)"` after a reboot), and the `yudame-notary` profile, so later
-   builds sign without rediscovering any of this. One paragraph, no new
-   mechanism.
+   workspace (`out/`, which is gitignored).
+
+**Secrets on argv.**
+- Wherever a tool reads a secret on stdin, it gets it there:
+  `unlock-keychain`, and the passwords for `create-keychain` and
+  `set-key-partition-list` when given no `-p` or `-k`.
+- `security import -P` and `notarytool --key-id/--issuer` take values on
+  argv. They are visible in `ps` for the moment the command runs, on a
+  single-user Mac.
+  - The .p12 password protects only a file that is deleted seconds later.
+  - The Key ID and Issuer ID are identifiers, not secrets. The .p8 is
+    passed as a path.
 
 ## Out of scope
 
@@ -81,15 +108,22 @@ Application: Yudame, Inc." (rule 5).
 - `codesign --verify --deep --strict` passes.
 - `notarytool` returns status Accepted. `xcrun stapler validate` passes.
 - Gatekeeper, as Tom's Mac will see it: unzip the delivered zip into a new
-  directory and add a `com.apple.quarantine` xattr. `spctl --assess --type
-  execute -vv` says "accepted, source=Notarized Developer ID". The app
-  launches (`open`, then `pgrep`), and is quit afterwards.
+  directory and add a `com.apple.quarantine` xattr. Then all of these pass
+  on that copy:
+  - `spctl --assess --type execute -vv` reports "accepted,
+    source=Notarized Developer ID";
+  - `xcrun stapler validate`;
+  - `syspolicy_check distribution`.
+  A quarantined launch waits for a click on screen, so the launch test
+  uses a copy without quarantine: `open`, `pgrep`, then quit.
 - Headless edge: lock the dedicated keychain, then unlock it the way the
-  agent doc says, and re-sign a scratch copy without any prompt. This shows
+  agent doc says (stdin), and re-sign a scratch copy without any prompt. This shows
   a build after a reboot works.
 - No secret escaped:
   - `git status` in both repos shows no .p12 or .p8;
   - `$TMPDIR` has no .p12 or .p8 left;
+  - `security list-keychains -d user` still lists login first, and
+    Claude Code still authenticates;
   - a grep of the build output for the .p12 password, the Key ID and the
     keychain password finds nothing.
 - The Valor suite passes, since the agent doc is in the repo.
