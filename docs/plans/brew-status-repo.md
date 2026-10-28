@@ -69,6 +69,10 @@ No signing identity on the Cowboy: builds are ad hoc.
    && tools/ship.sh valor-the-pirate valor-the-captain valor-the-bald`
    (ditto over ssh, relink CLI, reopen). Teammates: a new release zip,
    forwarded by Tom. No self-update.
+   Built instead (Tom, 2026-10-28): every Valor update installs or
+   updates it (`permissions.brew_status`: build from `~/src/brew-status`
+   with Swift 6.2, else the latest release's zip) and links `local.sh`
+   (`permissions.brew_status_local`); no `tools/ship.sh`.
 8. **Valor (this repo).** Delete `apps/`. `scripts/brew-status-local.sh`:
    vault Brewfile floor, vault `brew-unmanaged.txt` into `FROZEN`, Python
    restart, yudame plugins added and installed when missing and the
