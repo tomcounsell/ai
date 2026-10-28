@@ -37,8 +37,9 @@ It goes back to the vault job until yudame/yudame-tools#2 deploys.
 ## Build
 
 1. **Code** (`core/permissions.py`): remove `BREW_STATUS`, `brew_status`,
-   `brew_status_local`, the bundle-commit helper they use, their calls in
-   `ensure`, the docstring paragraph, and any imports left unused. Delete
+   `brew_status_local`, the helpers only they call (`_commit`, `_swift`),
+   their calls in `ensure`, the docstring paragraph, and the imports left
+   unused (`re`, `shutil`; `tempfile` and `plistlib` stay). Delete
    `scripts/brew-status-local.sh`. In `tests/test_permissions.py`, drop the
    Brew Status tests and the two monkeypatches. The `ensure` test keeps
    `com.valor.brew-nightly` (a bash job left alone), which is now the live
@@ -79,7 +80,10 @@ It goes back to the vault job until yudame/yudame-tools#2 deploys.
        substituted, and with `valor-run` first (Valor.app exists on all
        four);
      - `launchctl bootstrap`.
-   - Start one run with `launchctl kickstart` and watch
+   - Start one run with `launchctl kickstart` (the Pirate, the Captain and
+     the Bald first; the Cowboy last, after the commit and the #2 comment,
+     since a Python upgrade in the run restarts every running `com.valor.*`
+     job, this build's kernel among them) and watch
      `~/Library/Logs/brew-nightly.log`. It must reach `=== brew nightly
      update done ===` within about 20 minutes, through `valor-run`. A run
      that hangs is sampled, and a grant only a person at the Mac can give
@@ -93,11 +97,20 @@ It goes back to the vault job until yudame/yudame-tools#2 deploys.
 Packaging or deploying Yudame Tools (#2). `yudame/brew-status` stays
 archived as it is. The shared `~/Library/Logs/brew-nightly.log` is kept.
 
-## Risk
+## Risk: reinstall before the merge reaches each Mac
 
-If the merge has not landed by 03:00, that night's update reinstalls Brew
-Status. The delivery names the merge time. Removing it again is step 4's
-first bullet.
+`permissions.ensure` runs at the end of every rollout and on every
+up-to-date update check (`core/serve.py` `_setup`), so another task's
+merge or the 03:00 update before this one lands reinstalls the app,
+re-clones `~/src/brew-status` (Cowboy, Captain) and relinks `local.sh`.
+So the build removes Brew Status now, and once this merge's
+`rollout.ended` row is on each Mac, the post-merge check (step 6) runs
+again and removes anything that came back.
+
+6. **After the merge rolls out** (each Mac's `rollout.ended` for this
+   head): recheck `pgrep BrewStatus`, the six paths and `me.yuda.brew-status`
+   on all four, remove what came back, and record that check as the
+   delivery's live result. The build's own checks are provisional.
 
 ## Tests
 
@@ -107,7 +120,7 @@ first bullet.
   returns no `BrewStatus` entry.
 - `tests/test_bloat.py` and the full suite in a separate worktree, under 5
   minutes.
-- Live, per Mac, and in the delivery:
+- Live, per Mac, taken after this merge's rollout (step 6):
   - `pgrep BrewStatus` is empty;
   - none of the six paths exist;
   - `launchctl print gui/$UID/me.yuda.brew-status` fails;
