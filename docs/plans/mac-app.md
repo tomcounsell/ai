@@ -122,6 +122,8 @@ only plus Run now, no notifications. Built with `valor:mac-app`:
   it ([brew-status-repo.md](brew-status-repo.md)); the same day folded
   into Yudame Tools as its Homebrew Updates tool (Tom: one feature of
   Yudame Tools), yudame/brew-status archived, the deployment open in
-  yudame/yudame-tools#2.
+  yudame/yudame-tools#2; removed from Valor's four Macs the same day, the
+  vault job `com.valor.brew-nightly` back until then
+  ([brew-status-uninstall.md](brew-status-uninstall.md)).
 - Yudame Tools in github.com/yudame/yudame-tools (private), unsigned
   test build until the Developer ID certificate is in m-valor.
