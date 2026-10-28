@@ -140,7 +140,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    clone kept aside is moved whole, and the container runtime's images
    are removed. Data goes to
    `~/valor-retired/<date>`, never deleted. It leaves the caffeinate,
-   Brew Status (`me.yuda.brew-status`) and vault-sync jobs, `~/.zshenv`'s loader for
+   nightly Homebrew (`com.valor.brew-nightly`) and vault-sync jobs, `~/.zshenv`'s loader for
    `~/Desktop/Valor/zshenv.sh`, and other Postgres versions, which are the
    machine's, not the old system's.
 9. **The jobs.** First the voice models, once per Mac (about 1 GB:
@@ -190,29 +190,17 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    Subscriptions page, then reinstall it to Valor's account; the user
    token stays the same. The four apps were brought to the manifest
    (`reactions:read`, `canvases:write`, `reaction_added`) on 2026-10-27.
-   Brew Status (`yudame/brew-status`, the menu bar app that runs the
-   nightly Homebrew update) is not installed by hand either: every update
-   (`permissions.brew_status`) installs `~/Applications/BrewStatus.app`
-   when it is missing and replaces it when its `BrewStatusCommit` is
-   behind, reopening a running copy. A Mac with Swift 6.2 (Xcode 26)
-   pulls, or clones, `~/src/brew-status` and runs its `build.sh`; the
-   Pirate and the Bald download the latest release's `BrewStatus.zip`
-   (`gh release download`), so a change reaches them only once it is
-   released.
-   Brew Status's code moved into Yudame Tools on 2026-10-28 (its
-   Homebrew Updates tool, github.com/yudame/yudame-tools); the archived
-   `yudame/brew-status` still serves this step until the switch to Yudame
-   Tools, which is open in yudame/yudame-tools#2 (Tom: packaging and
-   deployment are part of a later Yudame Tools build). The update also links `~/.config/brew-status/local.sh` to
-   `scripts/brew-status-local.sh` (`permissions.brew_status_local`: the
-   vault's Brewfile floor and frozen list, the Python restart, the yudame
-   plugins). Its 04:00 job is set up once per Mac:
-   `brew-status setup --launcher ~/Applications/Valor.app/Contents/MacOS/valor-run`
-   (through Valor.app, which holds App Management; nobody is at the Mac
-   to answer the app's own question). A Mac still running the old
-   `com.valor.brew-nightly` first has it booted out and its plist and
-   `~/.local/bin/brew-nightly-update.sh` removed: two jobs at 04:00
-   would run brew twice at once. All four were switched on 2026-10-28.
+   The nightly Homebrew update is the vault's job, `com.valor.brew-nightly`
+   (04:00, `~/Desktop/Valor/brew/SETUP.md`), run through Valor.app, which
+   holds App Management; its install line is run once per Mac, and each
+   run keeps its own copy and plist current with the vault. Over ssh the
+   vault is not readable, so a remote Mac is installed by copying the
+   script to `~/.local/bin` and the plist, with its home, to
+   `~/Library/LaunchAgents` and bootstrapping it. Brew Status
+   (`yudame/brew-status`) ran it from 2026-10-28 morning and was removed
+   from all four Macs that day (Tom, Telegram 11762); Yudame Tools'
+   Homebrew Updates replaces this job once it is deployed
+   (yudame/yudame-tools#2).
    A kernel crash-looping after a rollout or an update: take the checkout
    back to the commit it rolled from (`from` on its `rollout.restarting`
    row), `git -C ~/src/ai reset --keep <from>`, then
@@ -225,8 +213,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
     `suite.ran` event of exit 0; a message in each chat the
     specs name gets 👀; a voice note sent to Valor reaches its session with
     a `transcript:` line and is answered with one that plays; `launchctl list | grep com.valor` lists only the
-    jobs of step 9 and caffeinate, and `launchctl list | grep me.yuda` lists
-    `me.yuda.brew-status`.
+    jobs of step 9, caffeinate and `com.valor.brew-nightly`.
 
 A Mac with no Telegram session or mailbox can run with only the local
 chat bridge ([bridges/local.md](bridges/local.md)).

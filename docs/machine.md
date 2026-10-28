@@ -248,10 +248,9 @@ scheduler, supervisor, or watchdog on the machine.
   the Mac ([rollout.md](rollout.md), step 9). Every update checks this
   (`permissions.ensure`): it builds a missing app, puts the launcher first
   in any `com.valor.*` job still running a bare Python, and reloads it.
-  It also keeps Brew Status (`yudame/brew-status`, the nightly Homebrew
-  job's menu bar app; archived, its code now Yudame Tools' Homebrew
-  Updates, the switch open in yudame/yudame-tools#2) installed and
-  current ([rollout.md](rollout.md), step 9).
+  The nightly Homebrew job (`com.valor.brew-nightly`, the vault's) runs
+  through it too, until Yudame Tools replaces it (yudame/yudame-tools#2;
+  [rollout.md](rollout.md), step 9).
 - **Stop is not `launchctl`.** Stopping a task is `python -m core stop`,
   which fences it in the database, revokes its gateway token, and kills the
   turn's process group. Unloading a LaunchAgent stops a service; it is not
