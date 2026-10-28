@@ -117,7 +117,8 @@ is connected; Chrome windows stack; Magnet's shortcuts copied; never force
 a window that won't resize; the tiler ships in "Yudame Tools", a menu-bar
 super app for team tools. Brew screen: each Mac its own runs, a CLI, view
 only plus Run now, no notifications. Built with `valor:mac-app`:
-- `apps/BrewStatus/` here (Valor's own Macs), installed on the Cowboy;
-  another Mac runs `./build.sh --open` there.
+- Brew Status, first in `apps/BrewStatus/` here; since 2026-10-28 a team
+  app in github.com/yudame/brew-status (private), the nightly job inside
+  it ([brew-status-repo.md](brew-status-repo.md)).
 - Yudame Tools in github.com/yudame/yudame-tools (private), unsigned
   test build until the Developer ID certificate is in m-valor.

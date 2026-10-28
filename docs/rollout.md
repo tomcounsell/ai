@@ -140,7 +140,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    clone kept aside is moved whole, and the container runtime's images
    are removed. Data goes to
    `~/valor-retired/<date>`, never deleted. It leaves the caffeinate,
-   brew-nightly and vault-sync jobs, `~/.zshenv`'s loader for
+   Brew Status (`me.yuda.brew-status`) and vault-sync jobs, `~/.zshenv`'s loader for
    `~/Desktop/Valor/zshenv.sh`, and other Postgres versions, which are the
    machine's, not the old system's.
 9. **The jobs.** First the voice models, once per Mac (about 1 GB:
@@ -198,14 +198,16 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    pulls, or clones, `~/src/brew-status` and runs its `build.sh`; the
    Pirate and the Bald download the latest release's `BrewStatus.zip`
    (`gh release download`), so a change reaches them only once it is
-   released. Its 04:00 job is set up once per Mac, at the switch from
-   `com.valor.brew-nightly`: copy `scripts/brew-status-local.sh` to
-   `~/.config/brew-status/local.sh`, `launchctl bootout $D/com.valor.brew-nightly`
-   and remove its plist, then
+   released. The update also links `~/.config/brew-status/local.sh` to
+   `scripts/brew-status-local.sh` (`permissions.brew_status_local`: the
+   vault's Brewfile floor and frozen list, the Python restart, the yudame
+   plugins). Its 04:00 job is set up once per Mac:
    `brew-status setup --launcher ~/Applications/Valor.app/Contents/MacOS/valor-run`
    (through Valor.app, which holds App Management; nobody is at the Mac
-   to answer the app's own question). Two jobs at 04:00 would run brew
-   twice at once.
+   to answer the app's own question). A Mac still running the old
+   `com.valor.brew-nightly` first has it booted out and its plist and
+   `~/.local/bin/brew-nightly-update.sh` removed: two jobs at 04:00
+   would run brew twice at once. All four were switched on 2026-10-28.
    A kernel crash-looping after a rollout or an update: take the checkout
    back to the commit it rolled from (`from` on its `rollout.restarting`
    row), `git -C ~/src/ai reset --keep <from>`, then
@@ -218,7 +220,8 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
     `suite.ran` event of exit 0; a message in each chat the
     specs name gets 👀; a voice note sent to Valor reaches its session with
     a `transcript:` line and is answered with one that plays; `launchctl list | grep com.valor` lists only the
-    jobs of step 9 and caffeinate and brew-nightly.
+    jobs of step 9 and caffeinate, and `launchctl list | grep me.yuda` lists
+    `me.yuda.brew-status`.
 
 A Mac with no Telegram session or mailbox can run with only the local
 chat bridge ([bridges/local.md](bridges/local.md)).

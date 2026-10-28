@@ -1,6 +1,7 @@
 """Valor.app (`core/permissions.py`): the launcher every launchd job runs through."""
 
 import importlib
+import os
 import plistlib
 import signal
 import subprocess
@@ -69,6 +70,7 @@ def test_every_routine_runs_through_the_launcher():
 
 def test_ensure_puts_every_python_job_on_the_launcher_and_reloads_its_own_last(exe, tmp_path, monkeypatch):
     monkeypatch.setattr(permissions, "brew_status", lambda fixed, failed: None)
+    monkeypatch.setattr(permissions, "brew_status_local", lambda fixed: None)
     jobs = {
         "com.valor.kernel": ["/opt/homebrew/bin/python3.14", "-m", "core.serve"],
         "com.valor.voice": ["/opt/homebrew/bin/python3.14", "-m", "tools.voice"],
@@ -334,3 +336,47 @@ def test_a_failed_build_is_reported(tmp_path):
     fixed, failed = [], []
     permissions.brew_status(fixed, failed, run, tmp_path)
     assert (fixed, failed) == ([], ["BrewStatus: build.sh: build failed"])
+
+
+def test_brew_status_local_freezes_the_vault_list_installs_the_floor_and_restarts_on_a_new_python(tmp_path):
+    """scripts/brew-status-local.sh as Brew Status's nightly.sh sources it."""
+    vault = tmp_path / "Desktop/Valor/brew"
+    vault.mkdir(parents=True)
+    (vault / "brew-unmanaged.txt").write_text("# frozen\nfigma\n\nkitty  # unused\n")
+    (vault / "Brewfile").write_text('cask "iterm2"\n')
+    py = tmp_path / "src/ai/.venv/bin"
+    py.mkdir(parents=True)
+    (tmp_path / "py1").touch(), (tmp_path / "py2").touch()
+    (py / "python").symlink_to(tmp_path / "py1")
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    for name, body in {
+        "brew": 'echo "brew $*"',
+        "launchctl": 'if [ "$1" = list ]; then printf "1\\t0\\tcom.valor.kernel\\n-\\t0\\tcom.valor.idle\\n"; else echo "launchctl $*"; fi',
+    }.items():
+        (bin_ / name).write_text(f"#!/bin/bash\n{body}\n")
+        (bin_ / name).chmod(0o755)
+    script = ROOT / "scripts/brew-status-local.sh"
+    swap = f"ln -sfn {tmp_path}/py2 {py}/python"
+    done = subprocess.run(
+        ["/bin/bash", "-c", f'log() {{ echo "$*"; }}; FROZEN=(x); source {script}; echo "frozen: ${{FROZEN[*]}}";'
+         f" before_upgrades; after_formulae; {swap}; after_formulae"],
+        env={"HOME": str(tmp_path), "PATH": f"{bin_}:/usr/bin:/bin"}, capture_output=True, text=True,
+    )  # fmt: skip
+    out = done.stdout.splitlines()
+    assert "frozen: x figma kitty" in out
+    assert f"brew bundle install --file {vault}/Brewfile --no-upgrade" in out
+    assert out.count(f"launchctl kickstart -k gui/{os.getuid()}/com.valor.kernel") == 1
+    assert not any("com.valor.idle" in line for line in out)
+
+
+def test_brew_status_local_links_to_this_checkouts_script_once(tmp_path):
+    local = tmp_path / ".config/brew-status/local.sh"
+    local.parent.mkdir(parents=True)
+    local.write_text("# an old copy\n")
+    fixed = []
+    permissions.brew_status_local(fixed, tmp_path)
+    assert fixed == ["BrewStatus: local.sh"]
+    assert local.readlink() == ROOT / "scripts/brew-status-local.sh"
+    permissions.brew_status_local(fixed, tmp_path)
+    assert fixed == ["BrewStatus: local.sh"]

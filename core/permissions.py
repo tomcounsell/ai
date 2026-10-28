@@ -35,8 +35,10 @@ Mac whose Swift builds it (6.2, Xcode 26) pulls `~/src/brew-status`,
 cloning it when missing, and runs its `build.sh` when the app's
 `BrewStatusCommit` is not the checkout's; any other Mac (the Pirate, the
 Bald) downloads the latest release's `BrewStatus.zip` and installs it when
-its commit differs. A copy that was running is reopened. Setting up its
-04:00 job is the migration's (`docs/rollout.md`), not this.
+its commit differs. A copy that was running is reopened. Its job's Valor
+part, `~/.config/brew-status/local.sh`, is a link to this checkout's
+`scripts/brew-status-local.sh`. Setting up its 04:00 job is the
+migration's (`docs/rollout.md`), not this.
 """
 
 import ctypes
@@ -110,6 +112,7 @@ def ensure(
         fixed.append(exe.parents[2].name)
     slack(agents, reload, fixed, failed)
     brew_status(fixed, failed)
+    brew_status_local(fixed)
     jobs = sorted(agents.glob("com.valor.*.plist"), key=lambda p: p.stem == own)
     for plist in jobs:
         job = plistlib.loads(plist.read_bytes())
@@ -224,6 +227,18 @@ def brew_status(
     if running:
         run(["pkill", "-x", "BrewStatus"], capture_output=True)
         run(["open", str(app)], capture_output=True)
+
+
+def brew_status_local(fixed: list[str], home: Path | None = None) -> None:
+    """Brew Status's `local.sh` links to this checkout's script (module docstring)."""
+    local = (home or Path.home()) / ".config/brew-status/local.sh"
+    script = ROOT / "scripts/brew-status-local.sh"
+    if local.is_symlink() and local.readlink() == script:
+        return
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.unlink(missing_ok=True)
+    local.symlink_to(script)
+    fixed.append("BrewStatus: local.sh")
 
 
 def _commit(app: Path) -> str:
