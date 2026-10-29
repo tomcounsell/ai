@@ -53,7 +53,7 @@ behaviour, not the classifiers.
 
 ## Done
 
-The proving ground is Eng: Wingtip Flowers with Rain, on the Pirate (Tom,
+The proving ground is Eng: Wingtip Flowers with Robin, on the Pirate (Tom,
 2026-10-16), so the Pirate rolls out once steps 1 to 4 are in. Tom has a
 teamwork session there on the new kernel; he judges it as good as Eng: Fabrikam or better, recorded with
 the date (rule 5). Then the Captain and the Bald roll out.

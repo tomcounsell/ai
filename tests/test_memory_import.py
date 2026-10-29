@@ -145,7 +145,7 @@ def test_prep_chooses_maps_and_collapses(tmp_path, prep, monkeypatch):
         ),
         rec("monday2", monday, agent="Jordan", project="northwind"),
         rec("tom", near),
-        rec("jess", near + " today", agent="Jess"),
+        rec("jamie", near + " today", agent="Jamie"),
         rec("lost", "nobody knows where this goes", source="agent", agent=None, project=None),
     ]
     a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
@@ -161,7 +161,7 @@ def test_prep_chooses_maps_and_collapses(tmp_path, prep, monkeypatch):
     assert (rows["northwind"]["project"], rows["northwind"]["client"], rows["northwind"]["by"]) == (
         "https://example.test/northwind.git", "northwind", "valor",
     )  # fmt: skip
-    assert (rows["tom"]["by"], rows["tom"]["text"], rows["tom"]["merged_from"]) == ("tom", near, ["jess"])
+    assert (rows["tom"]["by"], rows["tom"]["text"], rows["tom"]["merged_from"]) == ("tom", near, ["jamie"])
     assert rows["tom"]["project"] == "unused"
     report = (tmp_path / "out/report.md").read_text()
     for stage in ("| read | 9 |", "| knowledge skipped | 1 |", "| superseded skipped | 1 |",

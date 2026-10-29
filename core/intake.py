@@ -428,6 +428,10 @@ HISTORY = 20
 # Valor's engineering room is the valor spec's `update_chat`: the one chat
 # where a message updates this Mac (Tom's grant, docs/plans/update.md; guard
 # `update.room`).
+# Until every Mac's private valor spec names it (a Mac on older code refuses
+# the key), the room it had in code; this goes in stage 2b
+# (docs/plans/private-projects.md).
+UPDATE_CHAT = "telegram:-1003449100931"
 UPDATE_COMMAND = re.compile(r"/update(@\w+)?")
 # The stream of every update request and its `rollout.*` rows.
 UPDATES = "updates"
@@ -631,7 +635,9 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         team = _project_for(p)
     if team is not None:
         text = (p.get("text") or "").strip()
-        if f"{p['channel']}:{p['chat_id']}" == team.update_chat and UPDATE_COMMAND.fullmatch(text):
+        if f"{p['channel']}:{p['chat_id']}" == (team.update_chat or UPDATE_CHAT) and UPDATE_COMMAND.fullmatch(
+            text
+        ):
             as_ = await _bound(conn, p, None, "update")
             by = "tom" if _from_operator(p) else (p.get("sender_name") or p["sender_id"])
             reply = {"channel": p["channel"], "chat_id": p["chat_id"], "message_id": p["message_id"]}

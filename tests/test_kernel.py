@@ -681,7 +681,7 @@ def test_in_a_slack_mentions_chat_valors_own_tag_or_a_reply_in_his_thread_wakes_
     async def say(text, ts, **kw):
         inbound = intake.Inbound(
             channel="slack", chat_id=chat, chat_kind="group", message_id=ts, sender_id="T0ABC/ULEWIS",
-            sender_name="Lewis", sent_at="2026-10-23T11:00:00Z", text=slack_inbound.named(text, "UVALOR"), **kw,
+            sender_name="Logan", sent_at="2026-10-23T11:00:00Z", text=slack_inbound.named(text, "UVALOR"), **kw,
         )  # fmt: skip
         async with await db.connect(dsn) as conn:
             got = await intake.receive(conn, inbound)
@@ -1281,7 +1281,7 @@ def team(tmp_path):
         yield
 
 
-async def said(dsn, text, *, chat=GROUP, sender=RAIN, name="Rain", reply_to=None, kind="group") -> dict:
+async def said(dsn, text, *, chat=GROUP, sender=RAIN, name="Robin", reply_to=None, kind="group") -> dict:
     """A Telegram message, in a group unless `kind` says, received and
     bound: its binding."""
     mid = str(uuid.uuid4().int % 10**9)
@@ -1334,7 +1334,7 @@ def test_a_team_chat_has_one_chat_session_and_every_message_reaches_it(dsn, team
     assert "): morning all" in b.instruction
     steered = [r["payload"] for r in rows if r["type"] == "message.steered"]
     assert [(p["provenance"]["by"], p["text"]) for p in steered] == [
-        ("Rain", "the florist page 500s on mobile"), ("Kim", "valor can you look?"),
+        ("Robin", "the florist page 500s on mobile"), ("Kim", "valor can you look?"),
     ]  # fmt: skip
 
 
@@ -1357,7 +1357,7 @@ def test_in_a_mentions_chat_only_a_message_naming_valor_wakes_the_session(dsn, t
     assert (
         prompt.index("lunch at noon?") < prompt.index("valorous effort") < prompt.index("Valor, what broke?")
     )
-    assert "Rain (message " in prompt
+    assert "Robin (message " in prompt
 
 
 def test_someone_elses_dm_a_spec_lists_is_a_chat_every_message_of_theirs_wakes(dsn, team):
@@ -1555,7 +1555,7 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
             b = await tasks.brief(conn, session_id)
         start, answer, _, stop = chat_tasks.performers(b, dsn)
         made = await start.perform(
-            broker.Action("task.start", "work", {"instruction": "Bump stripe", "by": "Rain"}), "k1"
+            broker.Action("task.start", "work", {"instruction": "Bump stripe", "by": "Robin"}), "k1"
         )
         child = made["task_id"]
         async with await db.connect(dsn) as conn:
@@ -1567,7 +1567,7 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
             refused = await answer.refuse(conn, broker.Action("task.answer", session_id, {"text": "x"}))
         await answer.perform(broker.Action("task.answer", child, {"text": "v12", "by": "Kim"}), "k2")
         found = await start.lookup(broker.Action("task.start", "work", {}), "k1")
-        await stop.perform(broker.Action("task.stop", child, {"why": "not now", "by": "Rain"}), "k3")
+        await stop.perform(broker.Action("task.stop", child, {"why": "not now", "by": "Robin"}), "k3")
         return session_id, child, cb, refused, found, *[await rows_of(dsn, t) for t in (session_id, child)]
 
     session_id, child, cb, refused, found, parent_rows, child_rows = run(go())
@@ -1575,7 +1575,7 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
     assert cb.parent_id == session_id and cb.project == {"name": "flowers", "chat": "telegram:-1001"}
     assert found == {"task_id": child}
     (started,) = [r["payload"] for r in child_rows if r["type"] == "task.started"]
-    assert started["provenance"]["by"] == "Rain"
+    assert started["provenance"]["by"] == "Robin"
     reported = [p["kind"] for p in bridges.typed(parent_rows, "child.reported") if p["child_id"] == child]
     assert reported == ["question", "credential"]
     assert not [r for r in child_rows if r["type"] == "notice.requested"]

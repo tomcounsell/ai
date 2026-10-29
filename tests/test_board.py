@@ -43,7 +43,7 @@ def channel() -> str:
 async def say(dsn, chat, text, ts, *, sender="T0ABC/ULEWIS", **kw) -> dict:
     """A message in a team chat, received and bound."""
     inbound = intake.Inbound(channel="slack", chat_id=chat, chat_kind="group", message_id=ts, sender_id=sender,
-                             sender_name="Lewis", sent_at="2026-10-27T03:00:00Z", text=text, **kw)  # fmt: skip
+                             sender_name="Logan", sent_at="2026-10-27T03:00:00Z", text=text, **kw)  # fmt: skip
     async with await db.connect(dsn) as conn:
         got = await intake.receive(conn, inbound)
         await intake.bind(conn)
@@ -321,7 +321,7 @@ class Wire(SimpleNamespace):
     user_id = "UVALOR"
 
     async def user_name(self, user):
-        return "Lewis" if user == "ULEWIS" else "Tom Counsell"
+        return "Logan" if user == "ULEWIS" else "Tom Counsell"
 
 
 def reacted(user="UTOM", item_user="UVALOR", channel_id="C0TEAM", name="+1", ts="1793071000.000100"):

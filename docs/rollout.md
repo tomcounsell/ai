@@ -165,7 +165,8 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    and `core routine NAME` for each routine, `update` and `invoices` included (a `task` routine starts work only on the Mac its project is placed on, so it is installed on every Mac): `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
    `core serve`'s also needs `VALOR_OPERATOR_CHANNEL=slack` and
-   `VALOR_OPERATOR_CHAT=T0D654H7PPX/U0B9THUG5DN` (Tom's Slack DM) on every
+   `VALOR_OPERATOR_CHAT=<team>/<Tom's id>` (Tom's Slack DM, as the private
+   `valor.toml` in `~/Desktop/Valor/projects/` lists it) on every
    Mac, or its update-failure notices go nowhere (the Pirate, the Captain
    and the Bald ran without them until 2026-10-27); only the Mac whose spec
    lists the DM opens a session there. The bridges' jobs do not take them.

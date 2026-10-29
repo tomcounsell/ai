@@ -49,8 +49,8 @@ on a `Merge` and does not change. The dashboard (`python -m ui`, port 8790) has 
    services restarted, or the failed step. A hold is silent (`:612-615`) and the kernel may be down,
    so after 900 s `--wait` exits 1 ("still open: held, or no kernel"), writing nothing.
 4. **`/update` in Valor's engineering room.** In `_bind` (`core/intake.py:599-603`), in `if team is
-   not None:` before `_chat`, a message in `UPDATE_CHAT = "telegram:-1009417593398"`
-   (`projects/valor.toml:36`) fully matching `/update(@\w+)?` is `_bound(p, None, "update")` and a
+   not None:` before `_chat`, a message in Valor's engineering room (since
+   2026-10-29 the private valor spec's `update_chat`, docs/plans/private-projects.md) fully matching `/update(@\w+)?` is `_bound(p, None, "update")` and a
    `request_update` with `via` and `reply` `{channel, chat_id, message_id}`; one sent while a request
    is open joins it, unreplied (accepted). Any verified member may (Tom, 2026-10-20): `team_spec`
    (`:409-418`) checks verified, chat kind, not Tom's own chat. Hard-coded: `Spec` has no field

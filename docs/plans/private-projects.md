@@ -58,6 +58,11 @@ session says "go" (`merged` takes `feedback`). Stage 3 is no merge (below).
    `yudame/skills`, `yudame/yuda.me`), Tom's and Valor's names, and bare
    common words (a spec named after one is matched only in its client
    context). Merge; confirm each Mac. Redeploy `site/` if it changed.
+   **2a/2b.** `/update`'s room moves from a constant in `core/intake.py` to
+   the valor spec's `update_chat`. Older code refuses an unknown spec key,
+   so 2a binds on `update_chat`, else the constant; once every Mac runs 2a,
+   `update_chat` goes into the private `valor.toml`; 2b removes the
+   constant, the last listed string in the tree.
 3. **Rewrite history.** Install `git-filter-repo`. **Backup:** `git clone
    --mirror` of GitHub with `refs/pull/*`, recording each kept ref's
    pre-filter sha, as a verified bundle in
@@ -122,3 +127,11 @@ path; tests that pinned real specs pass on fixtures; the persona and site still
 name Valor and Yudame. Stage 3 (scripted, not suite): tree equality, `git
 bundle verify`, the heads-and-tags list, the post-push heads-and-tags scan, each Mac's `/update`
 ending `done` with no restart. Full suite each stage.
+
+## Confirmations
+
+Stage 1, 2026-10-29 12:22-12:27 +07: the Cowboy on 6fdbc926c, the Pirate,
+Captain and Bald updated to 184f0588a; on each, kernel and bridges running
+and connected, all 14 specs listed from the private folder by the kernel's
+Python under Valor.app, and the folder identical to the checkout's
+`projects/`.

@@ -81,7 +81,7 @@ from valor@yuda.me (rule 5; the live check waits on Tom's token).
    `python3 -m py_compile .claude/skills/yudame-invoice/render_invoice.py`)
    and, in `SKILL.md` ("Northwind"), the replacement for its steps 10-11: after
    Tom approves the PDF, `create` with customer someone@client.example, cc
-   jordan@, jess@, someone@client.example, then `notice` from valor@yuda.me instead
+   jordan@, jamie@, someone@client.example, then `notice` from valor@yuda.me instead
    of the Gmail draft from tom@yuda.me. The delivery asks the chat session
    to start the work-vault task that pastes it in.
 4. **Docs.** `docs/machine.md` Keychain: the "a turn holds none" passage

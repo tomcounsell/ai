@@ -556,10 +556,22 @@ async def posted(dsn, text: str, chat: str = ROOM) -> dict:
     return bound | {"message_id": mid}
 
 
+def test_until_the_spec_names_update_chat_the_old_room_still_updates(fresh, tmp_path):
+    """Stage 2a (docs/plans/private-projects.md): a valor spec without
+    `update_chat` keeps the room the code named."""
+    room = intake.UPDATE_CHAT.partition(":")[2]
+    with bridges.operator(tmp_path):
+        (Path(settings.projects_dir) / "valor.toml").write_text(
+            bridges.VALOR_SPEC + f'chats = ["telegram:{room}"]\n'
+        )
+        assert run(posted(fresh, "/update", room))["as"] == "update"
+
+
 def test_update_in_the_engineering_room_is_a_request_and_one_reply(fresh, tmp_path):
     with bridges.operator(tmp_path):
         (Path(settings.projects_dir) / "valor.toml").write_text(
-            bridges.VALOR_SPEC + f'chats = ["telegram:{ROOM}", "telegram:-1001"]\nupdate_chat = "telegram:{ROOM}"\n'
+            bridges.VALOR_SPEC
+            + f'chats = ["telegram:{ROOM}", "telegram:-1001"]\nupdate_chat = "telegram:{ROOM}"\n'
         )
         first = run(posted(fresh, " /update "))
         second = run(posted(fresh, "/update@valorengels_bot"))
@@ -754,7 +766,9 @@ def test_an_update_reports_each_bridges_state_waiting_for_one_it_installed(fresh
             await coming
         for c in [telegram, *late]:
             await c.close()
-        (ended,) = [r for r in typed(await rows(fresh, intake.UPDATES), "rollout.ended") if r["effect_id"] == request]
+        (ended,) = [
+            r for r in typed(await rows(fresh, intake.UPDATES), "rollout.ended") if r["effect_id"] == request
+        ]
         return ended["bridges"]
 
     came, never = run(update(True)), run(update(False))

@@ -331,7 +331,7 @@ def test_steering_taken_mid_build_no_longer_holds_a_passing_join():
 
 
 def said(kind, mid, text):
-    return (kind, {"received_id": f"r{mid}", "message_id": mid, "sender_name": "Rain", "text": text})
+    return (kind, {"received_id": f"r{mid}", "message_id": mid, "sender_name": "Robin", "text": text})
 
 
 def test_a_chat_turn_is_given_the_heard_lines_with_the_steer_and_its_next_prompt_skips_them():
