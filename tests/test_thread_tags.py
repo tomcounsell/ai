@@ -167,9 +167,14 @@ def test_a_session_reads_two_live_threads_by_their_tags_and_each_send_by_where_i
 def test_a_slack_send_into_a_thread_found_by_its_root_in_the_ledger(dsn):
     async def go():
         async with await db.connect(dsn) as conn:
-            await ledger.append(
-                conn, "slack", "message.received", {"chat_id": CHAT, "message_id": "1.5", "topic_id": "1.0"}
-            )
+            # A real received reply, bound like any other, so later tests' binds find nothing left over.
+            reply = intake.Inbound(
+                channel="slack", chat_id=CHAT, chat_kind="group", message_id="1.5", sender_id="T1/U2",
+                sender_name="Robin", sent_at="2026-10-29T07:41:00+00:00", text="photos", reply_to="1.0",
+                topic_id="1.0",
+            )  # fmt: skip
+            await intake.receive(conn, reply)
+            await intake.bind(conn)
             rows = [
                 {
                     "type": "message.heard",
