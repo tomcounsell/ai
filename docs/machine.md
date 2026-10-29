@@ -295,6 +295,12 @@ on 2026-10-26, `op vault list` showed only `m-valor`, `Valor env` and
 for the 1Password app to unlock, which a turn can't do. So a turn uses the
 sessions Tom signs in, and a login it must read goes into `m-valor`.
 
+The project specs are private too, though not secret: they name the
+clients, their chats and their people, and the repository is public. They
+live in `~/Desktop/Valor/projects/`, synced to every Mac by iCloud, and
+the processes Valor.app starts read them under its Full Disk Access; an ssh
+session cannot ([projects/README.md](../projects/README.md)).
+
 | Secret | Read by | Today |
 |---|---|---|
 | The Anthropic credential for frontier turns | The gateway, which sets it on every call; a turn carries only a placeholder, since it runs with its own Claude Code config directory | `claude-token` in the kernel key directory (a long-lived token from `claude setup-token`) when present; otherwise Claude Code's own login, read from the Keychain through `/usr/bin/security`, which lasts about eight hours and is refreshed only by Claude Code sessions on the default config directory |

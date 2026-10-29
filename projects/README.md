@@ -3,6 +3,24 @@
 Project specs: one TOML file per repository the kernel provisions
 workspaces for (`python -m core start ... --project NAME`).
 
+**Where the real specs live.** The real specs name Tom's clients, their
+repositories, chats and people, and this repository is public, so they live
+in `~/Desktop/Valor/projects/` (the iCloud folder every Mac syncs), the
+default `projects_dir`; `VALOR_PROJECTS` overrides it. While the Macs move
+there, the default folder falls back to this directory for a name it lacks
+or cannot list (`workspace.spec_dirs`); this directory's copies then go
+([private-projects.md](../docs/plans/private-projects.md)).
+
+- **Editing a spec** is a turn editing `~/Desktop/Valor/projects/NAME.toml`
+  in place, loading the edited file with the loader
+  (`workspace.Spec.load("<path>")`, or `python -m core start --project
+  <path>`), and putting the diff and that result in its delivery. Nothing
+  versions the folder and no merge reviews a spec.
+- **Over ssh** the folder cannot be read (`~/Desktop` is a privacy-protected
+  folder and sshd holds no grant; Valor.app's Full Disk Access is what lets
+  the launchd jobs and turns read it), so a command that reads a spec
+  runs on the Mac through a chat or a turn.
+
 ## Scope
 
 - What the kernel needs to make a task's workspace runnable and to check
@@ -71,8 +89,8 @@ provisioning) and [docs/harnesses.md](../docs/harnesses.md) (the workspace).
 
 ## Imports
 
-- Read by: `core/workspace.py` (`Spec.load`), through the `projects_dir`
-  setting.
+- Read by: `core/workspace.py` (`Spec.load`, `Spec.all`), through the
+  `projects_dir` setting.
 
 ## Not here
 

@@ -65,7 +65,7 @@ from pathlib import Path
 from typing import Any
 
 from core import binaries, channels, credentials, git, runs
-from core.settings import settings
+from core.settings import PRIVATE_PROJECTS, settings
 
 KINDS = ("python-uv", "django", "node", "plain")
 SERVICES = ("postgres", "redis")
@@ -239,10 +239,15 @@ class Spec:
 
     @classmethod
     def all(cls) -> list[Spec]:
-        """Every project spec in `settings.projects_dir`, by name. A spec
-        that does not load is left out; `start` names its error."""
+        """Every project spec in the spec folders, by name, the first
+        folder's copy winning. A spec that does not load is left out;
+        `start` names its error."""
+        paths: dict[str, Path] = {}
+        for folder in spec_dirs():
+            for path in sorted(folder.glob("*.toml")):
+                paths.setdefault(path.stem, path)
         found = []
-        for path in sorted(Path(settings.projects_dir).glob("*.toml")):
+        for _, path in sorted(paths.items()):
             try:
                 found.append(cls.load(str(path)))
             except Refused:
@@ -259,7 +264,8 @@ class Spec:
     def load(cls, name_or_path: str) -> Spec:
         path = Path(name_or_path)
         if not path.suffix:
-            path = Path(settings.projects_dir) / f"{name_or_path}.toml"
+            candidates = [folder / f"{name_or_path}.toml" for folder in spec_dirs()]
+            path = next((p for p in candidates if p.is_file()), candidates[0])
         try:
             raw = tomllib.loads(path.read_text())
         except FileNotFoundError:
@@ -267,6 +273,18 @@ class Spec:
         except tomllib.TOMLDecodeError as exc:
             raise Refused(f"{path}: {exc}") from None
         return cls.from_dict(raw)
+
+
+REPO_PROJECTS = Path(__file__).resolve().parent.parent / "projects"
+
+
+def spec_dirs() -> list[Path]:
+    """Where specs are read, first wins: `settings.projects_dir`, and, while
+    the Macs move to the private folder and only when it is the default,
+    the repository's own `projects/` for a name it lacks or cannot list
+    (docs/plans/private-projects.md, stage 1)."""
+    own = Path(settings.projects_dir)
+    return [own, REPO_PROJECTS] if own == Path(PRIVATE_PROJECTS) else [own]
 
 
 # -- paths --------------------------------------------------------------------------

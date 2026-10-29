@@ -83,6 +83,10 @@ os.environ["VALOR_WORK"] = tempfile.mkdtemp(prefix="valor-test-work-")
 atexit.register(shutil.rmtree, os.environ["VALOR_WORK"], True)
 os.environ["VALOR_PERFORMING_DIR"] = tempfile.mkdtemp(prefix="valor-test-performing-")
 atexit.register(shutil.rmtree, os.environ["VALOR_PERFORMING_DIR"], True)
+# An empty projects folder of the run's own, so the suite never reads or
+# writes the private one (`settings.PRIVATE_PROJECTS`).
+os.environ["VALOR_PROJECTS"] = tempfile.mkdtemp(prefix="valor-test-projects-")
+atexit.register(shutil.rmtree, os.environ["VALOR_PROJECTS"], True)
 # A bridge the tests run under `serve` answers history reads on a port the
 # OS chooses, never the live bridges' (`core.bridge.reads`).
 os.environ["VALOR_TELEGRAM_READ_PORT"] = os.environ["VALOR_SLACK_READ_PORT"] = "0"

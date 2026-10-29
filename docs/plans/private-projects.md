@@ -65,7 +65,10 @@ session says "go" (`merged` takes `feedback`). Stage 3 is no merge (below).
    (#3670, #3656, #3593, all same-repo). Kept and rewritten: `main`, the 3
    PR heads, `old-system`, any branch of a running task. Deleted: every other
    branch (merged or stale). **Filter** a fresh mirror: drop every historic
-   path of real specs and old project configs; `--replace-text` and
+   path of real specs and old project configs, and every historic path of
+   `_archive_/settings/local.py` (from c4bf48293, 2022-01-29, and its moves
+   such as 21e44252c), which holds a real OpenAI API key (Valor's secret
+   scan, 2026-10-29; the key is never printed); `--replace-text` and
    `--replace-message` from the list. Check filtered `main`'s tree equals
    today's; then commit `CLAUDE.md`'s new `old-system` sha onto filtered
    `main` in the mirror. **Stop and ask** the chat session
@@ -95,7 +98,7 @@ session says "go" (`merged` takes `feedback`). Stage 3 is no merge (below).
    to its local bare origin, `core/workspace.py:824`); such tasks are listed
    and restarted on the new `main`.
 4. **Report what stays exposed**: first `refs/pull/*` and closed PR diffs
-   (1,262 refs), then the 13 forks, commits reachable by old sha, issue and PR bodies, the
+   (1,262 refs; naming any PR that carried the key file), then the 13 forks, commits reachable by old sha, issue and PR bodies, the
    deployed site, existing clones. Each with a recommendation, and what GitHub
    Support must purge, which Tom must ask for as owner (Valor has push only).
 

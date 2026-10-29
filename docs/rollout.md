@@ -38,11 +38,15 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
 
 ## Before the day
 
-- **The Mac's projects have specs** in `projects/`, each with `machine` set
-  to this Mac's name and `chats` taken from the old system's routing
-  (`~/Desktop/Valor/projects.json`; over SSH its copy
-  `~/src/ai/data/projects.last_known_good.json`), merged to `main`. A chat
-  the old system read and no spec names is a chat nobody reads after step 7.
+- **The Mac's projects have specs** in `~/Desktop/Valor/projects/` (the
+  private, synced folder; [projects/README.md](../projects/README.md)), each
+  with `machine` set to this Mac's name and `chats` taken from the old
+  system's routing (`~/Desktop/Valor/projects.json`; over SSH its copy
+  `~/src/ai/data/projects.last_known_good.json`). A chat the old system read
+  and no spec names is a chat nobody reads after step 7.
+- **The folder has synced** to this Mac, and Valor.app holds Full Disk
+  Access (step 9) before the bridges start: without both, the kernel and
+  bridges read none of its specs.
 - **Valor can push** to each repo: `gh api repos/OWNER/REPO --jq .permissions.push`.
 
 ## Steps

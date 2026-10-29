@@ -22,6 +22,9 @@ from core import channels
 
 # Valor's own plugin, in the kernel's checkout (docs/plans/orchestration.md).
 VALOR_PLUGIN = str(Path(__file__).resolve().parent.parent / "skills" / "valor")
+# The real project specs: private, in the iCloud folder every Mac syncs, not
+# in the public repository (docs/plans/private-projects.md).
+PRIVATE_PROJECTS = str(Path.home() / "Desktop" / "Valor" / "projects")
 
 
 def _env(name: str, default: str) -> str:
@@ -422,11 +425,7 @@ class Settings:
     # -- kernel workspaces: one directory per task, outside ~/src (which the
     # turn sandbox denies); project specs; per-task service ports ----------
     work_dir: str = field(default_factory=lambda: _env("VALOR_WORK", str(Path.home() / "valor-tasks")))
-    projects_dir: str = field(
-        default_factory=lambda: _env(
-            "VALOR_PROJECTS", str(Path(__file__).resolve().parent.parent / "projects")
-        )
-    )
+    projects_dir: str = field(default_factory=lambda: _env("VALOR_PROJECTS", PRIVATE_PROJECTS))
     pg_ports: tuple[int, int] = field(default_factory=lambda: _span("VALOR_PG_PORTS", "5440-5599"))
     redis_ports: tuple[int, int] = field(default_factory=lambda: _span("VALOR_REDIS_PORTS", "6400-6499"))
     # How many turns (or checks) run at once on this machine (`core/slot.py`).
