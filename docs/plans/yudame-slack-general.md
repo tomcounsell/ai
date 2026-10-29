@@ -47,7 +47,7 @@ route for teamwork on general yudame business things".
 
 ## Out of scope
 
-#all-yudame (C0B5YQEFG3Z); moving the Yudame project to the Cowboy; a
+#all-yudame (C0K7RM2TQ4X); moving the Yudame project to the Cowboy; a
 second workspace; any hard lock on engineering in the chat (no incident;
 the room description carries the rule, as for every team chat).
 

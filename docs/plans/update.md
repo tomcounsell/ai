@@ -50,11 +50,11 @@ on a `Merge` and does not change. The dashboard (`python -m ui`, port 8790) has 
    so after 900 s `--wait` exits 1 ("still open: held, or no kernel"), writing nothing.
 4. **`/update` in Valor's engineering room.** In `_bind` (`core/intake.py:599-603`), in `if team is
    not None:` before `_chat`, a message in Valor's engineering room (since
-   2026-10-29 the private valor spec's `update_chat`, docs/plans/private-projects.md) fully matching `/update(@\w+)?` is `_bound(p, None, "update")` and a
+   2026-10-29 the private valor spec's `update_chat`, else `intake.UPDATE_CHAT` until stage 2b, docs/plans/private-projects.md) fully matching `/update(@\w+)?` is `_bound(p, None, "update")` and a
    `request_update` with `via` and `reply` `{channel, chat_id, message_id}`; one sent while a request
    is open joins it, unreplied (accepted). Any verified member may (Tom, 2026-10-20): `team_spec`
-   (`:409-418`) checks verified, chat kind, not Tom's own chat. Hard-coded: `Spec` has no field
-   naming a room's job (rules 4, 8). Each Mac has its own kernel database, so only the Mac whose
+   (`:409-418`) checks verified, chat kind, not Tom's own chat. Hard-coded until 2026-10-29, when
+   the room left the public code for the spec's `update_chat` field. Each Mac has its own kernel database, so only the Mac whose
    bridge owns that chat gets it; the others update by routine or Claude Code. Each wake `roll`
    first selects in SQL the ended requests with `reply` and no `notice.requested` with `about_key =
    'update:' || id`, and sends each `notices.request(conn, "updates", kind="update",
