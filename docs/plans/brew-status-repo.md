@@ -10,7 +10,7 @@ the four Macs the same day (Tom, Telegram 11762); they run the vault job
 `com.valor.brew-nightly` until then ([brew-status-uninstall.md](brew-status-uninstall.md)).
 
 Tom, Telegram 11748/11750/11751 (2026-10-28), answers to six questions the
-same day (all defaults). For Tom, Charlie and Thabi as much as for Valor: a
+same day (all defaults). For Tom, Avery and Taylor as much as for Valor: a
 nice install, a first launch that sets up the nightly update itself, plain
 words for amber and red. Done when Tom opens the repo and the app on the Mac
 he walks over to still shows its last run.

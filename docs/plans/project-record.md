@@ -50,7 +50,7 @@ Valor about Agent Builders) and Valor answers from the record.
    Brief gets none. Each session writes only its own memory.
 
 5. **Specs (Tom, 2026-10-24, 10-25).** Each DM in its project's `chats`
-   with a teammate-scope room: valor keeps Kevin; Charlie (room rewritten)
+   with a teammate-scope room: valor keeps Riley; Avery (room rewritten)
    and Logan Pratt to fabrikam; Taylor Ellis to litware (room
    rewritten; unanswered until LITWARE has a Mac); Jordan, Jamie Moss, Harper
    to northwind; Morgan Byrd to orbit-os. Removed: Max Reed, Alex Marsh,

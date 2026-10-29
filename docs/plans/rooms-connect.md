@@ -42,10 +42,10 @@ be. If it has not merged when items 1-4 are done, the build waits on it
    ("All DMs use teammate persona against the ai repo"), every DM is listed
    in `valor.toml`, so the Cowboy, which runs a kernel, answers all of them
    now; each DM's room names the person and the project they work on. From
-   the old whitelist: Kevin 982500498, Max Reed 9121238902, Noel Ford
-   9101392573, Alex Marsh 9350312702 (valor); Charlie 9283348351, Colin
-   Lakeshore 9310164543, Taylor Ellis 9122432271, Jordan 9860592743, Jess
-   Mason 9566926312, Harper 9705101085 (northwind); Logan Pratt 9500152038
+   the old whitelist: Riley 982500498, Max Reed 9121238902, Noel Ford
+   9101392573, Alex Marsh 9350312702 (valor); Avery 9283348351, Casey
+   Lakeshore 9310164543, Taylor Ellis 9122432271, Jordan 9860592743, Jamie
+   Moss 9566926312, Harper 9705101085 (northwind); Logan Pratt 9500152038
    (fabrikam); Morgan Byrd 908253545 (orbit-os); Glen R 920543245
    (tailspin, customer service).
 5. **Email lanes.** Exact senders already work (`email:<address>`):
@@ -66,7 +66,7 @@ be. If it has not merged when items 1-4 are done, the build waits on it
      has no Eng group: requests go to the Eng group of the project asked
      about, else Tom).
    - DMs: "A direct message with <name>, who works on <project>"; same no-
-     engineering rule, pointing to that project's Eng group. Graham's:
+     engineering rule, pointing to that project's Eng group. Glen's:
      customer service for Tailspin.
    - Email: `intake.room` for an email thread takes the session's project
      and returns that spec's `rooms."email"` if set, else today's
