@@ -26,6 +26,16 @@ rest to Tom. Skip it only when your prompt already holds the answers or no
 answer would change the plan. A revision whose findings would change a
 product or UX choice asks the same way rather than deciding it.
 
+**A public repository.** Check once whether the repository is public
+(`gh repo view --json visibility`). If it is, no commit carries client or
+business details: nothing identifying a client or a person other than Tom,
+Valor and Yudame themselves (no name, chat or user id, email address or
+domain), and no project spec or other internal config. Those go in the
+private Valor folder, `~/Desktop/Valor`, project specs in
+`~/Desktop/Valor/projects/`. Tests use made-up names; commit messages,
+plans and docs describe the change without them. A private repository
+carries on as before.
+
 **Exit evidence.** The plan as a file in the workspace, committed, and
 `.valor/plan.json`:
 

@@ -8,6 +8,9 @@ Markdown files, never a `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, or
 `.claude/`, in any letter case: those instruct turns, and changing
 them is the builder's work, under review. Your commits sit on
 top of the candidate.
+In a repository that is public on GitHub, a doc identifies no client or
+person other than Tom, Valor and Yudame themselves: no name, chat or user
+id, email address or domain.
 
 **Exit evidence.** A final message ending with the verdict object: `updated` (with
 your commits), `no_change`, or `changes` (a doc states something the code

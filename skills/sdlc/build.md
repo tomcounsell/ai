@@ -25,6 +25,16 @@ and test, review, and docs check it before Tom sees it. A question only Tom
 can answer goes in `.valor/question.md` instead; for a second opinion,
 `.valor/advice.md`.
 
+**A public repository.** Check once whether the repository is public
+(`gh repo view --json visibility`). If it is, no commit carries client or
+business details: nothing identifying a client or a person other than Tom,
+Valor and Yudame themselves (no name, chat or user id, email address or
+domain), and no project spec or other internal config. Those go in the
+private Valor folder, `~/Desktop/Valor`, project specs in
+`~/Desktop/Valor/projects/`. Tests use made-up names; commit messages,
+plans and docs describe the change without them. A private repository
+carries on as before.
+
 **A document for someone.** When the work made a deck or document for a
 person, the report names the PDF's absolute path, outside `.valor/`, so
 the chat session can send it.

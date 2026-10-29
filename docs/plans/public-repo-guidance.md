@@ -20,9 +20,9 @@ chat sessions (`converse.md`) commit nothing.
 
    > Check once whether the repository is public (`gh repo view --json
    > visibility`). If it is, no commit carries client or business
-   > details: no client's or person's name other than Tom's, Valor's and
-   > Yudame's, no chat or user id, email address or domain, and no project
-   > spec or other internal config. Those go in the private Valor folder,
+   > details: nothing identifying a client or a person other than Tom,
+   > Valor and Yudame themselves (no name, chat or user id, email address
+   > or domain), and no project spec or other internal config. Those go in the private Valor folder,
    > `~/Desktop/Valor`, project specs in `~/Desktop/Valor/projects/`. Tests
    > use made-up names; commit messages, plans and docs describe the change
    > without them. A private repository carries on as before.
@@ -31,8 +31,8 @@ chat sessions (`converse.md`) commit nothing.
    after the exit evidence.
 2. **`skills/sdlc/docs.md`:** one sentence after the first paragraph,
    since the docs session never sees `build.md`: in a public repository a
-   doc names no client or person other than Tom, Valor and Yudame, and no
-   chat or user id, email address or domain.
+   doc identifies no client or person other than Tom, Valor and Yudame
+   themselves: no name, chat or user id, email address or domain.
 
 Guidance only. No review step, reviewer question, commit hook, scanner or
 test that checks for client details; none of those is granted, and Tom
