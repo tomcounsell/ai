@@ -208,7 +208,10 @@ To reply, request the chat's send (`telegram.send_message` on Telegram,
 page) with the chat id as the target and `reply_to` the message you
 answer. In an email thread, request `email.send` with `reply_to` the
 message id you answer, which replies to all on it. One message per answer, as you would
-type it in the chat.
+type it in the chat. On Slack and Telegram each message you read names its
+thread (`in #tag`, or `top-level, starts #tag`), and each send's outcome
+names where it went: a channel holds several threads at once, so answer in
+the thread the message came from, and ask a thing in one thread only.
 
 **A made thing goes as a file.** An answer is text in the chat. A document
 is an ordinary A4 or Letter PDF, and a deck (only when asked for) a

@@ -786,14 +786,14 @@ def test_a_session_reads_the_handling_and_the_done_its_turn_earned(dsn, team):
 
     first, second, read, later = run(go())
     assert (
-        f"(message {first['message_id']}; reacted \U0001f50d: handling, the classifier's pick: read as "
-        "searching or reading the web" in read
+        f"(message {first['message_id']}, top-level, starts #find-florists-opening; reacted \U0001f50d: "
+        "handling, the classifier's pick: read as searching or reading the web" in read
     )
     assert (
         f"- Your reaction on message {first['message_id']} is now ✅: done, the classifier's pick after your "
         "turn (you replied to it; you did web_search): read as confirmed, done, checked off" in later
     )
-    assert f"(message {second['message_id']}; reacted {EYES} (read))" in later
+    assert f"(message {second['message_id']}, top-level, starts #book-table; reacted {EYES} (read))" in later
     assert "florist" not in later
 
 
@@ -838,7 +838,10 @@ def test_a_new_sessions_history_shows_the_reactions_on_earlier_messages(dsn, tea
             return first, (await tasks.brief(conn, second["task_id"])).instruction
 
     first, instruction = run(go())
-    assert f"(message {first['message_id']}; reacted \U0001f680: done, the classifier's pick" in instruction
+    assert (
+        f"(message {first['message_id']}, top-level, starts #deploy-menu-page; reacted \U0001f680: done, the classifier's pick"
+        in instruction
+    )
     assert "you did code): read as launch, deploy, ship it)" in instruction
 
 

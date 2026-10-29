@@ -1383,7 +1383,8 @@ async def next_prompt(conn, task_id: str, now: datetime | None = None) -> tuple[
     b = await tasks.brief(conn, task_id)
     if b.chat:
         first = b.instruction if f.session is None else None
-        report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
+        places = await _send_places(conn, rows, b.chat, f.last_collected)
+        report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"], places)
         woken = _wake_report(owed(rows, now or datetime.now(UTC)))
         parts = (first, chat_prompt(rows), woken, _failure_report(rows), _advice_report(rows),
                  _errors_report(f.last_collected), report, context_report(rows, b.model))  # fmt: skip
@@ -1509,11 +1510,57 @@ def _errors_report(collected: dict[str, Any] | None) -> str:
     return "What did not count from your last turn:\n" + "\n".join(f"- {e}" for e in collected["errors"])
 
 
-def _effects_report(collected: dict[str, Any] | None, now: dict[str, str]) -> str:
+async def _send_places(
+    conn, rows: list[dict], chat: dict[str, Any], collected: dict[str, Any] | None
+) -> dict[str, str]:
+    """Where each of a chat session's last-turn Slack or Telegram sends
+    went, by request file, in the tags its chat lines carry
+    (`intake.thread_tag`): `into #tag` for a reply, the tag of the message
+    it answers, or of that message's thread's first message
+    (`intake.root_of`), as this chat's rows have them, else `into the
+    thread of <first message>`; `into #topic-<id>` for a Telegram topic;
+    `top-level, starts #tag` for a post, slugged from its text. A send to
+    another chat, or an entry without its request, has none."""
+    from core import channels, intake
+
+    tags = {
+        r["payload"].get("message_id"): r["payload"].get("thread_tag") for r in rows if r["type"] in CHAT_ROWS
+    }
+    places = {}
+    for e in (collected or {}).get("effects") or []:
+        r = e.get("request") or {}
+        channel = chat.get("channel")
+        if channel not in ("slack", "telegram") or r.get("action_type") != f"{channel}.send_message":
+            continue
+        normal = channels.get(channel).normal
+        if normal(str(r.get("target"))) != normal(str(chat.get("chat_id"))):
+            continue
+        p = r.get("payload") or {}
+        if not p.get("reply_to"):
+            tag = intake.slug(str(p.get("text") or ""))
+            places[e["file"]] = (
+                f"into #topic-{p['topic_id']}" if p.get("topic_id")
+                else f"top-level, starts #{tag}" if tag else "top-level"
+            )  # fmt: skip
+            continue
+        where = tags.get(p["reply_to"])
+        root = None
+        if not where:
+            root = await intake.root_of(conn, channel, chat["chat_id"], p["reply_to"])
+            where = tags.get(root)
+        tag = re.search(r"#[a-z0-9-]+", where or "")
+        places[e["file"]] = f"into {tag[0]}" if tag else f"into the thread of {root or p['reply_to']}"
+    return places
+
+
+def _effects_report(
+    collected: dict[str, Any] | None, now: dict[str, str], places: dict[str, str] | None = None
+) -> str:
     """What became of the last turn's effect requests, as the ledger has
     them now (a send released to its bridge reads as done once it went), each named
-    by its request file and effect id: the request itself is the turn's
-    and is not repeated into its next prompt."""
+    by its request file and effect id, and a chat send by where it went
+    (`_send_places`): the request itself is the turn's and is not repeated
+    into its next prompt."""
     if not collected or not collected.get("effects"):
         return ""
     lines = ["What became of the effects you requested last turn:"]
@@ -1528,5 +1575,6 @@ def _effects_report(collected: dict[str, Any] | None, now: dict[str, str]) -> st
             "refused": f"refused: {e['error']}",
             "failed": f"failed: {e['error']}",
         }.get(kind, kind)
-        lines.append(f"- {e['file']} (effect {e['effect_id']}): {said}")
+        place = (places or {}).get(e["file"])
+        lines.append(f"- {e['file']} (effect {e['effect_id']}): {said}" + (f", {place}" if place else ""))
     return "\n".join(lines)

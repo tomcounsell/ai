@@ -815,7 +815,11 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
         conn,
         task_id,
         "message.steered" if wakes else "message.heard",
-        {**{k: p.get(k) for k in keep}, "provenance": ledger.provenance(by, channel, False)},
+        {
+            **{k: p.get(k) for k in keep},
+            "thread_tag": thread_tag(p),
+            "provenance": ledger.provenance(by, channel, False),
+        },
     )
     if stop:
         for t in await tasks.reporting(conn, task_id):
@@ -962,10 +966,70 @@ def chat_line(m: dict[str, Any], reaction: str | None = None) -> str:
     if m.get("kind") == "reaction":
         return f"[{when}] {who} reacted {m.get('text')} to your post {m.get('reply_to')}"
     ids = f"message {m.get('message_id')}" + (f", replying to {m['reply_to']}" if m.get("reply_to") else "")
+    where = m["thread_tag"] if "thread_tag" in m else thread_tag(m)
+    ids += f", {where}" if where else ""
     ids += f"; {reaction}" if reaction else ""
     files = _files(m.get("attachments") or [])
     said = (m.get("text") or "").strip() or "(no text)"
     return f"[{when}] {who} ({ids}): {said}" + (f"\n{files}" if files else "")
+
+
+_FILLER = frozenset(
+    re.findall(
+        r"\w+",
+        "a an the and or but so if of to in on at by for with from into about as is are was were be been "
+        "it its this that these those i im ive id me my we our you youre your he she they them their "
+        "do does did dont doesnt didnt can cant could would should will wont just also maybe some any "
+        "not no yes ok okay hey hi hello please thanks thank here there what when where why how which "
+        "who all very really think wondering valor",
+    )
+)
+_ISSUE = re.compile(r"https?://github\.com/[^\s>|]+/(issues|pull)/(\d+)\S*")
+
+
+def slug(text: str) -> str:
+    """A thread's tag from its first message's words: Slack's markup read
+    as its words (a mention, link markup, a channel name), a GitHub issue
+    or pull link as `issue N` / `pr N`, other links dropped; the first
+    three words that are not filler, then the first number when none of
+    them is one. Empty when no word is left."""
+    text = re.sub(r"<@[^>]*>|<![^>]*>", " ", text)
+    text = re.sub(r"<(?:[^>|]*\|)([^>]*)>", r" \1 ", text)
+    text = _ISSUE.sub(
+        lambda g: f" {'issue' if g[1] == 'issues' else 'pr'} {g[2]} ",
+        text.replace("<", " ").replace(">", " "),
+    )
+    text = re.sub(r"https?://\S+", " ", text).casefold().replace("'", "").replace("\u2019", "")
+    tokens = re.findall(r"[a-z0-9]+", text)
+    words = [t for t in tokens if not t.isdigit() and t not in _FILLER][:3]
+    number = next((t for t in tokens if t.isdigit()), None)
+    return "-".join(words + ([number] if number else [])) if words or number else ""
+
+
+def thread_tag(m: dict[str, Any]) -> str | None:
+    """Where a Slack or Telegram message sits in its chat, for the session
+    reading it (Tom, team chat, 2026-10-29): `in #tag` for a message in a
+    thread, the tag slugged from the thread's first message (`slug`); `top-
+    level, starts #tag` for one not in a thread, slugged from its own text,
+    the tag its replies will carry. A Telegram forum topic is `in
+    #topic-<id>` for every message in it; a Telegram reply chain also names
+    its first message's id, since its `replying to` is the message
+    answered, not the first (the chain as recorded: one whose first message
+    was deleted starts at the oldest left). None on another channel, and
+    for a reply whose first message's text is not recorded."""
+    channel = m.get("channel")
+    if channel not in ("slack", "telegram"):
+        return None
+    if channel == "telegram" and m.get("topic_id"):
+        return f"in #topic-{m['topic_id']}"
+    if m.get("reply_to"):
+        first = (m.get("thread") or [None])[0]
+        tag = slug(str(first.get("text") or "")) if first else ""
+        if not tag:
+            return None
+        return f"in #{tag}" + (f", from {first.get('id')}" if channel == "telegram" else "")
+    tag = slug(str(m.get("text") or ""))
+    return f"top-level, starts #{tag}" if tag else "top-level"
 
 
 def _files(attachments: list[dict[str, Any]]) -> str:
