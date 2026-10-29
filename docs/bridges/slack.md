@@ -34,11 +34,13 @@ writes into it. Tom answers in the channel, or with 👍 on a decision's
 post, which the bridge receives (below).
 
 **A channel over several repositories** (Tom, 2026-10-28: "scope this
-channel to several repositories"). `#yudame-dev` covers yuda.me and the
-Studio Tools Mac app: `yudame.toml` lists `studio-tools` in `projects`
+channel to several repositories"; 2026-10-29: "fold the yudame-skills
+repo into the same project"). `#yudame-dev` covers yuda.me, the Studio
+Tools Mac app and the yudame Claude Code plugins (`yudame/skills`):
+`yudame.toml` lists `studio-tools` and `skills` in `projects`
 (projects/README.md), so its session's Brief carries a `Repos:` line,
 `task.start` takes `"project"` to start the task in the repository the
-request is about, and the board covers both. Another repository is one
+request is about, and the board covers all three. Another repository is one
 spec and one name in that list.
 
 ## What it serves
