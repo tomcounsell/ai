@@ -23,12 +23,12 @@ resolved by `intake._toms_own`.
    beside `chats` in each `projects/*.toml`. Parsed in `Spec.from_dict`
    like `mentions`, with no new refusal. The inventory's descriptions go in
    verbatim: operator group and Eng: Valor in `valor.toml`; popoto,
-   cuttlefish, psyoptimal, mondayflowers, gato-os, counsell-home, yudame in
+   tailspin, fabrikam, wingtip, orbit-os, home-lab, yudame in
    their own files.
 2. **Tom's own chats and email.** Two constants in `core/intake.py`, where
    Tom's own chat is resolved: `TOMS_OWN_ROOM` ("running the business with
    Tom, Yudame first; engineering only when he starts it") and `EMAIL_ROOM`
-   ("Valor's own correspondence for the business"). The DM `179144806`
+   ("Valor's own correspondence for the business"). The DM `963835355`
    stays listed in `valor.toml` with no `rooms` entry, so one text covers
    his Telegram DM, Slack DMs and the local chat.
 3. **`intake.room(channel, chat_id) -> str | None`.** First a `rooms` entry

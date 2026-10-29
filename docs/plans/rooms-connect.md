@@ -18,22 +18,22 @@ be. If it has not merged when items 1-4 are done, the build waits on it
 
 ## What is built
 
-1. **Specs.** `projects/cyndra.toml` (repo `Cyndra-AI/cyndra-consulting`,
-   machine "Valor the Bald", kb "Cyndra"; kind and suite read from the
-   repo) and `projects/satsol.toml` (repo `yudame/satsol`, kb "SATSOL").
-   The old system had satsol `machine = "unassigned"`, `paused`: the spec
+1. **Specs.** `projects/northwind.toml` (repo `northwind-co/northwind-consulting`,
+   machine "Valor the Bald", kb "Northwind"; kind and suite read from the
+   repo) and `projects/litware.toml` (repo `yudame/litware`, kb "LITWARE").
+   The old system had litware `machine = "unassigned"`, `paused`: the spec
    keeps `machine = "unassigned"`, so it is listed but no machine hears it
    until Tom names one. Chats added:
-   - cyndra: Eng -1003900483201; team -1003794218389, -1004385743413
-   - satsol: Eng -5136818964; team -5095889193
-   - psyoptimal: team -1002600253717
-   - valor: Agent Builders Chat -1003879986445, Perplexity Build Comp -1003936769817
+   - northwind: Eng -1009420849132; team -1009195413795, -1009361301051
+   - litware: Eng -9192132517; team -9415349335
+   - fabrikam: team -1009151353130
+   - valor: Agent Builders Chat -1009442964902, Perplexity Build Comp -1009784202542
 2. **The handle wakes.** `MENTION` is `(?<![\w])@?valor\b`, so a Telegram
    tap-mention `@valorengels` does not match. It becomes
    `(?<![\w])@?valor(?:engels)?\b`, matching "valor", "@valor", "hey
    valor" (the old triggers) and Valor's handle.
-3. **Mentions only** for every team chat: Yudame, PsyOPTIMAL, both Cyndra
-   groups, SATSOL, Agent Builders, Perplexity (`mentions`, which exists).
+3. **Mentions only** for every team chat: Yudame, Fabrikam, both Northwind
+   groups, LITWARE, Agent Builders, Perplexity (`mentions`, which exists).
    Eng groups, the operator group and Tom's own chats are not listed.
 4. **DMs from others.** `team_spec` accepts a Telegram DM a spec lists, as
    well as a group (Tom's DM stays his via `_toms_own`). A DM is never
@@ -42,35 +42,35 @@ be. If it has not merged when items 1-4 are done, the build waits on it
    ("All DMs use teammate persona against the ai repo"), every DM is listed
    in `valor.toml`, so the Cowboy, which runs a kernel, answers all of them
    now; each DM's room names the person and the project they work on. From
-   the old whitelist: Kevin 577036901, Matt Rideout 2106858278, Nick Frith
-   7954357506, Andy Malkin 2019570687 (valor); Charlie 7312372670, Colin
-   Behring 8209004019, Thabiso Epema 8762685703, Johann 6084902164, Jess
-   Mason 7388810030, Hazem 7178632018 (cyndra); Lewis Parrott 7820562338
-   (psyoptimal); Mike Berson 469027377 (gato-os); Graham D 437868058
-   (cuttlefish, customer service).
+   the old whitelist: Kevin 982500498, Max Reed 9121238902, Noel Ford
+   9101392573, Alex Marsh 9350312702 (valor); Charlie 9283348351, Colin
+   Lakeshore 9310164543, Taylor Ellis 9122432271, Jordan 9860592743, Jess
+   Mason 9566926312, Harper 9705101085 (northwind); Logan Pratt 9500152038
+   (fabrikam); Morgan Byrd 908253545 (orbit-os); Glen R 920543245
+   (tailspin, customer service).
 5. **Email lanes.** Exact senders already work (`email:<address>`):
-   cuttlefish nav@krystallabs.io, gcason2@gmail.com,
-   grahamhderry@gmail.com (tom@yuda.me is Tom's own already); cyndra
-   charlie@yuda.me. Domains need code: an `email:@<domain>` entry matches a
+   tailspin someone@client.example, customer2@example.com,
+   customer3@example.com (tom@yuda.me is Tom's own already); northwind
+   teammate@example.com. Domains need code: an `email:@<domain>` entry matches a
    sender whose address ends in exactly `@<domain>` (`owns`,
    `_project_for`; IMAP's `FROM "@domain"` already searches it). Exact
-   sender beats domain. Added: psyoptimal `@psyoptimal.com`,
-   `@psyoptimalsports.com`; cyndra `@cyndra.ai`; gato-os
-   `@chainstarters.com` (its comment about the left-out domain goes).
+   sender beats domain. Added: fabrikam `@fabrikam.example`,
+   `@fabrikam-sports.example`; northwind `@northwind.example`; orbit-os
+   `@proseware.example` (its comment about the left-out domain goes).
 6. **Room descriptions** (`rooms`), one per chat added, plus:
    - Each team chat: its purpose; "No engineering or SDLC work starts here.
      Web search and filing GitHub issues are fine. Point engineering
      requests to <its Eng group>." Agent Builders adds "a public group".
      Perplexity Build Comp and Agent Builders point to Eng: Valor.
-   - yudame and psyoptimal's Eng-side texts revised to this rule (yudame
+   - yudame and fabrikam's Eng-side texts revised to this rule (yudame
      has no Eng group: requests go to the Eng group of the project asked
      about, else Tom).
    - DMs: "A direct message with <name>, who works on <project>"; same no-
      engineering rule, pointing to that project's Eng group. Graham's:
-     customer service for Cuttlefish.
+     customer service for Tailspin.
    - Email: `intake.room` for an email thread takes the session's project
      and returns that spec's `rooms."email"` if set, else today's
-     `EMAIL_ROOM`. cuttlefish's says customer service; the others teammate.
+     `EMAIL_ROOM`. tailspin's says customer service; the others teammate.
 7. Docs: `projects/README.md` (domain entries, DMs), `docs/bridges/telegram.md`
    (DMs bind like team chats), the intake docstring's table.
 
@@ -93,8 +93,8 @@ Slack DMs (not in the old list); `trusted_domains` (no email carries
 rights); old personas' read-only permissions (the descriptions carry the
 rule); rolling out the Pirate, Captain or Bald. Rooms on those machines
 stay inert until their rollout, and the delivery lists them: Yudame, the
-email lanes and team groups of psyoptimal, cuttlefish, gato-os (Captain,
-Pirate), and all cyndra groups and lanes (Bald); satsol has no machine.
+email lanes and team groups of fabrikam, tailspin, orbit-os (Captain,
+Pirate), and all northwind groups and lanes (Bald); litware has no machine.
 
 ## Stakes
 
@@ -106,7 +106,7 @@ by a commit.
 
 - Real specs: every team chat above is in its spec's `mentions`; no Eng
   group, operator group or Tom's DM is; every listed chat has a room;
-  cyndra and satsol load.
+  northwind and litware load.
 - A mentions team chat: unaddressed is `heard`, "Valor ..." and a reply to
   Valor are `steer` (existing test, kept); "@valorengels can you look" is
   `steer`; "valorous" stays `heard`.
@@ -114,10 +114,10 @@ by a commit.
 - A listed DM from another person: every message `steer`s that DM's
   session, no mention needed; an unlisted DM binds `none`; Tom's DM still
   binds as his own chat.
-- Email: `x@cyndra.ai` is owned and binds under cyndra; `x@evilcyndra.ai`
-  and `x@cyndra.ai.evil.com` are not owned; an exact sender listed in
+- Email: `someone@client.example` is owned and binds under northwind; `x@evilnorthwind.example`
+  and `someone@client.example.evil.com` are not owned; an exact sender listed in
   another spec wins over a domain.
-- `room`: an email thread under cuttlefish gets its email room; under a
+- `room`: an email thread under tailspin gets its email room; under a
   spec with none, `EMAIL_ROOM`; a DM gets its room.
 - Full suite under 5 minutes.
 

@@ -251,7 +251,7 @@ scheduler, supervisor, or watchdog on the machine.
   and loads any `com.valor.*` job whose plist is in place but not loaded
   (a turn's sandbox cannot bootstrap a job).
   The nightly Homebrew job (`com.valor.brew-nightly`, the vault's) runs
-  through it too, until Yudame Tools replaces it (yudame/yudame-tools#2;
+  through it too, until Studio Tools replaces it (yudame/studio-tools#2;
   [rollout.md](rollout.md), step 9).
 - **Stop is not `launchctl`.** Stopping a task is `python -m core stop`,
   which fences it in the database, revokes its gateway token, and kills the

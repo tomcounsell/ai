@@ -42,8 +42,9 @@ session says "go" (`merged` takes `feedback`). Stage 3 is no merge (below).
    folder: `Spec.load` by name raises an error naming the folder, not "no
    such project"; `Spec.all` (read on every inbound message, `intake.py:336`,
    and by notices, `notices.py:508`) returns no specs, so intake carries on
-   for the chats that need none (the operator chat, from settings), and the
-   error naming the folder reaches Tom there once. Replace
+   for the chats that need none (the operator chat, from settings). No
+   notice to Tom is added for it: that would be handling for a failure that
+   has not happened (CLAUDE.md rule 8); `Spec.load`'s error names the folder. Replace
    private client identifiers in docs, `site/`, `skills/`, tests and comments
    with made-up ones; tests that read real specs read fixtures. **The list**
    (kept in `~/Desktop/Valor/scrub/`, never the repo) holds only: client
@@ -115,8 +116,8 @@ repo's; an unlistable folder gives every repo spec; `Spec.all` is the union,
 folder winning; intake receives a chat listed only in the folder's copy, on the
 machine that copy names; a configured `projects_dir` sees no repo spec; the
 suite with `VALOR_PROJECTS` unset outside it never touches `~/Desktop`. Stage 2: `Spec.all` reads only `projects_dir`; a
-missing or unreadable folder: `Spec.load` raises naming it, and a message in
-the operator chat is still received with that error reaching Tom once; `projects/example.toml` loads by
+missing or unreadable folder: `Spec.load` raises naming it, and Tom's DM and
+the operator chat still resolve; `projects/example.toml` loads by
 path; tests that pinned real specs pass on fixtures; the persona and site still
 name Valor and Yudame. Stage 3 (scripted, not suite): tree equality, `git
 bundle verify`, the heads-and-tags list, the post-push heads-and-tags scan, each Mac's `/update`

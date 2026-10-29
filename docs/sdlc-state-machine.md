@@ -215,7 +215,7 @@ both legs failing, is `thin`, to `clarify`: a wrong `thin` costs one clarify tur
 costs review rounds.
 
 **Guard record.** Granted by Tom on 2026-10-01; mission items 3 and 6.
-Incidents: psyoptimal #894 (task `32f800bce8a2`: two feedback rounds for
+Incidents: fabrikam #894 (task `32f800bce8a2`: two feedback rounds for
 three decisions one message would have settled), popoto #191 (bare
 fidelity 1, 3 of 11 hidden tests; clarify 3 and 7 of 11), and #188 (bare
 built a feature Tom did not want). Counter-evidence: on #872, #646, and

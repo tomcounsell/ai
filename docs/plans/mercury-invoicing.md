@@ -76,12 +76,12 @@ from valor@yuda.me (rule 5; the live check waits on Tom's token).
    `~/Library/LaunchAgents/com.valor.routine.invoices.plist`,
    `launchctl bootstrap gui/$UID`, confirmed with `launchctl print`; the
    delivery names that evidence, and rollout step 9 lists the routine.
-3. **Cyndra.** `cyndra-invoice` lives in `tomcounsell/work-vault`. Add
+3. **Northwind.** `northwind-invoice` lives in `example/vault`. Add
    `projects/work-vault.toml` (Cowboy, `merge_url` the vault, suite
    `python3 -m py_compile .claude/skills/yudame-invoice/render_invoice.py`)
-   and, in `SKILL.md` ("Cyndra"), the replacement for its steps 10-11: after
-   Tom approves the PDF, `create` with customer michael@cyndra.ai, cc
-   johann@, jess@, tom@cyndra.ai, then `notice` from valor@yuda.me instead
+   and, in `SKILL.md` ("Northwind"), the replacement for its steps 10-11: after
+   Tom approves the PDF, `create` with customer someone@client.example, cc
+   jordan@, jess@, someone@client.example, then `notice` from valor@yuda.me instead
    of the Gmail draft from tom@yuda.me. The delivery asks the chat session
    to start the work-vault task that pastes it in.
 4. **Docs.** `docs/machine.md` Keychain: the "a turn holds none" passage

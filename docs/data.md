@@ -531,7 +531,7 @@ because every workspace turn runs under the sandbox profile
 (`harnesses/claude_code.py`, `workspace_turn`, refuses a task without
 one). A bare `turn` runs under no profile and has no tools; it must not be
 given tools without one. Still on
-the sandbox: other databases on the cluster (`postgres`, `psyoptimal`)
+the sandbox: other databases on the cluster (`postgres`, `fabrikam`)
 trust local logins, so a turn that escaped its profile could log in as the
 superuser to one of them and change a role's password or the server's
 settings; and Tom's macOS user, outside any turn, can always edit the data

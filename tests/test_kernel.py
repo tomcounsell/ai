@@ -489,13 +489,13 @@ def test_a_step_gets_the_repos_env_and_the_agent_gets_it_less_the_kernels_names(
     from harnesses import claude_code
 
     monkeypatch.setattr(workspace, "HOME", tmp_path)
-    dot = tmp_path / "src" / "psyoptimal" / ".env"
+    dot = tmp_path / "src" / "fabrikam" / ".env"
     dot.parent.mkdir(parents=True)
     names = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "GITHUB_PUSH_TOKEN", "PGPASSWORD")
     dot.write_text("".join(f"{n}=dev-{n}\n" for n in names) + "export DATABASE_URL='postgres://dev/db'\n")
     lay = workspace.Layout(tmp_path / "t")
     spec = workspace.Spec(
-        name="p", repo="https://github.com/yudame/psyoptimal.git", kind="python-uv", suite="true"
+        name="p", repo="https://github.com/yudame/fabrikam.git", kind="python-uv", suite="true"
     )
     with_db = dataclasses.replace(spec, services=("postgres",))
     pg = {"bin_dir": tmp_path / "bin", "passfile": tmp_path / "pass"}
@@ -521,7 +521,7 @@ def test_a_step_gets_the_repos_env_and_the_agent_gets_it_less_the_kernels_names(
     checked = workspace.turn_environment(check)
     assert checked["GEMINI_API_KEY"] == "dev-GEMINI_API_KEY" and "PGPASSWORD" not in checked
     # What provisioning records (`harness_env`) holds none of it.
-    assert task["GH_REPO"] == "yudame/psyoptimal" and not any(v.startswith("dev-") for v in task.values())
+    assert task["GH_REPO"] == "yudame/fabrikam" and not any(v.startswith("dev-") for v in task.values())
 
     # Read at each step: an edit is seen, and an earlier suite run is not reused.
     repo = tmp_path / "repo"
@@ -540,7 +540,7 @@ def test_a_step_gets_the_repos_env_and_the_agent_gets_it_less_the_kernels_names(
     dot.unlink()
     assert workspace.repo_env(task) == {} and digest(task) == digest(bare)
     without = workspace.turn_environment({"env": task})
-    assert without == {**workspace.turn_environment({"env": bare}), "GH_REPO": "yudame/psyoptimal"}
+    assert without == {**workspace.turn_environment({"env": bare}), "GH_REPO": "yudame/fabrikam"}
     assert workspace.repo_env({"GH_REPO": "yudame/elsewhere"}) == {}
 
 
@@ -986,7 +986,7 @@ def test_a_sessions_and_its_childs_notices_are_at_home_in_the_chat_they_came_fro
 
 
 def test_a_chat_session_that_kept_failing_on_a_message_says_so_in_reply_to_it(dsn):
-    """The mastery chat, 2026-10-23: a broken install failed four turns on
+    """The adatum chat, 2026-10-23: a broken install failed four turns on
     Tom's message, and the chat was told "one of its steps failed" about
     no work it could name."""
     ended = {"by": "kernel", "kind": "step", "check": None, "state": "clarify", "tries": 4, "reason": "boom"}
@@ -1505,39 +1505,6 @@ def test_each_chat_gets_its_rooms_entry_else_tom_owns_or_emails_else_none(tmp_pa
         assert intake.room("telegram", OTHER) is None  # another machine's
 
 
-def test_every_listed_chat_resolves_to_its_description_on_its_machine():
-    real = pathlib.Path(__file__).parent.parent / "projects"
-    toms = ("telegram:179144806", "slack:T0B6E8JPE3C/U0B78H17XQ8")
-    with bridges.configure(
-        projects_dir=str(real), operator_telegram_id="179144806", operator_slack_ids=("T0B6E8JPE3C/U0B78H17XQ8",)
-    ):
-        specs = workspace.Spec.all()
-        listed = {chat: spec for spec in specs for chat in spec.chats}
-        assert set(listed) >= {
-            "telegram:179144806",
-            "telegram:-1003890616618",
-            "telegram:-1003449100931",
-            "telegram:-5189826365",
-            "telegram:-1003801797780",
-            "telegram:-1003743854645",
-            "telegram:-5302491300",
-            "telegram:-1003513124705",
-            "telegram:-5174105183",
-            "telegram:-4719889199",
-        }
-        for chat, spec in listed.items():
-            channel, _, ident = chat.partition(":")
-            with bridges.configure(machine=spec.machine or settings.default_machine):
-                found = intake.room(channel, "<root@mail.test>" if channel == "email" else ident, spec.name)
-            if channel == "email":
-                assert found == spec.rooms["email"] != intake.EMAIL_ROOM, chat
-            else:
-                assert found == (
-                    intake.TOMS_OWN_ROOM if chat in toms else spec.rooms[chat]
-                ), chat
-        assert intake.room("email", "<root@mail.test>", "valor") == intake.EMAIL_ROOM
-
-
 def test_a_chat_sessions_every_turn_says_what_its_room_is_for(dsn, tmp_path):
     group = f"-{uuid.uuid4().int % 10**12}"  # its own chat: the ledger is shared across tests
 
@@ -1683,81 +1650,36 @@ def test_an_email_domain_entry_takes_every_sender_at_exactly_that_domain(dsn, ma
     assert run(go()) == [{"name": "garden"}, {"name": "flowers"}]
 
 
-def test_the_real_specs_keep_team_chats_quiet_and_the_rest_answering(tmp_path):
-    """Every team chat waits to be mentioned and starts no engineering
-    (Tom, 2026-10-17); Eng groups, the operator group and Tom's DM hear
-    every message."""
-    team = {"yudame": ["-4719889199"], "psyoptimal": ["-1002600253717"],
-            "cyndra": ["-1003794218389", "-1004385743413"], "satsol": ["-5095889193"],
-            "valor": ["-1003879986445", "-1003936769817"]}  # fmt: skip
-    answering = {"valor": ["-1003890616618", "-1003449100931", "179144806"], "psyoptimal": ["-1003743854645"],
-                 "cyndra": ["-1003900483201"], "satsol": ["-5136818964"]}  # fmt: skip
-    root = pathlib.Path(__file__).parent.parent / "projects"
-    with bridges.configure(projects_dir=str(root)):
-        specs = {s.name: s for s in workspace.Spec.all()}
-    assert len(specs) == len(list(root.glob("*.toml")))
-    for name, ids in team.items():
-        assert {f"telegram:{i}" for i in ids} <= set(specs[name].mentions), name
-        for i in ids:
-            assert "No engineering or SDLC work starts here" in specs[name].rooms[f"telegram:{i}"], i
-    assert "a public group" in specs["valor"].rooms["telegram:-1003879986445"]
-    general = (
-        "slack:T0B6E8JPE3C/C0B67T44KEF"  # Yudame Slack #general, received on the Cowboy (Tom, 2026-10-23)
+YUDAME_SLACK = "T0D654H7PPX"
+TOM_SLACK = f"{YUDAME_SLACK}/U0B9THUG5DN"
+
+
+def placed_specs(root: pathlib.Path) -> dict[str, workspace.Spec]:
+    """Made-up specs on two Macs: valor on the Cowboy with Tom's Slack DM
+    and its dev channel, a client's on the Pirate with its own."""
+    root.mkdir(exist_ok=True)
+    base = 'repo = "r"\nkind = "plain"\nsuite = "true"\n'
+    (root / "valor.toml").write_text(
+        f'name = "valor"\n{base}machine = "Valor the Cowboy"\n'
+        f'chats = ["slack:{TOM_SLACK}", "slack:{YUDAME_SLACK}/C0VALORDEV", "telegram:-1009000000002"]\n'
     )
-    assert general in specs["valor"].mentions and specs["valor"].machine == "Valor the Cowboy"
-    assert "No engineering or SDLC work starts here" in specs["valor"].rooms[general]
-    for name, ids in answering.items():
-        assert {f"telegram:{i}" for i in ids} <= set(specs[name].chats) - set(specs[name].mentions), name
-
-
-YUDAME_SLACK = "T0B6E8JPE3C"
-TOM_SLACK = f"{YUDAME_SLACK}/U0B78H17XQ8"
-
-
-def real_specs(**more) -> dict[str, workspace.Spec]:
-    root = pathlib.Path(__file__).parent.parent / "projects"
-    with bridges.configure(projects_dir=str(root), **more):
+    (root / "client.toml").write_text(
+        f'name = "client"\n{base}machine = "Valor the Pirate"\nchats = ["slack:{YUDAME_SLACK}/C0CLIENTDEV"]\n'
+    )
+    with bridges.configure(projects_dir=str(root)):
         return {s.name: s for s in workspace.Spec.all()}
 
 
-def test_each_project_has_a_slack_dev_channel_answering_as_its_eng_group():
-    """`<project>-dev` in the Yudame Slack is the Slack twin of the
-    project's Eng group: every message wakes it and its room is the Eng
-    group's (Tom, 2026-10-25); yudame, with no Eng group, has its own."""
-    eng = {"valor": "-1003449100931", "popoto": "-5189826365", "cuttlefish": "-1003801797780",
-           "psyoptimal": "-1003743854645", "cyndra": "-1003900483201", "satsol": "-5136818964",
-           "mastery": "-5565152737", "gato-os": "-1003513124705", "mondayflowers": "-5302491300",
-           "counsell-home": "-5174105183", "yudame": None}  # fmt: skip
-    specs = real_specs()
-    channels = set()
-    for name, spec in specs.items():
-        dev = [c for c in spec.chats if c.startswith(f"slack:{YUDAME_SLACK}/C") and c != "slack:T0B6E8JPE3C/C0B67T44KEF"]
-        if name not in eng:
-            assert dev == [], name
-            continue
-        (chat,) = dev
-        channels.add(chat)
-        assert chat not in spec.mentions, name
-        room = spec.rooms[chat]
-        assert room == (
-            spec.rooms[f"telegram:{eng[name]}"]
-            if eng[name]
-            else "Engineering on the yuda.me company site (yudame/yuda.me) and the Yudame Tools menu-bar Mac app "
-            "(yudame/yudame-tools)."
-        )
-    assert len(channels) == len(eng)
-
-
-def test_toms_slack_dm_is_owned_only_on_the_mac_valor_is_placed_on():
+def test_toms_slack_dm_is_owned_only_on_the_mac_valor_is_placed_on(tmp_path):
     """Tom's ids alone own nothing, so a second Mac's Slack bridge never
     takes his DM; each Mac's bridge owns its own projects' dev channels."""
+    root = tmp_path / "projects"
+    specs = placed_specs(root)
     owned = {}
     for mac in ("Valor the Cowboy", "Valor the Pirate"):
-        root = pathlib.Path(__file__).parent.parent / "projects"
         with bridges.configure(projects_dir=str(root), machine=mac, default_machine=mac,
                                operator_slack_ids=(TOM_SLACK,), operator_channel="telegram"):  # fmt: skip
             owned[mac] = set(intake.owned("slack"))
-    specs = real_specs()
     assert TOM_SLACK in owned["Valor the Cowboy"] and TOM_SLACK not in owned["Valor the Pirate"]
     for name, spec in specs.items():
         slack = {c.removeprefix("slack:") for c in spec.chats if c.startswith("slack:")}
@@ -1772,12 +1694,13 @@ def test_toms_dm_as_operator_chat_has_a_session_only_on_the_mac_its_spec_is_plac
     chat). Only the Cowboy, where `valor.toml` lists the DM, opens a
     session there; a root task's notice on the Pirate goes to the DM
     itself. A group operator chat no spec lists keeps its session."""
-    root = pathlib.Path(__file__).parent.parent / "projects"
+    root = tmp_path / "projects"
+    placed_specs(root)
 
     def mac(name, **more):
         return bridges.configure(**{
             "projects_dir": str(root), "work_dir": str(tmp_path / "work"), "machine": name, "default_machine": name,
-            "operator_telegram_id": "179144806", "operator_slack_ids": (TOM_SLACK,),
+            "operator_telegram_id": "963835355", "operator_slack_ids": (TOM_SLACK,),
             "operator_channel": "slack", "operator_chat": TOM_SLACK, **more,
         })  # fmt: skip
 

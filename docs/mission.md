@@ -314,7 +314,7 @@ Two records hold the first numbers: the demonstration
 Claude Opus 5.5 with every model call metered by the gateway, effect ceiling
 `act`, and no governance grant.
 
-### The demonstration: psyoptimal #894
+### The demonstration: fabrikam #894
 
 Tom's request, verbatim: "Home page notification if user profile settings not
 complete. Example: At least one of the **Sports Career Start Dates** should

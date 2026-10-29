@@ -2,7 +2,7 @@
 
 Tom, 2026-10-16: "a successful teamwork session in a group telegram chat,
 where Valor acts properly according to his persona and accomplishes tasks
-with Tom and the team. The Eng: PsyOPTIMAL group is a great example of how
+with Tom and the team. The Eng: Fabrikam group is a great example of how
 well Valor has been working with the team for several months. The rebuild
 has to be as good if not better than that." Until it is, the Captain and
 the Bald stay on the old system ([rollout.md](../rollout.md)).
@@ -48,18 +48,18 @@ behaviour, not the classifiers.
    `persona/conduct.md` and `voice.md`.
 5. **Media.** Voice notes transcribed and images passed to the turn, as
    `bridge/media.py` did.
-6. **The reference.** The Eng: PsyOPTIMAL history from the Captain's old
+6. **The reference.** The Eng: Fabrikam history from the Captain's old
    store, read-only, as the standard a session is compared with.
 
 ## Done
 
-The proving ground is Eng: Monday Flowers with Rain, on the Pirate (Tom,
+The proving ground is Eng: Wingtip Flowers with Rain, on the Pirate (Tom,
 2026-10-16), so the Pirate rolls out once steps 1 to 4 are in. Tom has a
-teamwork session there on the new kernel; he judges it as good as Eng: PsyOPTIMAL or better, recorded with
+teamwork session there on the new kernel; he judges it as good as Eng: Fabrikam or better, recorded with
 the date (rule 5). Then the Captain and the Bald roll out.
 
-**Met** (Tom, 2026-10-22): "the bar was met with monday flowers group chat
-working great yesterday", the session of 2026-10-21 in Eng: Monday Flowers
+**Met** (Tom, 2026-10-22): "the bar was met with wingtip group chat
+working great yesterday", the session of 2026-10-21 in Eng: Wingtip Flowers
 on the Pirate. The Captain and the Bald roll out from 2026-10-22.
 
 **Next: the Agent Builders Chat**, the real test (Tom, 2026-10-16): many

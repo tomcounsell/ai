@@ -118,7 +118,7 @@ the thread's earlier recorded emails; every later one is a steer on that
 session, naming its sender. The session reads, answers by replying to all
 (`email.send` with `reply_to`), and starts the tasks the work needs
 (`skills/sdlc/converse.md`). Its Brief's `Room:` line, on every turn, is
-its project's `rooms.email` (cuttlefish's says customer service), else
+its project's `rooms.email` (tailspin's says customer service), else
 `intake.EMAIL_ROOM`, Valor's own correspondence for the business
 ([telegram.md](telegram.md#chat-sessions-one-per-chat-every-message-a-steer)).
 

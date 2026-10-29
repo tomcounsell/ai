@@ -20,12 +20,12 @@ deferred this to after milestone 6; nothing was built.
 (`~/valor-retired/cutover-2026-10-19/memory.jsonl`, 5,049 lines; rollout.md
 step 7). Of the 2,597 records Tom chose, 188 are session summaries
 (`^In an? \d+-event session`, `agent_id` `tui-*`): dropped. `project_key` is
-coarse: 614 records keyed `valor` were extracted from Cyndra chats
-(`agent_id` `extraction-tg_cyndra_<chat>_N`; chats -1003900483201 and
--1003794218389 are in `projects/cyndra.toml:19-20`), so the project is the
+coarse: 614 records keyed `valor` were extracted from Northwind chats
+(`agent_id` `extraction-tg_northwind_<chat>_N`; chats -1009420849132 and
+-1009195413795 are in `projects/northwind.toml:19-20`), so the project is the
 `extraction-tg_<name>_` label when there is one, else `project_key`. After
-the summaries go: cyndra 1,609, valor 788, cuttlefish 4, yudame 3,
-mondayflowers 2, none 3 (dropped, listed). The ref
+the summaries go: northwind 1,609, valor 788, tailspin 4, yudame 3,
+wingtip 2, none 3 (dropped, listed). The ref
 `backup/pre-sync-main-2026-10-15` exists neither here nor on origin; the
 fields read plainly without it.
 
@@ -83,8 +83,8 @@ then does `memory import` run, on that same `import.jsonl` (prep is not run
 again after the review: the model pass need not repeat its groups). Rows
 on the ledger are permanent; the export stays in `~/valor-retired`, so
 `merged_from` ids still resolve. Each Mac imports its own projects: the
-Pirate now (yudame, mondayflowers); the Cowboy (valor) by copying
-`import.jsonl` there; the Bald (cyndra) and the Captain (cuttlefish) at
+Pirate now (yudame, wingtip); the Cowboy (valor) by copying
+`import.jsonl` there; the Bald (northwind) and the Captain (tailspin) at
 their installs, where step 7 exports that Mac's own old memory and prep
 runs over it and the Pirate's export together, so duplicates across the
 two collapse, and Valor reviews that report first (rollout.md step 7 gains
@@ -104,7 +104,7 @@ adds none: Valor's review of `report.md` is done by hand, not a gate in
 code.
 
 - The 2,413 knowledge records (Tom: skip).
-- [ORDERED] cyndra (1,609) and cuttlefish (4) wait for the Bald's and the
+- [ORDERED] northwind (1,609) and tailspin (4) wait for the Bald's and the
   Captain's installs.
 - No marks: whether an imported record is a standard of working is Valor's
   judgement later (`python -m core memory mark`).
@@ -117,7 +117,7 @@ code.
 - `memory import` run twice appends rows once; a line for a project not
   served here appends nothing.
 - Prep on a small fixture: summary dropped, superseded and knowledge
-  skipped, cyndra-labelled `valor` record mapped to cyndra, 0.8 duplicate
+  skipped, northwind-labelled `valor` record mapped to northwind, 0.8 duplicate
   collapsed (the model pass is stubbed), a human record by `agent_id`
   `Tom` written `by` `tom`; records the stubbed model judges not worth
   recalling dropped, counted per stage and project, and each listed.
@@ -129,13 +129,13 @@ Valor has reviewed the report, the Pirate's and the Cowboy's rows are imported,
 and the Brief of a later valor task on the Cowboy, whose instruction
 shares words with a named imported record, shows it under Remembered;
 recorded here with the date, the task id and the record's ref (rule 5).
-Cyndra's 1,609 are used only once the Bald runs.
+Northwind's 1,609 are used only once the Bald runs.
 
 ## Decided
 
 - Placement (Tom, 2026-10-21: "Each project on its Mac"): each project's
   records are imported on the Mac that serves it. The Pirate takes yudame
-  and mondayflowers now, the Cowboy takes valor, and cyndra and cuttlefish
+  and wingtip now, the Cowboy takes valor, and northwind and tailspin
   wait for the Bald and the Captain.
 - The Bald's and the Captain's own old memory (Tom, 2026-10-21: "Yes, same
   rules"): each Mac's own export comes across at its install, through the

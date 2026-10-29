@@ -48,7 +48,7 @@ login form, a signed-in Instagram among them, take byob's tools as usual.
 
 **Instagram.** Valor's account is `@valorengels`. Its recovery email is
 Valor's personal Gmail, `v*********s@gmail.com`; the work accounts are
-`valor@yuda.me` and `valor@cyndra.ai`. It's reached through the byob Chrome
+`valor@yuda.me` and `someone@client.example`. It's reached through the byob Chrome
 on the Cowboy, signed in by Tom on 2026-10-26 with "Save login info"
 accepted. Its password is in Valor's employee 1Password vault, not in
 `Common Login` ([machine.md](machine.md)). A turn uses the open session and

@@ -65,7 +65,7 @@ from pathlib import Path
 from typing import Any
 
 from core import binaries, channels, credentials, git, runs
-from core.settings import PRIVATE_PROJECTS, settings
+from core.settings import settings
 
 KINDS = ("python-uv", "django", "node", "plain")
 SERVICES = ("postgres", "redis")
@@ -100,6 +100,8 @@ class Spec:
     chat is for, rendered into every turn of its chat session
     (`intake.room`). `board` names the one of its Slack channels whose
     canvas is the project's decision board (`core/board.py`).
+    `update_chat` names the one of its chats where exactly `/update`
+    updates the Mac that receives it (`core/intake.py`).
 
     `projects` names the other projects whose repositories its chats work
     in too: a chat session's `task.start` may start a task under any of
@@ -131,6 +133,7 @@ class Spec:
     mentions: tuple[str, ...] = ()
     rooms: dict[str, str] = field(default_factory=dict)
     board: str | None = None
+    update_chat: str | None = None
     projects: tuple[str, ...] = ()
     machine: str | None = None
     knowledge_base: str | None = None
@@ -197,6 +200,15 @@ class Spec:
             board = f"{channel}:{row.normal(ident)}" if channel == "slack" and ident else None
             if board not in normal:
                 raise Refused(f"board names {raw['board']!r}, which is not one of the spec's Slack chats")
+        update_chat = raw.get("update_chat")
+        if update_chat is not None:
+            channel, _, ident = update_chat.partition(":") if isinstance(update_chat, str) else ("", "", "")
+            row = channels.get(channel)
+            update_chat = f"{channel}:{row.normal(ident)}" if row is not None and ident else None
+            if update_chat not in normal:
+                raise Refused(
+                    f"update_chat names {raw['update_chat']!r}, which is not one of the spec's chats"
+                )
         projects = tuple(raw.get("projects") or ())
         for name in projects:
             if not isinstance(name, str) or not name:
@@ -231,6 +243,7 @@ class Spec:
             mentions=tuple(mentions),
             rooms=rooms,
             board=board,
+            update_chat=update_chat,
             projects=projects,
             machine=machine,
             knowledge_base=kb,
@@ -239,15 +252,11 @@ class Spec:
 
     @classmethod
     def all(cls) -> list[Spec]:
-        """Every project spec in the spec folders, by name, the first
-        folder's copy winning. A spec that does not load is left out;
-        `start` names its error."""
-        paths: dict[str, Path] = {}
-        for folder in spec_dirs():
-            for path in sorted(folder.glob("*.toml")):
-                paths.setdefault(path.stem, path)
+        """Every project spec in `settings.projects_dir`, by name; none when
+        the folder is missing or unreadable. A spec that does not load is
+        left out; `start` names its error."""
         found = []
-        for _, path in sorted(paths.items()):
+        for path in sorted(Path(settings.projects_dir).glob("*.toml")):
             try:
                 found.append(cls.load(str(path)))
             except Refused:
@@ -264,27 +273,16 @@ class Spec:
     def load(cls, name_or_path: str) -> Spec:
         path = Path(name_or_path)
         if not path.suffix:
-            candidates = [folder / f"{name_or_path}.toml" for folder in spec_dirs()]
-            path = next((p for p in candidates if p.is_file()), candidates[0])
+            path = Path(settings.projects_dir) / f"{name_or_path}.toml"
         try:
             raw = tomllib.loads(path.read_text())
         except FileNotFoundError:
             raise Refused(f"no project spec at {path}") from None
+        except OSError as exc:  # the folder unreadable: no Full Disk Access, say, as over ssh
+            raise Refused(f"cannot read the project spec at {path}: {exc.strerror}") from None
         except tomllib.TOMLDecodeError as exc:
             raise Refused(f"{path}: {exc}") from None
         return cls.from_dict(raw)
-
-
-REPO_PROJECTS = Path(__file__).resolve().parent.parent / "projects"
-
-
-def spec_dirs() -> list[Path]:
-    """Where specs are read, first wins: `settings.projects_dir`, and, while
-    the Macs move to the private folder and only when it is the default,
-    the repository's own `projects/` for a name it lacks or cannot list
-    (docs/plans/private-projects.md, stage 1)."""
-    own = Path(settings.projects_dir)
-    return [own, REPO_PROJECTS] if own == Path(PRIVATE_PROJECTS) else [own]
 
 
 # -- paths --------------------------------------------------------------------------

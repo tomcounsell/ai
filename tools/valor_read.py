@@ -5,7 +5,7 @@ valor-slack read [CHAT] [--search TEXT] [--limit N] [--before TS] [--json]
 Reads a chat's history, or searches it, through the channel's running
 bridge (`core.bridge.reads` on 127.0.0.1), which reads with Valor's own
 account. The name it is run by picks the channel. CHAT is the chat id as
-the ledger has it (`-1003890616618`, `T0ABC/C0DEF`, `T0ABC/U0GHI`), with or
+the ledger has it (`-1009503296801`, `T0ABC/C0DEF`, `T0ABC/U0GHI`), with or
 without a `<channel>:` prefix; with none, `$VALOR_CHAT`, the turn's own
 chat. Prints oldest first, one message per line. Standard library only,
 and Python 3.9 (macOS's own `python3`), so it runs in any workspace.

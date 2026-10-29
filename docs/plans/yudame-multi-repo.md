@@ -1,4 +1,4 @@
-# #yudame-dev over yuda.me and Yudame Tools
+# #yudame-dev over yuda.me and Studio Tools
 
 Task 1641e6e5ead7 finishes branch `valor/yudame-multi-repo` (c31827ebb,
 5c1ee924f), rebased on main as d3941ab39 and 8edeb11bf.
@@ -7,7 +7,7 @@ Task 1641e6e5ead7 finishes branch `valor/yudame-multi-repo` (c31827ebb,
 
 - Tom, #yudame-dev, 2026-10-28 08:10 UTC (1793175025.483879): "we need to
   scope this channel to several repositories including yuda.me company site
-  as well as yudame-tools mac app".
+  as well as studio-tools mac app".
 - The #yudame-dev session (the Pirate) proposed the branch at 08:20 and named
   the Pirate's old Swift as the second call. Tom, 09:55–09:56: "I updated
   Xcode on the pirate machine", "and yes to accepting the edits". The
@@ -16,13 +16,13 @@ Task 1641e6e5ead7 finishes branch `valor/yudame-multi-repo` (c31827ebb,
 - Tom, valor team chat, 15:54 UTC: "Check the yudame multi repo branch and
   see if we can finish SDLC".
 
-Done when Tom asks for Yudame Tools work in #yudame-dev and a task starts on
-yudame/yudame-tools, running its suite on the Pirate.
+Done when Tom asks for Studio Tools work in #yudame-dev and a task starts on
+yudame/studio-tools, running its suite on the Pirate.
 
 ## What is built (already, on this branch)
 
 - `Spec.projects` lists other specs whose repositories a project's chats work
-  in. `yudame.toml` lists `yudame-tools`.
+  in. `yudame.toml` lists `studio-tools`.
 - `task.start` takes `"project"`: none starts under the session's
   project, as before, and a named one starts under that project. The child
   carries the session's chat as `project.chat`. `tasks.brief` keeps it through
@@ -32,7 +32,7 @@ yudame/yudame-tools, running its suite on the Pirate.
   #yudame-dev's children, the channel instead of the Telegram team chat).
 - The chat session's Brief gets a `Repos:` line. The board (`board_spec`,
   `snapshot`) covers the listed projects' tasks.
-- `projects/yudame-tools.toml`: plain repo, the Swift Testing suite
+- `projects/studio-tools.toml`: plain repo, the Swift Testing suite
   (`--disable-xctest` so the report lands at `{junit}`), the Pirate,
   Xcode 27.1 there.
 - Docs: projects/README, slack.md, telegram.md. Tests: `tests/test_projects.py`,
@@ -53,9 +53,9 @@ checks `machine`.
 
 1. **Review fixes**: the builder reads the diff against the request and fixes
    what it finds.
-2. **Live check before merge**: on the Pirate, clone yudame/yudame-tools
+2. **Live check before merge**: on the Pirate, clone yudame/studio-tools
    (private; the Pirate's git reaches it) and run the spec's `suite` line, so
-   the JUnit report lands at the path given. The yudame-tools suite must pass,
+   the JUnit report lands at the path given. The studio-tools suite must pass,
    or the first task there fails its tests.
 3. **Full suite and lint** on the final head, under 5 minutes (378 passed,
    1 skipped, 135 s on the rebase).
@@ -66,8 +66,8 @@ checks `machine`.
 
 ## Out of scope
 
-Giving yudame-tools chats of its own. Changing the Slack channel's
-description. Packaging Yudame Tools (yudame/yudame-tools#2).
+Giving studio-tools chats of its own. Changing the Slack channel's
+description. Packaging Studio Tools (yudame/studio-tools#2).
 
 ## Tests
 
@@ -85,5 +85,5 @@ The branch already holds tests for:
 - the real specs: #yudame-dev covers both repositories, and every listed
   project loads and is on the same Mac.
 
-A fix the review makes comes with its own test. Live checks: the yudame-tools suite on the Pirate, and the Pirate's head
+A fix the review makes comes with its own test. Live checks: the studio-tools suite on the Pirate, and the Pirate's head
 containing the merge.

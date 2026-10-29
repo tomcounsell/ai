@@ -224,35 +224,3 @@ def test_a_project_naming_its_own_board_resolves_to_itself(tmp_path):
         assert board.board_spec(site).name == site
         assert board.board_spec(app).name == site
         assert board.board_spec("nosuchproject") is None
-
-
-# -- the real specs --------------------------------------------------------------------
-
-
-def real_specs() -> dict[str, workspace.Spec]:
-    return test_kernel.real_specs()
-
-
-def test_yudame_dev_covers_the_site_and_the_mac_app():
-    """Tom, 2026-10-28: #yudame-dev is yuda.me and yudame-tools."""
-    specs = real_specs()
-    yudame, tools = specs["yudame"], specs["yudame-tools"]
-    assert yudame.projects == ("yudame-tools",)
-    room = yudame.rooms["slack:T0B6E8JPE3C/C0CBX4MBN1L"]
-    assert "yudame/yuda.me" in room and "yudame/yudame-tools" in room
-    assert tools.repo == tools.merge_url == "https://github.com/yudame/yudame-tools.git"
-    assert tools.chats == () and tools.client == "yudame" and tools.branch == "main"
-    # Swift Testing only: the report lands at {junit} with --disable-xctest alone.
-    assert "--disable-xctest" in tools.suite and "--xunit-output {junit}" in tools.suite
-
-
-def test_every_listed_project_loads_and_shares_the_machine_of_the_one_listing_it():
-    """A child runs on the Mac holding the chat, whatever its spec's
-    `machine` (projects/README.md)."""
-    specs = real_specs()
-    for s in specs.values():
-        for name in s.projects:
-            assert name in specs, (s.name, name)
-            assert (specs[name].machine or settings.default_machine) == (
-                s.machine or settings.default_machine
-            ), (s.name, name)

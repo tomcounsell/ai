@@ -16,7 +16,7 @@ found.
 the new system was shown a valid replacement. The bar, Tom's words
 (2026-10-16): "a successful teamwork session in a group telegram chat,
 where Valor acts properly according to his persona and accomplishes tasks
-with Tom and the team. The Eng: PsyOPTIMAL group is a great example of how
+with Tom and the team. The Eng: Fabrikam group is a great example of how
 well Valor has been working with the team for several months. The rebuild
 has to be as good if not better than that." Tom recorded it met on
 2026-10-22 ([plans/team-chat.md](plans/team-chat.md), Done), and both had
@@ -165,7 +165,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    and `core routine NAME` for each routine, `update` and `invoices` included (a `task` routine starts work only on the Mac its project is placed on, so it is installed on every Mac): `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
    `core serve`'s also needs `VALOR_OPERATOR_CHANNEL=slack` and
-   `VALOR_OPERATOR_CHAT=T0B6E8JPE3C/U0B78H17XQ8` (Tom's Slack DM) on every
+   `VALOR_OPERATOR_CHAT=T0D654H7PPX/U0B9THUG5DN` (Tom's Slack DM) on every
    Mac, or its update-failure notices go nowhere (the Pirate, the Captain
    and the Bald ran without them until 2026-10-27); only the Mac whose spec
    lists the DM opens a session there. The bridges' jobs do not take them.
@@ -204,9 +204,9 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    from a turn, whose sandbox cannot bootstrap, is loaded by the next
    update (`permissions.ensure`). Brew Status
    (`yudame/brew-status`) ran it from 2026-10-28 morning and was removed
-   from all four Macs that day (Tom, Telegram 11762); Yudame Tools'
+   from all four Macs that day (Tom, Telegram 11762); Studio Tools'
    Homebrew Updates replaces this job once it is deployed
-   (yudame/yudame-tools#2).
+   (yudame/studio-tools#2).
    A kernel crash-looping after a rollout or an update: take the checkout
    back to the commit it rolled from (`from` on its `rollout.restarting`
    row), `git -C ~/src/ai reset --keep <from>`, then

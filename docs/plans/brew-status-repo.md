@@ -1,11 +1,11 @@
 # Brew Status: a Yudame team app in yudame/brew-status
 
 **Superseded 2026-10-28 (Tom, Telegram 11758, 11760):** Brew Status is one
-tool of Yudame Tools, not its own app. Its code, docs and history are in
-github.com/yudame/yudame-tools (`main` b371b09, the Homebrew Updates tool,
+tool of Studio Tools, not its own app. Its code, docs and history are in
+github.com/yudame/studio-tools (`main` b371b09, the Homebrew Updates tool,
 tools switched on or off in Settings); yudame/brew-status is archived with
 a pointer. Packaging, the release, and switching teammates and Valor's
-four Macs are open in yudame/yudame-tools#2. Brew Status was removed from
+four Macs are open in yudame/studio-tools#2. Brew Status was removed from
 the four Macs the same day (Tom, Telegram 11762); they run the vault job
 `com.valor.brew-nightly` until then ([brew-status-uninstall.md](brew-status-uninstall.md)).
 

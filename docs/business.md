@@ -174,7 +174,7 @@ What counts as knowing these objectives are being met.
   is not progress.
 
 **First baseline.** Replays of the marketing and pricing decisions merged as
-pull requests in yudame/cuttlefish. Their outcomes are unknown, so a replay
+pull requests in yudame/tailspin. Their outcomes are unknown, so a replay
 measures agreement with what the operator merged, not whether the decision
 was right.
 

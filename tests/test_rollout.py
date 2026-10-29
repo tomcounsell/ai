@@ -379,7 +379,7 @@ def test_a_failed_bridge_pass_still_ends_the_rollout_and_the_stamp(fresh, tmp_pa
 
 # -- updates (docs/plans/update.md) ------------------------------------------------------
 
-ROOM = intake.UPDATE_CHAT.partition(":")[2]
+ROOM = "-1009000000001"  # the made-up engineering room: valor.toml's update_chat in the test below
 
 
 async def asked(dsn, **kw) -> str:
@@ -559,7 +559,7 @@ async def posted(dsn, text: str, chat: str = ROOM) -> dict:
 def test_update_in_the_engineering_room_is_a_request_and_one_reply(fresh, tmp_path):
     with bridges.operator(tmp_path):
         (Path(settings.projects_dir) / "valor.toml").write_text(
-            bridges.VALOR_SPEC + f'chats = ["telegram:{ROOM}", "telegram:-1001"]\n'
+            bridges.VALOR_SPEC + f'chats = ["telegram:{ROOM}", "telegram:-1001"]\nupdate_chat = "telegram:{ROOM}"\n'
         )
         first = run(posted(fresh, " /update "))
         second = run(posted(fresh, "/update@valorengels_bot"))
@@ -653,36 +653,6 @@ def test_an_update_that_rolls_nothing_still_checks_the_setup(fresh, tmp_path):
         "sha": repo.base,
         "setup": {"fixed": ["com.valor.voice"]},
     }
-
-
-def test_each_dm_is_listed_under_the_project_its_person_works_on():
-    """Tom, 2026-10-24 and 10-25: a DM is whitelisted per project, under
-    the project its person works on; five DMs and cuttlefish's email
-    contacts are removed."""
-    import tomllib
-
-    listed: dict[str, list[str]] = {}
-    for path in (Path(__file__).parent.parent / "projects").glob("*.toml"):
-        spec = tomllib.loads(path.read_text())
-        for chat in spec.get("chats", ()):
-            listed.setdefault(chat, []).append(spec["name"])
-    homes = {
-        "577036901": "valor",  # Kevin
-        "7312372670": "psyoptimal",  # Charlie
-        "7820562338": "psyoptimal",  # Lewis Parrott
-        "8762685703": "satsol",  # Thabiso Epema
-        "6084902164": "cyndra",  # Johann
-        "7388810030": "cyndra",  # Jess Mason
-        "7178632018": "cyndra",  # Hazem
-        "469027377": "gato-os",  # Mike Berson
-    }
-    for ident, project in homes.items():
-        assert listed.get(f"telegram:{ident}") == [project], ident
-    # Matt Rideout, Nick Frith, Andy Malkin, Colin Behring, Graham D.
-    for ident in ("2106858278", "7954357506", "2019570687", "8209004019", "437868058"):
-        assert f"telegram:{ident}" not in listed, ident
-    for address in ("nav@krystallabs.io", "gcason2@gmail.com", "grahamhderry@gmail.com"):
-        assert f"email:{address}" not in listed, address
 
 
 # -- connected means the bridge's own connection is up (Tom, 2026-10-25) ------------

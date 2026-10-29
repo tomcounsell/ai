@@ -5,7 +5,7 @@ Task 2bb12eb511b2. Two faults found installing Brew Status (8b86d911c550).
 ## 1. Update-failure notices from the Pirate, the Captain and the Bald
 
 **Premise, corrected.** Only the Cowboy sets an operator chat
-(`VALOR_OPERATOR_CHANNEL=slack`, `VALOR_OPERATOR_CHAT=T0B6E8JPE3C/U0B78H17XQ8`,
+(`VALOR_OPERATOR_CHANNEL=slack`, `VALOR_OPERATOR_CHAT=T0D654H7PPX/U0B9THUG5DN`,
 Tom's Slack DM, in its kernel, Slack and Telegram plists). The other three
 resolve to `telegram`/`None`, so every rollout notice there is
 `notice.undeliverable`. The Bald's of 2026-10-26 03:02 is one, and the Pirate

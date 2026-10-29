@@ -27,7 +27,7 @@ asking Tom. Tom can overturn any of these; each is reversible.
   (#3550).
 - The inbound Telegram record carries the forum topic id.
 - The rebuild runs on Valor's Mac, where the old system also runs.
-- The answer keys for cuttlefish #646, popoto #191, and popoto #188 stand
+- The answer keys for tailspin #646, popoto #191, and popoto #188 stand
   as written (the 1.5 records, in git history).
 - The old system's spend on the replayed PRs is not needed: every
   milestone's evidence compares against the bare baseline and the emulator,

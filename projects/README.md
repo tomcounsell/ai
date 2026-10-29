@@ -1,21 +1,24 @@
 # projects
 
 Project specs: one TOML file per repository the kernel provisions
-workspaces for (`python -m core start ... --project NAME`).
+workspaces for (`python -m core start ... --project NAME`). This directory
+holds one made-up spec, `example.toml`, the shape of a real one.
 
 **Where the real specs live.** The real specs name Tom's clients, their
 repositories, chats and people, and this repository is public, so they live
 in `~/Desktop/Valor/projects/` (the iCloud folder every Mac syncs), the
-default `projects_dir`; `VALOR_PROJECTS` overrides it. While the Macs move
-there, the default folder falls back to this directory for a name it lacks
-or cannot list (`workspace.spec_dirs`); this directory's copies then go
-([private-projects.md](../docs/plans/private-projects.md)).
+default `projects_dir`; `VALOR_PROJECTS` overrides it
+([private-projects.md](../docs/plans/private-projects.md)). A Mac whose
+folder is missing or unreadable reads no spec: Tom's own chats still reach
+it (they come from settings), and loading a spec names the folder.
 
 - **Editing a spec** is a turn editing `~/Desktop/Valor/projects/NAME.toml`
   in place, loading the edited file with the loader
   (`workspace.Spec.load("<path>")`, or `python -m core start --project
   <path>`), and putting the diff and that result in its delivery. Nothing
-  versions the folder and no merge reviews a spec.
+  versions the folder and no merge reviews a spec. What the suite used to
+  hold for the real specs is that turn's to check: each listed project
+  loads and is placed on the same machine as the one listing it.
 - **Over ssh** the folder cannot be read (`~/Desktop` is a privacy-protected
   folder and sshd holds no grant; Valor.app's Full Disk Access is what lets
   the launchd jobs and turns read it), so a command that reads a spec
@@ -61,15 +64,17 @@ or cannot list (`workspace.spec_dirs`); this directory's copies then go
   project's decision board: that chat's session keeps it, from the
   project's open questions and recent answers in the ledger
   (`core/board.py`, [slack.md](../docs/bridges/slack.md)).
+- `update_chat` names the one of its chats where exactly `/update` updates
+  the Mac that receives it: Valor's engineering room, in `valor.toml`
+  ([update.md](../docs/plans/update.md)).
 - `projects` names other project specs whose repositories the project's
-  chats work in too (`yudame` lists `yudame-tools`). A chat session's
+  chats work in too (a site project may list the app it ships with). A chat session's
   `task.start` takes `"project"` to start its task under one of them, its
   Brief lists them on a `Repos:` line, and its board covers their tasks.
   Every chat of the project gets them, its team chats too; their room
   line is what keeps engineering out of a team chat. A child runs on the
   Mac holding the chat session, whatever the listed spec's `machine`, so a
-  listed project is placed on the same machine as the one listing it
-  (`tests/test_projects.py` holds this for the real specs). Another
+  listed project is placed on the same machine as the one listing it. Another
   repository is one spec and one name here.
 - `knowledge_base` names the business's folder in `~/work-vault`, where its
   description lives. A working task's turns read and write that folder
@@ -97,4 +102,5 @@ provisioning) and [docs/harnesses.md](../docs/harnesses.md) (the workspace).
 **Governance is restrained by structure, not sentiment.** Before any check, gate, hook, validator, review round, approval step, isolation, sandbox rule, denial, allowlist, refusal, capability removal, or verification layer is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance needs Tom's grant, one per instance, written in the plan file that adds it. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is listed for Tom, and deleted unless he keeps it. The reviewer asks whether the diff adds governance; a yes with no grant in the plan file is a refused merge. The same paragraph, in the same words, sits at the top of `CLAUDE.md`, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.
 
 - Secrets of any kind.
-- Client repositories' specs, until a client task first starts or a Mac's rollout routes its chats (docs/rollout.md).
+- The real specs, which name clients, their chats and people: they are in
+  `~/Desktop/Valor/projects/`.

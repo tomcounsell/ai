@@ -107,7 +107,7 @@ async def stop(dsn, task) -> None:
 
 
 def test_a_projects_board_carries_its_own_questions_once_a_change_and_never_another_projects(dsn, dm):
-    """Cyndra's question is on cyndra's board only; nothing changed writes
+    """Northwind's question is on northwind's board only; nothing changed writes
     nothing; a question stopped leaves Open, and opening one more then
     stopping it brings the digest back to an earlier one, which still
     writes a row (it is compared with the latest)."""
@@ -423,7 +423,7 @@ class CanvasWire(SimpleNamespace):
         return ["UVALOR", "UTOM", "ULEWIS"]
 
     async def user_name(self, user):
-        return {"UTOM": "Tom Counsell", "ULEWIS": "Lewis Parrott"}[user]
+        return {"UTOM": "Tom Counsell", "ULEWIS": "Logan Pratt"}[user]
 
 
 def write(wire, markdown="# Valor Decisions"):
@@ -439,7 +439,7 @@ def test_the_canvas_is_made_once_then_replaced_whole_and_a_refusal_fails():
     made = run(sender.write_canvas(action, "k"))
     again = run(sender.canvas_lookup(action, "k", ""))
     url = "https://x.slack.com/docs/T0ABC/F0NEW"
-    assert made == again == {"canvas_id": "F0NEW", "url": url, "readers": ["Tom Counsell", "Lewis Parrott"]}
+    assert made == again == {"canvas_id": "F0NEW", "url": url, "readers": ["Tom Counsell", "Logan Pratt"]}
     assert [c[0] for c in wire.calls] == ["tab", "create", "tab", "replace"]
     assert wire.calls[1][1:3] == ("C0TEAM", BOARD) == ("C0TEAM", "Valor Decisions")
     toms = CanvasWire(tabs=[("F0TOMS", BOARD)])

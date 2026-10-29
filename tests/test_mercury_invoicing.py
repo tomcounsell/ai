@@ -37,11 +37,11 @@ def section(title, *items):
 
 
 def spec(**more):
-    """A Cyndra-shaped spec: labor 10,406.50 over four sections, with lines
+    """A Northwind-shaped spec: labor 10,406.50 over four sections, with lines
     the renderer leaves out of the subtotal."""
     base = {
         "number": "260901CA",
-        "client": {"name": "Cyndra AI LLC", "address": ["43 Glen Cove Rd"]},
+        "client": {"name": "Northwind AI LLC", "address": ["1 Example Rd"]},
         "date": "2026-09-01",
         "due_date": "2026-09-10",
         "sections": [
@@ -129,7 +129,7 @@ def inv(n, *, status="Unpaid", due="2026-11-10", note="valor", customer="c-1", a
         "dueDate": due,
         "invoiceDate": "2026-11-01",
         "slug": f"slug-{n}",
-        "ccEmails": ["Jess@Cyndra.ai"],
+        "ccEmails": ["someone@client.example"],
         "internalNote": note,
         **more,
     }
@@ -173,7 +173,7 @@ class Mercury:
         return next(c for c in self.customers if c["id"] == path.rsplit("/", 1)[1])
 
 
-CYNDRA = {"id": "c-1", "name": "Cyndra AI LLC", "email": "Michael@Cyndra.ai", "deletedAt": None}
+NORTHWIND = {"id": "c-1", "name": "Northwind AI LLC", "email": "someone@client.example", "deletedAt": None}
 
 
 @pytest.fixture
@@ -190,9 +190,9 @@ def fake(monkeypatch):
 
 
 def test_create_posts_every_required_field_and_mercury_sends_nothing(fake):
-    m = fake(customers=[{"id": "c-0", "name": "Other", "email": "a@b.c", "deletedAt": None}, CYNDRA])
+    m = fake(customers=[{"id": "c-0", "name": "Other", "email": "a@b.c", "deletedAt": None}, NORTHWIND])
     s = spec(budget=8000, adjustments=[{"label": "OpenAI", "amount": 3.61}])
-    out = mercury.create(s, "michael@cyndra.ai", ["jess@cyndra.ai"], "acct-1")
+    out = mercury.create(s, "someone@client.example", ["someone@client.example"], "acct-1")
     ((path, body),) = m.posts
     assert path == "/ar/invoices"
     required = {
@@ -216,7 +216,7 @@ def test_create_posts_every_required_field_and_mercury_sends_nothing(fake):
     assert (body["invoiceDate"], body["dueDate"], body["ccEmails"]) == (
         "2026-09-01",
         "2026-09-10",
-        ["jess@cyndra.ai"],
+        ["someone@client.example"],
     )
     assert (body["destinationAccountId"], body["achDebitEnabled"], body["creditCardEnabled"]) == (
         "acct-1",
@@ -229,23 +229,26 @@ def test_create_posts_every_required_field_and_mercury_sends_nothing(fake):
 
 
 def test_an_invoice_number_already_in_mercury_is_printed_and_nothing_posted(fake):
-    m = fake(invoices=[inv("A"), inv("B"), inv("260901CA", status="Paid")], customers=[CYNDRA])
-    out = mercury.create(spec(), "michael@cyndra.ai", [], "acct-1")
+    m = fake(invoices=[inv("A"), inv("B"), inv("260901CA", status="Paid")], customers=[NORTHWIND])
+    out = mercury.create(spec(), "someone@client.example", [], "acct-1")
     assert m.posts == []
     assert (out["existing"], out["id"], out["status"]) == (True, "i-260901CA", "Paid")
 
 
 def test_a_deleted_customer_with_the_email_is_skipped_and_a_new_one_made(fake):
-    gone = {**CYNDRA, "id": "c-gone", "deletedAt": "2026-10-01T00:00:00Z"}
+    gone = {**NORTHWIND, "id": "c-gone", "deletedAt": "2026-10-01T00:00:00Z"}
     m = fake(customers=[gone])
-    mercury.create(spec(), "michael@cyndra.ai", [], "acct-1")
+    mercury.create(spec(), "someone@client.example", [], "acct-1")
     (cust_path, cust), (inv_path, body) = m.posts
-    assert (cust_path, cust) == ("/ar/customers", {"name": "Cyndra AI LLC", "email": "michael@cyndra.ai"})
+    assert (cust_path, cust) == (
+        "/ar/customers",
+        {"name": "Northwind AI LLC", "email": "someone@client.example"},
+    )
     assert (inv_path, body["customerId"]) == ("/ar/invoices", "c-new")
 
 
 def test_a_mercury_amount_that_differs_from_the_spec_is_named(fake, monkeypatch):
-    m = fake(customers=[CYNDRA])
+    m = fake(customers=[NORTHWIND])
     real = m.__call__
 
     def short(method, path, body=None, *, raw=False):
@@ -253,7 +256,10 @@ def test_a_mercury_amount_that_differs_from_the_spec_is_named(fake, monkeypatch)
         return {**got, "amount": 1.0} if method == "POST" and path == "/ar/invoices" else got
 
     monkeypatch.setattr(mercury, "call", short)
-    assert "$1.00 is not the spec's total" in mercury.create(spec(), "michael@cyndra.ai", [], "a")["warning"]
+    assert (
+        "$1.00 is not the spec's total"
+        in mercury.create(spec(), "someone@client.example", [], "a")["warning"]
+    )
 
 
 # -- unpaid ---------------------------------------------------------------------
@@ -269,14 +275,14 @@ def test_unpaid_lists_only_unpaid_across_every_page_with_days_overdue(fake):
             inv("TODAY", due="2026-11-20"),
             inv("SOON", due="2026-11-25", note=None),
         ],
-        customers=[CYNDRA],
+        customers=[NORTHWIND],
     )
     got = {u["number"]: u for u in mercury.unpaid(TODAY)}
     assert set(got) == {"LATE", "TODAY", "SOON"}
     assert [got[n]["days_overdue"] for n in ("LATE", "TODAY", "SOON")] == [10, 0, -5]
     assert got["LATE"]["pay_link"] == "https://app.mercury.com/pay/slug-LATE"
     assert (got["LATE"]["valors"], got["SOON"]["valors"]) == (True, False)
-    assert (got["LATE"]["customer"], got["LATE"]["email"]) == ("Cyndra AI LLC", "Michael@Cyndra.ai")
+    assert (got["LATE"]["customer"], got["LATE"]["email"]) == ("Northwind AI LLC", "someone@client.example")
 
 
 # -- reminders ------------------------------------------------------------------
@@ -298,7 +304,7 @@ def test_remind_picks_valors_overdue_invoices_not_reminded_this_week(fake, monke
             inv("PAID", status="Paid"),
             inv("MANY", due="2026-09-01"),
         ],
-        customers=[CYNDRA],
+        customers=[NORTHWIND],
     )
     monkeypatch.setattr(mercury, "reminders_sent", sent(WEEK=[8], RECENT=[3], MANY=[1, 8, 15, 22]))
     out = mercury.remind(TODAY, NOW, tmp_path / "invoices")
@@ -310,15 +316,15 @@ def test_remind_picks_valors_overdue_invoices_not_reminded_this_week(fake, monke
 
 
 def test_a_reminder_is_addressed_from_the_invoice_itself_with_its_pdf(fake, monkeypatch, tmp_path):
-    fake(invoices=[inv("NEW")], customers=[CYNDRA])
+    fake(invoices=[inv("NEW")], customers=[NORTHWIND])
     monkeypatch.setattr(mercury, "reminders_sent", sent())
     monkeypatch.chdir(tmp_path)
     ((effect,),) = [mercury.remind(TODAY, NOW, Path(".valor/invoices"))["send"]]
     p = effect["payload"]
-    assert (effect["action_type"], effect["target"]) == ("email.send", "michael@cyndra.ai")
-    assert (p["to"], p["cc"]) == (["michael@cyndra.ai"], ["jess@cyndra.ai"])
+    assert (effect["action_type"], effect["target"]) == ("email.send", "someone@client.example")
+    assert (p["to"], p["cc"]) == (["someone@client.example"], ["someone@client.example"])
     assert "https://app.mercury.com/pay/slug-NEW" in p["body"] and "$8,003.61" in p["body"]
-    assert "10 days ago" in p["body"] and p["body"].startswith("Hello Cyndra AI LLC,")
+    assert "10 days ago" in p["body"] and p["body"].startswith("Hello Northwind AI LLC,")
     ((f),) = p["files"]
     path = Path(f["path"])
     assert path.is_absolute() and path == (tmp_path / ".valor/invoices/invoice_NEW.pdf").resolve()
@@ -327,8 +333,10 @@ def test_a_reminder_is_addressed_from_the_invoice_itself_with_its_pdf(fake, monk
 
 
 def test_a_notice_names_the_due_date_and_no_lateness(fake, tmp_path):
-    fake(invoices=[inv("N1", due="2026-12-01")], customers=[CYNDRA])
-    e = mercury.email(mercury.call("GET", "/ar/invoices/i-N1"), CYNDRA, tmp_path, reminder=False, today=TODAY)
+    fake(invoices=[inv("N1", due="2026-12-01")], customers=[NORTHWIND])
+    e = mercury.email(
+        mercury.call("GET", "/ar/invoices/i-N1"), NORTHWIND, tmp_path, reminder=False, today=TODAY
+    )
     assert e["payload"]["subject"] == "Invoice N1 from Yudame"
     assert "due on 2026-12-01" in e["payload"]["body"] and "ago" not in e["payload"]["body"]
 
@@ -356,7 +364,7 @@ def test_reminders_sent_reads_valors_sent_mail_through_gws(monkeypatch):
 
 
 def test_a_failed_sent_mail_read_stops_the_reminders(fake, monkeypatch, tmp_path):
-    fake(invoices=[inv("NEW")], customers=[CYNDRA])
+    fake(invoices=[inv("NEW")], customers=[NORTHWIND])
     monkeypatch.setattr(mercury.subprocess, "run", lambda *a, **k: run_result(1, "", "invalid_grant"))
     with pytest.raises(mercury.Failed, match="cannot be read: invalid_grant"):
         mercury.remind(TODAY, NOW, tmp_path)
@@ -528,7 +536,7 @@ def test_received_lists_a_client_s_incoming_payments_on_every_account_oldest_fir
             {"amount": 6000.0, "postedAt": "2025-09-11T00:00:00Z", "counterpartyName": "USERCRO INC",
              "externalMemo": "INVOICE: 250901DF. Fuse."},
             {"amount": -50.0, "postedAt": "2025-09-12T00:00:00Z", "counterpartyName": "UserCRO refund"},
-            {"amount": 8000.0, "postedAt": "2025-09-08T00:00:00Z", "counterpartyName": "CYNDRA AI LLC"},
+            {"amount": 8000.0, "postedAt": "2025-09-08T00:00:00Z", "counterpartyName": "NORTHWIND AI LLC"},
         ],
     }  # fmt: skip
     seen = []

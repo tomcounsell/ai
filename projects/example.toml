@@ -1,0 +1,29 @@
+# example: a made-up project spec, the shape of a real one. The real specs
+# live in ~/Desktop/Valor/projects/ (README.md); copy this there to add one.
+name = "example"
+client = "example-client"
+repo = "https://github.com/example/example-app.git"
+kind = "django"
+branch = "main"
+merge_url = "https://github.com/example/example-app.git"
+services = ["postgres", "redis"]
+setup = ["uv sync --frozen"]
+suite = "uv run pytest -q -p no:cacheprovider --junitxml={junit}"
+lint = "uv run ruff check ."
+env = { DATABASE_URL = "postgres://app@127.0.0.1:{port}/app" }
+# Its Eng group, a team chat that waits to be mentioned, the client's
+# Slack dev channel, and every sender at the client's domain.
+chats = [
+    "telegram:-1009000000010",
+    "telegram:-1009000000011",
+    "slack:T0EXAMPLE1/C0EXAMPLE2",
+    "email:@example.com",
+]
+mentions = ["telegram:-1009000000011"]
+board = "slack:T0EXAMPLE1/C0EXAMPLE2"
+rooms."telegram:-1009000000010" = "Engineering on the example app."
+rooms."telegram:-1009000000011" = "The client's team chat. No engineering or SDLC work starts here; engineering requests go to the Eng group."
+rooms."slack:T0EXAMPLE1/C0EXAMPLE2" = "Engineering on the example app."
+rooms.email = "Email with the client's team, as a teammate."
+machine = "Valor the Example"
+knowledge_base = "Example"

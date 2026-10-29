@@ -68,22 +68,22 @@ first, item 1).
    pair until the merge, then removed). Live check: each Mac's app token's
    sha256 differs from every other Mac's, compared over ssh without
    printing either.
-3. **Tom's Slack DM** is listed in `valor.toml` (`slack:T0B6E8JPE3C/<his
+3. **Tom's Slack DM** is listed in `valor.toml` (`slack:T0D654H7PPX/<his
    id>`, from the Cowboy's job), and `owned()` stops adding the operator
    ids. `VALOR_OPERATOR_SLACK_IDS` is added to the other Macs' kernel,
    Telegram and email jobs (reloaded) before any Slack job there starts, so
    Tom is `tom` there and item 5 copies it.
 4. **Channels**: Valor creates, with the Cowboy's token in a one-off
    script not committed, private `valor-dev`, `popoto-dev`,
-   `cuttlefish-dev`, `psyoptimal-dev`, `cyndra-dev`, `satsol-dev`,
-   `mastery-dev`, `gato-os-dev`, `mondayflowers-dev`, `counsell-home-dev`,
+   `tailspin-dev`, `fabrikam-dev`, `northwind-dev`, `litware-dev`,
+   `adatum-dev`, `orbit-os-dev`, `wingtip-dev`, `home-lab-dev`,
    `yudame-dev`; invites Tom; sets each purpose to its room text. Each is
    added to its spec's `chats`, not to `mentions`, with `rooms` equal to
    its Eng group's; `yudame-dev`'s (no Eng group) is "Engineering on the
    yuda.me site." Each Mac's own app's user joins its channels (Valor is
    one user, so it is already a member). Left out: `skills` and
-   `work-vault` (no Eng group, not in the Brief's list). `satsol-dev`
-   stays unanswered until SATSOL has a Mac.
+   `work-vault` (no Eng group, not in the Brief's list). `litware-dev`
+   stays unanswered until LITWARE has a Mac.
 5. **The update installs Slack**: the setup check (`permissions.ensure`)
    writes and bootstraps `com.valor.kernel.slack` when this Mac owns a
    Slack chat, its `slack-keys` holds a workspace, and the job is missing.
@@ -124,7 +124,7 @@ channel for team chats; inviting anyone but Tom; installing other bridges.
 
 ## Tests
 
-- Each of the eleven specs lists one `slack:T0B6E8JPE3C/C…` dev channel,
+- Each of the eleven specs lists one `slack:T0D654H7PPX/C…` dev channel,
   not in `mentions`, its room equal to the Eng group's; `skills` and
   `work-vault` list none.
 - `owned("slack")` with operator ids set lists only spec chats; Tom's DM is

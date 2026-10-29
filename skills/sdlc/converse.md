@@ -119,8 +119,8 @@ names Tom alone, a decision about
 the client relationship (pricing, terms, its people), and anything asked
 or answered in Tom's DM, shows as one line, e.g. "A pricing decision for
 this client: see Tom's DM", on the canvas, in a post, and under Decided.
-For example, a task's question "Raise Cyndra's day rate to $1,800?" asked
-in Tom's DM appears on #cyndra-dev's canvas as "A rate decision for Cyndra:
+For example, a task's question "Raise Northwind's day rate to $1,800?" asked
+in Tom's DM appears on #northwind-dev's canvas as "A rate decision for Northwind:
 see Tom's DM". A 👍 on the post "Use Postgres for the queue? I recommend
 yes, since it is already running" answers "Accepted: yes, since it is
 already running".

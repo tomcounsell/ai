@@ -100,7 +100,7 @@ old controller, it starts from what Tom said and counts what Tom used.
   - merged, stopped and crashed rows are not restarted;
   - five `step.failed` retries start nothing; their `task.ended kind=step`
     starts exactly one;
-  - a failed step on a client (e.g. cuttlefish) task starts nothing;
+  - a failed step on a client (e.g. tailspin) task starts nothing;
   - group, unverified and URL-less messages start nothing; DMs linking
     vm.tiktok.com, claude.ai or a client repo start nothing;
   - a DM linking `github.com/tomcounsell/popoto` starts on popoto;

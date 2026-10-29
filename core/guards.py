@@ -27,7 +27,7 @@ SEEDED: tuple[dict[str, Any], ...] = (
         "guard_id": machine.GUARD_JUDGE,
         "name": "the request judge: a request judged thin goes to clarify",
         "incident": (
-            "psyoptimal #894 (task 32f800bce8a2: two feedback rounds for three decisions one message "
+            "fabrikam #894 (task 32f800bce8a2: two feedback rounds for three decisions one message "
             "would have settled); popoto #191 bare (fidelity 1, 3 of 11 hidden tests); popoto #188 bare "
             "(built a feature Tom did not want)"
         ),
@@ -94,7 +94,7 @@ SEEDED: tuple[dict[str, Any], ...] = (
     },
     {
         "guard_id": "update.room",
-        "name": "/update binds only in Valor's engineering room (core/intake.py, UPDATE_CHAT)",
+        "name": "/update binds only in Valor's engineering room (core/intake.py, the valor spec's update_chat)",
         "incident": "none; accepted by Tom 2026-10-20",
         "mission_items": [1],
         "source": "docs/plans/update.md, Grant",

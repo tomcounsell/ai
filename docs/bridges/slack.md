@@ -9,9 +9,9 @@ outbox. This doc covers what is particular to Slack.
 **Status.** Built in `bridges/slack/`. `python -m bridges.slack run` runs
 it under `bridge.serve`; `keys` copies its tokens, `manifest` prints the
 app manifest, and `--plist` prints its launchd job. The last section lists
-the modules. It serves the Yudame workspace (`T0B6E8JPE3C`), one bridge per
+the modules. It serves the Yudame workspace (`T0D654H7PPX`), one bridge per
 Mac, each on that Mac's own app. The Cowboy's receives Tom's DM, #general
-(`C0B67T44KEF`, a mentions-only team chat for general Yudame business;
+(`C0VP3DHJKD9`, a mentions-only team chat for general Yudame business;
 Tom, 2026-10-23), and its projects' dev channels; each other Mac's, its
 own projects' dev channels.
 
@@ -19,28 +19,14 @@ own projects' dev channels.
 project ... named like x-dev. They are equivalent to Eng: x telegram
 groups"). Each is private, made by Valor with Tom invited, listed in its
 project's spec, not mentions-only, its room and Slack description its Eng
-group's:
-
-| Channel | Project, Mac |
-|---|---|
-| `#valor-dev` (`C0CBTQ76PRB`) | valor, the Cowboy |
-| `#popoto-dev` (`C0C1P5GLBGR`, Tom's own, from 2026-09) | popoto, the Cowboy |
-| `#gato-os-dev` (`C0CBYTEST8A`) | gato-os, the Pirate |
-| `#mondayflowers-dev` (`C0CBSS3RW03`) | mondayflowers, the Pirate |
-| `#counsell-home-dev` (`C0CC2PX7QTW`) | counsell-home, the Pirate |
-| `#yudame-dev` (`C0CBX4MBN1L`, "Engineering on the yuda.me site": no Eng group) | yudame, the Pirate |
-| `#cuttlefish-dev` (`C0CBHMQBYET`) | cuttlefish, the Captain |
-| `#psyoptimal-dev` (`C0CC2PWM8E8`) | psyoptimal, the Captain |
-| `#mastery-dev` (`C0CBHMR5FHV`) | mastery, the Captain |
-| `#cyndra-dev` (`C0CC2PWDETE`) | cyndra, the Bald |
-| `#satsol-dev` (`C0CCTEEG7FA`) | satsol, no Mac yet, so unanswered |
-
-`skills` and `work-vault` have no Eng group and no dev channel.
+group's. Which project has which channel, and on which Mac, is in the private specs
+([projects/README.md](../../projects/README.md)); a project with no Eng group
+has no dev channel, and one with no Mac yet goes unanswered.
 
 **Decision boards** (Tom, 2026-10-27: "more like a todo board that can be
 reorganized and evolve"; "I won't do work on the board. I'll chat with
-you or call you, or leave emoji reactions"). Each dev channel above but
-`#satsol-dev` is its project's `board` (projects/README.md): its session
+you or call you, or leave emoji reactions"). Each dev channel of a project
+with a Mac is its project's `board` (projects/README.md): its session
 keeps a canvas tab, "Valor Decisions", of the decisions open for Tom on
 that project, rewritten whole from the ledger (`core/board.py`,
 `skills/sdlc/converse.md`). Tom made `#valor-dev`'s himself; the bridge
@@ -49,7 +35,7 @@ post, which the bridge receives (below).
 
 **A channel over several repositories** (Tom, 2026-10-28: "scope this
 channel to several repositories"). `#yudame-dev` covers yuda.me and the
-Yudame Tools Mac app: `yudame.toml` lists `yudame-tools` in `projects`
+Studio Tools Mac app: `yudame.toml` lists `studio-tools` in `projects`
 (projects/README.md), so its session's Brief carries a `Repos:` line,
 `task.start` takes `"project"` to start the task in the repository the
 request is about, and the board covers both. Another repository is one
@@ -136,7 +122,7 @@ the send decides (below).
 
 **Who is received.** The same rule as Telegram:
 
-- Tom's DM, listed in `projects/valor.toml` as `slack:<team>/<his id>`, so
+- Tom's DM, listed in the private `valor.toml` as `slack:<team>/<his id>`, so
   only the Cowboy's bridge takes it; `VALOR_OPERATOR_SLACK_IDS` (a comma
   list of `<team>/<user>`, one per workspace) is who Tom is, on every Mac,
   and owns nothing by itself;
@@ -438,5 +424,5 @@ file's name.
 - **A reaction undone** (`reaction_removed`) is not received: a 👍
   passed on stays passed on, and Tom corrects it in the channel. The same
   emoji removed and added again on one post is the record already made.
-- **No Mac for SATSOL.** `#satsol-dev` is listed, as Eng: SATSOL is, and
+- **No Mac for LITWARE.** `#litware-dev` is listed, as Eng: LITWARE is, and
   answered once its spec names a Mac.

@@ -465,7 +465,7 @@ its first turn, the request-underspecification classifier
 one-line ask, an ask leaning on an example, an ask naming existing UI
 without scope) goes to a clarify turn, and a precise one goes straight to
 build. That classifier is a guard Tom granted, ledgered with its incidents
-(psyoptimal #894 in rebuild-demonstration.md, Attention log; popoto #191
+(fabrikam #894 in rebuild-demonstration.md, Attention log; popoto #191
 and #188 in rebuild-baseline.md, "What this says about the old SDLC
 stages", Clarify), serving Mission items 3 and 6, with a ninety-day expiry.
 

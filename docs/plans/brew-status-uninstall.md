@@ -1,9 +1,9 @@
-# Brew Status off the four Macs; the vault job back until Yudame Tools
+# Brew Status off the four Macs; the vault job back until Studio Tools
 
 Task 9c9294936bdb. Tom, Telegram 11762 (2026-10-28): "uninstall the old brew
 status from the machines. they can wait until the new yudame tool is ready".
-The Macs wait for Yudame Tools' app; their nightly Homebrew run does not wait.
-It goes back to the vault job until yudame/yudame-tools#2 deploys.
+The Macs wait for Studio Tools' app; their nightly Homebrew run does not wait.
+It goes back to the vault job until yudame/studio-tools#2 deploys.
 
 ## Premise, checked
 
@@ -47,19 +47,19 @@ It goes back to the vault job until yudame/yudame-tools#2 deploys.
 2. **Docs**:
    - `docs/rollout.md` step 9: no Brew Status install. Homebrew runs from
      the vault job `com.valor.brew-nightly` (`~/Desktop/Valor/brew/SETUP.md`)
-     until Yudame Tools replaces it per yudame/yudame-tools#2, and Brew
+     until Studio Tools replaces it per yudame/studio-tools#2, and Brew
      Status was removed on 2026-10-28.
    - `docs/rollout.md` lines 143 and 229: `me.yuda.brew-status` becomes
      `com.valor.brew-nightly` (it is a `com.valor.*` job, so the
      `launchctl list | grep me.yuda` check goes).
    - `docs/machine.md` (~l.251) and `core/README.md` (permissions entry):
-     drop the Brew Status sentence and say Yudame Tools will replace it per
+     drop the Brew Status sentence and say Studio Tools will replace it per
      #2.
 3. **Vault** (Cowboy, `~/Desktop/Valor/brew`): restore
    `brew-nightly-update.sh` and `com.valor.brew-nightly.plist` from the
    retired `vault/` copy. Restore `SETUP.md` from that copy, plus one
    paragraph: Brew Status was removed 2026-10-28, and this job runs until
-   Yudame Tools deploys (yudame/yudame-tools#2).
+   Studio Tools deploys (yudame/studio-tools#2).
 4. **Each Mac** (the Cowboy locally; the Pirate, the Captain and the Bald
    over `ssh -o BatchMode=yes`). First look at what each Mac has, then:
    - Remove Brew Status:
@@ -88,8 +88,8 @@ It goes back to the vault job until yudame/yudame-tools#2 deploys.
      update done ===` within about 20 minutes, through `valor-run`. A run
      that hangs is sampled, and a grant only a person at the Mac can give
      is named in the delivery as open for that Mac, not left silent.
-5. **yudame-tools#2**: one comment saying Valor's four Macs run the vault
-   job `com.valor.brew-nightly` until Yudame Tools is deployed, then switch
+5. **studio-tools#2**: one comment saying Valor's four Macs run the vault
+   job `com.valor.brew-nightly` until Studio Tools is deployed, then switch
    over (`gh issue comment`, as Valor).
 
 **Found in the build.** A turn's sandbox cannot bootstrap a launchd job
@@ -101,7 +101,7 @@ rollout or the 03:00 update, before 04:00. Tested.
 
 ## Out of scope
 
-Packaging or deploying Yudame Tools (#2). `yudame/brew-status` stays
+Packaging or deploying Studio Tools (#2). `yudame/brew-status` stays
 archived as it is. The shared `~/Library/Logs/brew-nightly.log` is kept.
 
 ## Risk: reinstall before the merge reaches each Mac

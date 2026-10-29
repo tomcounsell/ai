@@ -36,7 +36,7 @@ the new one to the token on Mercury's token page. Mercury deletes a token unused
    ids; payments go to Yudame's active checking account (••3031). A token without the
    accounts scope is refused `/accounts` (403 `tokenNotInScope`); `accounts` then lists
    the account each existing invoice pays into.
-   A spec with a discount or credit (the Cyndra budget line) becomes one services
+   A spec with a discount or credit (a client's budget line) becomes one services
    line priced net of it, since Mercury does not document negative prices; the PDF
    carries the detail.
 3. **Notice.** `python3 mercury.py notice ID` prints an `email.send` effect addressed
@@ -85,15 +85,14 @@ Learned on Fuse (UserCRO, Inc.), 2026-10-21.
 - **BCC.** `email.send` has no BCC field. When Tom asks for one, send him a separate
   copy, marked as such.
 
-## Cyndra
+## A client's own invoice skill
 
-The `cyndra-invoice` skill (work-vault) ends here instead of in a Gmail draft from
-tom@yuda.me: after Tom approves the PDF (its step 9), and once the budget-history row
-is ready,
+A client's invoice skill in work-vault (`.claude/skills/<client>-invoice`) ends
+here instead of in a Gmail draft from tom@yuda.me: after Tom approves the PDF, and
+once its budget-history row is ready,
 
-1. `create Cyndra/invoices/invoice_<n>.json --customer-email michael@cyndra.ai --cc johann@cyndra.ai jess@cyndra.ai tom@cyndra.ai --account <checking id>`,
-   shown to Tom first as above (his approval of the PDF is the OK when the total matches).
+1. `create <Client>/invoices/invoice_<n>.json --customer-email <to> --cc <the rest> --account <checking id>`,
+   with the addresses that skill's Email line names, shown to Tom first as above
+   (his approval of the PDF is the OK when the total matches).
 2. `notice <id>` and send it. Then move the PDF into `PDFs sent/` and add the
    budget-history row.
-
-Michael has paid by wire so far; the pay link offers ACH as well.

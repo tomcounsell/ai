@@ -320,9 +320,9 @@ def stub():
 
 def test_cli_prints_oldest_first_for_the_turns_chat(stub, monkeypatch, capsys):
     monkeypatch.setenv("VALOR_TELEGRAM_READ_PORT", str(stub.port))
-    monkeypatch.setenv("VALOR_CHAT", "telegram:-1003890616618")
+    monkeypatch.setenv("VALOR_CHAT", "telegram:-1009503296801")
     assert valor_read.main(["read", "--search", "ship", "-n", "5"], "/x/bin/valor-telegram") == 0
-    assert stub.asked == [("-1003890616618", "ship", 5, None)]
+    assert stub.asked == [("-1009503296801", "ship", 5, None)]
     assert capsys.readouterr().out.splitlines() == [
         "[2026-10-16 10:00 UTC] Tom (message 11): can we ship",
         "this? [photo: x.png]",

@@ -41,7 +41,7 @@ channel). Both results lead the delivery; if (b) fails, the build stops there
 and the delivery says what the plan allows.
 
 1. **`board` in each spec**: `board = "slack:<team>/<channel>"`, its dev
-   channel, in the ten specs that list one (satsol waits on a Mac). The board
+   channel, in the ten specs that list one (litware waits on a Mac). The board
    session is that chat's session, on the Mac owning it.
 2. **The wake, `core/board.py`**, beside `notices.owe` (`core/serve.py`). The
    snapshot: each open question of the project's tasks only (task, request,
@@ -114,7 +114,7 @@ moves where a notice goes; nothing new refuses.
 
 ## Tests
 
-- Snapshot: only its project's questions (cyndra's never on valor's); answered
+- Snapshot: only its project's questions (northwind's never on valor's); answered
   or stopped leave Open, answers enter Decided; open, then stop, back to the
   earlier digest writes a row each time; a new canvas link or post ts alone
   writes none; no `board`, or another Mac's: nothing; no session: started.

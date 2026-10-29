@@ -8,12 +8,12 @@ made it worse.
 
 | Case | Request shape | Label | Evidence |
 |---|---|---|---|
-| psyoptimal #894 | Example standing for the requirement; names an existing chip | `example_as_spec` | Three answers each changed the outcome (rebuild-demonstration.md, "Attention log") |
+| fabrikam #894 | Example standing for the requirement; names an existing chip | `example_as_spec` | Three answers each changed the outcome (rebuild-demonstration.md, "Attention log") |
 | popoto #191 | One line | `one_line_ask` | Fidelity 1 to 3, hidden tests 3/11 to 7/11 (rebuild-baseline.md, pop-b) |
 | popoto #188 | One line | `one_line_ask` | PM round avoided, fidelity 4 to 5, half the spend (rebuild-baseline.md, pop-c) |
-| psyoptimal #872 | Bulleted, names the flag and the reason | `precise` | Clarify changed nothing (rebuild-baseline.md, pso-a) |
-| cuttlefish #646 | Bug report with failure scenario and desired behavior | `precise` | Clarify changed nothing (rebuild-baseline.md, cut-a) |
-| psyoptimal #893 | Names existing UI, lists three candidate fixes | `precise` | Clarify tied on every score (rebuild-baseline.md, pso-b) |
+| fabrikam #872 | Bulleted, names the flag and the reason | `precise` | Clarify changed nothing (rebuild-baseline.md, pso-a) |
+| tailspin #646 | Bug report with failure scenario and desired behavior | `precise` | Clarify changed nothing (rebuild-baseline.md, cut-a) |
+| fabrikam #893 | Names existing UI, lists three candidate fixes | `precise` | Clarify tied on every score (rebuild-baseline.md, pso-b) |
 | popoto #633 | Bug report with measurements and source pointers | `precise` | Clarify hurt: fidelity 5 to 3, correctness 5 to 2 (rebuild-baseline.md, pop-a) |
 
 #893 is the case that keeps the classifier honest. It names existing UI and

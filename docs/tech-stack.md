@@ -315,7 +315,7 @@ What the stack fixes:
   one-line ask, an ask that leans on an example, an ask naming existing UI
   without scope) goes to a clarify turn; a precise one goes straight to
   build. This is a guard Tom granted, ledgered with its incidents and a
-  ninety-day expiry. Incidents: the demonstration (psyoptimal #894, two PM
+  ninety-day expiry. Incidents: the demonstration (fabrikam #894, two PM
   rounds for three decisions; rebuild-demonstration.md, Attention log) and
   the replay baseline (popoto #191 and #188, where clarifying raised fidelity
   and bare building needed a PM round; rebuild-baseline.md, What this says

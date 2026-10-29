@@ -384,7 +384,7 @@ The SDLC uses two:
    ask, one leaning on an example, one naming existing UI without scope)
    goes to `clarify`: one inspecting turn, one message with the material
    questions, the assumed answers, and the approach. A guard Tom granted on
-   2026-10-01 (incidents psyoptimal #894, popoto #191 and #188; mission
+   2026-10-01 (incidents fabrikam #894, popoto #191 and #188; mission
    items 3 and 6; ninety-day expiry). Clarify raised fidelity on one-line
    requests and changed nothing on precise ones; asked unconditionally it
    hurt once (#633), so it is never the default (rebuild-baseline.md,

@@ -25,7 +25,7 @@ Application: Yudame, Inc." (rule 5).
 2. **Notary profile** `yudame-notary` in that keychain, saved with
    `--no-validate` because Apple answers 403 "A required agreement is missing
    or has expired" until the Account Holder accepts the pending agreement.
-3. **Test build**: Yudame Tools through its unchanged `tools/package.sh`
+3. **Test build**: Studio Tools through its unchanged `tools/package.sh`
    with `SIGN_IDENTITY`; with `NOTARY_PROFILE` once Apple accepts it.
 4. **Agent doc**: `skills/valor/agents/mac-app.md`'s signing paragraph names
    the identity, keychain, unlock on stdin, and the notary state, with

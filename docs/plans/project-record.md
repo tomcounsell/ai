@@ -51,10 +51,10 @@ Valor about Agent Builders) and Valor answers from the record.
 
 5. **Specs (Tom, 2026-10-24, 10-25).** Each DM in its project's `chats`
    with a teammate-scope room: valor keeps Kevin; Charlie (room rewritten)
-   and Lewis Parrott to psyoptimal; Thabiso Epema to satsol (room
-   rewritten; unanswered until SATSOL has a Mac); Johann, Jess Mason, Hazem
-   to cyndra; Mike Berson to gato-os. Removed: Matt Rideout, Andy Malkin,
-   Nick Frith, Colin Behring, Graham D, and cuttlefish's three email lanes
+   and Logan Pratt to fabrikam; Taylor Ellis to litware (room
+   rewritten; unanswered until LITWARE has a Mac); Jordan, Jamie Moss, Harper
+   to northwind; Morgan Byrd to orbit-os. Removed: Max Reed, Alex Marsh,
+   Noel Ford, Casey Lakeshore, Glen R, and tailspin's three email lanes
    and `rooms.email`. All Macs run the new system (Tom, 10-25 10:56), so
    the "inert until rollout" comments in the specs and `docs/rollout.md`'s
    order paragraph are corrected; the delivery says which Macs' Telegram
@@ -87,6 +87,6 @@ DM sessions.
 - Memory: S1's file names S2's `MEMORY.md` path, not S3's, S4's or its own;
   T's names S1's and S2's; a session started later appears next turn.
 - `tests/test_rollout.py`: each moved DM in exactly one spec; the removed
-  DMs and cuttlefish's lanes in none.
+  DMs and tailspin's lanes in none.
 - Live: Tom asks in Eng: Valor about Agent Builders and the answer comes
   from `valor-record`, recorded with the date.

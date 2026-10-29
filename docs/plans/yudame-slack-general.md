@@ -6,7 +6,7 @@ route for teamwork on general yudame business things".
 ## What is built
 
 1. **The chat, under `valor` on the Cowboy.** `projects/valor.toml` lists
-   `slack:T0B6E8JPE3C/C0B67T44KEF` in `chats` and `mentions`. Its `rooms`
+   `slack:T0D654H7PPX/C0VP3DHJKD9` in `chats` and `mentions`. Its `rooms`
    entry follows the Telegram Yudame team chat's: the company's team chat
    in Slack, for general Yudame business; answer whoever mentions you; no
    engineering or SDLC work starts here; web search and filing GitHub
@@ -25,12 +25,12 @@ route for teamwork on general yudame business things".
    No second Slack connection is added.
 
 2. **Slack's mention wakes it.** Slack stores a mention as
-   `<@U0B6C6J735L>` (#general's own history shows Tom's tag that way),
+   `<@U04SCN9VXKN>` (#general's own history shows Tom's tag that way),
    and `intake.MENTION` matches only the word "valor", so a tag would be
    `heard` and never wake the session. The fix is in the Slack bridge,
    which alone knows its own user id (`wire.user_id`): `inbound.build`
    writes Valor's own mention in the record's `text` (and the thread's)
-   as Slack's labelled form, `<@U0B6C6J735L|valor>`. `MENTION` then
+   as Slack's labelled form, `<@U04SCN9VXKN|valor>`. `MENTION` then
    matches it as written, unchanged, and the session reading the message
    sees that the mention is of itself. In `core/` only `MENTION`'s comment changes; send
    lookup never reads inbound text. `docs/bridges/slack.md`'s record
@@ -53,7 +53,7 @@ the room description carries the rule, as for every team chat).
 
 ## Tests
 
-- `tests/test_kernel.py`, the real-specs test: `slack:T0B6E8JPE3C/C0B67T44KEF`
+- `tests/test_kernel.py`, the real-specs test: `slack:T0D654H7PPX/C0VP3DHJKD9`
   is in valor's `chats` and `mentions`, and its room says "No engineering
   or SDLC work starts here".
 - Slack inbound tests: a message containing `<@own>` comes out as

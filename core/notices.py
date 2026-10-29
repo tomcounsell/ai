@@ -284,8 +284,8 @@ async def headline(conn, task_id: str) -> str | None:
     """The task's request, shortened; None for a task with no Brief (or an
     id that names no task, such as the channel a failed binding falls back
     to), and for a chat session, whose instruction is its opening, not a
-    request, and whose notices go to the chat it serves (Monday Flowers'
-    ended notice, 2026-10-19, quoted "You are in the mondayflowers team
+    request, and whose notices go to the chat it serves (Wingtip Flowers'
+    ended notice, 2026-10-19, quoted "You are in the wingtip team
     chat...")."""
     from core import tasks
 

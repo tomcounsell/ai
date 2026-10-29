@@ -100,10 +100,10 @@ def test_import_twice_appends_once_and_only_what_is_served_here(dsn, specs):
 
 @pytest.fixture
 def prep(specs, monkeypatch):
-    """The prep script, with cyndra and valor specs and nothing judged not
+    """The prep script, with northwind and valor specs and nothing judged not
     worth recalling unless a test says so."""
-    (pathlib.Path(specs.projects_dir) / "cyndra.toml").write_text(
-        'name = "cyndra"\nclient = "cyndra"\nrepo = "https://example.test/cyndra.git"\nkind = "plain"\nsuite = "true"\n'
+    (pathlib.Path(specs.projects_dir) / "northwind.toml").write_text(
+        'name = "northwind"\nclient = "northwind"\nrepo = "https://example.test/northwind.git"\nkind = "plain"\nsuite = "true"\n'
     )
     (pathlib.Path(specs.projects_dir) / "valor.toml").write_text(bridges.VALOR_SPEC)
     spec = importlib.util.spec_from_file_location(
@@ -134,14 +134,16 @@ def test_prep_chooses_maps_and_collapses(tmp_path, prep, monkeypatch):
         rec("summary", "In a 12-event session Valor fixed the build", source="agent", agent="tui-1"),
         rec("superseded", "an old preference", superseded="m9"),
         rec("knowledge", "a knowledge doc", source="knowledge", agent=None),
-        rec("cyndra", "Amr wants weekly reports", agent="extraction-tg_cyndra_-100123_4", source="agent"),
+        rec(
+            "northwind", "Amr wants weekly reports", agent="extraction-tg_northwind_-100123_4", source="agent"
+        ),
         rec(
             "monday1",
-            "Hazem sends the weekly status report to the client every Monday morning",
-            agent="Hazem",
-            project="cyndra",
+            "Harper sends the weekly status report to the client every Monday morning",
+            agent="Harper",
+            project="northwind",
         ),
-        rec("monday2", monday, agent="Johann", project="cyndra"),
+        rec("monday2", monday, agent="Jordan", project="northwind"),
         rec("tom", near),
         rec("jess", near + " today", agent="Jess"),
         rec("lost", "nobody knows where this goes", source="agent", agent=None, project=None),
@@ -153,11 +155,11 @@ def test_prep_chooses_maps_and_collapses(tmp_path, prep, monkeypatch):
     rows = {
         r["memory_id"]: r for r in map(json.loads, (tmp_path / "out/import.jsonl").read_text().splitlines())
     }
-    assert set(rows) == {"cyndra", "monday2", "tom"}
+    assert set(rows) == {"northwind", "monday2", "tom"}
     assert (rows["monday2"]["text"], rows["monday2"]["merged_from"]) == (monday, ["monday1"])
     assert [{r["memory_id"] for r in g} for g in judged] == [{"monday1", "monday2"}]
-    assert (rows["cyndra"]["project"], rows["cyndra"]["client"], rows["cyndra"]["by"]) == (
-        "https://example.test/cyndra.git", "cyndra", "valor",
+    assert (rows["northwind"]["project"], rows["northwind"]["client"], rows["northwind"]["by"]) == (
+        "https://example.test/northwind.git", "northwind", "valor",
     )  # fmt: skip
     assert (rows["tom"]["by"], rows["tom"]["text"], rows["tom"]["merged_from"]) == ("tom", near, ["jess"])
     assert rows["tom"]["project"] == "unused"

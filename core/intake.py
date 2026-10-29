@@ -72,7 +72,7 @@ The binding table, first match wins:
 
 | The record | Bound as |
 | --- | --- |
-| In Valor's engineering room (`UPDATE_CHAT`), exactly `/update` or `/update@<bot>` | `update`: an update request (`request_update`), replied to there when it ends |
+| In Valor's engineering room (its spec's `update_chat`), exactly `/update` or `/update@<bot>` | `update`: an update request (`request_update`), replied to there when it ends |
 | In a team chat, with no text or files | `none` |
 | In a team chat, waking the chat session | `steer`, to the chat session |
 | In a team chat, otherwise | `heard`, to the chat session |
@@ -393,7 +393,7 @@ def owns(channel: str, id: str) -> bool:
 
 def _domain(address: str) -> str:
     """An email chats entry naming every sender at the address's domain:
-    `@cyndra.ai` for `x@cyndra.ai`."""
+    `@northwind.example` for `someone@client.example`."""
     return "@" + address.rpartition("@")[2]
 
 
@@ -425,10 +425,9 @@ def team_spec(p: dict[str, Any]) -> workspace.Spec | None:
 MENTION = re.compile(r"(?i)(?<![\w])@?valor(?:engels)?\b")
 # How many of the chat's recorded messages a new chat session starts with.
 HISTORY = 20
-# Valor's engineering room (`projects/valor.toml`): the one chat where a
-# message updates this Mac (Tom's grant, docs/plans/update.md; guard
-# `update.room`). `Spec` has no field naming a room's job, so it is named here.
-UPDATE_CHAT = "telegram:-1003449100931"
+# Valor's engineering room is the valor spec's `update_chat`: the one chat
+# where a message updates this Mac (Tom's grant, docs/plans/update.md; guard
+# `update.room`).
 UPDATE_COMMAND = re.compile(r"/update(@\w+)?")
 # The stream of every update request and its `rollout.*` rows.
 UPDATES = "updates"
@@ -632,7 +631,7 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         team = _project_for(p)
     if team is not None:
         text = (p.get("text") or "").strip()
-        if f"{p['channel']}:{p['chat_id']}" == UPDATE_CHAT and UPDATE_COMMAND.fullmatch(text):
+        if f"{p['channel']}:{p['chat_id']}" == team.update_chat and UPDATE_COMMAND.fullmatch(text):
             as_ = await _bound(conn, p, None, "update")
             by = "tom" if _from_operator(p) else (p.get("sender_name") or p["sender_id"])
             reply = {"channel": p["channel"], "chat_id": p["chat_id"], "message_id": p["message_id"]}
