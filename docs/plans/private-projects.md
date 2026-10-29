@@ -23,19 +23,27 @@ session says "go" (`merged` takes `feedback`). Stage 3 is no merge (below).
    unset); a configured folder sees no repo spec. `tests/conftest.py` sets
    `VALOR_PROJECTS` to a per-run temp dir, so the suite never reads or writes
    the private folder. **Editing a spec from now on:** a turn edits
-   `~/Desktop/Valor/projects/NAME.toml` directly and puts the diff in its
-   delivery; there is no merge or review of a spec any more (Tom sees this in
+   `~/Desktop/Valor/projects/NAME.toml` directly, loads the edited file with
+   the existing loader (`Spec.load` on its path), and puts the diff and that
+   result in its delivery, as the suite used to check the real specs; there
+   is no merge or review of a spec any more (Tom sees this in
    the stage-1 report). **Over ssh:** sshd cannot read `~/Desktop`, so a
    spec-reading command (`core start --project`, status) runs on a Mac through
    a chat or a turn, not ssh; `projects/README.md`, `docs/machine.md` and
    `docs/rollout.md` say so, and a new Mac needs the folder synced and Full
    Disk Access before its bridges serve. Confirm per Mac after its update: on
    the new commit, kernel and bridges up, bridge logs receiving its chats, and
-   a turn on that Mac lists the folder's specs. Specs merged meanwhile are
-   copied to the folder at confirmation.
+   a turn on that Mac lists the folder's specs. The folder's copy wins, so a
+   spec merged to the repo after the copy is stale there: the copy runs
+   again at each Mac's confirmation, and the stage-1 report names every spec
+   changed in the repo since the first copy.
 2. **Clean the tree.** Remove the real specs; keep `projects/example.toml`
-   (made up) and the README. Drop the fallback; an unreadable or missing
-   folder raises an error naming the folder, not "no such project". Replace
+   (made up) and the README. Drop the fallback. A missing or unreadable
+   folder: `Spec.load` by name raises an error naming the folder, not "no
+   such project"; `Spec.all` (read on every inbound message, `intake.py:336`,
+   and by notices, `notices.py:508`) returns no specs, so intake carries on
+   for the chats that need none (the operator chat, from settings), and the
+   error naming the folder reaches Tom there once. Replace
    private client identifiers in docs, `site/`, `skills/`, tests and comments
    with made-up ones; tests that read real specs read fixtures. **The list**
    (kept in `~/Desktop/Valor/scrub/`, never the repo) holds only: client
@@ -73,9 +81,12 @@ session says "go" (`merged` takes `feedback`). Stage 3 is no merge (below).
    "rolled out with no restart" (the diff is a quiet root `.md`), and so does
    each later one until the kernel next restarts; no Mac runs `git gc
    --prune` on its kernel checkout before then, since judge and prepare read
-   the old `started` sha's objects. **After:** `git ls-remote` shows only the kept refs, each
-   reaching only rewritten commits; a fresh clone of everything GitHub
-   serves (`--mirror`) is scanned with the list and finds nothing.
+   the old `started` sha's objects. **After:** `git ls-remote --heads --tags`
+   shows exactly the kept refs at their rewritten shas; a bare clone fetching
+   only `refs/heads/*` and `refs/tags/*` is scanned with the list and finds
+   nothing. `refs/pull/*` (1,262 today) are GitHub's, read-only, still serve
+   the old history and cannot be changed by a push; they are counted
+   separately and are stage 4's first item.
    **This task afterwards:** its own origin and mirror hold old history and
    refuse a non-fast-forward (`core/workspace.py:769`, `core/git.py:564`), so
    it merges nothing after the push; stage 4 is its delivery
@@ -83,8 +94,8 @@ session says "go" (`merged` takes `feedback`). Stage 3 is no merge (below).
    refused in the same way, rather than re-pushing it (branch pushes go only
    to its local bare origin, `core/workspace.py:824`); such tasks are listed
    and restarted on the new `main`.
-4. **Report what stays exposed**: the 13 forks, `refs/pull/*` and closed PR
-   diffs (1,259 PRs), commits reachable by old sha, issue and PR bodies, the
+4. **Report what stays exposed**: first `refs/pull/*` and closed PR diffs
+   (1,262 refs), then the 13 forks, commits reachable by old sha, issue and PR bodies, the
    deployed site, existing clones. Each with a recommendation, and what GitHub
    Support must purge, which Tom must ask for as owner (Valor has push only).
 
@@ -101,8 +112,9 @@ repo's; an unlistable folder gives every repo spec; `Spec.all` is the union,
 folder winning; intake receives a chat listed only in the folder's copy, on the
 machine that copy names; a configured `projects_dir` sees no repo spec; the
 suite with `VALOR_PROJECTS` unset outside it never touches `~/Desktop`. Stage 2: `Spec.all` reads only `projects_dir`; a
-missing or unreadable folder raises naming it; `projects/example.toml` loads by
+missing or unreadable folder: `Spec.load` raises naming it, and a message in
+the operator chat is still received with that error reaching Tom once; `projects/example.toml` loads by
 path; tests that pinned real specs pass on fixtures; the persona and site still
 name Valor and Yudame. Stage 3 (scripted, not suite): tree equality, `git
-bundle verify`, the ref list, the post-push mirror scan, each Mac's `/update`
+bundle verify`, the heads-and-tags list, the post-push heads-and-tags scan, each Mac's `/update`
 ending `done` with no restart. Full suite each stage.
