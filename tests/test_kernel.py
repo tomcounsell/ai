@@ -29,6 +29,7 @@ from core import (
     router,
     runs,
     session,
+    signals,
     slot,
     tasks,
     workspace,
@@ -1862,3 +1863,17 @@ def test_provisioning_fetches_as_valor_when_the_mac_has_the_github_key(tmp_path,
         workspace._provision(workspace.Layout(tmp_path / "t"), "t", spec, {}, base=None, source=None)
     key = str(passfile.parent / "github-keys")
     assert carried == [None, key, key]
+
+
+def test_a_collected_row_postgres_refuses_whole_is_reduced_to_what_it_stores(dsn):
+    """`_reduce` drops the largest part left until the row is stored; a
+    signal the row never holds (`compact.md`) is no part of it."""
+
+    async def go():
+        task = await new_task(dsn)
+        refused = session._collected("t", State.BUILD, signals.Signals(done="a\u0000b"), "candidate", None, [], [])
+        async with await db.connect(dsn) as conn:
+            return await session._reduce(conn, task, refused, True, "a NUL")
+
+    row = run(go())
+    assert row["done"] is None and row["verdict"] == "idle" and "done.md dropped" in row["errors"][-1]

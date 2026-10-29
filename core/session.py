@@ -924,7 +924,7 @@ async def _reduce(
     parts = [(_size(e), "error", i) for i, e in enumerate(kept["errors"])]
     parts += [(_size(e), "effect", i) for i, e in enumerate(kept["effects"])]
     parts += [
-        (_size(kept[name]), name, None) for name in (*signals.TEXT_SIGNALS, "plan") if kept[name] is not None
+        (_size(kept[name]), name, None) for name in (*signals.TEXT_SIGNALS, "plan") if kept.get(name) is not None
     ]
     if kept["screens"]:
         parts.append((_size(kept["screens"]), "screens", None))
