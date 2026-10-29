@@ -2,80 +2,112 @@
 
 **Ask.** Tom, valor team chat, 2026-10-17: "you should have a natural timer
 set whenever you ask a question to wake yourself and decide whether it's
-worth waiting for an answer. then you can say something like 'Anything I
-missed? if not, i'll go ahead'". Answers given 2026-10-29: a general "wake me
-in N"; anything that wakes the session cancels it; the session picks the
-delay and the kernel sets no bound; the wake prompt gives Tom's time; chat
-sessions only.
+worth waiting for an answer". His answers, 2026-10-29 07:17-07:24 UTC:
+- A real question waits for an answer, or for his positive reaction on it.
+  He "might be offline for a day", so the session judges whether waiting is
+  safer.
+- An open "anything missing?" waits 5 minutes, so he can say "let's chat
+  about it".
+- Only a message in the post's thread, or a reply to it, cancels the timer.
+- Chat sessions only: "your sub agents should probably wait for you
+  indefinitely and you should also check in on them when they've gone quiet".
 
-**Premise, checked.** A chat turn is a one-shot `claude -p --resume`, so
-Claude Code's ScheduleWakeup or CronCreate dies when the turn ends. The
-kernel already steps a task on a timer (`router.retry_due`, checked by
-`has_step` every `serve_tick_s`, 60s). A wake is one more clause there: no
-new timer, process or table.
+**Premise, checked.** A chat turn is a one-shot `claude -p --resume`, so a
+ScheduleWakeup or CronCreate dies with it. The kernel already steps a task
+on a timer (`router.retry_due`, every `serve_tick_s`, 60s). A wake is one more
+reason in the same two places. On Slack, Tom's reaction on Valor's post
+already arrives as a reply to it (`bridges/slack/inbound.py` `reaction`), which
+wakes the session and cancels a wake on that post. Telegram passes on no
+reactions, and that stays out of scope.
 
 ## What is built
 
-1. **The request.** `.valor/wake.md` becomes a text signal (`core/signals.py`).
-   Its first line is a delay: `90s`, `20m`, `2h`, or a bare number of
-   minutes. The lines after it are a note to itself. It counts only from a
-   chat turn that finished (`_stage_verdict`). From any other turn it goes to
-   `errors` as "wake means nothing outside a chat session". An unreadable
-   delay is reported in `errors` and ignored. `_collected` records
-   `"wake": {"after_s", "note"}` on the turn's `turn.collected`, or None.
-2. **When it is due.** `session.wake_due(rows, now)` is true when the
-   latest `turn.collected` carries a wake, `now >= its at + after_s`, and no
-   `turn.started` and no waking row (`CHAT_WAKES`: a `message.steered` or a
-   `child.reported`) comes after it. So any message that wakes the session
-   cancels the wake, and so does a report. A heard message does not. A later
-   turn replaces the wake or drops it. Because a turn started after it
-   ends the wake, a wake turn that fails falls back to `retry_due`'s
-   backoff and is never stepped every tick. `router.has_step` becomes
-   `not chat or chat_waiting or wake_due or retry_due`.
-3. **The prompt.** For a chat, `next_prompt` adds `# Your wake-up` when the
-   wake is due: "You asked to be woken 20 minutes after your last turn,
-   which ended at 13:40 (Tom's time, UTC+7; 06:40 UTC). Nothing has woken
-   you since. Your note: …". The time zone comes from `persona.identity`'s
-   `timezone`. Heard messages appear above it, as `chat_prompt` shows them
-   now.
-4. **The guidance.** `skills/sdlc/converse.md`, item 2: whenever the
-   session asks, it leaves `wake.md` with a delay sized to the question
-   (about 15–30 minutes in a live exchange, longer when Tom has stepped
-   away). On the wake it either keeps waiting (another `wake.md`), or posts
-   "Anything I missed? If not, I'll go ahead" and starts the work on its
-   stated defaults. Silence is go only for work it would have started
-   anyway; when the default is hard to undo, it keeps waiting. The
-   signals line ("`stop.md` … `compact.md` …; nothing else counts") names
-   `wake.md`. Docstrings in `core/signals.py` and `core/session.py`, and the
-   chat-session paragraph of `docs/bridges/telegram.md`, say when a session
-   is stepped.
+1. **The request.** `.valor/wake.md` (`core/signals.py` `TEXT_SIGNALS`):
+   - First line: a delay, `90s`, `20m`, `2h` or bare minutes, optionally followed by
+     `post: <effect file>` naming the same turn's send that the wake
+     watches.
+   - The lines after it: a note to itself.
+   - It counts only from a finished chat turn (`_stage_verdict`). Elsewhere, or
+     with an unreadable delay, it goes to `errors`.
+   - `_collected` records `"wake": {"after_s", "post", "note"}`.
+2. **Pending wakes.** `session.wakes(rows)` lists them, oldest first.
+   - Each `turn.collected` with a wake adds one. It replaces an earlier
+     wake on the same post, and a wake with no post replaces the earlier
+     wake with no post.
+   - The post's ids come from the `effect.outcome` of the effect that
+     file named: the `message_id` and `thread_ts` of each part it sent.
+   - A `message.steered` or `message.heard` whose `reply_to` or `topic_id` is
+     one of them cancels the wake. Nothing else does, a task's report
+     included, and a wake outlives unrelated turns.
+   - A send that was refused or failed leaves the wake with no ids. It
+     fires as usual, and its prompt says the post never went out.
+3. **Due, then spent.** A wake is due once `at + after_s` has passed and no
+   turn has started since. It is spent once a turn that started after
+   that time finishes (`turn.collected`). Its prompt is still owed until then,
+   so a failed wake turn's retry (`retry_due` backoff) still carries it, and
+   is not stepped every tick.
+4. **Scheduling.** Both gates take `session.wake_due`:
+   - `router.has_step` becomes `not chat or chat_waiting or wake_due or
+     retry_due`.
+   - `serve.Kernel._ready` (`core/serve.py:1012`) skips a task with no new
+     rows `and not (retry_due or wake_due)`.
+   - The `core/serve.py` docstring and the `has_step` line in
+     `core/README.md` say so.
+5. **The prompt.** For a chat, `next_prompt` adds `# Your wake-up`, one line
+   per owed wake, for example: "You asked to be woken 5 minutes after your
+   post 1793…, which went out at 13:40 Tom's time (06:40 UTC). Nothing in
+   its thread since. Your note: …". The other messages since show above it,
+   as now.
+   - Tom's time comes from `persona.identity`'s `timezone`, through the zone
+     named in its parentheses (`zoneinfo`).
+6. **The guidance**, in `skills/sdlc/converse.md` item 2:
+   - **A real question:** silence is never go. A positive reaction from
+     Tom on it is yes/ok. Set a wake on the question's post to re-judge.
+     On the wake, the default is to keep waiting, since he may be offline
+     for a day. Go ahead only when waiting is plainly the less safe choice
+     and the default is easy to undo.
+   - **"Anything I missed? If not, I'll go ahead":** set a 5-minute wake on
+     that post. Silence then is go. Any reply in its thread ("let's chat
+     about it") means don't go ahead.
+   - **Work handed to a task:** a wake with no post can check on it later.
+     On waking, if the task has gone quiet, read its record (`valor-record
+     task <id>`) and steer it to ask how it's going or whether it's
+     waiting.
+   - The signals line names `wake.md`. Docstrings in `core/signals.py` and
+     `core/session.py`, and `docs/bridges/telegram.md`'s chat-session
+     paragraph, say when a session is stepped.
 
-**Out of scope.** Tasks waiting on a question (unchanged; they stay
-`waiting`). Any floor or ceiling on the delay. Tom's DM gets the
-same mechanism, since it is a chat session, but no separate guidance.
+**Out of scope.** Tasks: a task waiting on its question waits indefinitely,
+as now. Bounds on the delay. Telegram reactions.
 
-**Governance.** None added. The wake holds, refuses and redirects nothing.
+**Governance.** None added. A wake holds, refuses and redirects nothing.
 It only adds one more reason the kernel steps a listening session.
 
-## Tests (`tests/test_steering.py`, beside the compaction cases)
+## Tests (`tests/test_steering.py`, `tests/test_serve.py`)
 
-- `wake_due`: not due one second before, due at the delay; a later
-  `message.steered` cancels it, and so does a `child.reported`; a later
-  `message.heard` does not, and the heard message appears in the wake prompt;
-  a `turn.started` after it (a failed wake turn) leaves it not due; a newer
-  `turn.collected` without a wake drops it, and one with a new wake replaces it.
-- Delay parsing: `90s`, `20m`, `2h` and `25` (minutes); garbage goes to `errors`
-  with no wake.
-- `wake.md` from a non-chat turn goes to `errors`; one from an unfinished
-  chat turn is not recorded; one beside `stop.md` does not survive the end.
-- `has_step` is true for a listening chat session whose wake is due, and
-  false before.
-- The prompt names the delay, the end time in UTC+7 and UTC, and the note.
-- `converse.md` tells the session to leave `wake.md` after a question and
-  carries the go-on-silence rule.
-- Full suite under 5 minutes.
+- Delays: `90s`, `20m`, `2h`, `25` parse, and garbage goes to `errors`. A
+  wake from a non-chat turn goes to `errors`, and one from an unfinished
+  chat turn is not recorded.
+- Timing: a wake is not due one second before its delay and is due at
+  it. Once a turn has started, it is no longer due but its prompt is still
+  owed. After a finished turn, it is spent.
+- What cancels: a reply or thread message on its post (a reaction row
+  included) cancels it. A message elsewhere in the chat and a
+  `child.reported` do not, and that message shows in the wake prompt.
+- Replacing: a new wake on the same post replaces the old one. Wakes on two
+  posts are both kept. A no-post wake replaces the earlier no-post wake.
+- A refused send: the wake still fires, and its prompt says the post never
+  went out.
+- The kernel: in `test_serve.py`, a listening chat session with no rows
+  since `seen` is started once its wake is due, and not one tick before.
+  A failed wake turn is retried on backoff, and its prompt still carries
+  the wake.
+- The prompt pins 06:40 UTC as 13:40 Tom's time, and names the delay and
+  the note.
+- `converse.md` carries both cases, the 5 minutes, and checking in on a
+  quiet task. The full suite runs in under 5 minutes.
 
 **Done when** (unchanged, #3654): in the valor team chat a real session
 asks Tom a question, he says nothing, it wakes on its own, posts the
-"anything I missed?" line and goes ahead. This needs the merge, so the
+"anything I missed?" line and goes ahead. It needs the merge, so the
 delivery names it as open.
