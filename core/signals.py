@@ -19,6 +19,9 @@ task's workspace, read when the turn ends.
 - `.valor/compact.md`: from a chat session's turn, a request to compact
   its conversation before its next turn; any text in it is added to the
   compaction's instructions.
+- `.valor/wake.md`: from a chat session's turn, a request to be stepped
+  again after a delay, watching one post: a delay (`20m`), optionally
+  `post: <effect file or message id>`, then a note to itself.
 - `.valor/screens/<name>.png|.html`: what `look` kept of a page, recorded
   as evidence (name and size) and never as a signal.
 - `.valor/effects/<name>.json`: one request for an effect beyond the
@@ -51,7 +54,7 @@ from typing import Any
 from core import workspace
 
 DIR = ".valor"
-TEXT_SIGNALS = ("question", "no_question", "done", "advice", "stop", "compact")
+TEXT_SIGNALS = ("question", "no_question", "done", "advice", "stop", "compact", "wake")
 
 
 def kind(value: Any) -> str:
@@ -69,6 +72,7 @@ class Signals:
     advice: str | None = None
     stop: str | None = None
     compact: str | None = None
+    wake: str | None = None
     plan: dict[str, Any] | None = None
     plan_error: str | None = None
     effects: list[dict[str, Any]] = field(default_factory=list)

@@ -315,6 +315,55 @@ def test_a_restart_leaves_serve_and_a_failed_wake_does_not(fresh, monkeypatch, c
 # -- queue order (docs/plans/ask-reconciliation.md) ---------------------------------
 
 
+def test_a_listening_chat_session_is_started_when_its_wake_falls_due_and_not_before(fresh, op):
+    """No row lands when a wake falls due: the kernel's own clock steps it
+    (`session.wake_due` in `router.has_step` and in `_ready`)."""
+    calls = []
+
+    async def listening(ctx):
+        calls.append(ctx.task_id)
+        turn_id = ledger.new_id()
+        async with await db.connect(ctx.dsn) as conn:
+            woke = [
+                w["turn_id"] for w in session.owed(await ledger.read(conn, ctx.task_id), datetime.now(UTC))
+            ]
+            await ledger.append(conn, ctx.task_id, "turn.started", {"turn_id": turn_id, "state": "clarify"})
+            await ledger.append(conn, ctx.task_id, "turn.ended", {"turn_id": turn_id, "outcome": "done",
+                                "result": {}})  # fmt: skip
+            await ledger.append(
+                conn,
+                ctx.task_id,
+                "turn.collected",
+                {
+                    "turn_id": turn_id,
+                    "state": "clarify",
+                    "verdict": "idle",
+                    "effects": [],
+                    "errors": [],
+                    "woke": woke,
+                    "wake": {"after_s": 2, "post": None, "note": None} if len(calls) == 1 else None,
+                },
+            )
+        return {"status": "listening"}
+
+    async def go():
+        task = await new_task(fresh, chat={"channel": "slack", "chat_id": "T1/C1"})
+        await scripted.run_judge(fresh, task, "precise")
+        kernel = only(serve.Kernel(None, {State.CLARIFY: listening}, None, fresh), task)
+        async with await db.connect(fresh) as conn:
+            await ledger.append(
+                conn, task, "message.steered", {"message_id": "1", "text": "valor, a question?"}
+            )
+        await ticks(kernel, fresh, 2)  # the message's turn, which sets a 2s wake; then nothing due
+        before = len(calls)
+        await asyncio.sleep(2.1)
+        await ticks(kernel, fresh, 3)  # due: one turn, which spends it; then nothing again
+        return before, len(calls), await state(fresh, task)
+
+    before, after, now = run(go())
+    assert (before, after, now) == (1, 2, State.CLARIFY)
+
+
 def test_ready_work_runs_foreground_first_then_in_start_order_moved_by_placements(fresh, op, monkeypatch):
     calls = []
 

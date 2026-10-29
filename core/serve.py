@@ -45,7 +45,8 @@ oldest latest row first, so an idle task never holds the slot from other
 work, whatever its queue place), or when a row it did not write
 lands on its stream (an answer, a steer, a stop, an effect's outcome); a
 chat session only when a message wakes it or one of its tasks reports
-(`session.chat_waiting`), and its provisioning runs no setup and starts
+(`session.chat_waiting`), or a wake it asked for falls due with no new
+rows (`session.wake_due`), and its provisioning runs no setup and starts
 no services. A step that failed is stepped again by the kernel once `router.retry_due`
 says the delay after it has passed, and the task ends with a report at
 `router.STEP_TRIES` failures in a row. A step that answers `parked` (a
@@ -1009,7 +1010,7 @@ class Kernel:
             return None
         if not router.has_step(rows, f, bool(b.chat)):
             return None  # a chat session waits for the chat or its tasks, not its own outcomes
-        if latest <= self.seen.get(task_id, 0) and not router.retry_due(rows):
+        if latest <= self.seen.get(task_id, 0) and not (router.retry_due(rows) or session.wake_due(rows)):
             return None
         if f.state in AT_ONCE:
             self._start(task_id, self._step(task_id, latest), latest)

@@ -1454,6 +1454,11 @@ def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team
     flat = " ".join(text.split())
     assert "Otherwise raise only the rest in the chat" in flat and "pass one `task.answer`" in flat
     assert "only the items left for Tom" in flat and "one line naming where it was asked" in flat
+    # A chat session sets a wake on each question: silence is never go on a real question,
+    # five quiet minutes are go on the read-back, and a quiet task is checked on.
+    assert "`.valor/wake.md` wakes it later" in flat and "set a wake on it" in flat
+    assert "silence is never go" in flat and "set a new wake on the same post" in flat
+    assert "wake after 5 minutes" in flat and "(`valor-record task <id>`)" in flat
     asked = session._stage_verdict(State.CLARIFY, signals.Signals(question="?"), None, "t", True, b)
     assert asked == ("idle", {}, ["question means nothing in a chat session; ignored"])
     assert (

@@ -400,7 +400,12 @@ with the next. Each turn's prompt is what came in since the last, with
 when, who and message ids; a message that wakes it during a turn reaches
 that turn after its current step, with the heard messages before it, and
 one the turn did not take goes in at the next
-([harnesses.md](../harnesses.md#steering-mid-turn)).
+([harnesses.md](../harnesses.md#steering-mid-turn)). A session may also
+ask to be woken after a delay (`.valor/wake.md`, watching one of its
+posts): if no reply to that post or message in its thread comes first, the
+kernel steps it once the delay passes, with no new message
+(`session.wake_due`), so a question it asked can end in "Anything I
+missed? If not, I'll go ahead" when Tom stays silent.
 
 Each chat (a "room") may carry a description of what it is for, beside
 where it is listed: a spec's `rooms` entry for its chat (every group and

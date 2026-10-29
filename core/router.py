@@ -297,11 +297,12 @@ def retry_due(rows: list[dict[str, Any]], now: datetime | None = None) -> bool:
 def has_step(rows: list[dict[str, Any]], f: machine.Fold, chat: bool) -> bool:
     """Whether an open task has a step to run on its new rows: not waiting
     on an answer, and for a chat session, a message or report to answer
-    (`session.chat_waiting`) or a failed step due again. The kernel schedules
-    by it, and the queue line counts only these as ahead."""
+    (`session.chat_waiting`), a wake it asked for due (`session.wake_due`),
+    or a failed step due again. The kernel schedules by it, and the queue
+    line counts only these as ahead."""
     if f.state is State.WAITING:
         return False
-    return not chat or session.chat_waiting(rows) or retry_due(rows)
+    return not chat or session.chat_waiting(rows) or session.wake_due(rows) or retry_due(rows)
 
 
 async def queue_line(conn, task_id: str) -> str:

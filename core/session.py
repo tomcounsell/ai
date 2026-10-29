@@ -47,8 +47,12 @@ with its instruction. A message that wakes it while a turn runs reaches
 that turn after its current step (`mid_turn`, `core/runs.py`), and its
 next prompt leaves out what the turn took. It answers by requesting sends; `stop.md` ends it,
 and no other signal counts. A turn ends the run `listening`: it is
-stepped again only when a message wakes it or a task reports
-(`chat_waiting`), never on its own effects' outcomes. Before each turn
+stepped again only when a message wakes it, a task reports
+(`chat_waiting`), or a wake it asked for is due (`wake_due`), never on its
+own effects' outcomes. A turn's `wake.md` asks to be woken after a delay,
+watching a post (`wakes`): a reply to the post, or a message in its
+thread, drops the wake; anything else leaves it pending, and the turn
+after it is due opens with `# Your wake-up` (`_wake_report`). Before each turn
 its checkout is brought up to the project's branch (`refresh`). It
 controls its own compaction: its prompt gives its context size as it
 passes each reminder (`context_report`), and a turn that leaves
@@ -63,10 +67,27 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from core import broker, db, git, ledger, machine, mail, outcomes, reactions, runs, signals, tasks, workspace
+from core import (
+    broker,
+    db,
+    git,
+    ledger,
+    machine,
+    mail,
+    outcomes,
+    persona,
+    reactions,
+    runs,
+    signals,
+    tasks,
+    workspace,
+)
 from core.gateway import Gateway
 from core.machine import State
 from core.settings import compaction, settings
@@ -128,8 +149,12 @@ async def run(
             stale = None
             if b.chat and asked is None:
                 stale = await asyncio.to_thread(refresh, b)
+            woke: list[str] = []
             if asked is None:
-                prompt, resume, read_upto = await next_prompt(conn, task_id)
+                now_at = datetime.now(UTC)
+                prompt, resume, read_upto = await next_prompt(conn, task_id, now_at)
+                if b.chat:
+                    woke = [w["turn_id"] for w in owed(await ledger.read(conn, task_id), now_at)]
             rows = await ledger.read(conn, task_id) if state is State.PATCH and asked is None else []
         if asked is not None:
             advised = await advise(gateway, task_id, dsn, alive, asked)
@@ -173,6 +198,7 @@ async def run(
                 finished=ok,
                 brief=b,
                 performers=performers,
+                woke=woke,
             )
             now = await tasks.status(conn, task_id)
             asking = advise is not None and pending_advice(await ledger.read(conn, task_id)) is not None
@@ -378,6 +404,126 @@ def compact_prompt(text: str) -> str:
     return "/compact" if text == "(empty compact.md)" else f"/compact {text}"
 
 
+WAKE = re.compile(r"(\d+)\s*([smh]?)(?:\s+post:\s*(\S+))?")
+UNITS = {"s": 1, "": 60, "m": 60, "h": 3600}
+
+
+def _wake(text: str) -> tuple[dict[str, Any] | None, str | None]:
+    """A `wake.md`'s request, or why it is not one: a first line that is a
+    delay (`90s`, `20m`, `2h`, or minutes) and optionally `post: <the
+    turn's effect file, or an earlier post's message id>`, then a note."""
+    first, _, note = text.partition("\n")
+    m = WAKE.fullmatch(first.strip())
+    if m is None:
+        return None, "wake.md's first line is not a delay such as `20m` (then `post: <file or id>`); not set"
+    return {"after_s": int(m[1]) * UNITS[m[2]], "post": m[3], "note": note.strip() or None}, None
+
+
+def wakes(rows: list[dict]) -> list[dict[str, Any]]:
+    """A chat session's pending wakes, oldest first. Each finished turn's
+    `wake` adds one, replacing the wake on the same post (with no post, the
+    one with no post). Its post is the effect file of that turn it names,
+    by the `effect_id` its collected entry carries, whose `effect.outcome`
+    lists the parts sent; or an earlier post's message id. A
+    `message.steered` or `message.heard` replying to one of the post's
+    parts or its thread drops it, and a finished turn whose prompt gave it
+    (`woke`) spends it. `status` is `sent`, `held` (no outcome yet), or
+    `gone`, with `why`; `due` is when it is owed."""
+    sent: dict[str, list[dict]] = {}
+    gone: dict[str, str] = {}
+    for r in rows:
+        p = r["payload"]
+        if r["type"] == "effect.outcome" and isinstance((p.get("result") or {}).get("sent"), list):
+            sent[p.get("effect_id")] = [s for s in p["result"]["sent"] if isinstance(s, dict)]
+        if r["type"] == "effect.outcome" and p.get("kind") in ("failed", "refused"):
+            gone[p.get("effect_id")] = p.get("error") or p["kind"]
+        elif r["type"] == "effect.refused":
+            gone[p.get("effect_id")] = p.get("reason") or "refused"
+    parts = [s for got in sent.values() for s in got]
+    pending: dict[str | None, dict[str, Any]] = {}
+    for r in rows:
+        p = r["payload"]
+        if r["type"] in ("message.steered", "message.heard") and p.get("reply_to") is not None:
+            for key in [k for k, w in pending.items() if str(p["reply_to"]) in w["ids"]]:
+                del pending[key]
+        if r["type"] != "turn.collected":
+            continue
+        if p.get("verdict") != "failed":
+            for key in [k for k, w in pending.items() if w["turn_id"] in (p.get("woke") or ())]:
+                del pending[key]
+        asked = p.get("wake")
+        if not isinstance(asked, dict):
+            continue
+        w = {**asked, "turn_id": p.get("turn_id"), "set_at": r["at"], "ids": set(), "status": "sent",
+             "why": None, "due": r["at"] + timedelta(seconds=asked["after_s"])}  # fmt: skip
+        ref, key = asked.get("post"), None
+        entry = next((e for e in p.get("effects") or [] if ref and e.get("file") == ref), None)
+        if entry is not None:
+            got = sent.get(entry.get("effect_id"), [])
+            w["ids"] = {str(x) for s in got for x in (s.get("message_id"), s.get("thread_ts")) if x}
+            w["why"] = entry.get("error") or gone.get(entry.get("effect_id"))
+            w["status"] = "gone" if w["why"] else "sent" if w["ids"] else "held"
+            key = str(got[0].get("message_id")) if got else f"{w['turn_id']}/{ref}"
+        elif ref and ref.endswith(".json"):
+            w["status"], w["why"], key = "gone", f"the turn requested no {ref}", f"{w['turn_id']}/{ref}"
+        elif ref:
+            same = [s for s in parts if str(s.get("message_id")) == ref]
+            w["ids"] = {ref, *(str(s["thread_ts"]) for s in same if s.get("thread_ts"))}
+            key = ref
+        w["key"] = key
+        pending.pop(key, None)
+        pending[key] = w
+    return list(pending.values())
+
+
+def owed(rows: list[dict], now: datetime) -> list[dict[str, Any]]:
+    """The pending wakes whose delay has passed at `now`: the next turn's
+    prompt gives them (`_wake_report`)."""
+    return [w for w in wakes(rows) if now >= w["due"]]
+
+
+def wake_due(rows: list[dict], now: datetime | None = None) -> bool:
+    """Whether a chat session should be stepped for a wake: one is owed
+    and no turn has started since it fell due. A wake turn that fails
+    leaves it owed, to the retry `router.retry_due` times."""
+    started = [r["at"] for r in rows if r["type"] == "turn.started" and not r["payload"].get("compaction")]
+    return any(not any(at >= w["due"] for at in started) for w in owed(rows, now or datetime.now(UTC)))
+
+
+def _delay(seconds: int) -> str:
+    for unit, size in (("hour", 3600), ("minute", 60)):
+        if seconds >= size and seconds % size == 0:
+            n = seconds // size
+            return f"{n} {unit}{'s' if n != 1 else ''}"
+    return f"{seconds} second{'s' if seconds != 1 else ''}"
+
+
+def _when(at: datetime) -> str:
+    """`at` in the operator's time and in UTC: the zone his identity names
+    in parentheses (`UTC+7 (Asia/Bangkok)`)."""
+    who = persona.identity(settings.persona_dir)
+    zone = re.search(r"\(([^)]+)\)", who["timezone"])
+    local = at.astimezone(ZoneInfo(zone[1]) if zone else UTC)
+    return f"{local:%H:%M} {who['operator'].split()[0]}'s time ({at.astimezone(UTC):%H:%M} UTC)"
+
+
+def _wake_report(owed_wakes: list[dict[str, Any]]) -> str:
+    """`# Your wake-up`: each owed wake, what became of its post, and its note."""
+    lines = []
+    for w in owed_wakes:
+        line = f"- You asked to be woken {_delay(w['after_s'])} after your turn that ended at {_when(w['set_at'])}"
+        if w.get("post"):
+            line += {
+                "sent": f", watching your post {w['key']}: nothing has replied to it or come in its thread since.",
+                "held": f", watching your post ({w['post']}): it has not gone out yet.",
+                "gone": f", watching your post ({w['post']}): it never went out ({w['why']}).",
+            }[w["status"]]
+        else:
+            line += "."
+        lines.append(line + (f" Your note: {w['note']}" if w.get("note") else ""))
+    return "\n".join(["# Your wake-up", "", *lines]) if lines else ""
+
+
 def context_size(rows: list[dict], turn_id: str, model: str) -> int | None:
     """A turn's context when it ended: its last complete, sent model call on
     the session's model (`gateway.charged`), all of whose input and output
@@ -556,6 +702,14 @@ def _stage_verdict(
                 errors.append(f"{name} means nothing in a chat session; ignored")
         if found.stop is not None:
             return "ended", extra, errors
+        if found.wake is not None and not finished:
+            errors.append("wake.md from a turn that did not finish; not set")
+        elif found.wake is not None:
+            wake, why = _wake(found.wake)
+            if wake is None:
+                errors.append(why)
+            else:
+                extra["wake"] = wake
         return ("idle" if finished else "failed"), extra, errors
     meant = {
         State.CLARIFY: ("question", "no_question"),
@@ -566,8 +720,9 @@ def _stage_verdict(
     for name in ("no_question", "plan", "done"):
         if name not in meant and getattr(found, name) is not None:
             errors.append(f"{name} means nothing in {state}; ignored")
-    if found.compact is not None:
-        errors.append("compact means nothing outside a chat session; ignored")
+    for name in ("compact", "wake"):
+        if getattr(found, name) is not None:
+            errors.append(f"{name} means nothing outside a chat session; ignored")
     # `stop.md` ends the work from any working state, unless another of the
     # state's signals is beside it.
     beside = any(getattr(found, name) is not None for name in meant)
@@ -616,9 +771,13 @@ def _collected(
     errors: list[str],
     effects: list[dict[str, Any]],
     advice: str | None = None,
+    wake: Any = None,
+    woke: list[str] | None = None,
 ) -> dict[str, Any]:
     """The `turn.collected` payload. `advice` is the question for the
-    advisor when it counted (`_verdict`), never `found.advice` as written."""
+    advisor when it counted (`_verdict`), never `found.advice` as written;
+    `wake` the wake it asked for, read (`_wake`); `woke` the turns whose
+    wakes its prompt gave it (`owed`)."""
     return {
         "turn_id": turn_id,
         "state": state.value,
@@ -633,6 +792,8 @@ def _collected(
         "errors": errors,
         "effects": effects,
         "screens": found.screens,
+        "wake": wake,
+        "woke": woke or [],
     }
 
 
@@ -689,7 +850,7 @@ async def _storable(conn, turn_id: str, state: State, found: signals.Signals) ->
     what the kernel wrote and the file names of the requests."""
     errors = [*found.unreadable, *([found.plan_error] if found.plan_error else [])]
     why = await ledger.unstorable(
-        conn, _collected(turn_id, state, found, None, None, errors, found.effects, found.advice)
+        conn, _collected(turn_id, state, found, None, None, errors, found.effects, found.advice, found.wake)
     )
     if why is None:
         return found
@@ -709,7 +870,7 @@ async def _storable(conn, turn_id: str, state: State, found: signals.Signals) ->
             kept.effects[i] = {"file": entry["file"], "error": f"unreadable request: {UNSTORABLE}: {refused}"}
     errors = [*kept.unreadable, *([kept.plan_error] if kept.plan_error else [])]
     why = await ledger.unstorable(
-        conn, _collected(turn_id, state, kept, None, None, errors, kept.effects, kept.advice)
+        conn, _collected(turn_id, state, kept, None, None, errors, kept.effects, kept.advice, kept.wake)
     )
     if why is None:
         return kept
@@ -719,7 +880,7 @@ async def _storable(conn, turn_id: str, state: State, found: signals.Signals) ->
         _drop(kept, part[1], f"{UNSTORABLE} beside the turn's other parts: {why}")
         errors = [*kept.unreadable, *([kept.plan_error] if kept.plan_error else [])]
         why = await ledger.unstorable(
-            conn, _collected(turn_id, state, kept, None, None, errors, kept.effects, kept.advice)
+            conn, _collected(turn_id, state, kept, None, None, errors, kept.effects, kept.advice, kept.wake)
         )
         if why is None:
             return kept
@@ -777,6 +938,7 @@ async def record(
     finished: bool = True,
     brief: tasks.Brief | None = None,
     performers: broker.Performers | None = None,
+    woke: list[str] | None = None,
 ) -> str:
     """Ledger what a turn left, sending each effect request but a merge to
     the broker. Postgres judges the signals before the verdict and the
@@ -825,7 +987,16 @@ async def record(
         await ledger.lock(conn, f"task:{task_id}")
         current = machine.fold(await ledger.read(conn, task_id)).state
         collected = _collected(
-            turn_id, state, found, verdict, extra.get("candidate"), errors, effects, extra.get("advice")
+            turn_id,
+            state,
+            found,
+            verdict,
+            extra.get("candidate"),
+            errors,
+            effects,
+            extra.get("advice"),
+            extra.get("wake"),
+            woke,
         )
         follow = None
         if current is state and verdict == "asked":
@@ -924,7 +1095,9 @@ async def _reduce(
     parts = [(_size(e), "error", i) for i, e in enumerate(kept["errors"])]
     parts += [(_size(e), "effect", i) for i, e in enumerate(kept["effects"])]
     parts += [
-        (_size(kept[name]), name, None) for name in (*signals.TEXT_SIGNALS, "plan") if kept.get(name) is not None
+        (_size(kept[name]), name, None)
+        for name in (*signals.TEXT_SIGNALS, "plan")
+        if kept.get(name) is not None
     ]
     if kept["screens"]:
         parts.append((_size(kept["screens"]), "screens", None))
@@ -1199,10 +1372,11 @@ def _entry_prompt(entry: dict[str, Any] | None, rows: list[dict]) -> str | None:
     return None
 
 
-async def next_prompt(conn, task_id: str) -> tuple[str, str | None, int]:
+async def next_prompt(conn, task_id: str, now: datetime | None = None) -> tuple[str, str | None, int]:
     """The next turn's prompt, the harness session it resumes, and the last
     row it read (`turn.started` `read_upto`): a steer after it is owed to
-    the turn mid-turn (`mid_turn`) or to the next."""
+    the turn mid-turn (`mid_turn`) or to the next. A chat session's wakes
+    owed at `now` (`owed`) are in it."""
     rows = await ledger.read(conn, task_id)
     read_upto = max((int(r["id"]) for r in rows), default=0)
     f = machine.fold(rows)
@@ -1210,7 +1384,8 @@ async def next_prompt(conn, task_id: str) -> tuple[str, str | None, int]:
     if b.chat:
         first = b.instruction if f.session is None else None
         report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"])
-        parts = (first, chat_prompt(rows), _failure_report(rows), _advice_report(rows),
+        woken = _wake_report(owed(rows, now or datetime.now(UTC)))
+        parts = (first, chat_prompt(rows), woken, _failure_report(rows), _advice_report(rows),
                  _errors_report(f.last_collected), report, context_report(rows, b.model))  # fmt: skip
         return "\n\n".join(x for x in parts if x) or "Continue.", f.session, read_upto
     if f.session is None:
