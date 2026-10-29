@@ -2,7 +2,7 @@
 
 Tom, valor team chat, 2026-10-29 08:09 UTC: "with multi-repo support for
 Valor projects, let's fold the yudame-skills repo into the same project as
-yudame tools and yuda.me site".
+studio tools and yuda.me site".
 
 Done when Tom asks for a skills change in #yudame-dev and a task starts on
 yudame/skills.
@@ -33,7 +33,7 @@ Checked already: the Pirate's checkout is at main's head (d3bea323b) and
 ## What is built
 
 1. Private specs (`~/Desktop/Valor/projects/`, no commit; docs/plans/private-projects.md):
-   - `yudame.toml`: `projects = ["yudame-tools", "skills"]`; the comment
+   - `yudame.toml`: `projects = ["studio-tools", "skills"]`; the comment
      above `chats` names skills (Tom, 2026-10-29); #yudame-dev's room line
      also names the Yudame Claude Code plugins (yudame/skills).
    - `skills.toml`: `machine = "Valor the Pirate"`, with a comment saying
@@ -67,7 +67,7 @@ No code changes, so there is no new unit test. The evidence:
 - `Spec.load` on the edited yudame.toml and skills.toml: yudame lists
   both projects, and each one loads with `machine` equal to the yudame spec's.
 - `tasks.repos("yudame")`, run against the real folder, lists yuda.me,
-  yudame-tools and skills with their repositories (this is the session's
+  studio-tools and skills with their repositories (this is the session's
   Repos line).
 - `board.board_spec("skills")` with this Mac set to the Pirate resolves to
   the yudame spec, so skills' questions reach #yudame-dev's board.
