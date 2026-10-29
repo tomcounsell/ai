@@ -9,7 +9,8 @@ Serves Mission item 1 (delivering within authority) and the constraint
 `act` effect the kernel performs at request, inside the task's ceiling.
 
 `core/workspace.py` provisions a task's workspace from a project spec
-(`projects/`) under `work_dir/<task id>/` before the task starts, cloning from
+(`settings.projects_dir`, by default the private `~/Desktop/Valor/projects/`;
+[projects/README.md](../projects/README.md)) under `work_dir/<task id>/` before the task starts, cloning from
 a bare cache per repository URL (keyed by the URL's digest).
 
 | Part | What it is |

@@ -400,7 +400,7 @@ Review and test checks run in a git worktree of the commit from the kernel mirro
 ## 7. Workspaces
 
 The kernel provisions a task's workspace from a project spec
-(`core/workspace.py`, `projects/`), never the turn:
+(`core/workspace.py`, `settings.projects_dir`), never the turn:
 
 - a clone of the repository holding only the history up to the base commit;
 - a local bare repository as the clone's only remote, which the turn cannot
