@@ -137,7 +137,8 @@ def test_a_projects_board_carries_its_own_questions_once_a_change_and_never_anot
     assert rows[0]["digest"] == rows[2]["digest"] != rows[1]["digest"]
     assert all(r.get("child_id") is None and r["kind"] == "board" for r in rows)
     assert "Use Postgres for the queue?" in rows[0]["text"] and f"question {q1}" in rows[0]["text"]
-    assert "no post yet: post it here" in rows[0]["text"]
+    assert "no board post: if you are already asking Tom this in this chat" in rows[0]["text"]
+    assert "the canvas line points there; else post it here" in rows[0]["text"]
     assert "Who reads it: not known until the first write." in rows[0]["text"]
     assert "Rename the app?" in rows[1]["text"] and "Rename the app?" not in rows[2]["text"]
     assert all("Raise the day rate?" not in r["text"] for r in rows)

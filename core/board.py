@@ -21,8 +21,9 @@ in (`board_spec`).
 
 A question whose task reports to the board session gets no `question`
 report there (`notices.owe` asks `here`): the board row carries it, and
-the session posts it once in the channel, the post Tom reacts to. A
-question relayed elsewhere (his DM, the operator chat) is listed as asked
+the session posts it once in the channel, the post Tom reacts to, unless
+it is already asking Tom that question in the chat (a thread or a reply),
+where the canvas points instead. A question relayed elsewhere (his DM, the operator chat) is listed as asked
 there, with no post.
 """
 
@@ -192,7 +193,10 @@ def text(board: str, snap: dict[str, Any], posts: dict[str, str], canvas: dict[s
         if q["question_id"] in posts:
             post = f"your post {posts[q['question_id']]}"
         elif q["asked_here"]:
-            post = "no post yet: post it here"
+            post = (
+                "no board post: if you are already asking Tom this in this chat (a thread or a reply), "
+                "the canvas line points there; else post it here"
+            )
         else:
             post = "asked in another chat (Tom's DM): no post here"
         head = f'- question {q["question_id"]} of task {q["task_id"]} ("{q["request"] or ""}"), asked {q["asked_at"]}'

@@ -93,15 +93,21 @@ weeks. Each time one comes:
    (`valor-record task <id>`) to write its brief. A question asked in
    another chat is one line naming where it was asked, until it is
    answered: that chat's session answers what it can and raises the rest.
-2. For each open question marked `no post yet: post it here`, post one
-   top-level message in this chat: the question in a line or two and your
+   So is a question you are already asking Tom in this chat, in a thread
+   or as a reply: one line pointing to that thread.
+2. For each open question marked `no board post`, unless you are already
+   asking Tom it in this chat (a thread or a reply), post one top-level
+   message in this chat: the question in a line or two and your
    recommendation (only the items left for Tom, yours to the rest listed
    as settled), with `"about": "question:<id>"` in the
    `slack.send_message` payload, so the next report names the post. One
-   post per question; a question asked in Tom's DM gets none here (its DM
-   message is where he answers it).
+   question in one place: one asked in a thread is answered there, and
+   one asked in Tom's DM gets none here (its DM message is where he
+   answers it). An apology or acknowledgement never repeats a question;
+   it points to where the question is asked.
 3. Tom's reaction reaches you as `Tom reacted :+1: to your post <ts>`.
-   👍 (`+1`) on a question's post: `task.answer` that task with
+   👍 (`+1`) on a question's post, or on your message asking it in a
+   thread: `task.answer` that task with
    `"Accepted: <your recommendation as that post wrote it>"`, `"by":
    "tom"`, `"via": "slack reaction :+1:"`, never the canvas's later
    wording. 👎 (`-1`): no answer; mark it rejected on the canvas and wait
