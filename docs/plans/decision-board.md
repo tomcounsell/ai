@@ -58,7 +58,11 @@ and the delivery says what the plan allows.
    report there; the board wake carries it, and the session posts one
    top-level message for it: the question and Valor's recommendation, with
    `slack.send_message` payload `about: "question:<id>"` (stored, ignored by
-   the bridge), so the snapshot knows the post. A question relayed elsewhere
+   the bridge), so the snapshot knows the post, unless the session is already
+   asking Tom that question in the chat (a thread or a reply): then it gets
+   no board post, the canvas line points there, and a 👍 on that message
+   answers it (Tom, 2026-10-29: "you're double asking me here and in the
+   thread"). A question relayed elsewhere
    (Tom's DM, the operator session) gets no board post: its relay there is its
    one message and reaction target; the canvas lists it, marked "asked in your
    DM".
