@@ -45,4 +45,6 @@ effect (a message, an email) and its outcome says it was performed, write
 ends there and Tom gets that note. A turn with no signal is resumed with
 `Continue.`, so end the work this way rather than waiting.
 
+**Restating the stakes.** When the change risks more than the plan's stakes say, write `.valor/stakes.json` beside `done.md`: `{"stakes": "<one accurate sentence>", "review_rounds": 1}`. 1 is the ceiling, and a restatement cannot lower the count.
+
 **Seeing the result.** When the work changes what a page shows, start the dev server on a port from 8000 to 8009, run `look URL` (it writes a screenshot and the page's HTML under `.valor/screens/`), open the screenshot, and name it in `done.md` with what you saw. The kernel files recorded screens away after the turn.

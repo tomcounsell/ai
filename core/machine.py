@@ -117,6 +117,7 @@ GUARD_JUDGE = "intake.underspecified"
 GUARD_BREADTH = "checks.test.breadth"
 GUARD_CRITIQUE = "critique.loop"
 GUARD_REVIEW = "review.loop"
+GUARD_RESTATED = "build.restated"
 
 
 def _session_id(value: Any) -> str | None:
@@ -220,6 +221,9 @@ class Fold:
     open_question: str | None = None
     plan: dict[str, Any] | None = None
     raised: dict[str, int] = field(default_factory=lambda: {"critique_rounds": 0, "review_rounds": 0})
+    # The builder's restatement of the stakes, when valid: it can only add
+    # the review round (`raised` holds the count).
+    restated: dict[str, Any] | None = None
     candidate: Candidate | None = None
     checks: dict[Check, CheckVerdict] = field(default_factory=dict)
     counts: dict[str, int] = field(default_factory=lambda: dict(FRESH_COUNTS))
@@ -291,6 +295,23 @@ class Fold:
             "carried": [{k: c.get(k) for k in ("from", "to", "tip", "verdicts")} for c in self.carried],
             "ignored": len(self.ignored),
         }
+
+
+def _restate(f: Fold, r: Any) -> None:
+    """Fold the builder's restated stakes: valid only as an object with a
+    string `stakes` and a `review_rounds` in `ROUNDS` that does not lower
+    the count; anything else is ignored, never an error."""
+    if not isinstance(r, dict) or not isinstance(r.get("stakes"), str):
+        return
+    n = r.get("review_rounds")
+    if not isinstance(n, int) or isinstance(n, bool) or n not in ROUNDS:
+        return
+    n = min(REVIEW_MAX, n)
+    if n < f.loops.review_rounds:
+        return
+    raised = n > f.loops.review_rounds
+    f.raised["review_rounds"] = max(f.raised["review_rounds"], n)
+    f.restated = {"stakes": r["stakes"], "raised": raised or bool(f.restated and f.restated["raised"])}
 
 
 def _candidate(value: Any) -> Candidate:
@@ -447,6 +468,7 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
             _enter(f, State.PLAN, entry)
         elif verdict == "candidate":
             f.candidate = _candidate(p["candidate"])
+            _restate(f, p.get("restated"))
             f.checks = {}
             f.join = None
             f.merge_effect = None

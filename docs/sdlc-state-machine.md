@@ -148,8 +148,9 @@ mistake would cost and the harder it is to undo, the more loops. As guidance, a 
 change in well-tested code is a 0, and a change to stored data, money, authentication, migrations,
 or the kernel itself gets 2 critique rounds and 1 review round. The kernel refuses a value outside 0
 to 2, and reads a review count of 2 as 1: review sends work back at most once. Critique may raise
-either count, never lower it, and the kernel uses the higher, so the builder's call on its own
-stakes is read by a session that did not make it.
+either count, never lower it, and the kernel uses the higher. After the build, the builder may
+restate the stakes in `.valor/stakes.json`; a restatement can raise the review count, never lower
+it, and the reviewer, a session that did not make either call, reads the restated stakes.
 
 ## Scope: leave it cleaner than we found it
 

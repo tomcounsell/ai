@@ -788,6 +788,7 @@ def _collected(
         "advice": advice,
         "stop": found.stop,
         "plan": found.plan,
+        "restated": found.stakes,
         "candidate": candidate,
         "errors": errors,
         "effects": effects,
@@ -815,6 +816,8 @@ def _parts(found: signals.Signals) -> list[tuple[float, tuple]]:
     ]
     if found.plan is not None:
         parts.append((_size(found.plan), ("plan",)))
+    if found.stakes is not None:
+        parts.append((_size(found.stakes), ("stakes",)))
     if found.screens:
         parts.append((_size(found.screens), ("screens",)))
     parts += [(_size(e), ("effect", i)) for i, e in enumerate(found.effects) if "request" in e]
@@ -828,6 +831,9 @@ def _drop(found: signals.Signals, part: tuple, reason: str) -> None:
         found.unreadable.append(f"{part[1]}.md is unreadable: {reason}")
     elif part[0] == "plan":
         found.plan, found.plan_error = None, f"plan.json is unreadable: {reason}"
+    elif part[0] == "stakes":
+        found.stakes = None
+        found.unreadable.append(f"stakes.json is unreadable: {reason}")
     elif part[0] == "screens":
         found.screens = []
         found.unreadable.append(f"the screens are unrecorded: {reason}")

@@ -70,6 +70,26 @@ SEEDED: tuple[dict[str, Any], ...] = (
         "source": "docs/sdlc-state-machine.md, checks.review, Why; rebuild-baseline.md, Review rounds",
     },
     {
+        "guard_id": machine.GUARD_RESTATED,
+        "name": "the builder's restatement: a raising restatement adds the review round",
+        "incident": (
+            'd0ec204a0, subject ending "(Tom, team chat 2026-10-29; prompt only)", plan 15141b3ae '
+            '"(prompt only)", whose plan said "Tags are in the prompt only"; the build added an '
+            "intake.root_of call in session._send_places that failed chat turns (fixed in 3cf7b882c). "
+            "The extra round is Tom's grant on top of that incident"
+        ),
+        "mission_items": [1],
+        "source": "docs/plans/restated-stakes.md, Governance",
+        "granted_at": "2026-10-30",
+        "expires": "2027-01-28",
+        "note": (
+            "Tom, 2026-10-30: \"the builder should be able to change the description from 'prompt "
+            'only\' to something more accurate once the build is done." "Because it can add a review '
+            "round it is governance: Tom's grant is this request.\""
+        ),
+        "via": "docs/plans/restated-stakes.md, Governance",
+    },
+    {
         "guard_id": "web.agent_only",
         "name": (
             "the web agent: in a Claude Code turn, WebFetch and WebSearch run only inside the valor:web "

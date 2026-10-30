@@ -75,9 +75,25 @@ class Signals:
     wake: str | None = None
     plan: dict[str, Any] | None = None
     plan_error: str | None = None
+    stakes: dict[str, Any] | None = None
     effects: list[dict[str, Any]] = field(default_factory=list)
     screens: list[dict[str, Any]] = field(default_factory=list)
     unreadable: list[str] = field(default_factory=list)
+
+
+def _stakes(signals: Signals, body: bytes | None, why: str | None) -> None:
+    """`stakes.json` as `plan.json` is read: an object, or one line in `unreadable`."""
+    if body is None:
+        if why:
+            signals.unreadable.append(why)
+        return
+    try:
+        value = json.loads(body)
+        if not isinstance(value, dict):
+            raise TypeError("not a JSON object")
+        signals.stakes = value
+    except (ValueError, TypeError, RecursionError) as exc:
+        signals.unreadable.append(f"stakes.json is unreadable: {_why(exc)}")
 
 
 def collect(workspace_dir: str | Path, turn_id: str) -> Signals:
@@ -119,6 +135,8 @@ def collect(workspace_dir: str | Path, turn_id: str) -> Signals:
                 signals.plan_error = f"plan.json is unreadable: {_why(exc)}"
         elif why:
             signals.plan_error = f"plan.json is unreadable: {why}"
+        body, why = _take(valor, "stakes.json", valor, turn_id)
+        _stakes(signals, body, why)
         _effects(signals, valor, turn_id)
         signals.screens = _screens(signals, valor, turn_id)
     finally:
@@ -176,6 +194,9 @@ def _filed(signals: Signals, handled: int) -> None:
                 signals.plan_error = f"plan.json is unreadable: {_why(exc)}"
         elif why:
             signals.plan_error = f"plan.json is unreadable: {why}"
+    if signals.stakes is None and not any("stakes.json" in u for u in signals.unreadable):
+        body, why = workspace.read_turn_file(handled, "stakes.json")
+        _stakes(signals, body, why)
     seen = {e["file"] for e in signals.effects}
     effects, why = workspace.open_turn_dir(handled, "effects")
     if effects is not None:

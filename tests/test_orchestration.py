@@ -62,7 +62,12 @@ def test_the_web_guard_is_ledgered_with_its_grant_and_expiry(dsn):
     assert (room["granted_at"], room["expires"], room["mission_items"]) == ("2026-10-20", "2027-01-18", [1])
     assert room["source"] == room["provenance"]["via"] == "docs/plans/update.md, Grant"
     assert room["firing_record"] is False and room["provenance"]["at"] == "2026-10-20"
-    own = ("web.agent_only", "update.room")
+    restated = by_id["build.restated"]
+    assert (restated["granted_at"], restated["expires"], restated["mission_items"]) == (
+        "2026-10-30", "2027-01-28", [1]
+    )  # fmt: skip
+    assert "d0ec204a0" in restated["incident"] and restated["provenance"]["at"] == "2026-10-30"
+    own = ("web.agent_only", "update.room", "build.restated")
     assert all(by_id[g]["expires"] == guards.EXPIRES.isoformat() for g in by_id if g not in own)
 
 

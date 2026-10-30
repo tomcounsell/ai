@@ -150,6 +150,8 @@ elif stage in ("build", "patch"):
     if cfg.get("push"):
         (v / "effects" / "push.json").write_text(json.dumps({"action_type": "push_branch",
             "target": cfg["push"], "payload": {"head_sha": head()}}))
+    if "stakes" in cfg:
+        (v / "stakes.json").write_text(json.dumps(cfg["stakes"]))
     (v / "done.md").write_text(f"{stage} turn {n}: greeting.txt, checked by reading it.")
 print(json.dumps({"result": "ok", "session_id": resume or "00000000-0000-4000-8000-000000000001", "is_error": False}))
 """
