@@ -144,6 +144,28 @@ def test_a_restatement_that_adds_nothing_leaves_the_plans_own_round_on_review_lo
     assert guards == [machine.GUARD_REVIEW]
 
 
+def test_a_row_five_join_after_a_restated_round_records_review_loop(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.steer(
+        ws,
+        counts={"critique_rounds": 0, "review_rounds": 0},
+        stakes={"stakes": "stored data changes", "review_rounds": 1},
+    )
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task, review="changes")  # row 3: stamps build.restated
+        assert (await fold(dsn, task)).join.row == 3
+        await drive(dsn, task)  # patch
+        await scripted.checks(dsn, task, review="changes")
+        return await fold(dsn, task), await rows(dsn, task)
+
+    f, ledger_rows = run(go())
+    assert f.join.row == 5
+    guards = [r["payload"]["guard_id"] for r in ledger_rows if r["type"] == "docs.decided"]
+    assert guards == [machine.GUARD_RESTATED, machine.GUARD_REVIEW]
+
+
 def test_a_moved_target_sends_the_work_to_rebase_however_often_it_moves(dsn, tmp_path):
     """Each rejection means another merge landed, so passing work rebases again."""
     ws, origin = scripted.workspace(tmp_path)

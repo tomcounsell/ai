@@ -81,19 +81,26 @@ class Signals:
     unreadable: list[str] = field(default_factory=list)
 
 
+def _object(name: str, body: bytes) -> tuple[dict[str, Any] | None, str | None]:
+    """`name` read as a JSON object: the object, or one line saying why not."""
+    try:
+        value = json.loads(body)
+        if not isinstance(value, dict):
+            raise TypeError("not a JSON object")
+        return value, None
+    except (ValueError, TypeError, RecursionError) as exc:
+        return None, f"{name} is unreadable: {_why(exc)}"
+
+
 def _stakes(signals: Signals, body: bytes | None, why: str | None) -> None:
     """`stakes.json` as `plan.json` is read: an object, or one line in `unreadable`."""
     if body is None:
         if why:
             signals.unreadable.append(why)
         return
-    try:
-        value = json.loads(body)
-        if not isinstance(value, dict):
-            raise TypeError("not a JSON object")
-        signals.stakes = value
-    except (ValueError, TypeError, RecursionError) as exc:
-        signals.unreadable.append(f"stakes.json is unreadable: {_why(exc)}")
+    signals.stakes, error = _object("stakes.json", body)
+    if error:
+        signals.unreadable.append(error)
 
 
 def collect(workspace_dir: str | Path, turn_id: str) -> Signals:
@@ -126,13 +133,7 @@ def collect(workspace_dir: str | Path, turn_id: str) -> Signals:
                 signals.unreadable.append(why)
         body, why = _take(valor, "plan.json", valor, turn_id)
         if body is not None:
-            try:
-                value = json.loads(body)
-                if not isinstance(value, dict):
-                    raise TypeError("not a JSON object")
-                signals.plan = value
-            except (ValueError, TypeError, RecursionError) as exc:
-                signals.plan_error = f"plan.json is unreadable: {_why(exc)}"
+            signals.plan, signals.plan_error = _object("plan.json", body)
         elif why:
             signals.plan_error = f"plan.json is unreadable: {why}"
         body, why = _take(valor, "stakes.json", valor, turn_id)
@@ -185,13 +186,7 @@ def _filed(signals: Signals, handled: int) -> None:
     if signals.plan is None and signals.plan_error is None:
         body, why = workspace.read_turn_file(handled, "plan.json")
         if body is not None:
-            try:
-                value = json.loads(body)
-                if not isinstance(value, dict):
-                    raise TypeError("not a JSON object")
-                signals.plan = value
-            except (ValueError, TypeError, RecursionError) as exc:
-                signals.plan_error = f"plan.json is unreadable: {_why(exc)}"
+            signals.plan, signals.plan_error = _object("plan.json", body)
         elif why:
             signals.plan_error = f"plan.json is unreadable: {why}"
     if signals.stakes is None and not any("stakes.json" in u for u in signals.unreadable):
