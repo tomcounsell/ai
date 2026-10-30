@@ -1543,13 +1543,14 @@ async def _send_places(
                 else f"top-level, starts #{tag}" if tag else "top-level"
             )  # fmt: skip
             continue
-        where = tags.get(p["reply_to"])
+        reply_to = str(p["reply_to"])  # a Telegram id may be written as a number
+        where = tags.get(reply_to)
         root = None
         if not where:
-            root = await intake.root_of(conn, channel, chat["chat_id"], p["reply_to"])
+            root = await intake.root_of(conn, channel, chat["chat_id"], reply_to)
             where = tags.get(root)
         tag = re.search(r"#[a-z0-9-]+", where or "")
-        places[e["file"]] = f"into {tag[0]}" if tag else f"into the thread of {root or p['reply_to']}"
+        places[e["file"]] = f"into {tag[0]}" if tag else f"into the thread of {root or reply_to}"
     return places
 
 

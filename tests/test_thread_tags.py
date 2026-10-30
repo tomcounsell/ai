@@ -128,7 +128,7 @@ def test_a_session_reads_two_live_threads_by_their_tags_and_each_send_by_where_i
             await intake.bind(conn)
             task = (await bridges.of_type(dsn, "message.bound", received_id=got[0].received_id))[0]["task_id"]
             rows = await ledger.read(conn, task)
-            sends = [("into-a.json", r), ("into-b.json", b), ("old.json", "999"), ("post.json", None)]
+            sends = [("into-a.json", int(r)), ("into-b.json", b), ("old.json", 999), ("post.json", None)]
             effects = [
                 {"file": f, "effect_id": f"e{i}", "kind": "done", "error": None,
                  "request": {"action_type": "telegram.send_message", "target": GROUP,
