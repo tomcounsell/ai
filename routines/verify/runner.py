@@ -258,7 +258,12 @@ async def _run(ctx: Context, run_id: str) -> Ran:
             if await tasks.is_stopped(ctx.conn, run_id):
                 return await _stopped(ctx, run_id, b)
             digest = await asyncio.to_thread(
-                checks.environment_digest, b.mirror, b.base_sha, b.project or {}, lay.root.parent / "bin"
+                checks.environment_digest,
+                b.mirror,
+                b.base_sha,
+                b.project or {},
+                lay.root.parent / "bin",
+                b.harness.get("env", {}),
             )
             try:
                 async with checks.stop_heard(cc) as stop:
