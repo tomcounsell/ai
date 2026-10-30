@@ -25,7 +25,6 @@ def keyfile(monkeypatch, tmp_path, text):
     monkeypatch.setattr(
         sentry, "settings", dataclasses.replace(settings, pg_passfile=str(tmp_path / "pg-pass"))
     )
-    return path
 
 
 @pytest.mark.parametrize("text", [None, "", "\n"])
