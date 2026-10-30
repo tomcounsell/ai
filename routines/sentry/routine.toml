@@ -1,0 +1,28 @@
+name = "sentry"
+runner = "task"
+ceiling = "act"
+model = "frontier"
+mission_item = "Tom's ask (rule 2): the old system's Sentry review routine, so no exception goes unseen"
+need = [
+    "Tom, 2026-10-30: an extra routine for reviewing Sentry issues, beside tracking every exception",
+    "2026-10-30 outage (text = smallint in intake.root_of, chat down on all four Macs) reached no exception tracker",
+]
+created = 2026-10-30
+project = "valor"
+branch = "main"
+instruction = """Review the unresolved issues of the `valor` Sentry project with `sentry-cli` (check `sentry-cli issues --help` for the verbs and flags).
+
+List the unresolved issues. Sort each into one of five:
+A. Stale: no events in 30 days. Resolve it.
+B. Already fixed: its `[VALOR-N]` GitHub issue is closed by a merged fix. Resolve it; Sentry reopens it as a regression if it fires again.
+C. Noise: not a defect in this repository (a network blip, a client hanging up). Ignore it in Sentry with a reason.
+D. A real defect with a GitHub issue already: leave it.
+E. A real defect with none.
+
+One issue with a high event count from a retry loop is one defect: one GitHub issue, one fix task. For each C, D or E, run `gh issue list --repo tomcounsell/ai --state all --search 'VALOR-N in:title' --json number,title`; a match counts only when a title contains the literal `[VALOR-N]`. For each E with no match, file an issue titled `[VALOR-N] <Sentry title>` and start a fix task.
+
+Stop with `Done:` listing each issue filed and each task started. With neither, stop with `Done: nothing new. Send Tom nothing.`"""
+
+[schedule]
+hour = 6
+minute = 0

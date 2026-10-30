@@ -102,8 +102,9 @@ def main(argv: list[str] | None = None) -> int:
         from bridges.telegram.bridge import TelegramBridge
         from bridges.telegram.kernel import from_core, seen_path, sends_path, session_path
         from bridges.telegram.wire import TelethonWire
-        from core import bridge
+        from core import bridge, sentry
 
+        sentry.init("telegram")
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
         api_id, api_hash = credentials()
         wire = TelethonWire(session_path(), api_id, api_hash)

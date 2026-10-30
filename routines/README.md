@@ -5,7 +5,7 @@ Every scheduled task and runner.
 ## Scope
 
 - Each routine is a directory holding `routine.toml`, and a runner module when its work is not a plain task. `python -m core routine NAME --plist` prints the launchd plist; none is committed.
-- Routines with runner modules: `expiry` (lists what is past ninety days, reports to Tom, deletes nothing) and `verify` (the suite at the branch head, whose red groups start fix tasks through `core/findings.py`). `invoices` has none: it names the kernel's `task` runner (`core/routines.py`), which starts one SDLC task with its instruction, only on the Mac its project is placed on.
+- Routines with runner modules: `expiry` (lists what is past ninety days, reports to Tom, deletes nothing) and `verify` (the suite at the branch head, whose red groups start fix tasks through `core/findings.py`). `invoices` and `sentry` (the nightly review of the `valor` Sentry project's issues) have none: they name the kernel's `task` runner (`core/routines.py`), which starts one SDLC task with the instruction, only on the Mac the project is placed on.
 - Every routine is an objective in `core/` with an effect ceiling. A routine is never a bare script.
 - Extraction follows the mission rule: a routine exists on a demonstrated second need, and one unused for ninety days is deleted by default.
 

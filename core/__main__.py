@@ -177,6 +177,7 @@ from core import (
     outcomes,
     router,
     routines,
+    sentry,
     session,
     tasks,
     workspace,
@@ -368,6 +369,7 @@ def _status_line(task_id: str, out: dict) -> str:
 
 
 async def _serve() -> None:
+    sentry.init("kernel")
     from core import serve
 
     try:

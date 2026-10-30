@@ -37,7 +37,7 @@ from pathlib import Path
 import numpy as np
 from aiohttp import web
 
-from core import routines
+from core import routines, sentry
 from core.settings import settings
 
 LABEL = "com.valor.voice"
@@ -147,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         fetch()
         return 0
     if args.verb == "run":
+        sentry.init("voice")
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
         web.run_app(app(), host="127.0.0.1", port=settings.voice_port, print=None)
         return 1

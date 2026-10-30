@@ -86,7 +86,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `export VALOR_PGPORT=5433` to the profile, and set `VALOR_PGPORT` when
    step 9 generates the jobs.
 5. **Keys**, copied from the Cowboy without printing them:
-   `for K in claude-token github-keys judgement-keys openai-key mail-keys telegram-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; chmod 600 ~/.config/valor-kernel/$K; done`.
+   `for K in claude-token github-keys judgement-keys openai-key mail-keys sentry-dsn telegram-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; chmod 600 ~/.config/valor-kernel/$K; done`.
    Never `slack-keys`: it holds the Cowboy's own Slack app, whose Socket
    Mode token must not run on two bridges. Each Mac has its own (step 9).
    Calibrate the judge from a copy of the Cowboy's whole `~/src/valor-demo/items/`
