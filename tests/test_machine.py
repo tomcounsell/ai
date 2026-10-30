@@ -74,9 +74,9 @@ class Ledger:
              "findings": [{"kind": "premise", "text": f"critique {verdict}"}]},
         )  # fmt: skip
 
-    def build(self, sha: str | None = None) -> Ledger:
+    def build(self, sha: str | None = None, **extra) -> Ledger:
         nxt = self.turns + 1
-        self.turn("candidate", candidate={"sha": sha or f"sha{nxt}", "turn_id": f"t{nxt}"})
+        self.turn("candidate", candidate={"sha": sha or f"sha{nxt}", "turn_id": f"t{nxt}"}, **extra)
         self.candidate = self.rows[-1]["payload"]["candidate"]
         return self
 
@@ -449,3 +449,40 @@ def test_the_merge_predicate_holds_only_for_the_current_candidate_with_test_and_
     f.state = State.MERGE  # as if it had got there: the predicate still refuses it
     payload = {"candidate": red.candidate, "head_sha": red.candidate["sha"]}
     assert [t[0] for t in machine.merge_predicate(f, payload)] == ["2", "3"]
+
+
+NONE = object()
+
+
+def _built(plan: int, *restated) -> Ledger:
+    led = Ledger(review_rounds=plan).plan().critique("sound")
+    for r in restated:
+        led.build() if r is NONE else led.build(restated=r)
+    return led
+
+
+def test_a_restatement_can_only_add_the_review_round():
+    f = _built(0, {"stakes": "stored data", "review_rounds": 1}).fold()
+    assert f.loops.review_rounds == 1 and f.restated == {"stakes": "stored data", "raised": True}
+    assert f.raised["critique_rounds"] == 0 and f.state is State.CHECKS
+    f = _built(1, {"stakes": "small", "review_rounds": 0}).fold()
+    assert f.loops.review_rounds == 1 and f.restated is None and f.state is State.CHECKS
+    f = _built(1, {"stakes": "big", "review_rounds": 1}, {"stakes": "small", "review_rounds": 0}).fold()
+    assert f.loops.review_rounds == 1
+    assert _built(0, {"stakes": "big", "review_rounds": 2}).fold().loops.review_rounds == 1
+
+
+def test_a_restatement_that_is_not_valid_is_ignored_and_the_row_still_folds():
+    for bad in ({"stakes": "x", "review_rounds": True}, {"stakes": 3, "review_rounds": 1},
+                {"stakes": "x", "review_rounds": 5}, {"review_rounds": 1}, "text"):  # fmt: skip
+        f = _built(0, bad).fold()
+        assert f.state is State.CHECKS and f.restated is None and f.loops.review_rounds == 0
+    for none in (_built(0, NONE), _built(0, None)):
+        assert none.fold().state is State.CHECKS and none.fold().restated is None
+
+
+def test_a_raising_restatement_makes_row_three_the_round_it_added():
+    led = _built(0, {"stakes": "stored data", "review_rounds": 1})
+    led.checks("pass", "changes", "no_change")
+    f = led.fold()
+    assert f.state is State.PATCH and f.join.row == 3 and f.restated["raised"] is True

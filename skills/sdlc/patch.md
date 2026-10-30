@@ -35,4 +35,6 @@ across itself (the target's new commits touch your paths, a lockfile, or
 the schema). Rebase the work onto it, resolve conflicts, run the tests, and
 write `done.md` as for any patch; this spends no round.
 
+**Restating the stakes.** When the change risks more than the plan's stakes say, write `.valor/stakes.json` beside `done.md`: `{"stakes": "<one accurate sentence>", "review_rounds": 1}`. 1 is the ceiling, and a restatement cannot lower the count.
+
 **Seeing the result.** When the work changes what a page shows, start the dev server on a port from 8000 to 8009, run `look URL` (it writes a screenshot and the page's HTML under `.valor/screens/`), open the screenshot, and name it in `done.md` with what you saw. The kernel files recorded screens away after the turn.

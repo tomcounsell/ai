@@ -15,6 +15,7 @@ import pytest
 from core import (
     broker,
     db,
+    fresh,
     intake,
     judgement,
     judgement_sites,
@@ -97,6 +98,72 @@ def test_a_red_test_goes_to_patch_and_the_patched_candidate_merges(dsn, tmp_path
     assert patching.state is State.PATCH and patching.join.row == 3
     assert f.candidate != first and f.state is State.MERGED
     assert done.kind == "done" and git(origin, "rev-parse", "main") == f.candidate.sha
+
+
+def test_a_builders_restated_stakes_add_the_review_round_and_the_reviewer_reads_them(
+    dsn, tmp_path, monkeypatch
+):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.steer(
+        ws,
+        counts={"critique_rounds": 0, "review_rounds": 0},
+        stakes={"stakes": "stored data changes", "review_rounds": 1},
+    )
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        f = await fold(dsn, task)
+        monkeypatch.setattr(fresh.git, "trusted", lambda *a, **k: "")
+        async with await db.connect(dsn) as conn:
+            brief = await tasks.brief(conn, task)
+        inputs = fresh.review_inputs(await rows(dsn, task), f, brief, {})
+        await scripted.checks(dsn, task, review="changes")
+        return f, inputs, await rows(dsn, task), await fold(dsn, task)
+
+    f, inputs, ledger_rows, after = run(go())
+    assert f.loops.review_rounds == 1 and f.restated == {"stakes": "stored data changes", "raised": True}
+    assert inputs["plan.md"].count("Its stakes") == 1
+    assert 'superseding the plan\'s "a toy change"): "stored data changes"' in inputs["plan.md"]
+    assert "review rounds: 1" in inputs["plan.md"]
+    assert after.state is State.PATCH and after.join.row == 3
+    assert [r["payload"]["guard_id"] for r in ledger_rows if r["type"] == "docs.decided"] == [
+        machine.GUARD_RESTATED
+    ]
+
+
+def test_a_restatement_that_adds_nothing_leaves_the_plans_own_round_on_review_loop(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.steer(ws, stakes={"stakes": "stored data changes", "review_rounds": 2})
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task, review="changes")
+        return await rows(dsn, task)
+
+    guards = [r["payload"]["guard_id"] for r in run(go()) if r["type"] == "docs.decided"]
+    assert guards == [machine.GUARD_REVIEW]
+
+
+def test_a_row_five_join_after_a_restated_round_records_review_loop(dsn, tmp_path):
+    ws, _ = scripted.workspace(tmp_path)
+    scripted.steer(
+        ws,
+        counts={"critique_rounds": 0, "review_rounds": 0},
+        stakes={"stakes": "stored data changes", "review_rounds": 1},
+    )
+
+    async def go():
+        task = await to_checks(dsn, ws)
+        await scripted.checks(dsn, task, review="changes")  # row 3: stamps build.restated
+        assert (await fold(dsn, task)).join.row == 3
+        await drive(dsn, task)  # patch
+        await scripted.checks(dsn, task, review="changes")
+        return await fold(dsn, task), await rows(dsn, task)
+
+    f, ledger_rows = run(go())
+    assert f.join.row == 5
+    guards = [r["payload"]["guard_id"] for r in ledger_rows if r["type"] == "docs.decided"]
+    assert guards == [machine.GUARD_RESTATED, machine.GUARD_REVIEW]
 
 
 def test_a_moved_target_sends_the_work_to_rebase_however_often_it_moves(dsn, tmp_path):

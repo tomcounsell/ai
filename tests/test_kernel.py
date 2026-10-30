@@ -1466,6 +1466,19 @@ def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team
     )
 
 
+def test_stakes_json_is_read_in_place_and_from_handled_and_only_as_an_object(tmp_path):
+    v = tmp_path / ".valor"
+    v.mkdir()
+    (v / "stakes.json").write_text(json.dumps({"stakes": "stored data", "review_rounds": 1}))
+    first = signals.collect(tmp_path, "t1")
+    again = signals.recollect(tmp_path, "t1")  # the file is filed away: read from handled/
+    assert first.stakes == again.stakes == {"stakes": "stored data", "review_rounds": 1}
+    (v / "stakes.json").write_text("[1]")
+    bad = signals.collect(tmp_path, "t2")
+    assert bad.stakes is None and len(bad.unreadable) == 1 and "stakes.json is unreadable" in bad.unreadable[0]
+    assert signals.collect(tmp_path, "t3").stakes is None
+
+
 def test_a_rooms_entry_matches_its_chat_as_chats_normalises_it():
     spec = workspace.Spec.from_dict(
         {

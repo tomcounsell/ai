@@ -270,7 +270,11 @@ async def record_check(
         kind = f"{check.value}.decided"
         after = _would(rows, kind, payload)
         if after.join is not None and f.join is None and after.join.row in (3, 5):
-            payload["guard_id"] = machine.GUARD_REVIEW
+            payload["guard_id"] = (
+                machine.GUARD_RESTATED
+                if after.join.row == 3 and f.restated and f.restated["raised"]
+                else machine.GUARD_REVIEW
+            )
         event_id = await _append(conn, task_id, kind, payload)
         after = machine.fold(await ledger.read(conn, task_id))
         if f.state is State.CHECKS and after.state in (State.MERGE, State.ENDED) and after.join is not None:

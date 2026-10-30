@@ -739,8 +739,13 @@ def review_inputs(rows: list[dict], f: machine.Fold, b: tasks.Brief, setup: dict
             body = ""
     header = (
         f"The plan file: {_quoted(plan.get('path'))}\n"
-        f"Its stakes: {_quoted(plan.get('stakes'))}\n"
-        f"Critique rounds: {plan.get('critique_rounds')}; review rounds: {plan.get('review_rounds')}\n"
+        + (
+            f"Its stakes, as the builder restated them (superseding the plan's "
+            f"{_quoted(plan.get('stakes'))}): {_quoted(f.restated['stakes'])}\n"
+            if f.restated
+            else f"Its stakes: {_quoted(plan.get('stakes'))}\n"
+        )
+        + f"Critique rounds: {f.loops.critique_rounds}; review rounds: {f.loops.review_rounds}\n"
         f"Scope additions: {_quoted(plan.get('scope') or [])}\n"
     )
     return {
