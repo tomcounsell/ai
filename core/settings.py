@@ -547,6 +547,12 @@ class Settings:
         return str(Path(self.pg_passfile).parent / "openai-key")
 
     @property
+    def sentry_dsn_file(self) -> str:
+        """The `valor` Sentry project's DSN, in the kernel key directory,
+        written once per Mac (docs/rollout.md). Absent, nothing reports."""
+        return str(Path(self.pg_passfile).parent / "sentry-dsn")
+
+    @property
     def local_tokenfile(self) -> str:
         """The local chat page's token, in the kernel key directory, made
         by the local bridge when it starts. Derived from `pg_passfile` as

@@ -77,8 +77,9 @@ def main(argv: list[str] | None = None) -> int:
         return open_page()
     if args.verb == "run":
         from bridges.local import LocalBridge
-        from core import bridge
+        from core import bridge, sentry
 
+        sentry.init("local")
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
         asyncio.run(bridge.serve(LocalBridge()))
         return 1  # serve returned: launchd restarts the job

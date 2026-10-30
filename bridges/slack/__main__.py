@@ -162,8 +162,9 @@ def main(argv: list[str] | None = None) -> int:
         from bridges.slack.bridge import SlackBridge
         from bridges.slack.kernel import from_core, seen_path
         from bridges.slack.wire import SlackWire
-        from core import bridge
+        from core import bridge, sentry
 
+        sentry.init("slack")
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
         app_token, user_token = credentials()
         wire = SlackWire(app_token, user_token)

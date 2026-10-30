@@ -105,6 +105,7 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+import sentry_sdk
 
 from core import (
     backup,
@@ -337,6 +338,7 @@ async def recover(
             turn_id = await _recollect(conn, task_id, ended, started, performers)
         except Exception as exc:  # noqa: BLE001  one task's collection fails alone; the kernel starts
             _log(f"task {task_id}: collecting turn {ended['turn_id']} failed: {exc!r}")
+            sentry_sdk.capture_exception(exc)
             done["uncollected"].append(task_id)
             continue
         if turn_id is not None:
@@ -371,6 +373,7 @@ async def recover(
             ending = await _rolled(conn, checkout, running)
         except git.GitError as exc:
             _log(f"the kernel's checkout cannot be read; rollouts not ended: {exc}")
+            sentry_sdk.capture_exception(exc)
             ending = []
         kicked: dict[str, dict] = {}
         acting = datetime.now(UTC).replace(microsecond=0)
@@ -379,6 +382,7 @@ async def recover(
                 kicked = await restart_bridges(conn, checkout, running, kick)
             except Exception as exc:  # noqa: BLE001  the bridges' restart never stops the kernel's start
                 _log(f"the bridges were not restarted: {exc!r}")
+                sentry_sdk.capture_exception(exc)
             done["bridges"] = sorted(kicked.get("restarted", {}))
         if ending and setup is not None:
             kicked |= await _setup(setup)
@@ -620,15 +624,18 @@ class Kernel:
             await self.react(conn)
         except Exception as exc:  # noqa: BLE001  the reactions are read again on the next wake
             _log(f"reactions failed: {exc!r}")
+            sentry_sdk.capture_exception(exc)
         for task_id in await self.active(conn):
             try:
                 await notices.owe(conn, task_id)
             except Exception as exc:  # noqa: BLE001  one task's notice fails alone
                 _log(f"task {task_id}: notices failed: {exc!r}")
+                sentry_sdk.capture_exception(exc)
         try:
             await board.owe(conn)
         except Exception as exc:  # noqa: BLE001  the boards are read again on the next wake
             _log(f"decision boards failed: {exc!r}")
+            sentry_sdk.capture_exception(exc)
         try:
             await self.roll(conn)
         except rollout.Restart:
@@ -636,11 +643,13 @@ class Kernel:
         except Exception as exc:  # noqa: BLE001  a rollout's failure leaves the wake to schedule
             self.restart_due = None
             _log(f"rollout failed: {exc!r}")
+            sentry_sdk.capture_exception(exc)
         await self.schedule(conn)
         try:
             await self.reclaim(conn)
         except Exception as exc:  # noqa: BLE001  a removal that fails is tried on the next pass
             _log(f"workspace reclaim failed: {exc!r}")
+            sentry_sdk.capture_exception(exc)
 
     async def reclaim(self, conn) -> None:
         """Every `RECLAIM_EVERY_S`, remove the workspace of each task that
@@ -667,8 +676,9 @@ class Kernel:
 
             def finished(job, rid=rid):
                 self.reacting.pop(rid, None)
-                if not job.cancelled() and job.exception() is not None:
-                    _log(f"reaction for message {rid}: {job.exception()!r}")
+                if not job.cancelled() and (e := job.exception()) is not None:
+                    _log(f"reaction for message {rid}: {e!r}")
+                    sentry_sdk.capture_exception(e)
 
             job.add_done_callback(finished)
 
@@ -735,6 +745,7 @@ class Kernel:
             else:
                 self.waiting.update(m.effect_id for m in merges)  # tried again on the next tick
                 _log(f"the kernel's checkout cannot be read; no merge rolled: {exc}")
+                sentry_sdk.capture_exception(exc)
             return
         self.judged.update(judged)
         if not due or (not retry and all(m.effect_id in self.waiting for m in due)):
@@ -952,6 +963,7 @@ class Kernel:
                 await self.settle(task_id)
             except Exception as exc:  # noqa: BLE001  one task's settling fails alone
                 _log(f"task {task_id}: settling failed: {exc!r}")
+                sentry_sdk.capture_exception(exc)
         if self.restart_due is not None:
             return  # a restart is due: no new job until the running ones end
         open_ids: list[str] = []
@@ -963,6 +975,7 @@ class Kernel:
                 found = await self._ready(conn, task_id)
             except Exception as exc:  # noqa: BLE001  one task's scheduling fails alone
                 _log(f"task {task_id}: scheduling failed: {exc!r}")
+                sentry_sdk.capture_exception(exc)
                 continue
             if found is False:
                 continue
@@ -1026,8 +1039,9 @@ class Kernel:
             self.jobs.pop(task_id, None)
             self.harness.discard(task_id)
             self.background.discard(task_id)
-            if not job.cancelled() and job.exception() is not None:
-                _log(f"task {task_id}: job failed: {job.exception()!r}")
+            if not job.cancelled() and (e := job.exception()) is not None:
+                _log(f"task {task_id}: job failed: {e!r}")
+                sentry_sdk.capture_exception(e)
                 self.parked[task_id] = latest
             self.wake.set()
 
@@ -1120,6 +1134,7 @@ class Kernel:
             )
         except Exception as exc:  # noqa: BLE001  a step's failure is the task's; the kernel goes on
             _log(f"task {task_id}: step failed: {''.join(traceback.format_exception_only(exc)).strip()}")
+            sentry_sdk.capture_exception(exc)
             out = {"status": "failed"}
         finally:
             ledger.WRITTEN.reset(collecting)
@@ -1259,6 +1274,7 @@ async def serve(
             started = await git.threaded(git.head, checkout)
         except git.GitError as exc:
             _log(f"the kernel's checkout cannot be read; nothing is rolled out by this process: {exc}")
+            sentry_sdk.capture_exception(exc)
     # Stamped like a bridge's lock connection, so the dashboard names the commit it runs.
     name = f"valor-kernel@{started or bridge.NO_HEAD}"
     conn = await db.connect(dsn, application_name=name)
@@ -1298,6 +1314,7 @@ async def serve(
                     raise
                 except Exception as exc:  # noqa: BLE001  the next wake tries again
                     _log(f"kernel wake failed: {exc!r}")
+                    sentry_sdk.capture_exception(exc)
                     if conn.closed:
                         conn = await db.connect(dsn, application_name=name)
                         await conn.execute(

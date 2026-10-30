@@ -81,7 +81,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name}: {status[name]}")
         return 1 if "missing" in status.values() else 0
     if args.verb == "run":
+        from core import sentry
+
         from . import EmailBridge, serve
+
+        sentry.init("email")
 
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
         try:
