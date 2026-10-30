@@ -6,6 +6,8 @@ appetite: Small
 status: Planning
 created: 2026-10-30
 last_comment_id: none
+revision_applied: true
+revision_applied_at: 2026-10-30T15:46:21Z
 ---
 
 # Sentry: every exception reported, and a nightly review
@@ -27,14 +29,14 @@ no governance: nothing is checked, gated or refused.
 scratchpad, ported from `sentry_config.py` without its noise filters,
 hibernation hook and environment guessing, none of which has a cause here
 yet: `core/sentry.py` with `init(component)`, which reads the DSN from
-`settings.sentry_dsn_file`, returns False with no file, an empty file, or
-under pytest, and otherwise calls `sentry_sdk.init(dsn, release=<HEAD>,
+`settings.sentry_dsn_file`, returns False with no file or an empty file,
+and otherwise calls `sentry_sdk.init(dsn, release=<HEAD>,
 server_name=settings.machine, environment="production")` and tags
 `component`; `Settings.sentry_dsn_file` beside `openai_keyfile`
 (`~/.config/valor-kernel/sentry-dsn`); `sentry-sdk>=2.73.0` in
-`pyproject.toml` and `uv.lock`. The pytest skip carries over because the old
-system filed test exceptions as real issues (#2246 "RuntimeError: boom",
-#2241). The DSN never enters the repo, a plan or an issue: the repo is public.
+`pyproject.toml` and `uv.lock`. The draft's pytest skip is dropped: no
+test calls a process's `main`, so no test reaches `init`. No handling is
+added for a malformed DSN or Sentry's rate limit; neither has happened. The DSN never enters the repo, a plan or an issue: the repo is public.
 
 **Build.**
 1. Land the draft. `init` is called first in `core/__main__.py` `main`
@@ -46,24 +48,39 @@ system filed test exceptions as real issues (#2246 "RuntimeError: boom",
 2. `core/serve.py` prints its handled exceptions with `_log` (stderr), which
    Sentry never sees. Each `except` whose exception is only printed calls
    `sentry_sdk.capture_exception(exc)` beside its `_log`, a no-op without
-   `init`. Verified at aee0336e5, 17 sites: 339, 373, 381, 399, 622, 627,
-   631, 638, 643, 671 (job exception), 737, 954, 965, 1030 (job exception),
-   1122 (the router's re-raise, so every step failure), 1261, 1300. Left
-   out: exceptions that already become ledger rows reported to Tom
-   (`_failed` for rollouts, `workspace.failed` at 1087).
+   `init`. Verified at aee0336e5, 16 sites: 339, 373, 381, 622, 627, 631,
+   638, 643, 671, 737, 954, 965, 1030, 1122 (the router's re-raise, so
+   every step failure), 1261, 1300. At 671 and 1030 (done callbacks) no
+   `exc` is in scope: write `if (e := job.exception()) is not None:` and
+   call `capture_exception(e)` beside the `_log`. Left out: exceptions that
+   already become ledger rows reported to Tom (`_failed` for rollouts,
+   `workspace.failed` at 1087, and setup's at 399, which lands in a
+   `rollout.ended` row). 622, 631, 737, 1261 and 1300 sit in loops that
+   retry each tick, so a lasting fault sends an event every tick from each
+   Mac. That volume is accepted: no filter or rate limit is added (none is
+   granted), and Sentry groups the events into one issue.
 3. `routines/sentry/routine.toml`: `runner = "task"`, `project = "valor"`,
    `branch = "main"`, `ceiling = "act"`, `model = "frontier"`, nightly at
    06:00 (02-05 are taken), `mission_item` and `need` citing Tom's ask and
    the outage, `created = 2026-10-30`. Its instruction carries the old
    triage's A-E scheme as prose, since `sentry-cli` in the turn replaces
-   the old 1026-line API client: list unresolved `valor` issues with
-   `sentry-cli issues list`; resolve stale ones (no events in 30 days) and
-   ignore test noise; for each real defect no open issue or task holds,
-   file a GitHub issue and start a fix task; stop with a `Done:` list. No
-   apply switch: the old `SENTRY_TRIAGE_APPLY` dry-run gate is not ported.
+   the old 1026-line API client (the turn checks `sentry-cli issues --help`
+   for the verbs and flags; the plan asserts none). List unresolved `valor`
+   issues; resolve stale ones (no events in 30 days), ignore test noise,
+   and resolve each whose `[VALOR-N]` GitHub issue is closed by a merged
+   fix (Sentry reopens it as a regression if it fires again). One issue
+   with a high event count from a retry loop is one defect: one GitHub
+   issue, one fix task. For a real defect, run
+   `gh issue list --repo tomcounsell/ai --state all --search 'VALOR-N in:title'`
+   and, with no match, file an issue titled `[VALOR-N] <Sentry title>` and
+   start a fix task. Stop with `Done:` listing each issue filed and task
+   started; with neither, stop with `Done: nothing new. Send Tom nothing.`,
+   the wording `routines/conditions/routine.toml` uses to keep a quiet run
+   silent. No apply switch: resolving and ignoring are live from the first
+   night on purpose (the old `SENTRY_TRIAGE_APPLY` dry-run gate is not
+   ported); a wrong resolve reopens on the next event.
 4. `tests/test_sentry.py`: `init` returns False and calls nothing with the
-   key file absent or empty; with a file (pytest variable cleared,
-   `sentry_sdk.init` patched) it passes the DSN and tags the component; a
+   key file absent or empty; with a file (`sentry_sdk.init` patched) it passes the DSN and tags the component; a
    step that raises in the kernel calls `capture_exception` (patched) once.
    The routine toml loads through `core/routines.py` like the others.
 5. Docs: `docs/rollout.md` step 5 adds `sentry-dsn` to the copied keys;
@@ -83,7 +100,7 @@ then copy it from the Cowboy to the Pirate, the Captain and the Bald as step
 |-------|---------|----------|
 | Tests pass | `uv run pytest -q -n auto -p no:cacheprovider` | exit code 0 |
 | Lint | `uv run ruff check .` | exit code 0 |
-| Every printed handler captures | `grep -c "sentry_sdk.capture_exception" core/serve.py` | output > 16 |
+| Every printed handler captures | `grep -c "sentry_sdk.capture_exception" core/serve.py` | output = 16 |
 | Each process inits | `grep -l "sentry.init(" core/__main__.py bridges/*/__main__.py tools/voice.py \| wc -l` | output > 5 |
 | No DSN committed | `git grep -nE "https://[0-9a-f]{32}@" -- . ':!uv.lock'` | exit code 1 |
 
