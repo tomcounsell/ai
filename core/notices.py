@@ -207,10 +207,14 @@ async def home(conn, task_id: str) -> tuple[str | None, str | None]:
 
 
 async def owe(conn, task_id: str) -> list[str]:
-    """Request every notice the task's fold owes. Returns the new ids."""
+    """Request every notice the task's fold owes. Returns the new ids. A
+    Meet call's session owes none: its call reports to the chat that asked
+    for it (`core/call.py`)."""
     rows = await ledger.read(conn, task_id)
     f = machine.fold(rows)
     if f.legacy or f.calibration or f.state in (State.STOPPED, State.MERGED):
+        return []
+    if any(r["type"] == "task.started" and "call" in r["payload"] for r in rows[:1]):
         return []
     made: list[str | None] = []
     from core import board
@@ -435,10 +439,18 @@ def _to_tom(effect: dict[str, Any]) -> bool:
     return False
 
 
-def _own_chat(chat: dict[str, str], kind: str, effect: dict[str, Any]) -> bool:
+def _own_chat(
+    chat: dict[str, str], kind: str, effect: dict[str, Any], asked: dict[str, str] | None = None
+) -> bool:
     """Whether a chat session's send, or its canvas write, went to its own
     chat: by email, a reply in its thread, whose `References` start at the
-    thread's root."""
+    thread's root. A Meet call's session (`core/call.py`) speaks and posts
+    in its call, and copies what it posts to the chat that asked for the
+    call (`asked`): both are its own."""
+    if asked and kind == f"{asked['channel']}.send_message" and str(effect.get("target")) == asked["chat_id"]:
+        return True
+    if kind == "meet.say":
+        return chat["channel"] == "meet"
     if kind == "email.send":
         refs = (effect.get("payload") or {}).get("references") or []
         return chat["channel"] == "email" and refs[:1] == [chat["chat_id"]]
@@ -457,7 +469,12 @@ async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, A
     from core import tasks
 
     chat = (await tasks.brief(conn, task_id)).chat
-    if chat and _own_chat(chat, kind, effect):
+    asked = None
+    if chat and chat["channel"] == "meet":
+        from core import call
+
+        asked = ((await call.marker(conn, task_id)) or {}).get("asked_by")
+    if chat and _own_chat(chat, kind, effect, asked):
         return None
     if kind == "merge":
         f = machine.fold(await ledger.read(conn, task_id))

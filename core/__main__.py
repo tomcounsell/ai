@@ -145,6 +145,7 @@ imports outside it.
 
 import argparse
 import asyncio
+import contextlib
 import dataclasses
 import functools
 import json
@@ -170,6 +171,7 @@ from core import (
     intake,
     judgement,
     judgement_sites,
+    judgement_tasks,
     ledger,
     machine,
     memory,
@@ -202,9 +204,10 @@ def _performers(b: tasks.Brief) -> broker.Performers:
     with the GitHub credential when the kernel provisioned the task, and from
     the workspace with none otherwise. A declared send sizes its files in the
     task's workspace. A chat session also starts, answers and stops its
-    tasks (`tools/chat_tasks.py`)."""
+    tasks (`tools/chat_tasks.py`), and a group chat's asks Valor into a
+    Meet call (`tools/meet.py`)."""
     from core.bridge import declared_performers
-    from tools import chat_tasks
+    from tools import chat_tasks, meet
     from tools.push_branch import Merge, PushBranch
 
     kernel = []
@@ -218,7 +221,9 @@ def _performers(b: tasks.Brief) -> broker.Performers:
                 credential=settings.github_keyfile if b.mirror else None,
             ),
         ]
-    return broker.Performers(*kernel, *chat_tasks.performers(b), *declared_performers(b.workspace))
+    return broker.Performers(
+        *kernel, *chat_tasks.performers(b), *meet.performers(b), *declared_performers(b.workspace)
+    )
 
 
 def _harnesses() -> dict:
@@ -405,6 +410,102 @@ async def _run_task(task_id: str) -> str:
     finally:
         await gateway.close()
     return _status_line(task_id, out)
+
+
+async def _call(session_id: str) -> str:
+    """A Meet call's process (`core/call.py`), spawned by `meet.join`: the
+    page (`bridges/meet`), the ears, the voice, `meet.speak`, the front
+    model and the worker, on the call's own gateway. It holds
+    `meet:call:<session>` and `run:<session>` while it lives."""
+    sentry.init("call")
+    import aiohttp
+    import numpy as np
+
+    from bridges.meet import Page, Socket
+    from core import call, runs
+    from core.gateway import ClaudeLogin, Gateway
+
+    dsn = settings.dsn()
+    holder = await db.connect(dsn, application_name=f"valor-call@{session_id}")
+    try:
+        for key in (f"meet:call:{session_id}", f"run:{session_id}"):
+            got = await holder.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
+            if not (await got.fetchone())[0]:
+                return f"another process holds {key}"
+        b = await tasks.brief(holder, session_id)
+        info = await call.marker(holder, session_id)
+        rows = await ledger.read(holder, session_id)
+        if info is None or any(r["type"] == "call.ended" for r in rows):
+            return "this call has ended"
+        await ledger.append(holder, session_id, "call.started", {"machine": settings.machine})
+        try:
+            judgement_port = port()
+        except (credentials.MissingKey, ValueError) as exc:
+            await call.end(holder, session_id, f"Valor's call process could not start: {exc}")
+            return str(exc)
+        gateway = Gateway(credential=ClaudeLogin())
+        await gateway.start()
+        asked = {k: info["asked_by"][k] for k in ("channel", "chat_id")}
+        resume: str | None = None
+
+        async def worker(question: str) -> str:
+            nonlocal resume
+            while True:
+                async with await db.connect(dsn) as conn:
+                    now = await tasks.brief(conn, session_id)
+                if now.workspace:
+                    break
+                await asyncio.sleep(5)
+            prompt = f"Asked in the call: {question}\n\nThe call so far:\n" + "\n".join(the.recent)
+            if resume is None:
+                prompt += f"\n\nWhy the call was asked for, from the notes before it:\n{info.get('prep') or '(none)'}"
+            ended = await runs.run_turn(gateway, session_id,
+                                        _turn_for(prompt, resume, dataclasses.replace(now, chat=asked)),
+                                        dsn=dsn, fresh="call")  # fmt: skip
+            result = ended["result"]
+            if ended["outcome"] != "done" or result.get("is_error") or not (result.get("text") or "").strip():
+                raise RuntimeError(f"the worker's turn ended {ended['outcome']}")
+            resume = result.get("session_id") or resume
+            return result["text"].strip()
+
+        async def ready() -> bool:
+            async with await db.connect(dsn) as conn:
+                return bool((await tasks.brief(conn, session_id)).workspace)
+
+        async def transcribe(audio: np.ndarray) -> str:
+            url = f"http://127.0.0.1:{settings.voice_port}/hear"
+            async with (
+                aiohttp.ClientSession() as http,
+                http.post(url, data=audio.astype(np.float32).tobytes()) as got,
+            ):
+                return (await got.json())["text"]
+
+        from kokoro_onnx import Kokoro
+
+        folder = Path(settings.tts_model_dir).expanduser()
+        kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
+        light = resolve_model("light")
+        the = call.Call(
+            session_id, info, Page(settings.meet_profile), call.Ears.load(transcribe), dsn=dsn,
+            voice=lambda text: kokoro.create(text, voice=settings.tts_voice, lang="en-us"),
+            judge=lambda inputs, turn: judgement_port.judge(
+                judgement_tasks.MEET_SPEAK, inputs, task_id=session_id, ref={"turn_id": turn}, dsn=dsn),
+            front=call.Front(gateway.issue(session_id, "front"), light, project=(b.project or {}).get("name") or "",
+                             prep=info.get("prep") or ""),
+            worker=worker, worker_ready=ready, project=(b.project or {}).get("name"),
+        )  # fmt: skip
+        socket = Socket(the.hear, the.chat, the.people)
+        the.socket = socket
+        await socket.start()
+        try:
+            return await the.run()
+        finally:
+            with contextlib.suppress(Exception):
+                await the.page.close()
+            await socket.close()
+            await gateway.close()
+    finally:
+        await holder.close()
 
 
 async def _provision(task_id: str, spec, ports: dict[str, int], base: str | None):
@@ -714,6 +815,9 @@ async def _orphan(conn, args, *, after_lock=None) -> str:
 async def _run(args) -> None:
     if args.command == "run":
         print(await _run_task(args.task_id))
+        return
+    if args.command == "call":
+        print(await _call(args.session_id))
         return
     if args.command == "serve":
         await _serve()
@@ -1062,6 +1166,7 @@ def main() -> None:
     start.add_argument("--by", default="tom")
     start.add_argument("--role-played", action="store_true")
     sub.add_parser("run").add_argument("task_id")
+    sub.add_parser("call").add_argument("session_id")
     for name in ("answer", "feedback"):
         reply = sub.add_parser(name)
         reply.add_argument("task_id")

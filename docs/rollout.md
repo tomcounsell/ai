@@ -208,6 +208,15 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    from all four Macs that day (Tom, Telegram 11762); Studio Tools'
    Homebrew Updates replaces this job once it is deployed
    (yudame/studio-tools#2).
+   Meet calls (docs/plans/meet.md) join from their own Chrome profile,
+   `~/Library/Application Support/Valor/meet-chrome`, which Tom signs in
+   once per Mac, at the Mac, as valor@yuda.me with the passkey: `open -na
+   "Google Chrome" --args --user-data-dir="$HOME/Library/Application
+   Support/Valor/meet-chrome" https://accounts.google.com/`, then quit
+   that window with ⌘Q (the Cowboy's on 2026-10-27). Until then a call
+   asked for on that Mac fails, naming this step. A call needs the voice
+   job (`/hear`), Smart Turn v3 (fetched into the Hugging Face cache on
+   the first call, 8 MB) and `gws` signed in as Valor for a new Meet.
    A kernel crash-looping after a rollout or an update: take the checkout
    back to the commit it rolled from (`from` on its `rollout.restarting`
    row), `git -C ~/src/ai reset --keep <from>`, then

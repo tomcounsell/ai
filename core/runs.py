@@ -145,7 +145,8 @@ async def run_turn(
 
     The turn holds a turn slot (`core/slot.py`) from before its Brief is
     rendered until `turn.ended` is written, except a clarify turn (a
-    question to Tom), which never waits on one. Memory ingests once the slot
+    question to Tom) and a call's worker (`fresh="call"`, someone in a
+    live call waits on it), which never wait on one. Memory ingests once the slot
     is released, so no other turn waits on it.
 
     The turn's TMPDIR (`TurnCommand.tmpdir`) is emptied before the turn
@@ -154,7 +155,8 @@ async def run_turn(
     Nothing in it is kept: a later turn of the session resumes from its
     harness's config directory, never from TMPDIR. A failed removal leaves
     the turn's result as it is."""
-    held = contextlib.nullcontext() if state == "clarify" else slot.held(task_id, dsn or gateway.dsn)
+    free = state == "clarify" or fresh == "call"
+    held = contextlib.nullcontext() if free else slot.held(task_id, dsn or gateway.dsn)
     tmpdirs: list[str] = []
     try:
         async with held:

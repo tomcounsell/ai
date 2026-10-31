@@ -499,6 +499,15 @@ class Settings:
         default_factory=lambda: _env("VALOR_TTS_MODEL_DIR", str(Path.home() / ".cache" / "kokoro-onnx"))
     )
     tts_voice: str = field(default_factory=lambda: _env("VALOR_TTS_VOICE", "am_michael"))
+    # A Google Meet call (docs/plans/meet.md): the Chrome profile a call
+    # joins with, signed in once per Mac as Valor's own account, and Tom's
+    # name as a call shows it, which tells his words apart there.
+    meet_profile: str = field(
+        default_factory=lambda: _env(
+            "VALOR_MEET_PROFILE", str(Path.home() / "Library" / "Application Support" / "Valor" / "meet-chrome")
+        )
+    )
+    operator_name: str = field(default_factory=lambda: _env("VALOR_OPERATOR_NAME", "Tom Counsell"))
 
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate, the worst case a

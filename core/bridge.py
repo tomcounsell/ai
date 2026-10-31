@@ -39,6 +39,9 @@ impossible send at request time without importing a bridge:
   `chat.postMessage`, which truncates past 40,000); 1 GB per file (its
   file upload limit).
 - Local: none. The local chat page shows any text and no files.
+- Meet: 500 characters a post, the same cap for a sentence spoken; no files.
+  A call's own process (`core/call.py`) performs both, never a bridge's
+  outbox, and turns are not offered them (docs/plans/meet.md).
 """
 
 import asyncio
@@ -95,6 +98,7 @@ LIMITS: dict[str, ChannelLimits] = {
     ),
     "local": ChannelLimits(max_text=None, text_units="chars", max_file_bytes=None),
     "slack": ChannelLimits(max_text=4000, text_units="chars", max_file_bytes=1_000_000_000),
+    "meet": ChannelLimits(max_text=500, text_units="chars", max_file_bytes=None),
 }
 
 
@@ -261,6 +265,30 @@ async def _refuse_local(conn, action: broker.Action) -> str | None:
     return None
 
 
+async def _refuse_meet(conn, action: broker.Action) -> str | None:
+    """A call's post or spoken sentence: text within `LIMITS["meet"]`, and a
+    post's `settles`, the open questions a read-back answers, as
+    `[{"task_id", "question_id"}]`."""
+    if not _strings(action.payload, ("text",)):
+        return TEXT_SHAPE
+    text = (action.payload.get("text") or "").strip()
+    most = LIMITS["meet"].max_text
+    if not text:
+        return "the text is empty: the call would hear nothing"
+    if len(text) > most:
+        return f"the text is {len(text)} characters, over a call's {most}"
+    if action.payload.get("files"):
+        return "a call takes text, no files"
+    settles = action.payload.get("settles")
+    if settles is not None and not (
+        isinstance(settles, list)
+        and all(isinstance(q, dict) and isinstance(q.get("task_id"), str) and isinstance(q.get("question_id"), str)
+                for q in settles)
+    ):  # fmt: skip
+        return 'settles must be a list of {"task_id", "question_id"} objects'
+    return None
+
+
 @dataclass(frozen=True)
 class Declared:
     """A channel's send type as a task's Performers holds it. `refuse`
@@ -270,8 +298,8 @@ class Declared:
 
     action_type: str
     effect_class: str
-    usage: str
-    owner: str  # "telegram", "email", "slack", or "local"
+    usage: str | None  # None: no turn is offered it
+    owner: str  # "telegram", "email", "slack", "local", or "meet"
     check: Callable[[Any, broker.Action], Awaitable[str | None]] | None = None
     workspace: str | None = None
 
@@ -338,6 +366,12 @@ DECLARED: dict[str, Declared] = {
         ),
         owner="local",
         check=_refuse_local,
+    ),
+    "meet.say": Declared(
+        action_type="meet.say", effect_class="act", usage=None, owner="meet", check=_refuse_meet
+    ),
+    "meet.send_message": Declared(
+        action_type="meet.send_message", effect_class="act", usage=None, owner="meet", check=_refuse_meet
     ),
 }
 

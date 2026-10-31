@@ -294,13 +294,15 @@ def retry_due(rows: list[dict[str, Any]], now: datetime | None = None) -> bool:
     return at is None or now >= at + timedelta(seconds=delay)
 
 
-def has_step(rows: list[dict[str, Any]], f: machine.Fold, chat: bool) -> bool:
+def has_step(rows: list[dict[str, Any]], f: machine.Fold, chat: bool | dict[str, str] | None) -> bool:
     """Whether an open task has a step to run on its new rows: not waiting
-    on an answer, and for a chat session, a message or report to answer
-    (`session.chat_waiting`), a wake it asked for due (`session.wake_due`),
-    or a failed step due again. The kernel schedules by it, and the queue
-    line counts only these as ahead."""
-    if f.state is State.WAITING:
+    on an answer, and for a chat session (`chat`, its Brief's chat), a
+    message or report to answer (`session.chat_waiting`), a wake it asked
+    for due (`session.wake_due`), or a failed step due again. A Meet call's
+    session never has one: its call's own process is Valor there
+    (`core/call.py`). The kernel schedules by it, and the queue line counts
+    only these as ahead."""
+    if f.state is State.WAITING or (isinstance(chat, dict) and chat.get("channel") == "meet"):
         return False
     return not chat or session.chat_waiting(rows) or session.wake_due(rows) or retry_due(rows)
 
@@ -320,7 +322,7 @@ async def queue_line(conn, task_id: str) -> str:
     waiting = [t for t, f in same if f.state is State.WAITING]
     ahead = 0
     for t, rows, f in found:
-        if positions[t] < positions[task_id] and has_step(rows, f, bool((await tasks.brief(conn, t)).chat)):
+        if positions[t] < positions[task_id] and has_step(rows, f, (await tasks.brief(conn, t)).chat):
             ahead += 1
     line = f"queue: {len(same)} open on {project}, {ahead} ahead of {task_id} in the kernel's queue"
     return line + (f"; waiting on an answer: {', '.join(waiting)}" if waiting else "")

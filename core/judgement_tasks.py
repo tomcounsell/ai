@@ -271,5 +271,51 @@ COMPLETED = JudgementTask(
     calibrated=None,
 )
 
-TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, OVERLAP, HANDLING, COMPLETED)
+# A call's whether to speak (docs/plans/meet.md): asked at the end of each
+# turn someone takes in a Meet call, while the front model drafts.
+MEET_SPEAK = JudgementTask(
+    site="meet.speak",
+    questions=(
+        Question(
+            id="turn",
+            text=(
+                "Valor is in a video call with these people. Someone just finished a turn: spoke, or typed in "
+                "the call's chat. Should Valor answer it now, as a person in the call would?"
+            ),
+            kind=Kind.PICK,
+            labels={
+                "asked_valor": (
+                    "It is said to Valor, by name or by plain context (a question right after he spoke, to "
+                    "him), or asks what only he can answer now: he answers."
+                ),
+                "useful_post": (
+                    "Not said to Valor, but a short written note from him would plainly help the people "
+                    "talking (a figure, a link, a fact they are missing): he posts it in the call's chat."
+                ),
+                "someone_else": "It is said to someone else, or another person should answer it.",
+                "nothing": "Small talk, thinking aloud, or a turn that needs nothing from Valor.",
+            },
+            proceed=frozenset({"asked_valor", "useful_post", "someone_else", "nothing"}),
+        ),
+    ),
+    inputs={
+        "said": "the finished turn: who took it, how (spoke or typed), and the words heard",
+        "recent": "the call's last turns before it, oldest first, one per line, Valor's among them",
+        "people": "who is in the call besides Valor",
+    },
+    error_cost="medium",
+    floor={"primary": 0.60, "fallback": 0.60},
+    on_abstain="caution",
+    on_failure="caution",
+    consumer={
+        "proceed": "asked_valor: Valor answers (aloud, or in the chat to a typed turn); useful_post: he posts; "
+        "someone_else and nothing: he stays silent (core/call.py)",
+        "caution": "he stays silent",
+    },
+    serves="Mission items 4 and 6",
+    guard="none: a label, no gate",
+    calibrated=None,
+)
+
+TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, OVERLAP, HANDLING, COMPLETED, MEET_SPEAK)
 BY_SITE = {t.site: t for t in TASKS}

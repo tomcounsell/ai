@@ -180,6 +180,23 @@ async def _canvas(conn, chat_id: str) -> dict[str, Any]:
     return row[0] if row else {}
 
 
+async def canvas_markdown(conn, spec: workspace.Spec) -> str | None:
+    """The markdown of the board canvas's last write that left, as the
+    board session wrote it; None before the first, or with no board."""
+    if spec.board is None:
+        return None
+    row = await (
+        await conn.execute(
+            "SELECT i.payload->'payload'->>'markdown' FROM events i JOIN events o ON o.type = 'effect.outcome' "
+            "AND o.payload->>'effect_id' = i.payload->>'effect_id' AND o.payload->>'kind' = 'done' "
+            "WHERE i.type = 'effect.intent' AND i.payload->>'action_type' = 'slack.write_canvas' "
+            "AND i.payload->>'target' = %s ORDER BY o.id DESC LIMIT 1",
+            (spec.board.partition(":")[2],),
+        )
+    ).fetchone()
+    return row[0] if row else None
+
+
 def text(board: str, snap: dict[str, Any], posts: dict[str, str], canvas: dict[str, Any]) -> str:
     """The board row as the board session reads it."""
     readers = canvas.get("readers")

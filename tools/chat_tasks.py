@@ -23,14 +23,17 @@ own; each refuses a task that does not report to its session
 (`tasks.reporting`: its children, and the tasks whose report is on it),
 but a project's board chat session answers any of the project's tasks
 waiting on a question (`board.answers`), since every decision for Tom on
-that project is on its board, however he answers it.
+that project is on its board, however he answers it, and Tom's DM's
+session answers a question a call sent it to confirm (`call.confirms`).
+A call's session (`core/call.py`) takes a steer while the call is open,
+posted in the call's chat, and refuses one once the call has ended.
 `lookup` reads the ledger, which is how a dangling intent is reconciled:
 a start by its idempotency key on the child's `task.started`, an answer
 by the question it answered, a steer by its key on the `message.steered`,
 `feedback.given` or `question.answered` row, a stop by the task's stop.
 """
 
-from core import board, db, ledger, machine, session, tasks
+from core import board, call, db, ledger, machine, session, tasks
 from core.machine import State
 from core.settings import resolve_seat
 
@@ -59,9 +62,11 @@ class _ChatTask:
                 None if str(action.payload.get("instruction") or "").strip() else "the request has no words"
             )
         try:
-            await self._child(conn, action.target)
+            child = await self._child(conn, action.target)
         except ValueError as exc:
             return str(exc)
+        if self.action_type == "task.steer" and call.is_call(child) and await _ended(conn, action.target):
+            return "the call has ended"
         return None
 
 
@@ -112,16 +117,19 @@ class TaskStart(_ChatTask):
 class TaskAnswer(_ChatTask):
     action_type = "task.answer"
     usage = (
-        '`task.answer`: target the task id, payload `{"text": "...", "by": "<who answered>", "via": "chat"}`; '
-        "answers that task's open question; `via` is how it came (`chat`, `slack reaction :+1:`, "
-        "`meet call`). The board chat's session also answers any task of its project waiting on a question."
+        '`task.answer`: target the task id, payload `{"text": "...", "by": "<who answered>", "via": "chat", '
+        '"question_id": null}`; answers that task\'s open question, or with `question_id` only that one; '
+        "`via` is how it came (`chat`, `slack reaction :+1:`, `meet call`). The board chat's session also "
+        "answers any task of its project waiting on a question."
     )
 
     async def _child(self, conn, task_id: str) -> tasks.Brief:
         try:
             return await super()._child(conn, task_id)
         except ValueError:
-            if not await board.answers(conn, self.session, task_id):
+            if not await board.answers(conn, self.session, task_id) and not await call.confirms(
+                conn, self.session, task_id
+            ):
                 raise
             return await tasks.brief(conn, task_id)
 
@@ -131,6 +139,7 @@ class TaskAnswer(_ChatTask):
             question = await session.answer(
                 conn, action.target, str(action.payload.get("text") or ""),
                 by=str(action.payload.get("by") or "valor"), via=str(action.payload.get("via") or "chat"),
+                question_id=action.payload.get("question_id") or None,
             )  # fmt: skip
         return {"task_id": action.target, "question_id": question}
 
@@ -203,6 +212,13 @@ class TaskStop(_ChatTask):
         async with await db.connect(self.dsn) as conn:
             f = machine.fold(await ledger.read(conn, action.target))
         return {"task_id": action.target} if f.state is State.STOPPED else None
+
+
+async def _ended(conn, task_id: str) -> bool:
+    row = await (
+        await conn.execute("SELECT 1 FROM events WHERE task_id = %s AND type = 'call.ended'", (task_id,))
+    ).fetchone()
+    return row is not None
 
 
 def performers(brief: tasks.Brief, dsn: str | None = None) -> list:

@@ -60,12 +60,15 @@ QUIET = (
     # A steer a running turn took after a step (`core/runs.py`): it spends
     # the steer once that turn finishes, and moves nothing.
     "message.delivered",
+    # What a Meet call heard and who came (`core/call.py`): its transcript.
+    "call.heard",
+    "call.participant",
 )
 
 # Judgement sites whose rows sit beside a task's work without moving it:
-# the reaction questions, and `response.shape`, which picked a reaction for
+# the reaction questions, a call's whether to speak, and `response.shape`, which picked a reaction for
 # a message until 2026-10-17 (its rows stay in the ledger), decide nothing.
-QUIET_SITES = ("reaction.handling", "reaction.completed", "response.shape")
+QUIET_SITES = ("reaction.handling", "reaction.completed", "response.shape", "meet.speak")
 
 
 def quiet(row: dict[str, Any]) -> bool:

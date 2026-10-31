@@ -1163,10 +1163,13 @@ async def answer(
     via: str = "the command line",
     role_played: bool = False,
     effect_key: str | None = None,
+    question_id: str | None = None,
 ) -> str:
     """Record the answer to the task's open question. `by` names who wrote
     it and `role_played` says whether they stood in for Tom; `effect_key`
-    names the chat session's `task.steer` that gave it. Returns the
+    names the chat session's `task.steer` that gave it. With `question_id`
+    (a call's read-back, `core/call.py`) it answers only that question:
+    a task asking another one now raises `LookupError`. Returns the
     question's id."""
     text = text.strip()
     if not text:
@@ -1180,6 +1183,8 @@ async def answer(
             raise LookupError(f"task {task_id} is a calibration task")
         if f.state is not State.WAITING:
             raise LookupError(f"task {task_id} has no open question (it is {f.state})")
+        if question_id is not None and question_id != f.open_question:
+            raise LookupError(f"task {task_id} now asks another question, not {question_id}")
         await ledger.append(
             conn,
             task_id,

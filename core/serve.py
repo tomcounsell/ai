@@ -29,6 +29,7 @@ row, or `settings.serve_tick_s` with none) binds every recorded message
 (`intake.bind`), starts a job for each message's next reaction
 (`reactions.pending`; kept in `reacting`, apart from the task jobs, so a
 task's step never waits on one), requests the notices each task owes (`notices.owe`),
+writes the end of each Meet call whose process is gone (`core.call.sweep`),
 rolls the kernel forward to its own merges (`roll`), and schedules jobs
 (`schedule`). A job is one step of one task
 (`router.step`), a provisioning, or the collection recover could not
@@ -132,6 +133,7 @@ from core import (
     verdicts,
     workspace,
 )
+from core import call as calls
 from core.gateway import Gateway
 from core.machine import State
 from core.settings import settings
@@ -637,6 +639,12 @@ class Kernel:
             _log(f"decision boards failed: {exc!r}")
             sentry_sdk.capture_exception(exc)
         try:
+            for ended in await calls.sweep(conn):
+                _log(f"call {ended}: its process was gone, so its end is written")
+        except Exception as exc:  # noqa: BLE001  the calls are read again on the next wake
+            _log(f"calls failed: {exc!r}")
+            sentry_sdk.capture_exception(exc)
+        try:
             await self.roll(conn)
         except rollout.Restart:
             raise
@@ -1021,7 +1029,7 @@ class Kernel:
             if _provision_due(rows):
                 self._start(task_id, self._provision(task_id, b.project.get("name")), latest)
             return None
-        if not router.has_step(rows, f, bool(b.chat)):
+        if not router.has_step(rows, f, b.chat):
             return None  # a chat session waits for the chat or its tasks, not its own outcomes
         if latest <= self.seen.get(task_id, 0) and not (router.retry_due(rows) or session.wake_due(rows)):
             return None

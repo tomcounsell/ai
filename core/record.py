@@ -15,7 +15,10 @@ A project's reach is the chats its spec lists now (`chats`):
 - its messages: every `message.received` in a chat it lists, or bound to
   one of its tasks. A message bound to another project's task (the
   operator chat, where every project reports) shows that task's id; the
-  task itself is outside.
+  task itself is outside;
+- its Meet calls (`call`): a call's session is inside when the chat that
+  asked for it is (`core/call.py`), and its transcript is what it heard
+  and what Valor said and posted there.
 
 Its memory (`memory`) is what recall reads for its tasks (core/memory.py,
 `search`): the project's records, and standards of working from any
@@ -60,15 +63,20 @@ async def reach(conn, spec: workspace.Spec) -> dict[str, dict[str, Any]]:
     """The project's tasks in reach, by id: each one's Brief body."""
     rows = await (
         await conn.execute(
-            "SELECT id, body, created_at FROM documents WHERE kind = 'task' AND body->'project'->>'name' = %s",
+            "SELECT d.id, d.body, d.created_at, s.payload->'call'->'asked_by' FROM documents d "
+            "LEFT JOIN events s ON s.task_id = d.id AND s.type = 'task.started' "
+            "WHERE d.kind = 'task' AND d.body->'project'->>'name' = %s",
             (spec.name,),
         )
     ).fetchall()
     bodies = {r[0]: {**r[1], "created_at": r[2]} for r in rows}
+    asked = {r[0]: r[3] for r in rows if r[3]}
     listed = set(spec.chats)
 
     def inside(task_id: str) -> bool:
         body = bodies[task_id]
+        if task_id in asked:
+            return _key(asked[task_id]) in listed
         if body.get("chat"):
             return body["chat"]["channel"] == "email" or _key(body["chat"]) in listed
         parent = body.get("parent_id")
@@ -215,7 +223,59 @@ async def memory_search(
         raise NotFound(str(exc)) from None
 
 
-VERBS = {"chats": chats, "messages": messages, "tasks": task_list, "task": task, "memory": memory_search}
+async def call(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query) -> list[dict[str, Any]]:
+    """A Meet call's transcript, newest first, paged by `before` (a record
+    id) and `limit` as `messages` is: each turn heard (who, how, the
+    words), each sentence Valor spoke (as far as it got) and each post,
+    who joined, and how it ended. `code` is the meeting code, the call's
+    chat id; its latest call in reach."""
+    code = (query.get("code") or "").removeprefix("meet:")
+    found = [t for t, b in tasks.items() if (b.get("chat") or {}) == {"channel": "meet", "chat_id": code}]
+    if not found:
+        raise NotFound(f"no call {code!r} in project {spec.name}'s record")
+    session = max(found, key=lambda t: tasks[t]["created_at"])
+    where, args = ["e.task_id = %s"], [session]
+    if query.get("before"):
+        if not query["before"].isdigit():
+            raise NotFound(f"before {query['before']!r} is not a record id")
+        where.append("e.id < %s")
+        args.append(int(query["before"]))
+    rows = await (
+        await conn.execute(
+            "SELECT e.id, e.type, e.payload, e.at FROM events e WHERE " + " AND ".join(where) + " AND (e.type IN "
+            "('call.heard', 'call.participant', 'call.started', 'call.ended') OR (e.type = 'effect.outcome' "
+            "AND e.payload->>'kind' = 'done' AND (e.payload->'result' ? 'spoken_text' OR "
+            "e.payload->'result' ? 'posted'))) ORDER BY e.id DESC LIMIT %s",
+            (*args, _limit(query)),
+        )
+    ).fetchall()
+    lines = []
+    for row_id, kind, p, at in rows:
+        if kind == "call.heard":
+            said = {"who": p.get("name"), "how": p.get("via"), "text": p.get("text")}
+        elif kind == "call.participant":
+            said = {"who": p.get("name"), "how": "joined", "text": ""}
+        elif kind == "call.started":
+            said = {"who": "Valor", "how": "joined", "text": ""}
+        elif kind == "call.ended":
+            said = {"who": "Valor", "how": "left", "text": p.get("reason") or ""}
+        elif "spoken_text" in p["result"]:
+            cut = " (cut off)" if p["result"].get("cut") else ""
+            said = {"who": "Valor", "how": "spoke" + cut, "text": p["result"]["spoken_text"]}
+        else:
+            said = {"who": "Valor", "how": "typed", "text": p["result"]["posted"]}
+        lines.append({"record": row_id, "at": at, **said})
+    return lines
+
+
+VERBS = {
+    "chats": chats,
+    "messages": messages,
+    "tasks": task_list,
+    "task": task,
+    "memory": memory_search,
+    "call": call,
+}
 
 
 async def answer(dsn: str, task_id: str, verb: str, query: dict[str, str]) -> Any:

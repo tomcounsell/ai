@@ -375,7 +375,8 @@ async def dispatch(
     docs: the stage's name) gets the verdict channel
     (`skills/sdlc/verdict.md`) in place of the working session's, offering
     no effect and no question, and its stage's file; the advisor (`advice`)
-    gets only its stage file, since it answers in prose. A working session's
+    gets only its stage file, since it answers in prose, as does a call's
+    worker (`call`, `core/call.py`), in its call session's checkout. A working session's
     Brief whose task has children ends with their Children section
     (`children_text`). Returns the text, the
     correction numbers it carries, the text's digest, the usage lines it
@@ -391,9 +392,12 @@ async def dispatch(
     rendered = persona.render(settings.persona_dir)
     head = f"# Brief\n\nTask: {b.id}\nInstruction: {b.instruction}"
     if b.chat:
+        from core import call  # call imports tasks
         from core.intake import room  # intake imports tasks
 
-        found = room(b.chat["channel"], b.chat["chat_id"], (b.project or {}).get("name"))
+        # A call's session has the room of the chat that asked for the call.
+        chat = ((await call.marker(conn, task_id)) or {}).get("asked_by") or b.chat
+        found = room(chat["channel"], chat["chat_id"], (b.project or {}).get("name"))
         if found:
             head += f"\nRoom: {found}"
         listed = repos((b.project or {}).get("name"))
@@ -414,7 +418,7 @@ async def dispatch(
             sections.append(shared)
     lines: list[str] = []
     if fresh:
-        if fresh != "advice":  # the advisor answers in prose, in its own stage file
+        if fresh not in ("advice", "call"):  # the advisor and a call's worker answer in prose
             sections.append(verdict_text())
         stage = stage_text(fresh)
         if stage:
