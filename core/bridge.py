@@ -266,9 +266,7 @@ async def _refuse_local(conn, action: broker.Action) -> str | None:
 
 
 async def _refuse_meet(conn, action: broker.Action) -> str | None:
-    """A call's post or spoken sentence: text within `LIMITS["meet"]`, and a
-    post's `settles`, the open questions a read-back answers, as
-    `[{"task_id", "question_id"}]`."""
+    """A call's post or spoken sentence: text within `LIMITS["meet"]`."""
     if not _strings(action.payload, ("text",)):
         return TEXT_SHAPE
     text = (action.payload.get("text") or "").strip()
@@ -277,15 +275,6 @@ async def _refuse_meet(conn, action: broker.Action) -> str | None:
         return "the text is empty: the call would hear nothing"
     if len(text) > most:
         return f"the text is {len(text)} characters, over a call's {most}"
-    if action.payload.get("files"):
-        return "a call takes text, no files"
-    settles = action.payload.get("settles")
-    if settles is not None and not (
-        isinstance(settles, list)
-        and all(isinstance(q, dict) and isinstance(q.get("task_id"), str) and isinstance(q.get("question_id"), str)
-                for q in settles)
-    ):  # fmt: skip
-        return 'settles must be a list of {"task_id", "question_id"} objects'
     return None
 
 

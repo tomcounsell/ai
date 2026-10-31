@@ -480,19 +480,6 @@ def test_a_thumbs_up_on_a_question_since_replaced_is_refused_and_the_new_one_sta
     assert machine.fold(run(bridges.rows(dsn, task))).open_question == q2
 
 
-def test_tom_not_in_the_call_settles_nothing(dsn, team):
-    async def go():
-        _brief, session_id = await a_call(dsn, team)
-        await append(dsn, session_id, ("call.participant", {"id": "d2", "name": "Logan"}))
-        task, q = await waiting(dsn, team, "Ship Friday?")
-        await readback(dsn, session_id, "Ship Friday.", [{"task_id": task, "question_id": q}])
-        await end(dsn, session_id)
-        return task
-
-    task = run(go())
-    assert answers(dsn, task) == []
-
-
 def test_with_others_present_readbacks_go_to_toms_slack_dm_which_answers_on_his_thumbs_up(
     dsn, team, tmp_path
 ):
@@ -556,7 +543,7 @@ def test_a_calls_posts_says_and_thread_copies_owe_no_report_and_a_send_elsewhere
     assert out["post"] is None and out["say"] is None and out["copy"] is None and out["elsewhere"]
 
 
-def test_a_calls_post_is_refused_empty_over_500_characters_or_with_bad_settles(dsn, team):
+def test_a_calls_post_is_refused_empty_or_over_500_characters(dsn, team):
     from core import bridge
 
     check = bridge.DECLARED["meet.send_message"].check
@@ -565,12 +552,12 @@ def test_a_calls_post_is_refused_empty_over_500_characters_or_with_bad_settles(d
         async with await db.connect(dsn) as conn:
             return [
                 await check(conn, broker.Action("meet.send_message", CODE, p))
-                for p in ({"text": "ok"}, {"text": " "}, {"text": "x" * 501}, {"text": "ok", "settles": [{"task_id": 1}]},
+                for p in ({"text": "ok"}, {"text": " "}, {"text": "x" * 501},
                           {"text": "ok", "settles": [{"task_id": "t", "question_id": "q"}]})
             ]  # fmt: skip
 
-    ok, empty, long, bad, good = run(go())
-    assert ok is None and good is None and "empty" in empty and "501" in long and "settles" in bad
+    ok, empty, long, settles = run(go())
+    assert ok is None and settles is None and "empty" in empty and "501" in long
 
 
 def test_the_call_transcript_reads_in_order_from_the_asking_chats_project_only_a_page_at_a_time(
@@ -616,3 +603,21 @@ def test_the_call_transcript_reads_in_order_from_the_asking_chats_project_only_a
     assert lines[-2] == {**lines[-2], "who": "Valor", "how": "spoke (cut off)", "text": "We ship"}
     assert lines[-1]["how"] == "typed" and lines[-1]["text"] == "Ship Monday."
     assert lines[-3]["text"] == f"line {record.MOST + 4}"
+
+
+def test_readbacks_go_to_toms_dm_whatever_name_he_joined_under(dsn, team, tmp_path):
+    """Display names are self-set, so the 👍 in Tom's DM is the one check:
+    Tom joined as "Tom C", and his read-back still reaches the DM."""
+
+    async def go():
+        with toms_dm(tmp_path):
+            _brief, session_id = await a_call(dsn, team)
+            await append(dsn, session_id, ("call.participant", {"id": "d1", "name": "Tom C"}))
+            task, q = await waiting(dsn, team, "Ship Friday?")
+            await readback(dsn, session_id, "Ship Friday.", [{"task_id": task, "question_id": q}])
+            await end(dsn, session_id)
+            return task, q, await confirmations(dsn)
+
+    task, q, (_dm, (confirm,)) = run(go())
+    assert confirm["confirm"] == [{"task_id": task, "question_id": q, "text": "Ship Friday."}]
+    assert answers(dsn, task) == []

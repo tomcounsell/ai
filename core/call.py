@@ -19,9 +19,8 @@ the worker answers that came after leaving and the questions left
 unanswered), `task.ended` unless the session was stopped, the decisions
 the call settled, `effect.refused` for each `meet.say` or
 `meet.send_message` never delivered (a thread copy still goes), and the
-report. Meet names people by display name only (`settings.operator_name`),
-which anyone with an open Meet's link can set, so Tom's read-backs (a
-post's `settles`, made with him in the call) go to his Slack DM's session,
+report. Meet names people by display name only, which anyone with an open Meet's link can set, so Tom's read-backs (a
+post's `settles`) go to his Slack DM's session,
 which posts them and answers each on his 👍 with its question id
 (`confirms`), refused unless it is still the task's open question. The call's own process writes the end; a kernel
 wake writes it for a call whose process died (`sweep`).
@@ -256,11 +255,6 @@ async def _settle(conn, session_id: str, rows: list[dict[str, Any]]) -> list[str
             readbacks[(q["task_id"], q["question_id"])] = action["payload"]["text"]
     if not readbacks:
         return []
-    names = {r["payload"].get("name") for r in rows if r["type"] == "call.participant"}
-    if settings.operator_name not in names:
-        return [
-            f"Not answered, since Tom was not in the call: {t} ({text})" for (t, _), text in readbacks.items()
-        ]
     return await _confirm(conn, session_id, readbacks)
 
 

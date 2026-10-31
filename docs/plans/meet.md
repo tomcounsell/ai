@@ -60,8 +60,7 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    `call.ended`, `task.ended`, the answers (item 6),
    `effect.refused` for its undelivered `meet.say` and `meet.send_message`
    releases (thread copies still deliver), the report, carrying any worker
-   answers that came after leaving and naming questions left unanswered. `Outbox`
-   takes a task filter. `meet.say` and `meet.send_message` (`act`,
+   answers that came after leaving and naming questions left unanswered. `meet.say` and `meet.send_message` (`act`,
    `{"text"}`, not offered to turns, 500 characters a post) each have a
    worker, so speech never holds up a post; `lookup` is None after ended.
 4. **Hearing and deciding, `core/call.py`**, in the voice process: per
