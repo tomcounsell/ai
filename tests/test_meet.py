@@ -416,18 +416,17 @@ def answers(dsn, task) -> list[dict]:
     return [r["payload"] for r in run(bridges.rows(dsn, task)) if r["type"] == "question.answered"]
 
 
-TOM_DM = "T0ABC/U0TOM"
-
-
 def toms_dm(tmp_path):
-    """Tom's Slack DM as the operator chat, with a session to open there."""
-    (tmp_path / "projects" / "valor.toml").write_text(bridges.VALOR_SPEC + f'chats = ["slack:{TOM_DM}"]\n')
-    return bridges.configure(operator_channel="slack", operator_chat=TOM_DM, operator_slack_ids=(TOM_DM,))
+    """Tom's Slack DM, fresh per test, as the operator chat, with a session
+    to open there."""
+    tom = f"T0ABC/U{uuid.uuid4().hex[:8].upper()}"
+    (tmp_path / "projects" / "valor.toml").write_text(bridges.VALOR_SPEC + f'chats = ["slack:{tom}"]\n')
+    return bridges.configure(operator_channel="slack", operator_chat=tom, operator_slack_ids=(tom,))
 
 
 async def confirmations(dsn) -> tuple[tasks.Brief, list[dict]]:
     async with await db.connect(dsn) as conn:
-        dm = await tasks.brief(conn, await intake.chat_session(conn, "slack", TOM_DM))
+        dm = await tasks.brief(conn, await intake.chat_session(conn, "slack", settings.operator_chat))
     return dm, [r for r in await reports(dsn, dm.id) if r["about_key"].endswith(":confirm")]
 
 
@@ -500,10 +499,10 @@ def test_with_others_present_readbacks_go_to_toms_slack_dm_which_answers_on_his_
     """The DM's session gets one `call` report with each read-back, and its
     `task.answer` with the read-back's question id is accepted; another
     session's is refused, and so is a stale question id."""
-    tom = TOM_DM
 
     async def go():
         with toms_dm(tmp_path):
+            tom = settings.operator_chat
             brief, session_id = await a_call(dsn, team)
             await append(dsn, session_id, ("call.participant", {"id": "d1", "name": TOM}),
                          ("call.participant", {"id": "d2", "name": "Logan"}))  # fmt: skip
