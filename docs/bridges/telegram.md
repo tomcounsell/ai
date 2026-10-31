@@ -101,6 +101,7 @@ whether the message with that idempotency key exists.
 | `email.send` | `act` | the `To` addresses, lowercased, sorted, comma-joined | see [email.md](email.md) |
 | `slack.send_message` | `act` | `<team>/<channel>`, or `<team>/<user>` for a DM | `text`, `reply_to`, `files` (each a path and its sha256); see [slack.md](slack.md) |
 | `local.send_message` | `act` | `local` | `text`; see [local.md](local.md) |
+| `meet.say`, `meet.send_message` | `act` | the meeting code | `text` (500 characters), a post's `settles`; performed by a Meet call's own process, never offered to a turn; see [meet.md](meet.md) |
 
 A `telegram.send_message` may target any chat Valor's account can reach,
 whether or not this machine's bridge receives it: the boundary is the

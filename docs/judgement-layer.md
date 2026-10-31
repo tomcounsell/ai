@@ -356,6 +356,7 @@ holds or redirects work. Status says where each stands.
 | 11 | Response shape | What activity will Valor's response to this message mainly take? | `reply`, `task`, `code`, `web_search`, `lookup`, `document`, `present`, `issue`, `schedule`, `send` (a `pick`) | no | Mission 6 | Retired 2026-10-17: it guessed on arrival and got plain questions wrong; until 2026-10-26 the reaction came from what a turn did, and shape 13 now picks it |
 | 13 | Reaction | Which emoji shows Valor understood this message (`reaction.handling`), and which shows what came of it once a turn handled it (`reaction.completed`)? | the palette's labels, about forty (`reactions.PICKS`; a `pick`, floor 0.08) | no | Mission 6 | Built 2026-10-26 (Tom: "the classifier should choose reactions for both handling and completed in all cases"), uncalibrated; an abstain or a failure gives 📝 |
 | 12 | Ask overlap | Does an open task on the ask's project already do what it asks, or touch the same work? Which listed task, and should the ask run before or after it? | `decision`: `covered`, `supersedes`, `overlaps`, `split`, `distinct`; `task`: `1` to `8` (the numbered open tasks, the 8 most recently active) or `none`; `placement`: `before`, `after`, `none` (each a `pick`) | no, in shadow | Mission 6, 1 | Built (`intake.overlap`), uncalibrated: asked in the `judge` step before the judge, recorded as `reconcile.decided` (an abstain or both legs failing is `distinct` with a note), and holds nothing; its placement proposes a queue place when the writer gives none. Holding an ask for the writer waits for its calibration record and Tom's grant ([docs/plans/ask-reconciliation.md](plans/ask-reconciliation.md)) |
+| 14 | Call turn | Someone in a Meet call just finished a turn: should Valor answer it now (`meet.speak`)? | `asked_valor`, `useful_post`, `someone_else`, `nothing` (a `pick`, floor 0.60) | no | Mission 4, 6 | Built 2026-10-31 for Valor in Google Meet ([docs/plans/meet.md](plans/meet.md)), uncalibrated; an abstain or a failure is silence |
 
 Notes per shape:
 
@@ -410,8 +411,15 @@ Notes per shape:
     emoji's rubric says it fits only work done or plainly asked for, and the
     completed question says that no text sent means agreement. Rows are
     quiet (`ledger.QUIET_SITES`).
+14. Asked by a call's own process (`core/call.py`) at the end of each turn
+    heard or typed in the call, while the front model drafts, and metered
+    on the call's session under its run. It reads the turn, the call's last
+    turns and who is there. `asked_valor` has Valor answer (aloud, or in
+    the call's chat to a typed turn), `useful_post` has it post; the
+    others, an abstain and a failure are silence. A label that picks what
+    Valor says, not a gate. Rows are quiet (`ledger.QUIET_SITES`).
 
-Shapes 2 to 5, 10, 11, and 13 label and route; they add no governance. Shapes 7 and 8 are checks the plan
+Shapes 2 to 5, 10, 11, 13, and 14 label and route; they add no governance. Shapes 7 and 8 are checks the plan
 or Tom's decisions already require. Shape 1 is the one guard granted on its own incident.
 
 ## The first task: the request-underspecification classifier

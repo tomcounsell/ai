@@ -168,7 +168,10 @@ per-account table, with the gaps, is [performers.md](performers.md).
   bridge's outcome for a send): `merge` through Valor's GitHub account,
   `valorengels`, with `GITHUB_PUSH_TOKEN`; `telegram.send_message` through
   Valor's Telegram user account; `email.send` through Valor's Gmail
-  mailbox over SMTP; and `local.send_message`, which uses no account.
+  mailbox over SMTP; `meet.say` and `meet.send_message` through Valor's
+  Google account in a Meet call, performed by the call's own process
+  ([bridges/meet.md](bridges/meet.md)); and `local.send_message`, which
+  uses no account.
   `push_branch` also passes the broker, to the task's own bare origin on
   the Mac, with no account.
 - **Through the gateway, not the broker**: model calls on the Anthropic
