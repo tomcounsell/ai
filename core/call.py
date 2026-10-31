@@ -4,8 +4,8 @@ process that is Valor in it.
 **The call session.** `meet.join` (`tools/meet.py`), requested by a group
 chat's session, opens one (`begin`): a root chat session on channel `meet`,
 its chat id the meeting code, under the asking chat's project and at its
-ceiling, so its worker has that chat's access (`intake.room` reads the
-asking chat's room for it). Its `task.started` carries `call`: the link,
+ceiling, so its worker has that chat's access (`tasks.dispatch` gives it
+the asking chat's room). Its `task.started` carries `call`: the link,
 this Mac, the chat and thread it was asked in (`asked_by`), and `prep`,
 the asking turn's notes on the topic. It runs no turn (`router.has_step`)
 and owes no notice (`notices.owe`); everything it says goes to the asking
@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import psycopg
 
 from core import broker, db, intake, ledger, session, tasks, workspace
 from core.settings import resolve_seat, settings
@@ -675,8 +676,9 @@ class Front:
 
 
 async def decisions(conn, project: str | None) -> str:
-    """What `open_decisions` reads: the project's board snapshot now, and
-    the board's canvas as last written (`board.canvas_markdown`)."""
+    """The open decisions as the front model reads them: the project's
+    board snapshot now, each with its task and question ids, and the board's
+    canvas as last written (`board.canvas_markdown`)."""
     from core import board
 
     spec = board.board_spec(project)
@@ -1018,7 +1020,7 @@ class Call:
                                 out.effect_id, "refused", error=str(exc) or type(exc).__name__
                             )
                 return out
-            except OSError:
+            except psycopg.OperationalError:
                 if attempt:
                     raise
         raise AssertionError("unreachable")
@@ -1027,8 +1029,9 @@ class Call:
         turn = self.current
         if turn is None or turn.id != payload.get("turn"):
             raise broker.Failed("stale: newer speech in the call came first")
-        pcm, rate = await self._spoken.get(payload["text"]) or await asyncio.to_thread(
-            self.voice, payload["text"]
+        voiced = self._spoken.get(payload["text"])
+        pcm, rate = (
+            await voiced if voiced is not None else await asyncio.to_thread(self.voice, payload["text"])
         )
         if self.current is not turn:
             raise broker.Failed("stale: newer speech in the call came first")

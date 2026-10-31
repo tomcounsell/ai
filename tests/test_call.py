@@ -428,7 +428,9 @@ def test_the_workers_answer_is_posted_naming_its_question_and_copied(dsn, team):
 
     page, done = run(go())
     assert page.posts == ['On "What did we ship?": The import, on Tuesday.']
-    assert [e["type"] for e in done] == ["meet.say", "meet.send_message", "slack.send_message"]
+    kinds = [e["type"] for e in done]  # the answer may come before or after Valor's "let me check"
+    assert sorted(kinds) == ["meet.say", "meet.send_message", "slack.send_message"]
+    assert kinds.index("slack.send_message") > kinds.index("meet.send_message")
 
 
 def test_a_readback_posts_with_its_settles_and_is_copied(dsn, team):
