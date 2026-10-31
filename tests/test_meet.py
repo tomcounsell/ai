@@ -34,7 +34,9 @@ def team(tmp_path):
     chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
     profile = tmp_path / "meet-chrome"
     (profile / "Default").mkdir(parents=True)
-    (profile / "Default" / "Preferences").write_text(json.dumps({"account_info": [{"email": "valor@example.com"}]}))
+    (profile / "Default" / "Preferences").write_text(
+        json.dumps({"account_info": [{"email": "valor@example.com"}]})
+    )
     here = f"m-{uuid.uuid4().hex[:6]}"  # one call at a time per Mac: each test a Mac of its own
     with (
         bridges.operator(tmp_path, meet_profile=str(profile), operator_name=TOM),
@@ -126,7 +128,9 @@ def test_meet_join_is_offered_to_a_group_chats_session_and_never_a_dm():
     an email thread, or a task that is no chat session."""
 
     def brief(channel, chat_id, workspace="/w"):
-        return tasks.Brief(instruction="x", workspace=workspace, chat={"channel": channel, "chat_id": chat_id})
+        return tasks.Brief(
+            instruction="x", workspace=workspace, chat={"channel": channel, "chat_id": chat_id}
+        )
 
     assert meet.group_chat({"channel": "telegram", "chat_id": "-1001234"})
     assert meet.group_chat({"channel": "slack", "chat_id": "T0ABC/C0123"})
@@ -158,9 +162,10 @@ def test_a_join_opens_one_call_session_reports_its_link_once_and_starts_its_proc
         started: list[str] = []
         first = await join(dsn, brief, started)
         again = await join(dsn, brief, started)
-        found = await joiner(brief, dsn, started).lookup(broker.Action("meet.join", "new", {}),
-                                                         (await bridges.of_type(dsn, "effect.intent",
-                                                                                action_type="meet.join"))[0]["idempotency_key"])  # fmt: skip
+        (intent,) = await bridges.of_type(dsn, "effect.intent", effect_id=first.effect_id)
+        found = await joiner(brief, dsn, started).lookup(
+            broker.Action("meet.join", "new", {}), intent["idempotency_key"]
+        )
         session_id = first.result["session_id"]
         async with await db.connect(dsn) as conn:
             b = await tasks.brief(conn, session_id)
@@ -187,11 +192,12 @@ def test_a_second_call_on_this_mac_fails_naming_the_first_and_the_chat_hears_why
     async def go():
         brief, first = await a_call(dsn, team)
         started: list[str] = []
-        second = await join(dsn, brief, started, target="https://meet.google.com/xyz-abcd-efg",
-                            request_id="t2/join.json")
+        second = await join(
+            dsn, brief, started, target="https://meet.google.com/xyz-abcd-efg", request_id="t2/join.json"
+        )
         return brief, first, second, started, await reports(dsn, brief.id)
 
-    brief, first, second, started, got = run(go())
+    _brief, _first, second, started, got = run(go())
     assert second.kind == "failed" and URL in second.error and started == []
     assert any(r["about_key"].endswith(":failed") and URL in r["text"] and r["child_id"] is None for r in got)
 
@@ -226,7 +232,7 @@ def test_the_call_session_runs_no_turn_and_owes_no_notice(dsn, team):
     """A steer of it wakes no step; its end owes no notice to the meet chat."""
 
     async def go():
-        brief, session_id = await a_call(dsn, team)
+        _brief, session_id = await a_call(dsn, team)
         await append(dsn, session_id, ("message.steered", {"text": "tell them we're running late"}))
         rows = await bridges.rows(dsn, session_id)
         async with await db.connect(dsn) as conn:
@@ -264,7 +270,7 @@ def test_a_call_worker_turn_reads_its_stage_and_the_asking_chats_room_and_no_ver
     )
 
     async def go():
-        brief, session_id = await a_call(dsn, team)
+        _brief, session_id = await a_call(dsn, team)
         async with await db.connect(dsn) as conn:
             return await tasks.dispatch(conn, session_id, fresh="call")
 
@@ -314,7 +320,9 @@ def test_the_end_is_written_once_refuses_what_never_left_and_leaves_copies_to_th
 def test_a_stopped_call_ends_without_task_ended_and_names_the_copies_it_dropped(dsn, team):
     async def go():
         brief, session_id = await a_call(dsn, team)
-        await held(dsn, session_id, "slack.send_message", {"text": "Half an answer."}, done=None, target=team.chat)
+        await held(
+            dsn, session_id, "slack.send_message", {"text": "Half an answer."}, done=None, target=team.chat
+        )
         async with await db.connect(dsn) as conn:
             await tasks.stop(conn, session_id, reason="stop the call", by="tom", via="chat")
         await end(dsn, session_id, "the call was stopped", unanswered=["What broke?"])
@@ -429,11 +437,15 @@ def test_tom_alone_with_valor_settles_three_questions_with_one_readback_and_a_co
             snap = await board.snapshot(conn, board.spec_of(team.project))
         return brief, qs, snap
 
-    brief, qs, snap = run(go())
+    _brief, qs, snap = run(go())
     first, second, third = (answers(dsn, t) for t, _ in qs)
     assert [a["text"] for a in first] == ["Correction: ship Monday."]
-    assert [a["text"] for a in second] == [a["text"] for a in third] == ["Ship Friday, freeze the API, drop IE."]
-    assert all(a["provenance"]["by"] == "tom" and a["provenance"]["via"] == "meet call" for a in first + second)
+    assert (
+        [a["text"] for a in second] == [a["text"] for a in third] == ["Ship Friday, freeze the API, drop IE."]
+    )
+    assert all(
+        a["provenance"]["by"] == "tom" and a["provenance"]["via"] == "meet call" for a in first + second
+    )
     assert not snap["open"] and len(snap["decided"]) == 3
 
 
@@ -458,7 +470,7 @@ def test_a_readback_of_a_question_since_replaced_is_refused_and_named_and_the_ne
 
 def test_tom_not_in_the_call_settles_nothing(dsn, team):
     async def go():
-        brief, session_id = await a_call(dsn, team)
+        _brief, session_id = await a_call(dsn, team)
         await append(dsn, session_id, ("call.participant", {"id": "d2", "name": "Logan"}))
         task, q = await waiting(dsn, team, "Ship Friday?")
         await readback(dsn, session_id, "Ship Friday.", [{"task_id": task, "question_id": q}])
@@ -469,7 +481,9 @@ def test_tom_not_in_the_call_settles_nothing(dsn, team):
     assert answers(dsn, task) == []
 
 
-def test_with_others_present_readbacks_go_to_toms_slack_dm_which_answers_on_his_thumbs_up(dsn, team, tmp_path):
+def test_with_others_present_readbacks_go_to_toms_slack_dm_which_answers_on_his_thumbs_up(
+    dsn, team, tmp_path
+):
     """The DM's session gets one `call` report with each read-back, and its
     `task.answer` with the read-back's question id is accepted; another
     session's is refused, and so is a stale question id."""
@@ -477,7 +491,9 @@ def test_with_others_present_readbacks_go_to_toms_slack_dm_which_answers_on_his_
 
     async def go():
         with bridges.configure(operator_channel="slack", operator_chat=tom, operator_slack_ids=(tom,)):
-            (tmp_path / "projects" / "valor.toml").write_text(bridges.VALOR_SPEC + f'chats = ["slack:{tom}"]\n')
+            (tmp_path / "projects" / "valor.toml").write_text(
+                bridges.VALOR_SPEC + f'chats = ["slack:{tom}"]\n'
+            )
             brief, session_id = await a_call(dsn, team)
             await append(dsn, session_id, ("call.participant", {"id": "d1", "name": TOM}),
                          ("call.participant", {"id": "d2", "name": "Logan"}))  # fmt: skip
@@ -516,7 +532,7 @@ def test_with_others_present_readbacks_go_to_toms_slack_dm_which_answers_on_his_
 
 def test_a_calls_posts_says_and_thread_copies_owe_no_report_and_a_send_elsewhere_does(dsn, team):
     async def go():
-        brief, session_id = await a_call(dsn, team)
+        _brief, session_id = await a_call(dsn, team)
         out = {}
         async with await db.connect(dsn) as conn:
             for name, kind, target in (("post", "meet.send_message", CODE), ("say", "meet.say", CODE),
@@ -548,7 +564,9 @@ def test_a_calls_post_is_refused_empty_over_500_characters_or_with_bad_settles(d
     assert ok is None and good is None and "empty" in empty and "501" in long and "settles" in bad
 
 
-def test_the_call_transcript_reads_in_order_from_the_asking_chats_project_only_a_page_at_a_time(dsn, team, tmp_path):
+def test_the_call_transcript_reads_in_order_from_the_asking_chats_project_only_a_page_at_a_time(
+    dsn, team, tmp_path
+):
     """Heard turns, a spoken answer cut short and a post, newest first,
     paged by `before`; a call longer than a page is read whole by paging;
     another project's turn finds no call."""

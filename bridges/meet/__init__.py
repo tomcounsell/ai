@@ -58,7 +58,10 @@ def script(port: int) -> str:
         },
     }
     meet = {"modifyDomForVideoRecording": False, "disableIncomingVideo": True}
-    parts = [f"window.initialData = {json.dumps(data)};", f"window.googleMeetInitialData = {json.dumps(meet)};"]
+    parts = [
+        f"window.initialData = {json.dumps(data)};",
+        f"window.googleMeetInitialData = {json.dumps(meet)};",
+    ]
     return "\n".join(parts + [(HERE / name).read_text() for name in PAYLOADS])
 
 
@@ -173,7 +176,9 @@ class Page:
         """Speak `pcm` (float32 mono at `rate`); returns `played`, `total`
         (seconds) and `cut`, once it played out or `stop` cut it."""
         ints = (np.clip(pcm, -1, 1) * 32767).astype("<i2").tobytes()
-        return await self.page.evaluate("([b, r]) => window.valorPlay(b, r)", [base64.b64encode(ints).decode(), rate])
+        return await self.page.evaluate(
+            "([b, r]) => window.valorPlay(b, r)", [base64.b64encode(ints).decode(), rate]
+        )
 
     async def stop(self) -> None:
         await self.page.evaluate("window.valorStop()")

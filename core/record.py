@@ -242,8 +242,10 @@ async def call(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], que
         args.append(int(query["before"]))
     rows = await (
         await conn.execute(
-            "SELECT e.id, e.type, e.payload, e.at FROM events e WHERE " + " AND ".join(where) + " AND (e.type IN "
-            "('call.heard', 'call.participant', 'call.started', 'call.ended') OR (e.type = 'effect.outcome' "
+            "SELECT e.id, e.type, e.payload, e.at FROM events e WHERE "
+            + " AND ".join(where)
+            + " AND (e.type IN ('call.heard', 'call.participant', 'call.started', 'call.ended') OR "
+            "(e.type = 'effect.outcome' "
             "AND e.payload->>'kind' = 'done' AND (e.payload->'result' ? 'spoken_text' OR "
             "e.payload->'result' ? 'posted'))) ORDER BY e.id DESC LIMIT %s",
             (*args, _limit(query)),

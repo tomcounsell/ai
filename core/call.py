@@ -686,7 +686,9 @@ async def decisions(conn, project: str | None) -> str:
 # -- the call ------------------------------------------------------------------
 
 # "Valor, leave" from Tom ends the call as any leave does (Tom, 2026-10-27).
-LEAVE = re.compile(r"\bvalor\b[\s,.!]*(?:please\s+|can you\s+)?(?:leave|drop off|hang up)\b", re.IGNORECASE)
+LEAVE = re.compile(
+    r"\bvalor\b(?:(?!\b(?:don'?t|do not|not|never)\b).){0,30}?\b(?:leave|drop off|hang up)\b", re.IGNORECASE
+)
 JOIN_LINE = "Valor here, keeping a transcript for notes."
 JOIN_S = 90  # to get through Meet's join screen
 LOBBY_S = 600  # waiting to be let in
@@ -1148,12 +1150,14 @@ class Call:
         if not self.hard:
             waited = self.clock()
             while (self.asking or not self.questions.empty()) and self.clock() - waited < WORKER_WAIT_S:
-                await asyncio.sleep(1)
-        for job in [*lanes, *self.jobs]:
-            job.cancel()
+                await asyncio.sleep(0.2)
         unanswered = [*self.asking, *self.dropped]
         while not self.questions.empty():
             unanswered.append(self.questions.get_nowait())
+        jobs = [*lanes, *self.jobs]
+        for job in jobs:
+            job.cancel()
+        await asyncio.gather(*jobs, return_exceptions=True)
         async with await db.connect(self.dsn) as conn:
             await end(conn, self.id, self.reason, late=self.late, unanswered=unanswered)
         return self.reason

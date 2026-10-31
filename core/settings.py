@@ -504,7 +504,8 @@ class Settings:
     # name as a call shows it, which tells his words apart there.
     meet_profile: str = field(
         default_factory=lambda: _env(
-            "VALOR_MEET_PROFILE", str(Path.home() / "Library" / "Application Support" / "Valor" / "meet-chrome")
+            "VALOR_MEET_PROFILE",
+            str(Path.home() / "Library" / "Application Support" / "Valor" / "meet-chrome"),
         )
     )
     operator_name: str = field(default_factory=lambda: _env("VALOR_OPERATOR_NAME", "Tom Counsell"))
