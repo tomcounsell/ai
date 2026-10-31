@@ -10,15 +10,10 @@ revision: 12 (critique of revision 11; revision 9 critiqued ready 2026-10-27)
 
 # Valor in Google Meet
 
-**Ask.** Tom: Valor joins Meet like any user, answers when addressed, full
-duplex over voice quality, a Jev-style decision on whether to speak, tools
-via workers, quick answers typed in the chat (2026-10-26). Calls from group
-chats only, with that chat's access; legal and financial work avoided, as
-guidance; open decisions once someone asks what is open; Tom told apart by
-Google account, else by 👍 in his Slack DM (2026-10-27). Asked for a call,
-Valor posts the link in that thread and joins ready; written answers go to
-the Meet chat and a copy to the thread; the full summary is an attached
-document, never a large text in the channel (2026-10-31).
+**Ask.** Tom (2026-10-26, 27, 31): Valor joins Meet like any user from a
+group chat's ask, with that chat's access, and answers when addressed; the
+link goes in that thread; written answers go to the Meet chat with a copy
+in the thread; the summary is an attached document, never a long text.
 
 **Premise.** `gws meet spaces create` makes an open space. Attendee's page
 payloads (@5acfb99, ELv2) give per-speaker audio, chat, participants and a
@@ -121,8 +116,7 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
 **No-Gos.** Joining unasked; calls from DMs; Zoom, Teams; video; two calls
 at once on one Mac.
 
-**Risks.** Meet page changes break the payloads; crosstalk mislabels the
-quieter speaker; Google may challenge the profile.
+**Risks.** Meet page changes; crosstalk mislabels; Google challenges the profile.
 
 **Stakes.** Valor speaks and posts as itself in live calls and threads, and
 notices, outbox and answering change; a mistake is said aloud or settles a
