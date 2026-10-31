@@ -458,6 +458,36 @@ class Ears:
         return float(self._turn.run(None, {"input_features": features.astype(np.float32)})[0].ravel()[0])
 
 
+async def words(audio: np.ndarray, scratch: Path) -> str:
+    """The words of a turn, from the voice process (`tools/voice.py`):
+    `/hear`, on a worker of its own; or, from a voice process started
+    before it had `/hear` (a rollout does not restart it, docs/rollout.md),
+    the voice notes' `/transcribe`, on the turn written as a WAV file in
+    `scratch`."""
+    import wave
+
+    import aiohttp
+
+    base = f"http://127.0.0.1:{settings.voice_port}"
+    async with aiohttp.ClientSession() as http:
+        async with http.post(f"{base}/hear", data=audio.astype(np.float32).tobytes()) as got:
+            if got.status != 404:
+                got.raise_for_status()
+                return (await got.json())["text"]
+        path = scratch / f"{ledger.new_id()}.wav"
+        with wave.open(str(path), "wb") as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(RATE)
+            out.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+        try:
+            async with http.post(f"{base}/transcribe", json={"path": str(path)}) as got:
+                got.raise_for_status()
+                return (await got.json())["text"]
+        finally:
+            path.unlink(missing_ok=True)
+
+
 class Speaker:
     """One person's turn as it is heard: their voiced frames from the
     first (with the frames just before it) to a pause Smart Turn calls the

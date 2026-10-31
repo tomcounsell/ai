@@ -742,3 +742,45 @@ def test_a_calls_worker_takes_no_turn_slot(dsn, tmp_path, monkeypatch):
             await gateway.close()
 
     assert run(go())["outcome"] == "done"
+
+
+@pytest.mark.parametrize("hear", [True, False])
+def test_a_turn_is_heard_by_the_voice_process_old_or_new(tmp_path, hear):
+    """`/hear` when the voice process has it; from one started before it,
+    `/transcribe` on the turn as a WAV file, removed after."""
+    import wave
+
+    from tools import voice
+
+    seen = []
+
+    def listen(path):
+        with wave.open(path) as w:
+            seen.append((w.getframerate(), w.getnframes()))
+        return "from the file"
+
+    async def go():
+        app = voice.app(listen=listen, heard=lambda samples: "heard")
+        if not hear:
+            app = web.Application()
+
+            async def transcribe(request):
+                return web.json_response({"text": listen((await request.json())["path"])})
+
+            app.router.add_post("/transcribe", transcribe)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            with bridges.configure(voice_port=port):
+                return await call.words(np.zeros(8000, np.float32), tmp_path)
+        finally:
+            await runner.cleanup()
+
+    got = run(go())
+    if hear:
+        assert got == "heard" and seen == []
+    else:
+        assert got == "from the file" and seen == [(16000, 8000)] and list(tmp_path.iterdir()) == []

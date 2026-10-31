@@ -418,7 +418,6 @@ async def _call(session_id: str) -> str:
     model and the worker, on the call's own gateway. It holds
     `meet:call:<session>` and `run:<session>` while it lives."""
     sentry.init("call")
-    import aiohttp
     import numpy as np
 
     from bridges.meet import Page, Socket
@@ -472,13 +471,11 @@ async def _call(session_id: str) -> str:
             async with await db.connect(dsn) as conn:
                 return bool((await tasks.brief(conn, session_id)).workspace)
 
+        scratch = Path(settings.work_dir).expanduser() / session_id / "heard"
+        scratch.mkdir(parents=True, exist_ok=True)
+
         async def transcribe(audio: np.ndarray) -> str:
-            url = f"http://127.0.0.1:{settings.voice_port}/hear"
-            async with (
-                aiohttp.ClientSession() as http,
-                http.post(url, data=audio.astype(np.float32).tobytes()) as got,
-            ):
-                return (await got.json())["text"]
+            return await call.words(audio, scratch)
 
         from kokoro_onnx import Kokoro
 
