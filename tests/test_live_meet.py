@@ -259,3 +259,64 @@ def test_the_front_model_follows_the_others_avoids_pricing_and_lets_only_tom_set
     assert not [a for a in out["client"][1] if a[0] == "record_decision"]
     (decided,) = [a for a in out["tom"][1] if a[0] == "record_decision"]
     assert decided[1]["settles"] == [{"task_id": "t7", "question_id": "q7"}]
+
+
+TRANSCRIPT = """#11 [2026-10-31 03:00 UTC] Valor (joined):
+#12 [2026-10-31 03:00 UTC] Logan Reyes (joined):
+#13 [2026-10-31 03:00 UTC] Tom Counsell (joined):
+#14 [2026-10-31 03:01 UTC] Logan Reyes (spoke): Valor, where are we on the Northwind import?
+#15 [2026-10-31 03:01 UTC] Valor (spoke): It shipped Tuesday, and the launch is planned for Monday.
+#16 [2026-10-31 03:02 UTC] Tom Counsell (spoke): Let's keep Monday, and Logan, can you own the launch email?
+#17 [2026-10-31 03:02 UTC] Logan Reyes (spoke): Yes, I'll draft it by Friday.
+#18 [2026-10-31 03:03 UTC] Valor (typed): Launch stays Monday; Logan drafts the launch email by Friday.
+#19 [2026-10-31 03:04 UTC] Tom Counsell (spoke): Valor, check whether the import's error rate is under one percent.
+#20 [2026-10-31 03:04 UTC] Valor (spoke): I'll check and post it in the thread.
+#21 [2026-10-31 03:05 UTC] Valor (left): everyone else had left"""
+
+
+def test_the_asking_chat_sends_the_summary_as_one_file_with_at_most_two_lines(tmp_path):
+    """The eval the plan lists for Tom's amendment (2026-10-31): given a
+    call's end report, the chat session (Claude Code with the converse
+    skill, on the frontier seat) reads the transcript, writes the full
+    summary to a `.md` file, and sends it in the asking thread as the
+    send's `files`, with at most two lines of text and no long text."""
+    import subprocess
+
+    from core.bridge import DECLARED
+
+    work = tmp_path / "work"
+    (work / ".valor").mkdir(parents=True)
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    stub = bin_ / "valor-record"
+    stub.write_text(f"#!/bin/sh\ncat <<'END'\n{TRANSCRIPT}\nEND\n")
+    stub.chmod(0o755)
+    offered = "\n".join(f"  - {d.usage}" for d in DECLARED.values() if d.usage)
+    skill = (Path(settings.stages_dir) / "converse.md").read_text().replace("{effects}", offered)
+    report = (
+        "# In the chat since your last turn\n\n- Your task 6daae76a50c5 reports (call):\n"
+        "  The call https://meet.google.com/abc-defg-hij ended: everyone else had left.\n"
+        "  Its whole transcript: `valor-record call abc-defg-hij`, every page. Write the full summary as a file "
+        "and send it in the thread it was asked in (reply_to 1790000000.000100), with at most two lines of text "
+        "beside it.\n\nYou are in the northwind team chat on Slack (chat id T0ABC/C0NORTH). "
+        f"Your workspace is {work}."
+    )
+    env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}"}
+    done = subprocess.run(
+        [settings.claude, "-p", "--model", "claude-opus-5-5", "--append-system-prompt", skill,
+         "--permission-mode", "bypassPermissions", "--setting-sources", "", "--strict-mcp-config", "--", report],
+        cwd=work, env=env, capture_output=True, text=True, timeout=600, check=False,
+    )  # fmt: skip
+    assert done.returncode == 0, done.stderr[-2000:]
+    sends = [json.loads(p.read_text()) for p in (work / ".valor" / "effects").glob("*.json")]
+    sends = [s for s in sends if s["action_type"] == "slack.send_message"]
+    print(json.dumps(sends, indent=1))
+    (send,) = sends
+    assert send["target"] == "T0ABC/C0NORTH" and send["payload"]["reply_to"] == "1790000000.000100"
+    (f,) = send["payload"]["files"]
+    summary = Path(f["path"])
+    assert summary.suffix == ".md" and summary.is_file() and str(summary).startswith(str(work))
+    body = summary.read_text()
+    assert "Monday" in body and "Friday" in body and "error rate" in body
+    text = send["payload"].get("text") or ""
+    assert len([line for line in text.splitlines() if line.strip()]) <= 2 and len(text) < 400

@@ -19,12 +19,11 @@ the worker answers that came after leaving and the questions left
 unanswered), `task.ended` unless the session was stopped, the decisions
 the call settled, `effect.refused` for each `meet.say` or
 `meet.send_message` never delivered (a thread copy still goes), and the
-report. Tom's read-backs (a post's `settles`) answer their questions when
-he was the only one there besides Valor, each refused unless it is the
-task's open question; with others present they go to his Slack DM's
-session, which posts them and answers each on his 👍 (`confirms`). Meet
-names people by display name only (`settings.operator_name`): the page's
-roster carries no account. The call's own process writes the end; a kernel
+report. Meet names people by display name only (`settings.operator_name`),
+which anyone with an open Meet's link can set, so Tom's read-backs (a
+post's `settles`, made with him in the call) go to his Slack DM's session,
+which posts them and answers each on his 👍 with its question id
+(`confirms`), refused unless it is still the task's open question. The call's own process writes the end; a kernel
 wake writes it for a call whose process died (`sweep`).
 
 **The call's process** (`python -m core call SESSION`, `run`) holds
@@ -49,7 +48,7 @@ from typing import Any
 import numpy as np
 import psycopg
 
-from core import broker, db, intake, ledger, session, tasks, workspace
+from core import broker, db, intake, ledger, tasks, workspace
 from core.settings import resolve_seat, settings
 
 CHANNEL = "meet"
@@ -262,31 +261,23 @@ async def _settle(conn, session_id: str, rows: list[dict[str, Any]]) -> list[str
         return [
             f"Not answered, since Tom was not in the call: {t} ({text})" for (t, _), text in readbacks.items()
         ]
-    if names - {settings.operator_name}:
-        return await _confirm(conn, session_id, readbacks)
-    lines = []
-    for (task_id, question_id), text in readbacks.items():
-        try:
-            await session.answer(conn, task_id, text, by="tom", via="meet call", question_id=question_id)
-            lines.append(f"Answered for task {task_id}: {text}")
-        except (LookupError, KeyError, ValueError) as exc:
-            lines.append(f"Not answered for task {task_id} ({exc}): {text}")
-    return lines
+    return await _confirm(conn, session_id, readbacks)
 
 
 async def _confirm(conn, session_id: str, readbacks: dict[tuple[str, str], str]) -> list[str]:
-    """With others in the call, Meet's display name does not prove a word
-    was Tom's: the read-backs go to his Slack DM's session, which asks his
-    👍 on each (Tom, 2026-10-27)."""
+    """Meet gives display names only, which anyone with an open Meet's link
+    can set, so no word in a call is proven Tom's: the read-backs go to his
+    Slack DM's session, which asks his 👍 on each (Tom, 2026-10-27: by
+    account, else by 👍 in his DM)."""
     dm = await intake.operator_session(conn) if settings.operator_channel == "slack" else None
     if dm is None:
         return [
-            f"Not answered: others were in the call and Tom has no Slack DM here to confirm by 👍: {t} ({text})"
+            f"Not answered: Tom has no Slack DM here to confirm by 👍: {t} ({text})"
             for (t, _), text in readbacks.items()
         ]
     confirm = [{"task_id": t, "question_id": q, "text": text} for (t, q), text in readbacks.items()]
     head = (
-        "Tom settled these in a call with others present. Post each to him here and, on his 👍 on its post, "
+        "Tom settled these in a Meet call, which shows display names only. Post each to him here and, on his 👍 on its post, "
         "answer it with `task.answer` (via `meet call`, its `question_id`):"
     )
     text = "\n".join(
@@ -458,34 +449,18 @@ class Ears:
         return float(self._turn.run(None, {"input_features": features.astype(np.float32)})[0].ravel()[0])
 
 
-async def words(audio: np.ndarray, scratch: Path) -> str:
-    """The words of a turn, from the voice process (`tools/voice.py`):
-    `/hear`, on a worker of its own; or, from a voice process started
-    before it had `/hear` (a rollout does not restart it, docs/rollout.md),
-    the voice notes' `/transcribe`, on the turn written as a WAV file in
-    `scratch`."""
-    import wave
-
+async def words(audio: np.ndarray) -> str:
+    """The words of a turn, from the voice process's `/hear`
+    (`tools/voice.py`), which holds the Mac's one copy of Parakeet."""
     import aiohttp
 
-    base = f"http://127.0.0.1:{settings.voice_port}"
-    async with aiohttp.ClientSession() as http:
-        async with http.post(f"{base}/hear", data=audio.astype(np.float32).tobytes()) as got:
-            if got.status != 404:
-                got.raise_for_status()
-                return (await got.json())["text"]
-        path = scratch / f"{ledger.new_id()}.wav"
-        with wave.open(str(path), "wb") as out:
-            out.setnchannels(1)
-            out.setsampwidth(2)
-            out.setframerate(RATE)
-            out.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
-        try:
-            async with http.post(f"{base}/transcribe", json={"path": str(path)}) as got:
-                got.raise_for_status()
-                return (await got.json())["text"]
-        finally:
-            path.unlink(missing_ok=True)
+    url = f"http://127.0.0.1:{settings.voice_port}/hear"
+    async with (
+        aiohttp.ClientSession() as http,
+        http.post(url, data=audio.astype(np.float32).tobytes()) as got,
+    ):
+        got.raise_for_status()
+        return (await got.json())["text"]
 
 
 class Speaker:

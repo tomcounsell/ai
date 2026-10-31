@@ -32,7 +32,6 @@ from core.settings import settings
 
 ROOT = Path(__file__).resolve().parents[1]
 MEET_URL = re.compile(r"https://meet\.google\.com/([a-z]+-[a-z]+-[a-z]+)/?(?:\?.*)?")
-PREP_MOST = 4000
 
 
 def group_chat(chat: dict[str, str] | None) -> bool:
@@ -78,7 +77,7 @@ class MeetJoin:
         '`meet.join`: target "new" for a new Meet, or a Meet link; payload `{"reply_to": "<the thread it was '
         "asked in: on Slack its root ts, or the asking message's own ts when it was top-level; on Telegram the "
         'asking message\'s id>", "topic_id": null, "prep": "<your notes on the topic or project, from the '
-        'thread, the project and its open decisions, at most 4,000 characters>"}`; Valor joins the call ready '
+        'thread, the project and its open decisions, kept short>"}`; Valor joins the call ready '
         "on that topic, and your next prompt carries its link to post in that thread."
     )
 
@@ -91,8 +90,6 @@ class MeetJoin:
         p = action.payload
         if not all(p.get(k) is None or isinstance(p[k], str) for k in ("reply_to", "topic_id", "prep")):
             return "reply_to, topic_id and prep must each be a string or null"
-        if len(p.get("prep") or "") > PREP_MOST:
-            return f"prep is {len(p['prep'])} characters, over {PREP_MOST}"
         return None
 
     async def perform(self, action: broker.Action, key: str) -> dict[str, Any]:

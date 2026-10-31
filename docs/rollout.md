@@ -215,8 +215,8 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    Support/Valor/meet-chrome" https://accounts.google.com/`, then quit
    that window with ⌘Q (the Cowboy's on 2026-10-27). Until then a call
    asked for on that Mac fails, naming this step. A call needs the voice
-   job (`/hear`; until `com.valor.voice` is kickstarted after this
-   change, a call is heard through `/transcribe`), Smart Turn v3 (8 MB,
+   job with `/hear` (kickstart `com.valor.voice` once after this change),
+   Smart Turn v3 (8 MB,
    which `tools.voice fetch` now fetches too) and `gws` signed in as Valor
    for a new Meet.
    A kernel crash-looping after a rollout or an update: take the checkout

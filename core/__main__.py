@@ -418,7 +418,6 @@ async def _call(session_id: str) -> str:
     model and the worker, on the call's own gateway. It holds
     `meet:call:<session>` and `run:<session>` while it lives."""
     sentry.init("call")
-    import numpy as np
 
     from bridges.meet import Page, Socket
     from core import call, runs
@@ -474,12 +473,6 @@ async def _call(session_id: str) -> str:
             async with await db.connect(dsn) as conn:
                 return bool((await tasks.brief(conn, session_id)).workspace)
 
-        scratch = Path(settings.work_dir).expanduser() / session_id / "heard"
-        scratch.mkdir(parents=True, exist_ok=True)
-
-        async def transcribe(audio: np.ndarray) -> str:
-            return await call.words(audio, scratch)
-
         from kokoro_onnx import Kokoro
 
         folder = Path(settings.tts_model_dir).expanduser()
@@ -489,7 +482,7 @@ async def _call(session_id: str) -> str:
         home = Path(settings.work_dir).expanduser() / session_id / "front"
         home.mkdir(parents=True, exist_ok=True)
         the = call.Call(
-            session_id, info, Page(settings.meet_profile), call.Ears.load(transcribe), dsn=dsn,
+            session_id, info, Page(settings.meet_profile), call.Ears.load(call.words), dsn=dsn,
             voice=lambda text: kokoro.create(text, voice=settings.tts_voice, lang="en-us"),
             judge=lambda inputs, turn: judgement_port.judge(
                 judgement_tasks.MEET_SPEAK, inputs, task_id=session_id, ref={"turn_id": turn}, dsn=dsn),

@@ -53,7 +53,9 @@ def message_line(r: dict) -> str:
 
 
 def task_line(t: dict) -> str:
-    where = f"session of {t['chat']}" if t["chat"] else f"under {t['parent_id']}" if t["parent_id"] else "root"
+    where = (
+        f"session of {t['chat']}" if t["chat"] else f"under {t['parent_id']}" if t["parent_id"] else "root"
+    )
     out = f"{t['task_id']} {t['state']} ({where}, last {_when(t.get('last_at'))}): {(t['instruction'] or '')[:200]}"
     if t.get("open_question"):
         out += f"\n    asked: {t['open_question'][:300]}"
