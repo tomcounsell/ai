@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor
 created: 2026-10-26
 tracking: https://github.com/tomcounsell/ai/issues/2902
-revision: 11 (critique of revision 10; revision 9 critiqued ready 2026-10-27)
+revision: 12 (critique of revision 11; revision 9 critiqued ready 2026-10-27)
 ---
 
 # Valor in Google Meet
@@ -38,9 +38,11 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    the call session (root chat session, channel `meet`, chat id the
    meeting code, the asking chat's project and room, marker
    `{"call": {"asked_by": {channel, chat_id, reply_to, topic_id}, "prep",
-   "effect_key"}}`), reports the URL to the asking session, which posts it
-   in the thread, spawns `python -m bridges.meet join`, and returns
-   `{url, session_id}`. `lookup` finds the session by `effect_key`.
+   "effect_key"}}`), writes in the same transaction the first `call`
+   report (the URL) to the asking session, spawns `python -m
+   bridges.meet join`, and returns `{url, session_id}`. The link is posted
+   only by the asking turn that report wakes, never from the effect's
+   result; a retry finds the session by `effect_key` and writes no report.
 2. **The call session runs no turn** (`router.has_step` false for `meet`;
    `notices.owe` owes it nothing). A steer is posted in the Meet chat while
    the call is open and fails after; `task.stop`, or "Valor, leave" from
@@ -54,11 +56,14 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    dropped) to the voice process and plays reply audio. Holding lock
    `meet:call:<session>` it writes `call.started`; it leaves on stop,
    removal, lobby denial or 10 min, 2 min after the last other person, 10
-   min alone, or the voice socket down 30 s, then writes `ended`. A kernel
+   min alone, or the voice socket down 30 s. The voice process then waits
+   up to 2 min for open worker questions and writes `ended`. A kernel
    wake writes `ended` for a session whose lock is free after
    `call.started`, or with none after 90 s. `ended` is one transaction:
    `call.ended`, `task.ended` unless stopped, the answers (item 6),
-   `effect.refused` for its undelivered releases, the report. `Outbox`
+   `effect.refused` for its undelivered `meet.say` and `meet.send_message`
+   releases (thread copies still deliver), the report, carrying any worker
+   answers that came after leaving and naming questions left unanswered. `Outbox`
    takes a task filter. `meet.say` and `meet.send_message` (`act`,
    `{"text"}`, not offered to turns, 500 characters a post) each have a
    worker, so speech never holds up a post; `lookup` is None after ended.
@@ -77,7 +82,7 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    `runs.run_turn` per question, `fresh="call"` with `skills/sdlc/call.md`
    (prose, no effects, no `verdict.md`), resuming the last, no turn slot,
    in the checkout once set, the first carrying `prep`; a late answer is
-   posted naming its question, or after `ended` goes to the thread. Each
+   posted naming its question, or after leaving goes in the report. Each
    sentence is a `meet.say`, a written reply a `meet.send_message`,
    `request_id` `meet/<turn>/<n>/say|post`, a retry resending the same
    payload. A say plays only while its turn is current (else `failed`,
@@ -100,9 +105,11 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    there requests `task.answer`. Refusals are named in the report.
 7. **After the call.** `valor-record call <code>` (a `core/record.py` verb)
    reads the call in order: heard turns, Valor's `done` says
-   (`spoken_text` when cut short) and posts. `reach` counts a `meet`
+   (`spoken_text` when cut short) and posts, paged with `before` and
+   `limit` as `messages` is; the skill reads every page. `reach` counts a `meet`
    session as inside when its `asked_by` chat is listed for the project.
-   The `call` report names the code, read-backs and refusals; the asking
+   The `call` report names the code, read-backs, refusals and late
+   answers; the asking
    turn writes `call-<code>.md` (who joined, what was discussed, settled,
    answered and promised, what is open) and sends it as `files` in the
    thread with at most two lines of text. A promise becomes a task only on
@@ -126,35 +133,26 @@ decision wrongly. Critique may return the plan twice, review once.
 ## Tests and verification
 
 A local page with two `RTCPeerConnection`s stands in for Meet. Hearing:
-turn ends on speech; three talkers over fewer streams; own lines dropped;
-`meet.speak` routes (speak, post, silent, abstain, failed, stale). Replies:
-a retry is one effect; a post lands during a 5 s say; a stale say is not
-played; barge-in by the addressed speaker, not side talk; no re-speak after
-a voice restart; a late answer to the thread after `ended`. Copies: a copy
-follows only a `done` post, never before it, in the asking thread; a failed
-post has none; a retry of a copy is one; a failed copy does not delay the
-next post; a read-back is copied; speech and the join line are not; a copy
-owes no report. Lifecycle: no turn runs on the call session; a steer is
-posted in Meet, fails after `ended`; a stop leaves within 5 s, also before
-joining; crash, removal, alone and stop each write `ended` once; a bridge
-never started is swept after 90 s; a kernel restart charges once; a worker
-question takes no slot; `ended` reaches a closed asking session; another
-call's release is not taken. `meet.join`: refused in a DM; a second call
-names the first; a missing profile names the sign-in; a retry makes one
-session; the link is posted once, in a Slack thread's root, a top-level
-Slack message's own ts, or a Telegram reply in its topic; `prep` reaches
-the front model and the first worker question. Record: the asking chat's
-turn reads `call <code>` with heard turns and a spoken answer in order;
-another project's turn does not. The `call` report reaches the asking
-session; a send with `files` and `reply_to` in that thread passes. Decisions:
-only that project's; no board still answers; one read-back settles three;
-a correction wins; a stale question is refused and named; the DM path
-answers on 👍 only. Evals: the front model follows the others first, skips
-legal and financial work; a client's words settle nothing; the summary
-turn sends one `.md` with at most two lines. Live (`VALOR_LIVE=1`): the
-profile opens Meet as valor@yuda.me; account field, lobby and removal
-signals, open join, chat limit, reply gap. `uv run pytest -q -n auto`,
-ruff, `tests/test_bloat.py`.
+three talkers over fewer streams; own lines dropped; `meet.speak` routes.
+Replies: a retry is one effect; a post lands during a 5 s say; a stale say
+is not played; barge-in by the addressed speaker, not side talk. Copies:
+only after a `done` post, in the asking thread; a failed copy does not
+delay the next post; read-backs copied, speech not; no report owed; a copy
+requested just before `ended` still lands. Lifecycle: a stop leaves within
+5 s; crash, removal, alone and stop each write `ended` once; a never-started
+bridge is swept at 90 s; a steer after `ended` fails; a worker answer after
+leaving reaches the thread once, through the report. `meet.join`: refused
+in a DM; a second call names the first; a retry makes one session and one
+link post; the thread is a Slack thread's root, a top-level message's ts,
+or a Telegram reply in its topic; `prep` reaches the front model. Record:
+the asking chat's turn reads a call longer than `MOST` in full, a spoken
+answer in order; another project's turn reads nothing. Decisions: only
+that project's; one read-back settles three; a stale question is refused
+and named; the DM path answers on 👍 only. Evals: the front model follows
+the others, skips legal and financial work; a client settles nothing; the
+summary turn sends one `.md` with at most two lines. Live (`VALOR_LIVE=1`):
+the profile opens Meet as valor@yuda.me; account field, lobby and removal,
+open join, reply gap. `uv run pytest -q -n auto`, ruff, `tests/test_bloat.py`.
 
 **Done** when Tom has a real Meet call with Valor in it, Valor joins as
 itself and speaks or posts when it is its turn, with a tool where needed,
