@@ -87,15 +87,25 @@ def profile_ready(profile: str | None = None) -> bool:
 
 async def in_progress(conn) -> dict[str, Any] | None:
     """The call this Mac is in: an open call session's `call`."""
-    rows = await (
+    for session_id, _, _ in await _open_calls(conn):
+        call = await marker(conn, session_id) or {}
+        if call.get("machine") == settings.machine and not await tasks.is_stopped(conn, session_id):
+            return {"session_id": session_id, **call}
+    return None
+
+
+async def _open_calls(conn) -> list[tuple[str, datetime, bool]]:
+    """Each call session with no `call.ended`, oldest first: its id, when
+    it opened, and whether its process wrote `call.started`."""
+    return await (
         await conn.execute(
-            "SELECT s.task_id, s.payload->'call' FROM events s WHERE s.type = 'task.started' "
-            "AND s.payload->'call'->>'machine' = %s AND NOT EXISTS (SELECT 1 FROM events e "
-            "WHERE e.task_id = s.task_id AND e.type IN ('call.ended', 'task.stopped')) ORDER BY s.id",
-            (settings.machine,),
+            "SELECT d.id, d.created_at, EXISTS (SELECT 1 FROM events c WHERE c.task_id = d.id "
+            "AND c.type = 'call.started') FROM documents d WHERE d.kind = 'task' "
+            "AND d.body->'chat'->>'channel' = %s AND NOT EXISTS (SELECT 1 FROM events e "
+            "WHERE e.task_id = d.id AND e.type = 'call.ended') ORDER BY d.created_at",
+            (CHANNEL,),
         )
     ).fetchall()
-    return {"session_id": rows[0][0], **rows[0][1]} if rows else None
 
 
 async def begin(
@@ -345,16 +355,8 @@ async def sweep(conn) -> list[str]:
     """End each open call whose process is gone: its lock free after
     `call.started`, or no `call.started` `NEVER_STARTED_S` after it opened.
     Returns the sessions ended."""
-    rows = await (
-        await conn.execute(
-            "SELECT s.task_id, s.at, EXISTS (SELECT 1 FROM events c WHERE c.task_id = s.task_id "
-            "AND c.type = 'call.started') FROM events s WHERE s.type = 'task.started' AND s.payload ? 'call' "
-            "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = s.task_id AND e.type = 'call.ended') "
-            "ORDER BY s.id"
-        )
-    ).fetchall()
     ended = []
-    for session_id, at, started in rows:
+    for session_id, at, started in await _open_calls(conn):
         if not started and datetime.now(UTC) - at < timedelta(seconds=NEVER_STARTED_S):
             continue
         key = f"meet:call:{session_id}"

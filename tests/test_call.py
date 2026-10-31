@@ -21,7 +21,7 @@ from aiohttp import web
 from core import call, db, ledger, tasks
 from tests import bridges, test_meet
 from tests.test_kernel import at
-from tests.test_meet import TOM, a_call
+from tests.test_meet import CODE, TOM, a_call
 
 pytestmark = pytest.mark.spend(usd=0)
 team = test_meet.team  # the project and its signed-in call profile, a fixture
@@ -653,7 +653,9 @@ def test_a_steer_of_the_call_is_posted_in_its_chat_and_not_copied(dsn, team, qui
         running = asyncio.create_task(the.run())
         assert await wait_for(lambda: _async(page.posts == [call.JOIN_LINE]))
         async with await db.connect(dsn) as conn:
-            await ledger.append(conn, the.id, "message.steered", {"text": "Logan is running five minutes late."})
+            await ledger.append(
+                conn, the.id, "message.steered", {"text": "Logan is running five minutes late."}
+            )
         assert await wait_for(lambda: _async(len(page.posts) == 2))
         the.leave("done")
         await asyncio.wait_for(running, 10)
@@ -662,3 +664,79 @@ def test_a_steer_of_the_call_is_posted_in_its_chat_and_not_copied(dsn, team, qui
     page, done = run(go())
     assert page.posts[1] == "Logan is running five minutes late."
     assert not any(e["type"] == "slack.send_message" for e in done)
+
+
+def test_a_stop_before_valor_is_let_in_leaves_within_seconds(dsn, team, quick):
+    async def go():
+        page = Page()
+        page.status = "lobby"
+        _, the = await a_call_of(dsn, team, page, Front([]), judged())
+        running = asyncio.create_task(the.run())
+        await asyncio.sleep(0.5)
+        start = asyncio.get_running_loop().time()
+        async with await db.connect(dsn) as conn:
+            await tasks.stop(conn, the.id, reason="never mind", by="tom", via="chat")
+        reason = await asyncio.wait_for(running, 10)
+        return reason, asyncio.get_running_loop().time() - start, page
+
+    reason, took, page = run(go())
+    assert reason == "the call was stopped" and took < 5 and page.posts == []
+
+
+@pytest.mark.parametrize(
+    ("status", "people", "why"),
+    [
+        ("removed", None, "Valor was removed from the call"),
+        ("in", [{"id": "devices/9", "name": "Valor Engels", "me": True}], "no one else came"),
+    ],
+)
+def test_removal_or_no_one_coming_ends_the_call_once(dsn, team, quick, monkeypatch, status, people, why):
+    monkeypatch.setattr(call, "ALONE_S", 0.3)
+
+    async def go():
+        page = Page()
+        if people is not None:
+            page.people = people
+        _, the = await a_call_of(dsn, team, page, Front([]), judged())
+        running = asyncio.create_task(the.run())
+        assert await wait_for(lambda: _async(bool(page.posts)))
+        page.status = status
+        reason = await asyncio.wait_for(running, 10)
+        return reason, await bridges.rows(dsn, the.id)
+
+    reason, rows = run(go())
+    assert reason == why and [r["type"] for r in rows].count("call.ended") == 1
+
+
+def test_a_copy_goes_to_the_telegram_topic_it_was_asked_in():
+    info = {
+        "code": CODE,
+        "asked_by": {"channel": "telegram", "chat_id": "-1009", "reply_to": "77", "topic_id": "5"},
+    }
+    the = SimpleNamespace(info=info)
+    kind, payload, chat = call.Call._copy(the, "The answer.")
+    assert (kind, chat) == ("telegram.send_message", "-1009")
+    assert payload == {"text": "The answer.", "reply_to": "77", "topic_id": "5"}
+
+
+def test_a_calls_worker_takes_no_turn_slot(dsn, tmp_path, monkeypatch):
+    from core import runs, slot
+
+    def taken(*a, **k):
+        raise AssertionError("a call's worker waited on a turn slot")
+
+    monkeypatch.setattr(slot, "held", taken)
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="a call", max_effect_class="act"))
+        gateway = await bridges.gateway(dsn)
+        build = lambda url, brief, turn_id: runs.TurnCommand(
+            argv=[sys.executable, "-c", "print('{}')"], env={}, cwd=str(tmp_path), harness="answer"
+        )
+        try:
+            return await runs.run_turn(gateway, task, build, dsn=dsn, fresh="call")
+        finally:
+            await gateway.close()
+
+    assert run(go())["outcome"] == "done"
