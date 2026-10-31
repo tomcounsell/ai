@@ -148,7 +148,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `~/Desktop/Valor/zshenv.sh`, and other Postgres versions, which are the
    machine's, not the old system's.
 9. **The jobs.** First the voice models, once per Mac (about 1 GB:
-   Parakeet into `~/.cache/huggingface`, Kokoro, which the present
+   Parakeet and a call's Smart Turn into `~/.cache/huggingface`, Kokoro, which the present
    skill's `tts.py` speaks with, into `~/.cache/kokoro-onnx`; Handy's own
    models folder is not used): `$PY -m tools.voice fetch`.
    Then, at the Mac itself, `$PY -m core permissions`: it builds
@@ -215,8 +215,10 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    Support/Valor/meet-chrome" https://accounts.google.com/`, then quit
    that window with ⌘Q (the Cowboy's on 2026-10-27). Until then a call
    asked for on that Mac fails, naming this step. A call needs the voice
-   job (`/hear`), Smart Turn v3 (fetched into the Hugging Face cache on
-   the first call, 8 MB) and `gws` signed in as Valor for a new Meet.
+   job (`/hear`; until `com.valor.voice` is kickstarted after this
+   change, a call is heard through `/transcribe`), Smart Turn v3 (8 MB,
+   which `tools.voice fetch` now fetches too) and `gws` signed in as Valor
+   for a new Meet.
    A kernel crash-looping after a rollout or an update: take the checkout
    back to the commit it rolled from (`from` on its `rollout.restarting`
    row), `git -C ~/src/ai reset --keep <from>`, then

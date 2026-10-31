@@ -49,8 +49,9 @@ against a new Meet with a second device of Valor's account
 ## Setup per Mac
 
 The call profile signed in once, at the Mac ([rollout.md](../rollout.md),
-step 9); the voice job running (`/hear`); `gws` signed in as Valor; and
-Smart Turn v3 fetched into the Hugging Face cache on the first call.
+step 9); the voice job running (`/hear`, or `/transcribe` from a voice job
+started before this change); `gws` signed in as Valor; and Smart Turn v3
+fetched with the voice models (`python -m tools.voice fetch`).
 
 ## Not here
 

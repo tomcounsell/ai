@@ -437,6 +437,9 @@ async def _call(session_id: str) -> str:
         if info is None or any(r["type"] == "call.ended" for r in rows):
             return "this call has ended"
         await ledger.append(holder, session_id, "call.started", {"machine": settings.machine})
+        from core import spending
+
+        spending.HOLDER.set(f"run:{session_id}")  # `meet.speak`'s judgement calls are this run's
         try:
             judgement_port = port()
         except (credentials.MissingKey, ValueError) as exc:

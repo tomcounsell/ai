@@ -111,8 +111,9 @@ def app(*, listen=listen, heard=heard) -> web.Application:
 
 
 def fetch() -> None:
-    """Download Parakeet (into the Hugging Face cache) and Kokoro's files
-    (into `settings.tts_model_dir`); a file already there is kept."""
+    """Download Parakeet and a Meet call's Smart Turn (into the Hugging
+    Face cache) and Kokoro's files (into `settings.tts_model_dir`); a file
+    already there is kept."""
     folder = Path(settings.tts_model_dir).expanduser()
     folder.mkdir(parents=True, exist_ok=True)
     for name in KOKORO_FILES:
@@ -123,7 +124,12 @@ def fetch() -> None:
             tmp.replace(folder / name)
     print(f"fetching {settings.asr_model}")
     _asr()
-    print("both models are in place")
+    from huggingface_hub import hf_hub_download
+
+    from core import call
+
+    hf_hub_download(*call.SMART_TURN)
+    print("the models are in place")
 
 
 def plist(*, python: str | None = None) -> bytes:
