@@ -5,7 +5,7 @@ appetite: Large
 owner: Valor
 created: 2026-10-26
 tracking: https://github.com/tomcounsell/ai/issues/2902
-revision: 12 (critique of revision 11; revision 9 critiqued ready 2026-10-27)
+revision: 13 (critique of revision 12; revision 9 critiqued ready 2026-10-27)
 ---
 
 # Valor in Google Meet
@@ -31,7 +31,8 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    characters, written after reading them. Under lock `meet:<machine>` it
    fails naming a missing profile or the call in progress; else it opens
    the call session (root chat session, channel `meet`, chat id the
-   meeting code, the asking chat's project and room, marker
+   meeting code, the asking chat's project, room and `max_effect_class`
+   (`act`), marker
    `{"call": {"asked_by": {channel, chat_id, reply_to, topic_id}, "prep",
    "effect_key"}}`), writes in the same transaction the first `call`
    report (the URL) to the asking session, spawns `python -m
@@ -40,22 +41,23 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    result; a retry finds the session by `effect_key` and writes no report.
 2. **The call session runs no turn** (`router.has_step` false for `meet`;
    `notices.owe` owes it nothing). A steer is posted in the Meet chat while
-   the call is open and fails after; `task.stop`, or "Valor, leave" from
-   Tom, makes the bridge leave at once (`LISTEN`). Its reports go to the
-   asking chat's session, opened if closed.
+   the call is open and fails after. "Valor, leave" from Tom is a leave:
+   the bridge exits and the normal `ended` path follows. `task.stop` is the
+   hard kill (`LISTEN`): the broker refuses what the session has not
+   released, and the report names the dropped copies and questions. Its
+   reports go to the asking chat's session, opened if closed.
 3. **The bridge, `bridges/meet/`**: Playwright on the call profile, camera
    off, posting "Valor here, keeping a transcript for notes" on joining.
    Vendored: the two JS payloads, pako, protobuf and the LICENSE only;
    Attendee's Python is read for selectors, not committed. One page file of
    ours sends per-speaker audio, chat lines and participants (Valor's own
    dropped) to the voice process and plays reply audio. Holding lock
-   `meet:call:<session>` it writes `call.started`; it leaves on stop,
-   removal, lobby denial or 10 min, 2 min after the last other person, 10
-   min alone, or the voice socket down 30 s. The voice process then waits
+   `meet:call:<session>` it writes `call.started`; it leaves when told,
+   removed, left alone or without its voice socket. The voice process waits
    up to 2 min for open worker questions and writes `ended`. A kernel
    wake writes `ended` for a session whose lock is free after
    `call.started`, or with none after 90 s. `ended` is one transaction:
-   `call.ended`, `task.ended` unless stopped, the answers (item 6),
+   `call.ended`, `task.ended`, the answers (item 6),
    `effect.refused` for its undelivered `meet.say` and `meet.send_message`
    releases (thread copies still deliver), the report, carrying any worker
    answers that came after leaving and naming questions left unanswered. `Outbox`
@@ -126,27 +128,20 @@ decision wrongly. Critique may return the plan twice, review once.
 
 ## Tests and verification
 
-A local page with two `RTCPeerConnection`s stands in for Meet. Hearing:
-three talkers over fewer streams; own lines dropped; `meet.speak` routes.
-Replies: a retry is one effect; a post lands during a 5 s say; a stale say
-is not played; barge-in by the addressed speaker, not side talk. Copies:
-only after a `done` post, in the asking thread; a failed copy does not
-delay the next post; read-backs copied, speech not; no report owed; a copy
-requested just before `ended` still lands. Lifecycle: a stop leaves within
-5 s; crash, removal, alone and stop each write `ended` once; a never-started
-bridge is swept at 90 s; a steer after `ended` fails; a worker answer after
-leaving reaches the thread once, through the report. `meet.join`: refused
-in a DM; a second call names the first; a retry makes one session and one
-link post; the thread is a Slack thread's root, a top-level message's ts,
-or a Telegram reply in its topic; `prep` reaches the front model. Record:
-the asking chat's turn reads a call longer than `MOST` in full, a spoken
-answer in order; another project's turn reads nothing. Decisions: only
-that project's; one read-back settles three; a stale question is refused
-and named; the DM path answers on 👍 only. Evals: the front model follows
-the others, skips legal and financial work; a client settles nothing; the
-summary turn sends one `.md` with at most two lines. Live (`VALOR_LIVE=1`):
-the profile opens Meet as valor@yuda.me; account field, lobby and removal,
-open join, reply gap. `uv run pytest -q -n auto`, ruff, `tests/test_bloat.py`.
+A local page with two `RTCPeerConnection`s stands in for Meet. Replies:
+a retry is one effect; a post lands during a say; barge-in by the addressed
+speaker, not side talk. Copies: only after a `done` post, in the asking
+thread; a copy requested just before `ended`, or just before "Valor,
+leave", lands; after `task.stop` the report names the dropped copies and
+open questions. A worker answer after leaving reaches the thread once.
+`meet.join`: refused in a DM; one session and one link post on retry; the
+thread for each channel case; a say and a copy are not refused for the
+ceiling. Record: a call longer than `MOST` read in full; another project's
+turn reads nothing. Decisions: one read-back settles three; a stale
+question is refused; the DM path answers on 👍 only. Evals: the front
+model follows the others, skips legal and financial work; the summary
+turn sends one `.md` with at most two lines. Live (`VALOR_LIVE=1`): the
+profile opens Meet as valor@yuda.me; account field; open join; reply gap.
 
 **Done** when Tom has a real Meet call with Valor in it, Valor joins as
 itself and speaks or posts when it is its turn, with a tool where needed,
