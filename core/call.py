@@ -380,6 +380,7 @@ VOICED = 0.5
 PRE_FRAMES = 8  # kept from before speech starts, so its first sound is heard
 PAUSE_S = 0.3  # a pause long enough to ask Smart Turn whether the turn ended
 GIVE_UP_S = 1.6  # a pause this long ends the turn whatever Smart Turn says
+SHORT_S = 1.0  # a turn this short ends only by `GIVE_UP_S`: "Valor," then a pause is no turn
 TURN_MOST_S = 30.0
 BARGE_S = 0.12  # this much speech by the person Valor answers stops him
 TURN_ENDED = 0.5
@@ -497,7 +498,7 @@ class Speaker:
             return None
         audio = np.concatenate(self.heard)
         done = now - self.last_voice >= GIVE_UP_S or now - self.since >= TURN_MOST_S
-        if not done and self.asked != self.last_voice:
+        if not done and self.asked != self.last_voice and len(audio) >= SHORT_S * RATE:
             self.asked = self.last_voice
             done = ears.ended(audio) >= TURN_ENDED
         if not done:
@@ -509,161 +510,166 @@ class Speaker:
 
 # -- answering -----------------------------------------------------------------
 
-FRONT_TOOLS = [
-    {
-        "name": "ask_worker",
-        "description": (
-            "Ask your worker, who reads the project's code, records, chats and documents and works things out. "
-            "Use it for anything you would have to check. It answers in writing a little later, posted in the "
-            "call's chat and copied to the thread; tell them you'll check."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {"question": {"type": "string"}},
-            "required": ["question"],
-        },
-    },
-    {
-        "name": "open_decisions",
-        "description": (
-            "The project's decisions open for Tom, each with its task id and question id, and the decision board "
-            "as last written. Call it when someone asks what is open."
-        ),
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "record_decision",
-        "description": (
-            "Post a read-back of what Tom just decided, one or two sentences, naming each open question it "
-            "settles (one idea may settle several), by the ids open_decisions gave. A correction is a new "
-            "read-back."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "readback": {"type": "string"},
-                "settles": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {"task_id": {"type": "string"}, "question_id": {"type": "string"}},
-                        "required": ["task_id", "question_id"],
-                    },
-                },
-            },
-            "required": ["readback", "settles"],
-        },
-    },
-]
 GUIDANCE = (
     "You are Valor Engels, in a live Google Meet call as yourself, on the {project} project. You are an AI "
-    "coworker; everyone in the call knows. What you write here is spoken aloud or posted in the call's chat: "
-    "short, plain, natural sentences, one to three, no lists or markdown, no preamble.\n\n"
+    "coworker; everyone in the call knows. Your reply is spoken aloud, or posted in the call's chat when it "
+    "was typed there: short, plain, natural sentences, one to three, no lists or markdown, no preamble.\n\n"
+    "Each message brings what was said in the call since your last reply (your own words as Valor), the "
+    "decisions open for Tom when they change, and then what was just said, which you answer. A reply of yours "
+    "that was not said is marked so: you stayed silent then.\n\n"
     "- Answer whoever addresses you. Follow what the others want to discuss; do not steer the call.\n"
     "- Avoid legal and financial work, pricing, terms and people matters for now: say you will take it "
     "offline with Tom.\n"
-    "- When someone asks what is open, call open_decisions, then take them through it one at a time, with "
-    "your recommendation on each, and let them choose. With anyone but Tom in the call, a decision about a "
-    "client relationship (pricing, terms, its people) is one line: there is one for Tom in his DM.\n"
-    "- When Tom settles open decisions, read his answer back in a sentence and call record_decision with the "
-    "questions it settles. Only Tom settles decisions.\n"
-    "- For anything you would have to look up, call ask_worker and say you will check; never guess a fact.\n\n"
+    "- When someone asks what is open, take them through the open decisions listed, one at a time, with "
+    "your recommendation on each, and let them choose. With anyone but Tom in the call, an open decision "
+    "about a client relationship (pricing, terms, its people) is one line: it is for Tom. Mention no "
+    "decision that is not listed, and never say an id aloud.\n"
+    "- For anything you would have to look up (code, records, documents, figures), say you will check and "
+    "end your reply with a line `ASK: <the question>`: your worker, who reads the project's code, records "
+    "and chats, answers in writing in the call's chat. Never guess a fact.\n"
+    "- When Tom settles open decisions (one idea may settle several), read his answer back in a sentence and "
+    "end your reply with a line `DECIDED: <task id>/<question id>, ... | <the read-back>`, naming each "
+    "question it settles by the ids listed. Only Tom settles decisions; a correction is a new DECIDED line.\n\n"
     "Why you are in this call, from your notes before it:\n{prep}"
 )
 SENTENCE = re.compile(r"[.!?…](?=\s)")
-FRONT_ROUNDS = 3
+DIRECTIVES = ("ASK:", "DECIDED:")
+
+
+def directive(line: str) -> tuple[str, dict[str, Any]] | None:
+    """An `ASK:` or `DECIDED:` line of the front model's reply as the action
+    it asks for; None for any other line."""
+    line = line.strip()
+    if line.startswith("ASK:") and line[4:].strip():
+        return "ask_worker", {"question": line[4:].strip()}
+    if line.startswith("DECIDED:") and "|" in line:
+        ids, _, readback = line[8:].partition("|")
+        settles = [
+            {"task_id": t.strip(), "question_id": q.strip()}
+            for t, _, q in (i.partition("/") for i in ids.split(","))
+            if t.strip() and q.strip()
+        ]
+        if settles and readback.strip():
+            return "record_decision", {"readback": readback.strip(), "settles": settles}
+    return None
 
 
 class Front:
-    """The front model (the light seat), streamed through the call's own
-    gateway: it drafts what Valor says while `meet.speak` decides whether
-    he says it. Its tools act only once the draft is taken (`Tools`)."""
+    """The front model: one Claude Code session on the light seat for the
+    whole call, streaming (`claude -p` reading and writing stream-json), on
+    the call's own gateway, so it answers within a second or so of a turn
+    while `meet.speak` decides whether Valor says it. It has no tools: it
+    asks the worker and records a decision by a line of its reply
+    (`directive`), which acts only once the draft is taken."""
 
-    def __init__(self, url: str, model: str, *, project: str, prep: str, max_tokens: int = 600):
-        self.url, self.model, self.max_tokens = url, model, max_tokens
-        self.system = GUIDANCE.format(project=project, prep=prep.strip() or "(no notes)")
+    def __init__(self, argv: list[str], env: dict[str, str], cwd: str):
+        self.argv, self.env, self.cwd = argv, env, cwd
+        self.proc: asyncio.subprocess.Process | None = None
+        self.lock = asyncio.Lock()
 
-    async def draft(self, recent: list[str], said: str, people: list[str], tools: Tools):
-        """The answer's sentences as they stream."""
-        import aiohttp
-
+    @classmethod
+    def claude(cls, base_url: str, *, model: str, project: str, prep: str, home: str) -> Front:
         from core.gateway import TURN_TOKEN
 
-        system = f"{self.system}\n\nIn the call: {', '.join(people) or 'only you'}."
-        prompt = "The call so far:\n" + ("\n".join(recent) or "(nothing yet)") + f"\n\nJust now, {said}"
-        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
-        headers = {
-            "x-api-key": TURN_TOKEN,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-        async with aiohttp.ClientSession() as http:
-            for _ in range(FRONT_ROUNDS):
-                body = {"model": self.model, "max_tokens": self.max_tokens, "system": system, "stream": True,
-                        "messages": messages, "tools": FRONT_TOOLS}  # fmt: skip
-                blocks: list[dict[str, Any]] = []
-                text, stop = "", None
-                async with http.post(f"{self.url}/v1/messages", json=body, headers=headers) as resp:
-                    if resp.status != 200:
-                        raise RuntimeError(f"the front model answered {resp.status}")
-                    async for raw in resp.content:
-                        line = raw.decode(errors="replace").strip()
-                        if not line.startswith("data:"):
-                            continue
-                        event = json.loads(line[5:])
-                        kind = event.get("type")
-                        if kind == "content_block_start":
-                            blocks.append({**event["content_block"], "json": ""})
-                        elif kind == "content_block_delta":
-                            delta = event["delta"]
-                            if delta.get("type") == "text_delta":
-                                blocks[-1]["text"] = blocks[-1].get("text", "") + delta["text"]
-                                text += delta["text"]
-                                while m := SENTENCE.search(text):
-                                    yield text[: m.end()].strip()
-                                    text = text[m.end() :]
-                            elif delta.get("type") == "input_json_delta":
-                                blocks[-1]["json"] += delta.get("partial_json", "")
-                        elif kind == "message_delta":
-                            stop = (event.get("delta") or {}).get("stop_reason")
-                if text.strip():
-                    yield text.strip()
-                if stop != "tool_use":
-                    return
-                content, results = [], []
-                for b in blocks:
-                    if b["type"] == "text":
-                        content.append({"type": "text", "text": b.get("text", "")})
-                    elif b["type"] == "tool_use":
-                        args = json.loads(b["json"] or "{}")
-                        content.append({"type": "tool_use", "id": b["id"], "name": b["name"], "input": args})
-                        out = await tools.call(b["name"], args)
-                        results.append({"type": "tool_result", "tool_use_id": b["id"], "content": out})
-                messages += [{"role": "assistant", "content": content}, {"role": "user", "content": results}]
+        system = GUIDANCE.format(project=project, prep=prep.strip() or "(no notes)")
+        argv = [settings.claude, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+                "--verbose", "--include-partial-messages", "--model", model, "--system-prompt", system,
+                "--tools", "", "--setting-sources", "", "--strict-mcp-config"]  # fmt: skip
+        env = {"PATH": "/usr/bin:/bin", "HOME": home, "ANTHROPIC_BASE_URL": base_url,
+               "CLAUDE_CONFIG_DIR": home, "CLAUDE_CODE_OAUTH_TOKEN": TURN_TOKEN}  # fmt: skip
+        return cls(argv, env, home)
 
+    async def start(self) -> None:
+        self.proc = await asyncio.create_subprocess_exec(
+            *self.argv, env=self.env, cwd=self.cwd, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024,
+        )  # fmt: skip
 
-class Tools:
-    """The front model's tools for one draft. Reading the open decisions
-    happens at once; asking the worker and posting a read-back wait in
-    `actions` until the draft is taken, so a draft Valor never says acts
-    on nothing."""
+    async def close(self) -> None:
+        if self.proc is not None and self.proc.returncode is None:
+            self.proc.stdin.close()
+            with contextlib.suppress(ProcessLookupError):
+                self.proc.terminate()
+            await self.proc.wait()
 
-    def __init__(self, decisions: Callable[[], Awaitable[str]], worker_ready: Callable[[], Awaitable[bool]]):
-        self.decisions, self.worker_ready = decisions, worker_ready
-        self.actions: list[tuple[str, dict[str, Any]]] = []
+    async def draft(self, news: str, said: str, actions: list[tuple[str, dict[str, Any]]]):
+        """The answer to `said`, sentence by sentence as it streams; its
+        directive lines go to `actions`. Drafts take turns: a draft
+        abandoned midway is read to its end before the next is asked."""
+        await self.lock.acquire()
+        ended = False
+        try:
+            message = (f"{news}\n\n" if news else "") + f"Now: {said}"
+            line = {"type": "user", "message": {"role": "user", "content": message}}
+            self.proc.stdin.write((json.dumps(line) + "\n").encode())
+            await self.proc.stdin.drain()
+            text = ""
+            while True:
+                event = await self._event()
+                if event.get("type") == "result":
+                    ended = True
+                    if event.get("is_error"):
+                        raise RuntimeError(f"the front model's turn failed: {str(event.get('result'))[:300]}")
+                    break
+                delta = (event.get("event") or {}).get("delta") or {}
+                if event.get("type") != "stream_event" or delta.get("type") != "text_delta":
+                    continue
+                text += delta["text"]
+                text, done = self._sentences(text, actions)
+                for sentence in done:
+                    yield sentence
+            _, done = self._sentences(text + "\n", actions)
+            for sentence in done:
+                yield sentence
+        finally:
+            if ended:
+                self.lock.release()
+            else:
+                asyncio.get_running_loop().create_task(self._drain())
 
-    async def call(self, name: str, args: dict[str, Any]) -> str:
-        if name == "open_decisions":
-            return await self.decisions()
-        if name == "ask_worker" and str(args.get("question") or "").strip():
-            self.actions.append((name, args))
-            if not await self.worker_ready():
-                return "Asked, but your worker's copy of the project is still being set up: say you need a moment."
-            return "Asked: the answer will be posted in the call's chat when it is ready. Say you'll check."
-        if name == "record_decision" and str(args.get("readback") or "").strip():
-            self.actions.append((name, args))
-            return "Posted."
-        return f"{name} needs its arguments"
+    async def _event(self) -> dict[str, Any]:
+        raw = await self.proc.stdout.readline()
+        if not raw:
+            raise RuntimeError("the front model's session ended")
+        return json.loads(raw)
+
+    async def _drain(self) -> None:
+        try:
+            while (await self._event()).get("type") != "result":
+                pass
+        except RuntimeError:
+            pass
+        finally:
+            self.lock.release()
+
+    @staticmethod
+    def _sentences(text: str, actions: list) -> tuple[str, list[str]]:
+        """The whole sentences of `text` to say, and what is left of it. A
+        line that is (or may yet be) a directive is never said: once it is
+        whole it goes to `actions`."""
+        out = []
+        while text:
+            line, newline, rest = text.partition("\n")
+            head = line.strip()
+            if head and any(d.startswith(head) or head.startswith(d) for d in DIRECTIVES):
+                if not newline:
+                    break
+                if (found := directive(head)) is not None:
+                    actions.append(found)
+                text = rest
+                continue
+            m = SENTENCE.search(line + (" " if newline else ""))
+            if m is not None:
+                if sentence := line[: m.end()].strip():
+                    out.append(sentence)
+                text = text[m.end() :]
+            elif newline:
+                if head:
+                    out.append(head)
+                text = rest
+            else:
+                break
+        return text, out
 
 
 async def decisions(conn, project: str | None) -> str:
@@ -694,9 +700,10 @@ JOIN_S = 90  # to get through Meet's join screen
 LOBBY_S = 600  # waiting to be let in
 ALONE_S = 600  # with no one else ever there
 EMPTY_S = 120  # after the last other person left
-SOCKET_S = 30  # without the page's audio
+SOCKET_S = 30  # without the page's audio, or out of the call
 WORKER_WAIT_S = 120  # for questions still with the worker after leaving
 TICK_S, STATE_S = 0.1, 2.0
+VOICED_MOST = 32  # sentences voiced ahead and kept
 RECENT = 20
 
 
@@ -785,7 +792,10 @@ class Call:
         self.speakers: dict[str, Speaker] = {}
         self.names: dict[str, str] = {}
         self.me: str | None = None
-        self.recent: list[str] = []
+        self.lines: list[str] = []  # the call so far, as the front model reads it
+        self.told = 0  # how many of `lines` the front model has read
+        self.open_told: str | None = None
+        self.unsaid = False
         self.current: Turn | None = None  # the turn Valor is answering
         self.playing: Turn | None = None  # the turn whose answer is being spoken
         self.said: dict[str, int] = {}  # each turn's request numbers so far
@@ -848,17 +858,18 @@ class Call:
         async with await db.connect(self.dsn) as conn:
             await ledger.append(conn, self.id, "call.heard", {"turn_id": turn.id, "who": turn.who, "name": turn.name,
                                 "via": turn.via, "text": turn.text})  # fmt: skip
-        self.recent = [*self.recent[-(RECENT - 1) :], f"{turn.name} ({turn.via}): {turn.text}"]
+        self.lines.append(f"{turn.name} ({turn.via}): {turn.text}")
         if turn.name == settings.operator_name and LEAVE.search(turn.text):
             self.leave("Tom asked Valor to leave")
             return
         if self.current is not None and self.current.who == turn.who:
             self.current = None  # they went on: what Valor was answering is stale
-        tools = Tools(self._decisions, self.worker_ready)
+        actions: list[tuple[str, dict[str, Any]]] = []
         sentences: asyncio.Queue = asyncio.Queue()
-        drafting = asyncio.create_task(self._draft(turn, tools, sentences))
+        drafting = asyncio.create_task(self._draft(turn, actions, sentences))
         label = await self._decide(turn)
         if label not in ("asked_valor", "useful_post") or self.left:
+            self.unsaid = True
             drafting.cancel()
             return
         self.current = turn
@@ -866,6 +877,7 @@ class Call:
         written = []
         while (sentence := await sentences.get()) is not None:
             if self.current is not turn:
+                self.unsaid = True
                 drafting.cancel()
                 return
             if spoken:
@@ -873,7 +885,7 @@ class Call:
                 self.says.put_nowait((turn, self._n(turn.id), sentence))
             else:
                 written.append(sentence)
-        for name, args in tools.actions:
+        for name, args in actions:
             if name == "ask_worker":
                 self.questions.put_nowait(str(args["question"]).strip())
             else:
@@ -883,10 +895,35 @@ class Call:
         if written:
             self.posts.put_nowait(Post(turn.id, " ".join(written), True))
 
-    async def _draft(self, turn: Turn, tools: Tools, sentences: asyncio.Queue) -> None:
+    async def _news(self) -> str:
+        """What the front model has not heard yet, up to the turn it is
+        asked about: the call's lines since its last message, who is in it,
+        the open decisions when they changed, and whether its last reply
+        went unsaid."""
+        parts = []
+        if self.unsaid:
+            parts.append("(Your last reply was not said: you stayed silent.)")
+            self.unsaid = False
+        since, self.told = self.lines[self.told : -1], len(self.lines)
+        if since:
+            parts.append("Said in the call since your last reply:\n" + "\n".join(since))
+        open_now = await self._decisions()
+        if open_now != self.open_told:
+            parts.append(open_now)
+            self.open_told = open_now
+        parts.append(f"In the call: {', '.join(sorted(set(self.names.values()))) or 'only you'}.")
+        if not await self.worker_ready():
+            parts.append(
+                "Your worker's copy of the project is still being set up: asked anything, say you need a moment."
+            )
+        return "\n\n".join(parts)
+
+    async def _draft(self, turn: Turn, actions: list, sentences: asyncio.Queue) -> None:
         said = f"{turn.name} {'said' if turn.via == 'spoke' else 'typed in the chat'}: {turn.text}"
         try:
-            async for sentence in self.front.draft(self.recent[:-1], said, list(self.names.values()), tools):
+            async for sentence in self.front.draft(await self._news(), said, actions):
+                if turn.via == "spoke":
+                    self._prefetch(sentence)
                 sentences.put_nowait(sentence)
         except Exception as exc:  # noqa: BLE001  a draft that fails is silence, and the call goes on
             _log(f"call {self.id}: the front model failed: {exc!r}")
@@ -897,7 +934,7 @@ class Call:
         """`meet.speak`'s label; None (silence) on abstain, failure or stop."""
         inputs = {
             "said": f"{turn.name} {turn.via}: {turn.text}",
-            "recent": "\n".join(self.recent[:-1]) or "(nothing before it)",
+            "recent": "\n".join(self.lines[-RECENT:-1]) or "(nothing before it)",
             "people": ", ".join(self.names.values()) or "no one else",
         }
         try:
@@ -917,8 +954,13 @@ class Call:
     # -- speaking and posting --
 
     def _prefetch(self, text: str) -> None:
+        """Voice `text` ahead of saying it: a spoken turn's draft is voiced
+        as it streams, before `meet.speak` decides, so a sentence Valor
+        says is ready when its turn comes. The latest `VOICED_MOST` kept."""
         if text not in self._spoken:
             self._spoken[text] = asyncio.get_running_loop().run_in_executor(self._tts, self.voice, text)
+            while len(self._spoken) > VOICED_MOST:
+                self._spoken.pop(next(iter(self._spoken)))
 
     async def says_lane(self) -> None:
         """One sentence spoken at a time, never holding up a post."""
@@ -996,7 +1038,7 @@ class Call:
         spoken = _cut(payload["text"], got["played"] / got["total"]) if got.get("cut") else payload["text"]
         if got.get("cut"):
             self.current = None
-        self.recent = [*self.recent[-(RECENT - 1) :], f"Valor (spoke): {spoken}"]
+        self.lines.append(f"Valor (spoke): {spoken}")
         return {
             "spoken_text": spoken,
             "cut": bool(got.get("cut")),
@@ -1006,7 +1048,7 @@ class Call:
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not await self.page.post(payload["text"]):
             raise broker.Failed("the call's chat box was not there")
-        self.recent = [*self.recent[-(RECENT - 1) :], f"Valor (typed): {payload['text']}"]
+        self.lines.append(f"Valor (typed): {payload['text']}")
         return {"posted": payload["text"]}
 
     # -- the worker --
@@ -1047,12 +1089,17 @@ class Call:
 
     async def watch(self) -> None:
         """Who is in the call, and the reasons to leave it."""
-        start, alone, down, seen = self.clock(), None, None, set()
+        start, alone, down, seen, inside = self.clock(), None, None, set(), self.clock()
         while not self.leaving.is_set():
             state = await self.page.state()
             if state["status"] in ("removed", "denied", "ended"):
                 self.leave({"removed": "Valor was removed from the call", "denied": "Valor was not let in",
                             "ended": "the call ended"}[state["status"]])  # fmt: skip
+                break
+            if state["status"] == "in":
+                inside = self.clock()
+            elif self.clock() - inside >= SOCKET_S:
+                self.leave("Valor was no longer in the call")
                 break
             others = [p for p in state["people"] if not p["me"]]
             for p in state["people"]:
@@ -1132,6 +1179,7 @@ class Call:
                 asyncio.create_task(c)
                 for c in (self.orders(), self.says_lane(), self.posts_lane(), self.work())
             ]
+            await self.front.start()
             await self.page.open(self.info["url"], self.socket.port if self.socket else 0)
             why = await self.joined()
             if why is not None:
@@ -1147,6 +1195,8 @@ class Call:
         self.left = True
         with contextlib.suppress(Exception):
             await self.page.leave()
+        with contextlib.suppress(Exception):
+            await self.front.close()
         if not self.hard:
             waited = self.clock()
             while (self.asking or not self.questions.empty()) and self.clock() - waited < WORKER_WAIT_S:

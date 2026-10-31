@@ -456,7 +456,7 @@ async def _call(session_id: str) -> str:
                 if now.workspace:
                     break
                 await asyncio.sleep(5)
-            prompt = f"Asked in the call: {question}\n\nThe call so far:\n" + "\n".join(the.recent)
+            prompt = f"Asked in the call: {question}\n\nThe call so far:\n" + "\n".join(the.lines[-40:])
             if resume is None:
                 prompt += f"\n\nWhy the call was asked for, from the notes before it:\n{info.get('prep') or '(none)'}"
             ended = await runs.run_turn(gateway, session_id,
@@ -485,13 +485,16 @@ async def _call(session_id: str) -> str:
         folder = Path(settings.tts_model_dir).expanduser()
         kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
         light = resolve_model("light")
+        # The front model's own Claude Code state: no login, the gateway's.
+        home = Path(settings.work_dir).expanduser() / session_id / "front"
+        home.mkdir(parents=True, exist_ok=True)
         the = call.Call(
             session_id, info, Page(settings.meet_profile), call.Ears.load(transcribe), dsn=dsn,
             voice=lambda text: kokoro.create(text, voice=settings.tts_voice, lang="en-us"),
             judge=lambda inputs, turn: judgement_port.judge(
                 judgement_tasks.MEET_SPEAK, inputs, task_id=session_id, ref={"turn_id": turn}, dsn=dsn),
-            front=call.Front(gateway.issue(session_id, "front"), light, project=(b.project or {}).get("name") or "",
-                             prep=info.get("prep") or ""),
+            front=call.Front.claude(gateway.issue(session_id, "front"), model=light, home=str(home),
+                                    project=(b.project or {}).get("name") or "", prep=info.get("prep") or ""),
             worker=worker, worker_ready=ready, project=(b.project or {}).get("name"),
         )  # fmt: skip
         socket = Socket(the.hear, the.chat, the.people)

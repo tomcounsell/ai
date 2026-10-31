@@ -11,6 +11,7 @@ report; a stop leaves at once and "Valor, leave" from Tom leaves too."""
 
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -107,10 +108,15 @@ class Front:
     def __init__(self, answers, tools=None, *, gate=None):
         self.answers, self.tools, self.gate, self.drafts = list(answers), list(tools or []), gate, []
 
-    async def draft(self, recent, said, people, tools):
-        self.drafts.append((list(recent), said))
-        for name, args in self.tools.pop(0) if self.tools else []:
-            await tools.call(name, args)
+    async def start(self):
+        pass
+
+    async def close(self):
+        pass
+
+    async def draft(self, news, said, actions):
+        self.drafts.append((news, said))
+        actions += self.tools.pop(0) if self.tools else []
         for sentence in self.answers.pop(0) if self.answers else []:
             if self.gate is not None:
                 await self.gate.wait()
@@ -207,7 +213,7 @@ def test_a_spoken_question_is_answered_aloud_a_sentence_at_a_time_and_heard_in_t
     assert page.posts == []  # speech is not copied
     (heard,) = [r["payload"] for r in rows if r["type"] == "call.heard"]
     assert heard["name"] == "Logan" and heard["text"] == "Valor, when do we ship?" and heard["via"] == "spoke"
-    assert the.recent[-1] == "Valor (spoke): The import is done."
+    assert the.lines[-1] == "Valor (spoke): The import is done."
 
 
 def test_a_typed_question_is_answered_in_the_chat_and_copied_to_the_thread_after_its_post(dsn, team):
@@ -379,7 +385,7 @@ def test_each_persons_turn_is_heard_apart_though_their_audio_shares_the_frames(d
         _, the = await a_call_of(dsn, team, page, Front([]), judged(), said=["one", "two", "three"])
         the.clock = lambda: clock[0]
         for who in (LOGAN, TOMS, "devices/3"):
-            for _ in range(40):
+            for _ in range(120):  # past `SHORT_S`, so Smart Turn ends it
                 clock[0] += 0.01
                 the.hear(who, loud, 48000)
                 the.hear("devices/4", quiet, 48000)
@@ -448,59 +454,63 @@ def test_a_readback_posts_with_its_settles_and_is_copied(dsn, team):
     )
 
 
-def test_the_front_model_reads_the_prep_streams_sentences_and_runs_its_tools(monkeypatch):
-    """Over the gateway's wire format: the notes before the call open its
-    instructions; text arrives a sentence at a time; a tool call is
-    answered and the model goes on."""
-    asked = []
+FAKE_CLAUDE = r"""
+import json, sys
+replies = json.loads(sys.argv[1])
+for line in sys.stdin:
+    asked = json.loads(line)["message"]["content"]
+    sys.stderr.write(asked + "\n---\n")
+    reply = replies.pop(0)
+    for chunk in reply:
+        print(json.dumps({"type": "stream_event", "event": {"type": "content_block_delta",
+                          "delta": {"type": "text_delta", "text": chunk}}}), flush=True)
+    print(json.dumps({"type": "result", "result": "".join(reply)}), flush=True)
+"""
 
-    def sse(events):
-        return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events).encode()
 
-    rounds = [
-        [{"type": "message_start"}, {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
-         {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Let me look. One"}},
-         {"type": "content_block_start", "index": 1,
-          "content_block": {"type": "tool_use", "id": "tu1", "name": "open_decisions"}},
-         {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": "{}"}},
-         {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}, {"type": "message_stop"}],
-        [{"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
-         {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Two are open. Ship it?"}},
-         {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}, {"type": "message_stop"}],
+def test_the_front_model_streams_sentences_keeps_directives_unsaid_and_a_dropped_draft_never_skews_the_next(
+    tmp_path,
+):
+    """A Claude Code session reading and writing stream-json (here a fake
+    one): each sentence as soon as it is whole, an `ASK:` or `DECIDED:`
+    line an action and never said, and a draft abandoned midway read to its
+    end before the next is asked, so the next answer is its own."""
+    replies = [
+        ["Let me", " check that. Two", " are open.\nASK: What shipped", " this week?\n", "DECIDED: t1/q1, t2/q2 | Ship Monday."],
+        ["This one", " is dropped.", " Still dropped."],
+        ["Second answer."],
     ]  # fmt: skip
-
-    async def messages(request):
-        asked.append(await request.json())
-        return web.Response(body=sse(rounds.pop(0)), content_type="text/event-stream")
+    errors = tmp_path / "asked.txt"
 
     async def go():
-        app = web.Application()
-        app.router.add_post("/v1/messages", messages)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]
+        front = call.Front(["sh", "-c", f'{sys.executable} -c "$0" "$1" 2>{errors}', FAKE_CLAUDE, json.dumps(replies)],
+                           {}, str(tmp_path))  # fmt: skip
+        await front.start()
+        actions = []
+        got = [s async for s in front.draft("news one", "Tom said: what is open?", actions)]
+        dropped = front.draft("", "Logan said: hm", [])
+        first = await dropped.__anext__()
+        await dropped.aclose()
+        second = [s async for s in front.draft("", "Tom said: and then?", [])]
+        await front.close()
+        return got, actions, first, second
 
-        async def decisions():
-            return "Open for Tom: two."
+    got, actions, first, second = run(go())
+    assert got == ["Let me check that.", "Two are open."]
+    assert actions == [("ask_worker", {"question": "What shipped this week?"}),
+                       ("record_decision", {"readback": "Ship Monday.", "settles": [
+                           {"task_id": "t1", "question_id": "q1"}, {"task_id": "t2", "question_id": "q2"}]})]  # fmt: skip
+    assert first == "This one is dropped." and second == ["Second answer."]
+    assert errors.read_text().startswith("news one\n\nNow: Tom said: what is open?")
 
-        async def ready():
-            return True
 
-        front = call.Front(
-            f"http://127.0.0.1:{port}", "claude-haiku-5-5", project="acme", prep="The launch notes."
-        )
-        tools = call.Tools(decisions, ready)
-        got = [s async for s in front.draft(["Logan (spoke): hi"], "Tom said: what is open?", ["Tom"], tools)]
-        await runner.cleanup()
-        return got
-
-    got = run(go())
-    assert got == ["Let me look.", "One", "Two are open.", "Ship it?"]
-    assert "The launch notes." in asked[0]["system"] and asked[0]["stream"] is True
-    assert asked[1]["messages"][-1]["content"][0] == {"type": "tool_result", "tool_use_id": "tu1",
-                                                      "content": "Open for Tom: two."}  # fmt: skip
+def test_the_front_models_instructions_carry_the_notes_before_the_call():
+    front = call.Front.claude("http://127.0.0.1:1/t/x", model="claude-haiku-5-5", project="acme",
+                              prep="The launch: two decisions open.", home="/tmp/front")  # fmt: skip
+    system = front.argv[front.argv.index("--system-prompt") + 1]
+    assert "The launch: two decisions open." in system and "acme" in system
+    assert front.argv[front.argv.index("--tools") + 1] == "" and "--include-partial-messages" in front.argv
+    assert front.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/t/x"
 
 
 # -- the call's life -----------------------------------------------------------
@@ -634,3 +644,21 @@ def test_the_voice_process_hears_a_calls_turn_on_its_own_worker():
         return got
 
     assert run(go()) == {"text": "16000 samples"}
+
+
+def test_a_steer_of_the_call_is_posted_in_its_chat_and_not_copied(dsn, team, quick):
+    async def go():
+        page = Page()
+        _, the = await a_call_of(dsn, team, page, Front([]), judged())
+        running = asyncio.create_task(the.run())
+        assert await wait_for(lambda: _async(page.posts == [call.JOIN_LINE]))
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, the.id, "message.steered", {"text": "Logan is running five minutes late."})
+        assert await wait_for(lambda: _async(len(page.posts) == 2))
+        the.leave("done")
+        await asyncio.wait_for(running, 10)
+        return page, await effects(dsn, the.id)
+
+    page, done = run(go())
+    assert page.posts[1] == "Logan is running five minutes late."
+    assert not any(e["type"] == "slack.send_message" for e in done)

@@ -39,10 +39,21 @@ CHROME_ARGS = (
     "--mute-audio",
     "--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets",
 )
-JOIN = (
-    'xpath=//button[.//span[text()="Join now" or text()="Ask to join" or text()="Ask to join anyway" or '
-    'text()="Join anyway" or text()="Join here too" or text()="Join the call now"]]'
-)
+# Meet's join buttons, the first shown wins. Never "Switch here", which
+# would take the call from another device of Valor's account.
+JOIN = ("Join now", "Ask to join", "Ask to join anyway", "Join anyway", "Join the call now", "Join here too")
+# A shown button whose words end with one of `labels` (an icon's name comes
+# first), clicked; else "Other ways to join" opened, for the next try.
+CLICK_JOIN = """(labels) => {
+    const shown = [...document.querySelectorAll('button')].filter((b) => b.getClientRects().length);
+    for (const label of labels) {
+        const button = shown.find((b) => b.innerText.trim().endsWith(label));
+        if (button) { button.click(); return label; }
+    }
+    const more = shown.find((b) => b.getAttribute('aria-label') === 'Other ways to join');
+    if (more && more.getAttribute('aria-expanded') !== 'true') more.click();
+    return null;
+}"""
 
 
 def script(port: int) -> str:
@@ -155,12 +166,18 @@ class Page:
         self.page = self._context.pages[0] if self._context.pages else await self._context.new_page()
         await self.page.goto(url, wait_until="domcontentloaded")
 
-    async def join(self, timeout_s: float = 60) -> None:
-        """Camera off, then the join button, whichever Meet shows."""
-        button = self.page.locator('button[aria-label="Turn off camera"]')
-        if await button.count():
-            await button.first.click()
-        await self.page.locator(JOIN).first.click(timeout=timeout_s * 1000)
+    async def join(self, timeout_s: float = 60) -> str:
+        """Camera off, then the join button, whichever Meet shows; the
+        button's label."""
+        camera = self.page.locator('button[aria-label="Turn off camera"]')
+        if await camera.count() and await camera.first.is_visible():
+            await camera.first.click()
+        for _ in range(int(timeout_s * 2)):
+            clicked = await self.page.evaluate(CLICK_JOIN, list(JOIN))
+            if clicked:
+                return clicked
+            await asyncio.sleep(0.5)
+        raise TimeoutError("Meet showed no join button")
 
     async def ready(self) -> None:
         """Once in the call: the payloads start reading it and open the chat."""

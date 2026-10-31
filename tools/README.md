@@ -14,18 +14,25 @@ Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and 
 
 - `push_branch.py`: `push_branch` (`act`) pushes one commit of a task's workspace to one branch of its origin, never with force, when requested; never to the task's target branch. `merge` (`act`) is the kernel's push of a passed candidate onto the target branch, performed only when the merge predicate holds; no turn is offered it. `push_branch` pushes to the task's `push_url` (else the origin URL recorded at start) and never carries a credential. `merge` is built from the task's Brief, pushes to the origin URL and target branch recorded there at start, from the kernel mirror with the GitHub token, whose own reach bounds which repositories it can write ([docs/machine.md](../docs/machine.md), Keychain). A performer's `usage` line is what a turn's Brief lists; `refuse` is checked at request and again before the intent.
 
+- `meet.py`: `meet.join` (`act`), offered to a group chat's session only: opens a Google Meet call's
+  session (`core/call.py`), on a new Meet (`gws meet spaces create`, open to anyone with its link) or
+  a given link, reports the link to the asking session, and starts the call's process
+  ([docs/bridges/meet.md](../docs/bridges/meet.md)).
+
 ## Workspace tools
 
 Installed into every turn's `bin/` (`core/workspace.py` `WORKSPACE_TOOLS`, before each turn).
 
 - `look` (`read`): a page's screenshot and DOM ([docs/browser.md](../docs/browser.md)).
-- `valor_record.py`, as `valor-record`: `chats`, `messages [CHAT] [--search TEXT]`, `tasks`, `task ID` read the turn's own project's record (messages and their bindings, tasks, effects), and `memory WORDS` searches its memory as recall reads it, from the kernel at `$VALOR_RECORD_URL` (`core/record.py`). Standard library and Python 3.9. A read; it writes nothing.
+- `valor_record.py`, as `valor-record`: `chats`, `messages [CHAT] [--search TEXT]`, `tasks`, `task ID`, `call CODE` (a Meet call's transcript) read the turn's own project's record (messages and their bindings, tasks, effects), and `memory WORDS` searches its memory as recall reads it, from the kernel at `$VALOR_RECORD_URL` (`core/record.py`). Standard library and Python 3.9. A read; it writes nothing.
 - `valor_read.py`, as `valor-telegram` and `valor-slack` (`read`): `read [CHAT] [--search TEXT]` reads or searches a chat's history through its running bridge, with Valor's own account. Standard library and Python 3.9, the turn's `python3`. No send: sends stay broker effects.
 
 ## Voice
 
 `voice.py`, the launchd job `com.valor.voice` (`python -m tools.voice run | fetch | --plist`), on `127.0.0.1:settings.voice_port` (8714). One process holds Parakeet for every bridge on the Mac, since it peaks near 1.7 GB resident.
 
+- `POST /hear`, a Meet call's turn as float32 samples at 16 kHz -> `{text}`: the same model on a
+  worker of its own, so a call is heard while a voice note transcribes (`core/call.py`).
 - `POST /transcribe {path}` -> `{text}`: Parakeet TDT 0.6B v3 (`settings.asr_model`, the model Handy runs) through onnx-asr, int8 on the CPU, with Silero VAD so any length is cut into segments; ffmpeg decodes any audio first. The bridges call it through `core.bridge.transcribe` for every `audio/*` attachment, waiting at most `TRANSCRIBE_TIMEOUT_S` (600 s).
 
 The engine is the function `listen`: another model is a setting (`VALOR_ASR_MODEL`), another engine is one function.
