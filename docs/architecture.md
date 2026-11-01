@@ -500,8 +500,8 @@ A bridge is I/O: it turns an inbound message into a request or a reply on a task
 chat session's sends on its medium. The kernel's loop is the
 one execution engine; delivery is keyed by transport, so an email thread is answered by email.
 The kernel side of the port is built (`core/intake.py`, `core/notices.py`, `core/bridge.py`): one
-`message.received` row per inbound message, bound by the kernel to start, steer, answer, feedback,
-stop, or none; reports owed by the fold, to sessions; and an outbox that hands each bridge the sends
+`message.received` row per inbound message, bound by the kernel to start, steer, stop, or none
+(answers and feedback reach a task through its chat session); reports owed by the fold, to sessions; and an outbox that hands each bridge the sends
 the broker released, all of them a chat session's. Telegram is built in `bridges/telegram/` ([bridges/telegram.md](bridges/telegram.md))
 email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `bridges/slack/`
 ([bridges/slack.md](bridges/slack.md)), and a local chat page in `bridges/local/`

@@ -56,7 +56,7 @@ Adapters behind `core/judgement.py`'s `JudgementPort` ([docs/judgement-layer.md]
 - Every tool declares one class per operation: `read`, `propose`, or `act`.
 - `read`: queries and fetches with no effect.
 - `propose`: workspace writes, branches, drafts, anything that can be withdrawn.
-- `act`: merge, send, pay, deploy. Performed by the broker when requested inside the task's ceiling, and reported to Tom.
+- `act`: merge, send, pay, deploy. Performed by the broker when requested inside the task's ceiling, and reported to the chat session the task reports to. Sends are offered only to a chat session's turn.
 - A tool that cannot say which class an operation is does not ship.
 
 ## Not here

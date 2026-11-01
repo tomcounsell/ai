@@ -52,7 +52,7 @@ item, and a ninety-day expiry.
 | `patch` | every finding from the join resolved, or the work stopped | working session, resumed | `candidate`, `asked`, `ended`, `idle`, `failed` | `checks`, `waiting`, `ended` |
 | `merge` | the delivery merged | kernel and broker | `merged`, `feedback`, `rebase` | `merged`, `patch`, `checks`, `ended` |
 | `merged` | the change is on the target branch | nothing | `feedback` | `patch` |
-| `ended` | Valor stopped the work, or finished it with nothing to merge; Tom has a report | nothing | `feedback` | `patch` |
+| `ended` | Valor stopped the work, or finished it with nothing to merge; its session has a report | nothing | `feedback` | `patch` |
 | `stopped` | nothing more happens | nothing, ever again | | none |
 
 "`plan` or `build`" means the critique count decides (see Loops). The working session is the task's
@@ -119,8 +119,8 @@ patch carrying every finding of the three branches together.
   finding and the word that the rounds are spent. In that round Valor decides, as the project
   manager, whether to patch once more (`done.md`) or stop (`stop.md`, a note to Tom), optionally
   after asking the advisor. When it stops, or that round's candidate does not pass either, the task
-  ends (`ended`, which runs nothing) and Tom gets one report of what was built, what did not pass,
-  and why it stopped; it asks for nothing, and feedback (by reply, or a chat session's `task.steer`)
+  ends (`ended`, which runs nothing) and its session gets one report of what was built, what did not pass,
+  and why it stopped; it asks for nothing, and feedback (a chat session's `task.steer`)
   opens a new loop window in `patch`.
   The decision is Valor's, not Tom's, under Tom's rulings of 2026-10-03 ("Valor decides who stops
   and who gets more budget") and 2026-10-09.
@@ -505,7 +505,8 @@ turn writes. A turn cannot request a merge, and its `push_branch` cannot target 
 
 After the merge the task is `merged`; a defect found in use comes back as
 `feedback.given` on the same task and goes to `patch` (Mission item 1, "resolving discovered defects"),
-by Tom's reply to its report or by a `task.steer` from the chat session it reports to.
+by a `task.steer` from the chat session it reports to (Tom's reply under its report reaches that session)
+or by `python -m core feedback`.
 After a merge, `python -m core status` reads what came after it
 (`core/outcomes.py`): the feedback given after it and before the next
 delivery, the `delivery.used` marks, the later merges of other tasks to the

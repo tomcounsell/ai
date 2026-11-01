@@ -29,9 +29,8 @@ Rules the kernel enforces:
 
 Starting a child, stopping, and feedback take one advisory lock per tree,
 on its root, before any task lock, so a child started during a stop is
-either seen by the stop's walk or refused. Binding Tom's reply to a task
-takes the same tree lock before the task's, since a reply can stop the task
-or give it feedback.
+either seen by the stop's walk or refused. Binding Tom's `stop` to a task
+takes the same tree lock before the task's, since it stops the task.
 
 **Design.** Decomposition cuts by outcome [13], one agent per leaf. Fan-out
 and depth are bounded by the leaf criterion (one session), never by a

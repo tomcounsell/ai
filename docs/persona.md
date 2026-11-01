@@ -424,7 +424,7 @@ The persona governs content; the broker governs departure.
 | Kind | Effect class | Who authorizes |
 |---|---|---|
 | A draft, a branch, a reply prepared for sending | `propose` | the grant |
-| A sent message or email, a push, a merge, a post | `act` | the task's ceiling; performed when requested, and reported to Tom |
+| A sent message or email, a push, a merge, a post | `act` | the task's ceiling (a send, a chat session's only); performed when requested, and reported to the chat session |
 
 The effect classes are the kernel's (README, "What corrigible means here";
 `docs/architecture.md`). In the current kernel the outbound actions are
