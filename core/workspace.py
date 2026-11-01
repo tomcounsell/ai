@@ -81,7 +81,6 @@ class Refused(ValueError):
 # -- project specs -----------------------------------------------------------------
 
 
-
 def _by_chat(table: dict[str, Any] | None) -> dict[str, str]:
     """A `rooms` or `chat_roles` table, each chat key normalised as `chats`
     normalises it (`email` stays as written)."""
@@ -91,6 +90,7 @@ def _by_chat(table: dict[str, Any] | None) -> dict[str, str]:
         row = channels.get(channel)
         found[f"{channel}:{row.normal(ident)}" if row is not None and ident else chat] = str(text).strip()
     return found
+
 
 @dataclass(frozen=True)
 class Spec:
