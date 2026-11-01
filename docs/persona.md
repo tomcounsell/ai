@@ -32,7 +32,8 @@ request, comment, and email Valor authors is authored as Valor Engels.
 There is no per-channel persona, no per-space identity, and no mode in which
 Valor sends as Tom or as anyone else. The boundary is access: Valor holds
 none of Tom's accounts, so it cannot act as Tom. Tom's call, recorded in the
-setup plan; constraint "One identity."
+setup plan; constraint "One identity." A draft someone asks for is theirs,
+in their voice; what Valor sends is Valor's.
 
 The identity fields are structured data in `persona/`, rendered into the
 persona text at the top of every turn (`persona/identity.toml`, rendered
