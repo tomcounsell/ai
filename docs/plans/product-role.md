@@ -1,15 +1,11 @@
 # Roles, and the product role's first room
 
-**Ask.** Tom, valor team chat, 2026-10-31/11-01 (#need-additional-hat): lock in
-"role" and "room" as defined terms, each naming "hat" as his word for the
-role-in-room. Add a "product" role: a professional product owner (JTBD, Hooked,
-second-mover + blue ocean, value/effort ratings, one ordered queue for bugs and
-features where raising one lowers another, nothing ready until scoped and its
-details decided, not a yes-man). The queue is a Google Sheet, standard drawn
-from Shape Up. The room approves the next ready item for build "like a PR
-review", by starting a thread in the sibling `<project>-dev` channel. Members:
-Tom adds them. First room: a private `#<project>-product` channel for one client
-project (named in the private spec, not here).
+**Ask.** Tom, valor team chat, #need-additional-hat, 2026-10-31/11-01: "role"
+and "room" as defined terms, each naming "hat"; a "product" role (his points go
+verbatim into its role file); the queue a Google Sheet from Shape Up; the room
+approves the next ready item "like a PR review" with a thread in the sibling
+`<project>-dev`; Tom adds members. First room: one client project's private
+product channel (named in the private spec).
 
 **Premise, checked.** A chat's purpose is its spec's `rooms` line
 (`intake.room`, rendered as `Room:` by `tasks.dispatch`). Eng vs team chat is
@@ -38,24 +34,12 @@ spec from the shared folder.
    filing issues are fine; engineering goes to the project's Eng chat; ported
    from old-system `config/personas/teammate.md`), `customer-service` (ported
    from its old file), `product` (below). `mentions` stays separate.
-4. **The product role** guidance: Tom's points; the Sheet standard; the
-   readiness review; sharing the Sheet with a member Tom adds (gws
-   `drive permissions create`, writer). **Sheet standard**: one Sheet per
-   product room, owned by valor@yuda.me, tab `Queue`, one row per item, row
-   order = rank: `rank`, `item`, `kind` (bug/feature), `job` (JTBD: when…,
-   I want…, so I can…), `hook` (trigger/action/reward/investment/none),
-   `problem`, `appetite` (small batch ≤2 wk / big batch ≤6 wk), `value` 1-5,
-   `effort` 1-5, `solution sketch`, `rabbit holes`, `no-gos`, `dependencies`
-   (each typed human / product item / engineering task, with its state),
-   `status` (raw → shaping → shaped → ready → approved → building → shipped,
-   or dropped), `issue`, `dev thread`, `updated`. Raising a row's rank moves
-   rows down and the room says which. **Readiness review** (guidance, not a
-   gate or state): `ready` only when problem, appetite, sketch, rabbit holes and
-   no-gos are written and every blocking dependency is cleared; then the room
-   approves the top ready row. **Where state comes from**: an approved task
-   reports to the dev chat, not here, so on every queue review the room reads
-   each approved/building row's linked issue, PR and dev thread (`gh`,
-   `valor-slack read`) and moves `building`/`shipped` from them.
+4. **The product role** (`roles/product.md`): Tom's points; the Sheet standard
+   (one Sheet per product room owned by valor@yuda.me, row order = rank, columns
+   from Shape Up plus job, hook, value, effort, status, issue, dev thread); the
+   readiness review (guidance, not a gate or state); sharing the Sheet with a
+   member Tom adds; build state read from each approved row's issue, PR and dev
+   thread on every queue review, since the task reports to the dev chat.
 5. **Handoff: `task.start` takes `"in": "<chat>"`**, a chat of the session's own
    spec, so one this Mac owns (one spec, one machine). `perform` resolves it;
    a chat the spec does not list raises `ValueError` with the reason (no new
@@ -69,7 +53,9 @@ spec from the shared folder.
    the approval as a new top-level message in the dev channel, then starts the
    task with `in` the dev chat and the instruction holding the row, the issue
    and that thread's `ts`; `converse.md` says a task started from another room
-   is reported in the thread its instruction names. One path, extended.
+   is reported in the thread its instruction names, and that a session whose
+   opening carries no new message posts nothing. The dev chat's id sits in the
+   product room's `rooms` line beside the Sheet URL. One path, extended.
 6. **Build stage, reversible live objects only** (as Valor): create the private
    channel, invite Tom only, set its description; create the Sheet, share with
    Tom. No spec is edited before merge.
