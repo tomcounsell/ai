@@ -9,74 +9,95 @@ end of November (rule 5).
 
 ## What is built
 
-1. **`hours` in the record** (`core/record.py`). For one project spec, using
-   the existing `reach` (the project's tasks and chat sessions, tasks of
-   other projects never included): every turn's `[turn.started.at,
-   turn.ended.at]` (a turn reaped or never ended runs to its `turn.reaped`
-   row, else is left out). Rules, in order: union overlapping turns; join
-   blocks whose gap is 20 minutes or less; split at Asia/Bangkok midnight;
-   round each block's start down and end up to the 6-minute grid (0.1h);
-   a block under 12 minutes widens its end to 12. Each block carries its
-   tasks' ids and a title: the first line of the longest-running task's
-   instruction, cut to 60 characters, plus "(+N more)" when there are
-   others. No model call: the instruction is already a plain sentence.
-   Exposed as `valor-record hours [--since DATE] [--until DATE] [--json]`
-   (`tools/valor_record.py`), which a turn reads for its own project.
+1. **`hours` in the record** (`core/record.py`), for one project spec over a
+   range of whole Asia/Bangkok days, using the existing `reach` (the
+   project's tasks and chat sessions; other projects' tasks never). Input:
+   every turn overlapping the range, `[turn.started.at, end]`. `end` is
+   `turn.ended.at`, except a turn ended `interrupted` with reason `kernel
+   restarted` (`core/serve.py`), stamped at the restart, not the death: it
+   ends at the last row carrying its `turn_id` before that `turn.ended`
+   (its last `gateway.*` call), or is dropped if there is none. Rules, in
+   order: union overlapping turns; join gaps of 20 minutes or less; split
+   at Bangkok midnight and keep the days in the range; round start down and
+   end up to the 6-minute grid (0.1h); a block under 12 minutes widens its
+   end to 12, or its start backwards when its end is a midnight split.
+   Each block carries its task ids. `valor-record hours [--since D]
+   [--until D] [--json]` (`tools/valor_record.py`) prints the blocks.
 2. **Routine `hours`** (`routines/hours/`: `routine.toml`, `runner.py`),
    daily at 02:00, installed on every Mac; ceiling `act`. For each
-   `Spec.here()` whose spec has `calendar = {id = "...", since = DATE}`:
-   window = the last 7 days, never before `since`. It lists the calendar's
-   events in the window carrying the private extended property
-   `valor_hours=1`, diffs them against the record's blocks by (start, end):
-   a match with a different title is patched, a tagged event matching no
-   block is deleted, a missing block is inserted with the tag. Untagged (hand-made) events are never touched. Writes go
-   through `gws calendar events …` as valor@yuda.me. Each write is a
-   `calendar.written` row on the run (project, op, start, end, event id);
-   a gws failure is a `calendar.unwritten` row and the other projects go on.
-3. **`Spec.calendar`** (`core/workspace.py`): an optional table, `id` and
+   `Spec.here()` with `calendar = {id = "...", since = DATE}`, the window
+   is whole Bangkok days from max(`since`, today − 7) to now. It lists the
+   calendar's events starting in the window that carry the private
+   extended property `valor_hours=1`, and for each block of `hours` over
+   the window: a tagged event overlapping it is patched to its start and
+   end, keeping its title; with none, an event is inserted with the tag.
+   A tagged event overlapping no block is deleted. Untagged (hand-made)
+   events are never touched. Events have no attendees and are written with
+   `sendUpdates=none`, so no Google mail leaves. gws is run by its path,
+   `settings.gws` (`VALOR_GWS`, default `/opt/homebrew/bin/gws`), since
+   `launchd_path()` does not include it. Each write is a `calendar.written`
+   row on the run (project, op, start, end, event id); a failed write is
+   `calendar.unwritten`, and the other blocks and projects go on.
+3. **Titles, client-readable, written once per block** (Tom approved this):
+   a new block's title comes from the `light` seat (`claude-haiku-5-5`),
+   one `claude -p` through the kernel's `Gateway` on a grant for the run,
+   as `call.Front` does, so it is metered on the run. Input: the block's
+   tasks' delivered results (`turn.ended` result text, in Valor's own
+   words), not their instructions, which for a chat session open with the
+   chat id. Output: under 60 characters, the value delivered, no tooling
+   words. Kept on re-runs (patches keep the title). A failed title call
+   skips that block's insert, as `calendar.unwritten`; the next run retries.
+4. **`Spec.calendar`** (`core/workspace.py`): an optional table, `id` and
    `since`. The public repo names no client and no calendar id.
 
-## Private side (rollout, not in the diff)
+## Rollout, in this order
 
-- `calendar = {id, since = 2026-11-01}` in the cyndra, psyoptimal and
-  mastery specs in `~/Desktop/Valor/projects/`; ids from
-  `calendar_config.json`. A new "Mastery" calendar on valor@yuda.me,
-  shared with tom@yuda.me (make changes), as Cyndra's and PsyOPTIMAL's are.
-- The three work-vault invoice skills' Valor rows read "the client's
-  calendar on valor@yuda.me, events tagged `valor_hours`, hours = duration"
-  in place of the CSV Tom prompts for; committed in the vault.
-- Plist installed on the Bald (cyndra) and the Captain (psyoptimal,
-  mastery) per `docs/rollout.md`; one manual run there, then a read of each
-  calendar to check November's events against `valor-record hours`.
+1. The merge lands; every Mac updates (`docs/rollout.md`), because
+   `Spec.from_dict` refuses an unknown key and an old Mac would drop a spec
+   carrying `calendar`, unbinding its chats.
+2. Only then: `calendar = {id, since = 2026-11-01}` in the cyndra,
+   psyoptimal and mastery specs in `~/Desktop/Valor/projects/` (ids from
+   `calendar_config.json`); a new "Mastery" calendar on valor@yuda.me,
+   shared with tom@yuda.me (make changes). Each spec loaded with the loader.
+3. Plist installed on the Bald (cyndra) and the Captain (psyoptimal,
+   mastery); the live check is `launchctl kickstart` of the installed job,
+   then a read of each calendar against `valor-record hours` for November.
+4. The three work-vault invoice skills' Valor rows read the client's
+   calendar on valor@yuda.me, events tagged `valor_hours`, hours =
+   duration, in place of the CSV Tom prompts for; committed in the vault.
 
 ## Out of scope
 
-October: no events written, edited or removed on any calendar (Tom: the
-invoices are final). SATSOL, Fuse and every other project. Tom's or
-Charlie's hours. Billing rates, invoice rendering, Mercury.
+October: nothing written, edited or removed on any calendar (Tom: the
+invoices are final). SATSOL, Fuse and other projects. Tom's or Charlie's
+hours. Rates, rendering, Mercury.
 
-## Tests (real Postgres; `gws` is a stub executable on `PATH` that keeps
-events in a JSON file, as Telegram is a local emulator)
+## Tests (real Postgres; a stub `gws` at `VALOR_GWS` keeps events in a
+JSON file; titles from the local scripted upstream)
 
-- Hours: two overlapping turns count once; a 20-minute gap joins, 21 splits;
-  a block across Bangkok midnight becomes two; rounding to 0.1h and the
-  0.2h floor; a reaped turn ends at its reap; a task of another project and
-  a chat session outside the project's chats are excluded; a project chat
-  session's turns are included; same rows twice give the same blocks.
-- Routine: first run inserts tagged events; a re-run writes nothing; a
-  changed title patches in place; a block that vanished deletes only its
-  tagged event; a hand-made overlapping event is untouched; nothing before
-  `since`; a spec without `calendar`, or placed on another Mac, is skipped;
-  a gws failure on one project leaves a `calendar.unwritten` row and the
-  next project still written.
-- Read-only check before rollout: `valor-record hours` for October on the
-  Bald and the Captain against the hand-built October events' totals, as
-  numbers in the delivery; nothing written.
+- Hours: overlapping turns count once; a 20-minute gap joins, 21 splits; a
+  block across midnight becomes two; 0.1h rounding; the 12-minute floor; a
+  23:55–24:00 block widens backwards, not into the next day; a turn ended
+  by a kernel restart ends at its last call, and with no call is dropped;
+  another project's task and a chat outside the project's chats are
+  excluded; a project chat session's turns are included; same rows twice,
+  same blocks.
+- Routine: first run inserts tagged events with no attendees and
+  `sendUpdates=none`; a re-run writes nothing; a block that grew patches
+  its event's times and keeps its title; a vanished block deletes only its
+  tagged event; a hand-made overlapping event is untouched; a turn spanning
+  the window's start yields no second event; nothing before `since`; a
+  spec without `calendar`, or on another Mac, is skipped; a chat-session
+  block's title comes from its results, not its chat id; a gws failure on
+  one project leaves `calendar.unwritten` and the next project is written.
+- Read-only, before step 2: `valor-record hours` for October on the Bald
+  and the Captain against the hand-built October events' totals, reported
+  as numbers; nothing written.
 
 ## Docs
 
-`docs/routines.md` and `routines/README.md` (the `hours` runner),
-`tools/README.md` (`hours`), `docs/performers.md` (Google Calendar writes
-as valor@yuda.me), `projects/example.toml` (a made-up `calendar` table).
+`docs/routines.md`, `routines/README.md`, `tools/README.md`,
+`docs/performers.md` (Calendar writes as valor@yuda.me, no invites),
+`projects/example.toml` (a made-up `calendar` table).
 
 No governance is added: no check, gate or approval step.
