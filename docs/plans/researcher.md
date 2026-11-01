@@ -83,7 +83,8 @@ its own cost).
 
 - `tests/test_research.py`: the ported stand-in checks (call order and
   arguments into Cuttlefish, report layout, a missing key skips its tool and
-  is named, a key in the environment wins over `keys.env`).
+  is named, each key from Valor's vault over the
+  environment, the environment's only when `op read` fails).
 - `tests/test_orchestration.py`: `valor:researcher`'s prompt names its
   runner under `${CLAUDE_PLUGIN_ROOT}` and that file exists; `keys.env`
   holds the six key names, all `op://m-valor/` references.
