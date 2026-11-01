@@ -31,7 +31,7 @@ or the error goes on, so the task's record says why. The resident kernel
 steps it again itself once `retry_due` says so, and the next turn opens
 with the reason (`session.next_prompt`); at `STEP_TRIES` failures in a row
 of the same state and check, `task.ended` is written with the last one and
-Tom gets a report of what failed (`notices.owe`), except for docs, which
+its session gets a report of what failed (`notices.owe`), except for docs, which
 decide `no_change` with the reason as a finding and never hold the merge.
 
 A task's services (its Postgres, its Redis) are held under the session lock

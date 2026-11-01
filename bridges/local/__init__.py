@@ -5,8 +5,9 @@ The page (`chat.html`, `chat.js`, and the vendored renderer and
 sanitizer in `vendor/`) polls `GET /log` and posts Tom's
 messages to `POST /send`; both carry the token from the mode-600 file
 `settings.local_tokenfile` in the `X-Valor-Token` header. The ledger is
-the platform: a notice or a requested `local.send_message` is shown once it
-has a `notice.sent` or `effect.outcome` row, so sending is a ledger write
+the platform: a requested `local.send_message` is shown once it has an
+`effect.outcome` row (and a kernel notice from before 2026-11-01 its
+`notice.sent` row), so sending is a ledger write
 and `lookup` returns what `perform` returns. Governed by
 `docs/bridges/local.md`.
 """
@@ -35,8 +36,8 @@ TOKEN_HEADER = "X-Valor-Token"
 # The page's Markdown renderer and sanitizer, pinned in docs/bridges/local.md.
 VENDORED = ("marked.umd.js", "purify.min.js")
 
-# The whole local chat, oldest first: Tom's messages, and the notices and
-# sends shown on the page, with their text.
+# The whole local chat, oldest first: Tom's messages, and the sends (and
+# the kernel's notices before 2026-11-01) shown on the page, with their text.
 _SHOWN = '[{"channel": "local", "chat_id": "local"}]'
 LOG_SQL = f"""
 SELECT r.id, r.payload->>'message_id', 'tom', r.payload->>'text', r.payload->>'reply_to'
@@ -116,8 +117,6 @@ class LocalBridge:
             async for item in outbox:
                 if isinstance(item, bridge.Release):
                     await outbox.perform(item)
-                elif isinstance(item, bridge.NoticeDue):
-                    await outbox.sent(item, _sent(item.notice_id)["sent"])
         finally:
             await self.close()
 

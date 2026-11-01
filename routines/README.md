@@ -20,7 +20,7 @@ Governed by [docs/routines.md](../docs/routines.md); launchd on the machine is [
 
 - A routine's ceiling is set when its objective is committed and never widens at run time.
 - Most routines are `read` (sweeps, reports) or `propose` (drafts, branches, proposed memory). `conditions` is `propose`: it reads businesses' data and drafts agenda items for the next strategy meeting, and sends Tom nothing.
-- An `act` inside a routine is performed like any other `act`: when requested inside the routine task's ceiling, with a report to Tom. The expiry sweep's deletion merge lands as any merge does, when its delivery passes and the merge predicate holds.
+- An `act` inside a routine is performed like any other `act`: when requested inside the routine task's ceiling. A routine's turn is offered no send (only a chat session sends); its result is a quiet report held in the record, unless its toml sets `wakes`. The expiry sweep's deletion merge lands as any merge does, when its delivery passes and the merge predicate holds.
 - Spend is metered on each run's task and the routine's spending over its period is reported; money never stops a routine.
 
 ## Not here

@@ -475,9 +475,7 @@ def test_a_canvas_write_needs_markdown_and_owes_no_report_to_its_own_chat(dsn, d
         async with await db.connect(dsn) as conn:
             empty = await declared.refuse(conn, broker.Action("slack.write_canvas", chat, {"markdown": " "}))
             fine = await declared.refuse(conn, broker.Action("slack.write_canvas", chat, {"markdown": "# x"}))
-            owed = await notices.report(
-                conn, task, {**effect, "effect_id": ledger.new_id()}, {"canvas_id": "F"}
-            )
+            owed = await notices.report(conn, task, {**effect, "effect_id": ledger.new_id()})
         return empty, fine, owed
 
     empty, fine, owed = run(go())

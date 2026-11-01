@@ -12,8 +12,9 @@ root builds a `broker.Performers` for each task from its Brief and passes it
 to every broker call, so one task's performer never acts for another.
 
 A bridge's send types (`telegram.send_message`, `email.send`, `slack.send_message`) are declared in
-`core/bridge.py`; the kernel sizes each file a send names in the task's
-workspace without reading it and refuses an impossible send at request time.
+`core/bridge.py`; only a chat session's turn is offered them (`core/__main__.py` `_performers`,
+guard `send.sessions_only`). The kernel sizes each file a send names in the session's workspace,
+or that of a task reporting to it, without reading it and refuses an impossible send at request time.
 The bridge's `perform` reads each file once and refuses one whose sha256
 differs. Its `lookup` returns nothing only when the platform can no longer
 record the send, and raises `Unknown` while it still might.
@@ -75,7 +76,7 @@ known yet.
 
 | Account | Mac | What Valor does through it | Through the broker | How it reaches the ledger |
 |---|---|---|---|---|
-| GitHub, `valorengels`, by `GITHUB_PUSH_TOKEN` in `github-keys` | this install | `merge` of a passed candidate onto the Brief's URL and branch | yes | `effect.intent` then `effect.outcome`; a `report` notice to Tom |
+| GitHub, `valorengels`, by `GITHUB_PUSH_TOKEN` in `github-keys` | this install | `merge` of a passed candidate onto the Brief's URL and branch | yes | `effect.intent` then `effect.outcome`; a `report` to its session |
 | GitHub, `valorengels`, by `GITHUB_PUSH_TOKEN` in `github-keys` | this install | read: the `conditions` routine fetches each business's repository, private ones included, to read `decisions/conditions.toml` ([routines.md](routines.md), Watched conditions) | no; a read under the routine's `propose` ceiling | one `repository.fetched` row per repository, naming the key, never its value |
 | Telegram, Valor's user account, by `telegram-keys` and `telegram.session` | this install | `telegram.send_message`; receiving, which marks messages read | sends yes; receive no | a send is `effect.held`, `release.requested`, and the bridge's outcome; each message taken is `message.received`; marking it read has no row |
 | Gmail, Valor's mailbox, by `mail-keys` | this install | `email.send` over SMTP; receiving over IMAP, which sets `\Seen` | sends yes; receive no | as Telegram's; setting `\Seen` has no row |
@@ -87,7 +88,7 @@ known yet.
 | Valor's own `gh` login, git credential helper, SSH agent, and `sentry-cli` auth | this install | whatever the account allows, from a turn: pushes to the task's origin, pull requests, issue and Sentry reads | no | none beyond the turn's own transcript. **Gap** |
 | Google Meet, valor@yuda.me, by the call profile `~/Library/Application Support/Valor/meet-chrome` ([bridges/meet.md](bridges/meet.md)) | each Mac where Tom signed the profile in | `meet.say` and `meet.send_message` in a call a group chat asked for, performed by the call's own process; joining and hearing the call | says and posts yes; joining and hearing no | a say or post as Telegram's send, released by the call's process; what it heard is `call.heard` and `call.participant`, its start and end `call.started` and `call.ended` |
 | Google Workspace, valor@yuda.me, by `gws`'s refresh token in `~/.config/gws/credentials.json` ([machine.md](machine.md)) | this install | whatever the account allows, from a turn: Gmail reads, drafts and sends, Calendar, Drive, Docs, Sheets, Slides, Tasks; and `meet.join`'s new Meet (`gws meet spaces create`, `tools/meet.py`) | a turn's use no; `meet.join` yes | a turn's use none beyond its own transcript. **Gap**; `meet.join` is `effect.intent` then `effect.outcome` |
-| Mercury, Yudame's company account, by the API token in 1Password (`m-valor`, item `Mercury API Token`), read through `op` at use time ([machine.md](machine.md), Keychain) | the Cowboy, where the `valor` project is placed and whose IP the token's allowlist names | `mercury-invoicing`: customers and invoices created with `DontSend`, invoices, customers, PDFs and account transactions read; the notice and reminders it prepares leave as `email.send` | no; the notice and reminders yes | the sends as Gmail's; the Mercury calls none beyond the turn's own transcript. **Gap** |
+| Mercury, Yudame's company account, by the API token in 1Password (`m-valor`, item `Mercury API Token`), read through `op` at use time ([machine.md](machine.md), Keychain) | the Cowboy, where the `valor` project is placed and whose IP the token's allowlist names | `mercury-invoicing`: customers and invoices created with `DontSend`, invoices, customers, PDFs and account transactions read; the notice and reminders it prepares leave as a chat session's `email.send` (a task or the `invoices` run drafts them for its session) | no; the notice and reminders yes | the sends as Gmail's; the Mercury calls none beyond the turn's own transcript. **Gap** |
 | Any other account logged in on the Mac, in the login keychain or a browser session | this install | whatever the account allows, from a turn | no | none beyond the turn's own transcript. **Gap** |
 | Stripe | per business, not yet granted | | | |
 | Google Analytics | per business, not yet granted | | | |

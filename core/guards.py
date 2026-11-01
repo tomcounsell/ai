@@ -2,8 +2,9 @@
 incident it prevents, the mission item it serves, and a ninety-day expiry.
 
 The four granted with the pipeline on 2026-10-01, and the web guard granted on
-2026-10-16 (docs/plans/orchestration.md), and the update room granted on
-2026-10-20 (docs/plans/update.md), are seeded by `db.migrate` on the
+2026-10-16 (docs/plans/orchestration.md), the update room granted on
+2026-10-20 (docs/plans/update.md), and the session-only send granted on
+2026-11-01 (docs/plans/one-voice.md), are seeded by `db.migrate` on the
 `guards` stream, once each. This module records; the expiry routine (`core/routines.py`) reads the
 rows and proposes the deletion of what is due.
 """
@@ -129,6 +130,30 @@ SEEDED: tuple[dict[str, Any], ...] = (
         # The firing fold reads only pipeline verdict rows (`machine.VERDICT_ROWS`),
         # and a refused `/update` is an ordinary message: a row of its own would be
         # code for no use.
+        "firing_record": False,
+    },
+    {
+        "guard_id": "send.sessions_only",
+        "name": (
+            "only a chat session's turn is offered or may request a send or canvas write; any other task "
+            "reports to its session (core/__main__.py _performers, core/notices.py)"
+        ),
+        "incident": (
+            "2026-10-31: the nightly Sentry routine's report reached Tom's Slack DM as kernel text no "
+            "session wrote; his two questions in its thread were bound as feedback and the routine re-sent "
+            "its report twice, unanswered"
+        ),
+        "mission_items": [6],
+        "source": "docs/plans/one-voice.md, Grant",
+        "granted_at": "2026-11-01",
+        "expires": "2027-01-30",
+        "note": (
+            'Tom, 2026-11-01: "No routine or system should be impersonating you." "How can I trust '
+            "anything coming from you if something else might be able to speak for you without your "
+            'permission." Confirmed with a :+1: at 04:34 UTC on the design post.'
+        ),
+        "via": "docs/plans/one-voice.md, Grant",
+        # A task's turn is never offered a send, so there is nothing to refuse and no firing.
         "firing_record": False,
     },
 )

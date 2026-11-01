@@ -60,7 +60,7 @@ outside the model is AI Control [4].
 | Review and test checks | a git worktree of the commit from the kernel mirror (`checks.worktree`) | in use |
 | Workspace services | a Postgres cluster (and Redis when asked) per task, scram auth, run under a service sandbox | in use |
 | Broker performers | Python classes run in the kernel process; `push_branch` and `merge` over git | in use |
-| Reports to Tom | `report` and `delivered` notices over the bridges, and `python -m core status` | in use |
+| Reports to Tom | reports (`child.reported`) to a chat session, which tells its chat; and `python -m core status` | in use |
 | Bridges | Telegram, email, Slack, and local chat modules over the port in `core/bridge.py` | the port in use; Telegram on Telethon, built; email in use (`imaplib`, `smtplib`); Slack on `slack-sdk`, built; local chat in use (`aiohttp`) |
 | Scheduling | launchd: the kernel's LaunchAgent, the email, Slack, and local bridges', and the backup job; routines | in use |
 | Secrets | kernel-held secrets (the kernel databases' passwords, the judgement keys, the OpenAI key, the Telegram bridge's keys and session, the Slack tokens, the mail credentials, the local chat's token) in the kernel key directory, durable copy of the keys in the vault | in use |
@@ -101,7 +101,7 @@ port's input needs validation the dataclasses cannot give without hand code.
 
 `python -m core` is the composition root. `python -m core serve` is the
 resident kernel, kept alive by launchd: it binds what the bridges record,
-writes the notices Tom is owed, and schedules every task's turns, up to
+writes the reports sessions are owed, and schedules every task's turns, up to
 `max_turns` at once, waking on each ledger notification. The other commands
 (`start`, `run`, `answer`, `feedback`, `stop`,
 `status`, `ledger`, `correct`) are one short process each, and `run` steps

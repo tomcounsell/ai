@@ -11,7 +11,7 @@ and documents only what is particular to email.
 
 **Status.** The port is built: `core/bridge.py` (the port, the declared
 send types, their limits, and the outbox), `core/intake.py` (the record
-and binding), and `core/notices.py` (operator notices), run by the
+and binding), and `core/notices.py` (reports to sessions), run by the
 resident kernel, `python -m core serve`. The Telegram bridge is built in
 `bridges/telegram/`, run by `python -m bridges.telegram run`; it is live
 only during Tom's test windows. Its tests run over the real port and the
@@ -27,7 +27,7 @@ the bridge's code does.
 |---|---|
 | Receiving Tom's messages anywhere, any time | Mission item 1 (Tom gives work in conversation and never coordinates the gaps) |
 | Questions, deliveries, and reports reaching Tom where he already is | Mission item 6 (attention spent as carefully as money) |
-| Replies bound to the task they answer, by structure | Constraint "Reliable stop, recovery, and correction": corrections and feedback carry provenance |
+| Tom's messages bound to his chat's session, and his `stop` to what it replies under, by structure | Constraint "Reliable stop, recovery, and correction": corrections and feedback carry provenance |
 | Every send an `act` effect released by the broker | Constraint "Bounded authority, metered spending"; effect classes [11] |
 | Idempotent receipt and send, acknowledged only after the ledger commits | Constraint "Reliable stop, recovery, and correction": stop and restart lose nothing |
 | Inbound text treated as data, never as authority | Retrieved content can act as instructions [7]; the kernel decides what a thing may do |
@@ -127,8 +127,8 @@ channel's bridge process, not in the kernel's.
 
 The outbox is a query over the ledger, not a separate queue: every
 `release.requested` row whose `owner` is the bridge's channel and whose
-effect has no intent, outcome, or `effect.refused`, then every
-`notice.requested` with no `notice.sent`.
+effect has no intent, outcome, or `effect.refused`, then each reaction
+due.
 
 The broker writes `release.requested` with the send's `effect.held` row,
 when the request passes its checks. The bridge listens on a Postgres notification channel
@@ -150,34 +150,27 @@ included. The dashboard's Services row and every update's report read
 that name (`rollout.services`): the lock connection exists from start,
 before the bridge connects, so it says only that the process runs.
 
-### Operator notices
+### Reports, and one voice
 
-Some messages are the kernel speaking to Tom about his own work: a question a
-turn asked, a delivery that needs him, a report of an `act` that left, a failed workspace, a message that was not acted on. These are operator notices.
+Only a chat session speaks as Valor (Tom's grant of 2026-11-01,
+docs/plans/one-voice.md): only a chat session's turn is offered the send
+types, and the kernel posts nothing itself. What the kernel or a task has
+to say (a question, an end, a merge, a failed workspace, the push
+credential, a rollout, a message that could not be bound, a send in doubt)
+is a report, one `child.reported` row on the session that hears it
+(`core/notices.py`), which tells its chat in its own words or says nothing.
 
 Every task reports to a Valor session (next section): a task a chat
 session started reports to that session, in a team chat or in Tom's own
 chat, and a root task that is no session (from the CLI, a routine, or his
 email) reports to the operator chat's session, started for it when none
-is open, except where the operator chat is one of Tom's DMs and no spec
-placed on this Mac lists it: there it has no session, since that Mac's
-bridge never receives his replies, and its notices go to the DM directly.
-The kinds that stay Tom's go to him directly: the push credential
-request, a binding notice, and a rollout's. Those, and any notice with no
-session to take it, go to the chat where Tom started the work, when that
-is his own chat (a session's own chat, or its child's session's), and
-otherwise to his operator chat, which is fixed in settings
-(`notices.home`). No turn, task, or payload names the recipient. The kernel writes `notice.requested` with the text and the record it
-concerns (`question_id`, `task.delivered` row, `effect_id`); the bridge's
-outbox sends it and writes `notice.sent` with the platform's `message_id`.
-That `message_id` is what lets Tom's reply bind to the record (next section).
-
-Notices are how the kernel speaks to Tom, so they are not requested as
-effects (Tom, 2026-10-01). The README's effect table names "send" as
-`act`; a notice to Tom's own chat is the one send outside it. Every other message, including a reply in a group where Tom is one
-member, is an `act` effect. Each notice is also an attention item: the
-Evidence section counts "decisions escalated to Tom per finished task", and
-`notice.sent` rows are where that count starts.
+is open (`intake.operator_session`). Where the operator chat is one of
+Tom's DMs that no spec placed on this Mac lists, it has no session here,
+and a report with no session stays on its reporter, quiet. A routine's
+result is quiet: it wakes no turn and is shown at the session's next one
+as held in the record. No turn, task, or payload names the recipient.
+Each question a session puts to Tom is an attention item: the Evidence
+section counts "decisions escalated to Tom per finished task".
 
 ### Reactions
 
@@ -199,7 +192,7 @@ effects it requested and the tool calls in its transcript, read as `task`,
 `schedule`, or `send`), and whether it sent text: a plain yes answered by
 👍 alone, 🔍 after a web search, 🫡 for work handed to a task. A turn that
 ended in an error leaves a `stalled` reaction, which the next turn's done
-replaces. A message that starts a task, and Tom's reply to finished work,
+replaces. A message that starts a task, and one that could not be bound,
 owe their done at once; a `stop` gets 👌. An abstain, a failed judgement,
 or a stopped task (which cannot be billed) gives 📝, as does a done the
 chat refuses. Both questions pick from one palette of about forty emoji,
@@ -212,7 +205,7 @@ on the first reaction) is sent as `ReactionEmoji`; any other (🔍 🧐 📤 �
 Telegram's search gives for the glyph (`SearchCustomEmojiRequest`, logged
 and kept), which needs the account's Premium (logged on connect). Setting
 the account's list replaces its earlier reaction, so the message shows one.
-Like a notice, a reaction is not an effect: no approval, no report. The
+A reaction is not an effect: no approval, no report. The
 session reads the reaction beside each message (`intake.chat_line`), and
 what set it.
 
@@ -323,12 +316,11 @@ two files in the key directory:
 | File | Holds | When it is unreadable |
 |---|---|---|
 | `telegram-seen.json` | For each owned chat, the newest message id its last completed gap-fill pass saw | Set aside (also when a value is not a whole number) as `telegram-seen.json.unreadable`; each chat's next pass starts at its lowest id in the ledger (`intake.lowest`), so nothing is missed and the receipt index drops what is already recorded |
-| `telegram-sends.json` | For each send in flight (an effect with an intent and no outcome, or a notice not yet marked sent), the chat's newest message id before its first message | Set aside as `telegram-sends.json.unreadable`; a send in flight with no entry stays in doubt, because Telegram's history cannot tell it from an earlier identical message of the account's own; a notice with no entry is looked up over the whole chat, since its text carries its own id |
+| `telegram-sends.json` | For each send in flight (an effect with an intent and no outcome), the chat's newest message id before its first message | Set aside as `telegram-sends.json.unreadable`; a send in flight with no entry stays in doubt, because Telegram's history cannot tell it from an earlier identical message of the account's own |
 
 Each is written whole to a temporary file, flushed to disk, renamed into
 place, and the directory flushed. An entry in `telegram-sends.json` is
-dropped once the ledger settles its send: an `effect.outcome` for an
-effect, `notice.sent` for a notice.
+dropped once the ledger settles its send, with its `effect.outcome`.
 
 ## Reading history for a turn
 
@@ -350,39 +342,34 @@ read, and nothing is recorded.
 None of this runs in the bridge. It is described here because it is what the
 bridge's records feed, and the bridge's fields are shaped for it.
 
-### Bound replies: decided by the kernel
+### Replies: decided by the kernel
 
-A message from Tom's verified `sender_id` that replies to a notice binds
-deterministically to the record the notice carried:
+In Tom's own chat every message of his from his verified `sender_id`
+binds to the chat's session, a reply under any post included (Tom's grant
+of 2026-11-01: his questions in a routine report's thread had been bound
+as feedback and never answered). A reply under one of Valor's posts
+carries the post (`replying_to`: its text, and its task when that is no
+chat session); the session reads it quoted under the message, and that
+task then reports to the session (`tasks.reporting`), so the session
+answers it (`task.answer`, `question.answered`) or steers it
+(`task.steer`, `feedback.given` on finished work).
 
-| Tom replies to | Becomes | Ledger row |
-|---|---|---|
-| A question notice | His answer to that question | `question.answered` |
-| A delivery notice, or a merge's report | Feedback on that delivery, which puts the task back to work | `feedback.given` |
-| Any notice of a task, with exactly `stop` | Stop of the task and every task under it | `task.stopped`, one per task |
+`question.answered` and `feedback.given` carry `provenance` with `by`,
+`via`, `at`, and `role_played`. A stand-in speaking for Tom does so through
+the command line with `--role-played`, never through Tom's account. The
+demonstration's fifth finding is why both fields exist: rows 177 and 207
+both read `"by": "tom"` and 207 was role-played (rebuild-demonstration.md,
+Kernel findings, item 5).
 
-`question.answered` and `feedback.given` already exist and already carry
-`provenance` with `by`, `via`, `at`, and `role_played`. A bridge-delivered
-reply records `by` as Tom, `via` as `telegram`, and `role_played: false`. A
-stand-in speaking for Tom does so through the command line with
-`--role-played`, never through Tom's account. The demonstration's fifth
-finding is why both fields exist: rows 177 and 207 both read `"by": "tom"`
-and 207 was role-played (rebuild-demonstration.md, Kernel findings, item 5).
-
-Stop binds by structure, a verified sender replying to a known message
-with a fixed token, because it decides what may happen. In Tom's own chat
-an exact `stop` from Tom, top level or in reply to the session's own post,
-stops at once every open task that reports to the session, and reaches
-the session as a steer so it knows; it never stops the session. A team
-chat's `stop` is a message to its session like any other. A classifier
-decides what a thing is; it never decides what a thing may do. A reply
-near `stop` that is not it is told "Not a stop; reply `stop`. Your message
-steers the task." and steers. A notice about how a message bound goes in
-reply to it only in Tom's own chat (his DM on that channel, or the operator
-chat); about a message anywhere else, such as a project group, it goes to
-the operator channel and chat, so kernel text never reaches the other
-people there. How an act leaves belongs to
-[architecture.md](../architecture.md).
+Stop binds by structure, a verified sender with a fixed token, because it
+decides what may happen. In Tom's own chat an exact `stop` from Tom stops
+at once the task whose post it replies under, else every open task that
+reports to the session, and reaches the session as a steer so it knows; it
+never stops the session. A team chat's `stop` is a message to its session
+like any other. A classifier decides what a thing is; it never decides
+what a thing may do. A message whose binding fails is reported to the
+session that would have had it (`notices.request`, kind `binding`). How an
+act leaves belongs to [architecture.md](../architecture.md).
 
 ### Chat sessions: one per chat, every message a steer
 
@@ -450,19 +437,17 @@ and promises, quotes the chat's human messages verbatim, newest first,
 and ends with the recent tail; an email thread's also carries its opening
 forward, a Telegram or Slack chat's does not (`skills/sdlc/compact.md`,
 docs/harnesses.md). A compacted message is still in the chat
-(`valor-telegram read`, `valor-slack read`) and in the ledger. Its sends to its own chat owe Tom no report.
+(`valor-telegram read`, `valor-slack read`) and in the ledger. Its sends owe no report.
 
 Tom's own chat (the operator chat, his DM) has a chat session the same
 way, under the project listing the chat, else `valor`; its opening says
 it is Tom's own chat, a 1:1 with him, not a team chat, and its room is
 running the business, Yudame first, engineering only when he starts it
 (the operator group's own `rooms` entry wins there). Only Tom is heard
-there, and every message of his wakes it. A reply to an older task's
-notice or send binds to that task as above; every other message of his
-there, a reply to the session's own post included, is the session's next
-prompt, and a reply to another chat's session's post binds to that session
-as a reply. Root tasks that are no session report to the operator chat's
-session (on a Mac whose specs do not list his DM, to the DM directly). So the work he asks for in his DM is a task the session starts,
+there, and every message of his, a reply under any post included, is the
+session's next prompt. Root tasks that are no session report to the
+operator chat's session (on a Mac whose specs do not list his DM, to the
+record alone). So the work he asks for in his DM is a task the session starts,
 which reports to the session, and the session tells him.
 
 ### Started tasks
@@ -586,7 +571,7 @@ Its resident memory counts against the RAM plan in
 - **Retries.** A failed send stays failed until a new request.
 - **Lifecycle signalling.** It posts no typing indicators or progress
   messages of its own, and places no reaction the kernel did not request.
-  Progress Tom needs comes as a notice from `core/`; the reactions above
+  Progress Tom needs comes from a chat session's send; the reactions above
   are rows `core/` writes.
 - **State of its own.** It keeps no queue, deduplication store, session map,
   or message history outside the ledger. Its only local state is the
@@ -610,7 +595,7 @@ An implementation conforms to the port when:
    released effects. Retry counters, dead-letter routing, and requeueing are
    removed.
 4. **Its ids go to the ledger.** Sent message ids are recorded in
-   `effect.outcome` and `notice.sent` rows, and received ids in
+   `effect.outcome` rows, and received ids in
    `message.received`. Any other store mapping messages to sessions is
    removed.
 5. **It imports only `core/` ports.** No settings module, model, or helper
@@ -620,21 +605,14 @@ An implementation conforms to the port when:
    with test accounts (`tests/test_live_telegram_dc.py`), and a real
    Postgres. A message replayed after a kill lands
    once; a send killed after its intent is reconciled and not repeated; a
-   reply to a question notice records `question.answered` with
-   `via: telegram`.
+   reply of Tom's in his own chat binds to its session.
 
 ## Gaps
 
 - **`random_id` duplicate behaviour.** That Telegram refuses a repeated
   `random_id` from a user account, rather than silently delivering again,
   is what `tests/test_live_telegram_dc.py` checks on the test servers. The
-  broker never performs one effect twice, so for effects it is defence in
-  depth; for notices, which the outbox yields until marked sent, the scan
-  backs it: it matches each message of the notice on its full text, among
-  messages no recorded send claims; a notice opens with its task's request,
-  so identical texts are rare, and two matches are `Unknown`, left unsent.
-  A notice cut off part way is finished the
-  same way a split send is: the messages not on screen are sent.
+  broker never performs one effect twice, so it is defence in depth.
 
 ## As built
 
@@ -646,7 +624,7 @@ job `com.valor.kernel.telegram` that `--plist` prints.
 | `wire.py` | The only module importing Telethon: one client with sequential updates, no automatic flood sleep, reconnect, or request retry; raw `SendMessageRequest` and `SendMediaRequest` with a given `random_id`, no parse mode, no link preview; `SendReactionRequest` for a reaction |
 | `inbound.py` | One message to the `Inbound` fields: raw `message.message`, the forum topic and reply target, the reply chain to its root, files by sha256 with no timer of their own |
 | `gap.py`, `bridge.py` | Gap fill on connect and in `tick()`; the live handler, which drops the connection when `receive` fails so the next connect's fill takes the message, and runs a message with a file as its own task; one `serve_tick_s` between connects after a failure; the outbox loop; dropping settled send records; SIGTERM lets an in-flight send and its outcome finish |
-| `send.py` | `telegram.send_message` perform and lookup, the notice send to the row's `chat_id`, marked through `outbox.sent`, and a reaction, marked through `outbox.reacted` |
+| `send.py` | `telegram.send_message` perform and lookup, and a reaction, marked through `outbox.reacted` |
 | `state.py` | The bridge's own files beside the session: `telegram-seen.json` (the newest id each chat's last gap-fill pass saw) and `telegram-sends.json` (each send in flight and the newest id in its chat before its first message), each written whole, flushed, and renamed into place; an unreadable one set aside |
 | `kernel.py` | The port gathered into one object, so the bridge imports only `core.bridge`, `core.intake`, `core.broker`, `core.settings`, `core.db`, and `core.credentials` |
 | `login.py`, `__main__.py` | `login` (Tom types the code and password; nothing stores them; `--test-dc` signs in on Telegram's test servers), `keys` (copies `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` from the vault into `telegram-keys`), `run`, `--plist` |

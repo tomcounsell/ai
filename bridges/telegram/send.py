@@ -1,4 +1,4 @@
-"""`telegram.send_message`: perform, lookup, and the notice send.
+"""`telegram.send_message`: perform and lookup.
 
 A payload is `{text, reply_to, topic_id, files: [{path, sha256}]}`. Text
 is split by the port's `split_text` (Telegram's limit, in UTF-16 code
@@ -19,7 +19,7 @@ What a failure means, as the broker reads it:
   `lookup`.
 
 Before a send's first message, the chat's newest message id is recorded
-in `telegram-sends.json` under the effect id (or `notice:<id>`). `lookup`
+in `telegram-sends.json` under the effect id. `lookup`
 reads the chat's history above that id and keeps the account's own
 messages: message ids within a chat only grow, so the send is there
 whatever the Mac's clock and Telegram's dates say. When some of a send's
@@ -28,13 +28,8 @@ each under its own `random_id`, so a message Telegram already holds is
 refused as a duplicate rather than shown twice; the send then settles as
 done. A send whose start record was lost with the file is
 `Unknown`, never `done`: the chat's history cannot tell it from an earlier
-identical message. A notice whose record was lost is looked up over the
-whole chat: every earlier send is claimed by its recorded `sent`, so an
-unclaimed message with the notice's text is taken as it, and two such are
-`Unknown`, logged and left unsent. Notices open with their task's request,
-so identical texts are rare. When finishing is refused, or a file of the send is gone, the send
-settles as done with the messages that are on screen. A notice is finished
-the same way.
+identical message. When finishing is refused, or a file of the send is
+gone, the send settles as done with the messages that are on screen.
 """
 
 from __future__ import annotations
@@ -122,7 +117,6 @@ class Sender:
         self.starts = starts
         self.split = kernel.split_text
         self.flood = Flood()
-        self._attempts: dict[tuple[str, int], int] = {}
         self._logged: set[str] = set()
 
     # -- the performer -----------------------------------------------------
@@ -229,60 +223,6 @@ class Sender:
             out.append(Part("file", name=name, data=data))
         return out
 
-    # -- notices -----------------------------------------------------------
-
-    async def notice(self, item, outbox) -> None:
-        """Send one due notice to the chat its row names, finishing what
-        is already on screen; mark it sent through the outbox."""
-        chat = int(item.chat_id)
-        key = notice_key(item.notice_id)
-        expected = self._expected(item.text, [], item.reply_to, None)
-        try:
-            after = self._after(key)
-            if after is None:
-                await self._start(key, chat)
-                found = [None] * len(expected)
-            else:
-                found = await self._scan(chat, expected, max(after, 0))
-            sent = await self._finish_notice(item, chat, key, expected, found)
-        except self.kernel.Unknown as e:
-            self._log_once(item.notice_id, f"notice {item.notice_id}: {e}")
-            return
-        except WireError as e:
-            if isinstance(e, FloodWait):
-                self.flood.hit(e.seconds)
-            self._log_once(item.notice_id, f"notice {item.notice_id} not sent: {e}")
-            return
-        await outbox.sent(item, sent)
-        self.starts.drop([key])
-
-    async def _finish_notice(self, item, chat, key, expected, found) -> list[dict[str, str]]:
-        """Send each part not on screen. A part Telegram holds under its
-        `random_id` but that is not on screen goes again under a new id,
-        so Tom sees it."""
-        out = list(found)
-        reply = int(item.reply_to) if item.reply_to else None
-        for n, part in enumerate(self.split(item.text)):
-            while out[n] is None:
-                attempt = self._attempts.get((item.notice_id, n), 0)
-                rid = random_id(key if attempt == 0 else f"{key}:{attempt}", n)
-                try:
-                    await self.flood.wait()
-                    mid = await self.wire.send_text(
-                        chat, part, random_id=rid, reply_to=reply if n == 0 else None, topic_id=None
-                    )
-                    out[n] = self._entry(chat, mid)
-                except DuplicateRandomId:
-                    again = await self._scan(chat, expected, max(self._after(key) or 0, 0))
-                    if again[n] is None:
-                        self._attempts[(item.notice_id, n)] = attempt + 1
-                    out[n] = again[n]
-                except InDoubt as e:
-                    raise self.kernel.Unknown(f"send in doubt: {e}") from None
-        for n in range(len(out)):
-            self._attempts.pop((item.notice_id, n), None)
-        return out
-
     # -- the records -------------------------------------------------------
 
     async def _start(self, key: str, chat: int) -> None:
@@ -380,9 +320,9 @@ class Sender:
             return
         await outbox.reacted(item)
 
-    def _log_once(self, notice_id: str, text: str) -> None:
-        if notice_id not in self._logged:
-            self._logged.add(notice_id)
+    def _log_once(self, key: str, text: str) -> None:
+        if key not in self._logged:
+            self._logged.add(key)
             log.warning(text)
 
 
@@ -392,10 +332,6 @@ LOST = -1  # a send's start record that was lost with the file
 def effect_of(key: str) -> str:
     """The effect id a broker key ends in."""
     return key.rsplit(":", 1)[-1]
-
-
-def notice_key(notice_id: str) -> str:
-    return f"notice:{notice_id}"
 
 
 def _matches(m: Msg, exp: Expected) -> bool:

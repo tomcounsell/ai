@@ -41,12 +41,15 @@ the new one to the token on Mercury's token page. Mercury deletes a token unused
    carries the detail.
 3. **Notice.** `python3 mercury.py notice ID` prints an `email.send` effect addressed
    to the invoice's own customer email and cc in Mercury, with the pay link and
-   Mercury's PDF written into `.valor/invoices/`. Write it unchanged to
-   `.valor/effects/notice-<number>.json`. It leaves from valor@yuda.me without asking
-   Tom again.
+   Mercury's PDF written into `.valor/invoices/`. Only a chat session sends: in
+   one, write it unchanged to `.valor/effects/notice-<number>.json`; it leaves from
+   valor@yuda.me without asking Tom again. A task cannot send: it reports the effect,
+   unchanged, in a fenced `json` block of its `done.md` or `stop.md`, and the session
+   it reports to sends it with the PDF from the task's workspace.
    The pay link is `https://app.mercury.com/pay/<slug>`; it opened on Mercury's pay page
    with the right number, amount and due date for 250901DF and 251215DF (2026-10-21).
-4. **Reminders** are the weekly `invoices` routine (`routines/invoices/`): `remind`
+4. **Reminders** are the weekly `invoices` routine (`routines/invoices/`), whose run
+   drafts them and whose session sends them (the routine `wakes` its session): `remind`
    picks Valor's Unpaid invoices at least a day overdue, at most one reminder per
    invoice every 7 days and 4 in all, reading valor@yuda.me's Sent mail (`gws`) for
    what already went out. An invoice past its fourth reminder is listed for Tom. A

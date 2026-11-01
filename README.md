@@ -68,7 +68,7 @@ Effects have classes. Every capability declares one, and every task carries a ce
 |-------|---------|----------------|
 | `read` | read, no effect | the grant |
 | `propose` | reversible: workspace writes, drafts, branches, and effects that can be withdrawn, such as a PR or a message draft | the grant; Valor asks first when Tom would want to be asked |
-| `act` | irreversible effect or money: merge, send, pay, deploy | inside the task's ceiling, performed when requested; a report to Tom says what left |
+| `act` | irreversible effect or money: merge, send, pay, deploy | inside the task's ceiling, performed when requested; a merge reports to its session, and only a chat session sends |
 
 The drive to ask comes from Cooperative Inverse Reinforcement Learning [3]: the human and the agent share a reward the agent does not know, so its best move under uncertainty is to learn and to ask. Valor borrows the shape without claiming the guarantee, since nothing here is trained. The Off-Switch Game [8] shows why the borrow is partial: the incentive to allow shutdown holds only while the uncertainty holds, and later work shows it is fragile [9, 10]. Valor does not rely on the model's incentive. The off switch is in the kernel.
 

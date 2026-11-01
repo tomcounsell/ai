@@ -2,22 +2,27 @@
 
 A bridge (Telegram, email, Slack, local) is a process of its own. It receives messages
 and records them through `core.intake`, and it sends what the outbox
-yields: a send a task requested, or an operator notice. It decides
+yields: a send a chat session requested. It decides
 nothing: the kernel binds every message, refuses or releases every send at
 request, and checks every release. A bridge imports `core.bridge`, `core.intake`, `core.broker`,
 `core.settings`, `core.db`, and `core.credentials`, and nothing else from
 `core/`.
 
 The kernel declares each channel's send type here (`DECLARED`): its class,
-the usage line a turn reads, and what refuses it. Every task's Performers holds
-them, so a turn can request a send and `request` releases it to its
-channel's bridge. The
+the usage line a turn reads, and what refuses it. Only a chat session's
+Performers holds them (`declared_performers`, Tom's grant of 2026-11-01,
+`docs/plans/one-voice.md`: "No routine or system should be impersonating
+you."), so only a chat session's turn can request a send, and `request`
+releases it to its channel's bridge. Any other task reports to its
+session (`core/notices.py`). The
 bridge supplies only how to send (`perform`) and how to find a send that
 happened (`lookup`); `serve` joins the two into the performer the broker
 runs.
 
-Each task's declared sends carry its workspace. A file a send names must
-be a regular file there, reached through no link; the kernel takes its
+A session's declared sends carry its workspace and its id. A file a send
+names must be a regular file in that workspace, or in the workspace of a
+task that reports to the session (`tasks.reporting`: a PDF a task made
+reaches its chat through its session), reached through no link; the kernel takes its
 size from the opened file's `fstat` and never reads it, and a file that is
 missing, a link, or outside the workspace gets one answer, so a refusal
 says nothing about a path outside. Whether the bytes are the ones the
@@ -71,7 +76,6 @@ NO_HEAD = "none"
 email_message = mail.email_message
 email_serialized = mail.serialized
 email_message_id = mail.message_id
-email_reply_all = mail.reply_all
 
 
 @dataclass(frozen=True)
@@ -177,11 +181,11 @@ def _strings(payload: dict[str, Any], strings: tuple[str, ...], lists: tuple[str
     )
 
 
-async def _size_refusal(channel: str, action: broker.Action, workspace: str | None) -> str | None:
+async def _size_refusal(channel: str, action: broker.Action, roots: list[str]) -> str | None:
     """`files` absent or None is no files; otherwise it is the port's list
     of {path, sha256} objects, each a string, or the send is refused for
     its shape, since the bridge's `perform` reads each entry's path and
-    sha256. Each file must then be a regular file in the task's workspace,
+    sha256. Each file must then be a regular file in one of `roots`,
     within the channel's limit, and the whole message within its limit once
     the channel's size function is set. A refusal names the file by its
     place in `files`, not its path. The kernel never reads a file a turn
@@ -199,9 +203,12 @@ async def _size_refusal(channel: str, action: broker.Action, workspace: str | No
         return FILES_SHAPE
     sizes = []
     for i, f in enumerate(files):
-        size = await asyncio.to_thread(_file_size, workspace, f["path"]) if workspace else None
+        size = None
+        for root in roots:
+            if (size := await asyncio.to_thread(_file_size, root, f["path"])) is not None:
+                break
         if size is None:
-            return f"files[{i}] is not a regular file in the task's workspace"
+            return f"files[{i}] is not a regular file in your workspace or a reporting task's"
         if limits.max_file_bytes is not None and size > limits.max_file_bytes:
             return f"files[{i}] is {size} bytes, over {channel}'s limit of {limits.max_file_bytes} bytes per file"
         sizes.append(size)
@@ -280,10 +287,11 @@ async def _refuse_meet(conn, action: broker.Action) -> str | None:
 
 @dataclass(frozen=True)
 class Declared:
-    """A channel's send type as a task's Performers holds it. `refuse`
-    checks the send and, given the task's `workspace`, sizes its files
-    there; a bridge's `Bound` checks the send alone, since the bridge reads
-    each file at `perform` and refuses one that differs."""
+    """A channel's send type as a chat session's Performers holds it.
+    `refuse` checks the send and sizes its files in the session's
+    `workspace` or a workspace of a task reporting to `session`; a bridge's
+    `Bound` checks the send alone, since the bridge reads each file at
+    `perform` and refuses one that differs."""
 
     action_type: str
     effect_class: str
@@ -291,10 +299,28 @@ class Declared:
     owner: str  # "telegram", "email", "slack", "local", or "meet"
     check: Callable[[Any, broker.Action], Awaitable[str | None]] | None = None
     workspace: str | None = None
+    session: str | None = None
 
     async def refuse(self, conn, action: broker.Action) -> str | None:
         said = await self.check(conn, action) if self.check else None
-        return said or await _size_refusal(self.owner, action, self.workspace)
+        return said or await _size_refusal(self.owner, action, await self._roots(conn, action))
+
+    async def _roots(self, conn, action: broker.Action) -> list[str]:
+        """Where a send's files may be: the session's workspace, then each
+        reporting task's, read only when a file is named."""
+        roots = [self.workspace] if self.workspace else []
+        if self.session is None or not action.payload.get("files"):
+            return roots
+        from core import tasks
+
+        for task_id in await tasks.reporting(conn, self.session):
+            try:
+                found = (await tasks.brief(conn, task_id)).workspace
+            except KeyError:
+                continue
+            if found:
+                roots.append(found)
+        return roots
 
 
 DECLARED: dict[str, Declared] = {
@@ -365,9 +391,10 @@ DECLARED: dict[str, Declared] = {
 }
 
 
-def declared_performers(workspace: str | None = None) -> list[Declared]:
-    """Every declared send, sizing files in `workspace`, the task's."""
-    return [dataclasses.replace(d, workspace=workspace) for d in DECLARED.values()]
+def declared_performers(workspace: str | None = None, session: str | None = None) -> list[Declared]:
+    """Every declared send, for the chat session `session`, sizing files in
+    its `workspace` and its reporting tasks'."""
+    return [dataclasses.replace(d, workspace=workspace, session=session) for d in DECLARED.values()]
 
 
 PerformFn = Callable[[broker.Action, str], Awaitable[dict[str, Any]]]
@@ -419,16 +446,6 @@ class Release:
 
 
 @dataclass(frozen=True)
-class NoticeDue:
-    notice_id: str
-    task_id: str
-    chat_id: str
-    text: str  # plain text for Tom; the notice id stays in the row
-    reply_to: str | None
-    at: str  # the notice.requested row's at
-
-
-@dataclass(frozen=True)
 class ReactionDue:
     reaction_id: str
     task_id: str
@@ -466,8 +483,7 @@ class Bridge(Protocol):
 class Outbox:
     """What the bridge sends, from the ledger. Iterating yields, oldest
     first, every release requested for this channel with no intent,
-    outcome, or refusal, then every notice on this channel not yet sent,
-    then every reaction on this channel not yet placed or failed; then
+    outcome, or refusal, then every reaction on this channel not yet placed or failed; then
     waits for a row of any of these kinds, or `settings.serve_tick_s`. On a
     row's wake it yields again first, so a 👀 is placed before the bridge's
     gap fill runs; then on either wake it reconciles this channel's
@@ -499,10 +515,10 @@ class Outbox:
         self.up_since: int | None = None
         self.named = f"valor-{self.channel}-listen"
 
-    def __aiter__(self) -> AsyncIterator[Release | NoticeDue | ReactionDue]:
+    def __aiter__(self) -> AsyncIterator[Release | ReactionDue]:
         return self._items()
 
-    async def _items(self) -> AsyncIterator[Release | NoticeDue | ReactionDue]:
+    async def _items(self) -> AsyncIterator[Release | ReactionDue]:
         while True:
             await self.report()
             for item in await self.due():
@@ -537,7 +553,7 @@ class Outbox:
         `conn`, the outbox's connection when None."""
         return await broker.reconcile(conn or self.conn, self.performers, effect_id)
 
-    async def due(self) -> list[Release | NoticeDue | ReactionDue]:
+    async def due(self) -> list[Release | ReactionDue]:
         releases = await (
             await self.conn.execute(
                 "SELECT r.payload->>'effect_id', r.at FROM events r WHERE r.type = 'release.requested' "
@@ -547,23 +563,7 @@ class Outbox:
                 (self.channel,),
             )
         ).fetchall()
-        notices = await (
-            await self.conn.execute(
-                "SELECT n.task_id, n.payload, n.at FROM events n WHERE n.type = 'notice.requested' "
-                "AND n.payload->>'channel' = %s AND n.payload->>'chat_id' IS NOT NULL "
-                "AND NOT EXISTS (SELECT 1 FROM events s WHERE s.type = 'notice.sent' "
-                "AND s.payload->>'notice_id' = n.payload->>'notice_id') ORDER BY n.id",
-                (self.channel,),
-            )
-        ).fetchall()
-        return (
-            [Release(e, at.isoformat()) for e, at in releases]
-            + [
-                NoticeDue(p["notice_id"], t, p["chat_id"], p["text"], p.get("reply_to"), at.isoformat())
-                for t, p, at in notices
-            ]
-            + await self._reactions()
-        )
+        return [Release(e, at.isoformat()) for e, at in releases] + await self._reactions()
 
     async def _reactions(self) -> list[ReactionDue]:
         """This channel's reactions with no result, oldest first, so a
@@ -636,15 +636,11 @@ class Outbox:
         self.named = name
 
     async def wait(self) -> bool:
-        """Until a release, notice, or reaction row is written (true), or the
+        """Until a release or reaction row is written (true), or the
         tick (false)."""
         try:
             async for note in self.listener.notifies(timeout=settings.serve_tick_s):
-                if json.loads(note.payload).get("type") in (
-                    "release.requested",
-                    "notice.requested",
-                    "reaction.requested",
-                ):
+                if json.loads(note.payload).get("type") in ("release.requested", "reaction.requested"):
                     return True
         except psycopg.OperationalError:
             # The listening connection died: wait the tick, then listen on a
@@ -670,16 +666,6 @@ class Outbox:
             return await broker.release(conn or self.perform_conn, self.performers, item.effect_id)
         except (broker.Refused, tasks.TaskStopped) as exc:
             return broker.Outcome(item.effect_id, "refused", error=str(exc) or type(exc).__name__)
-
-    async def sent(self, item: NoticeDue, sent: list[dict[str, str]], conn=None) -> None:
-        conn = conn or self.conn
-        try:
-            async with conn.transaction():
-                await ledger.append(
-                    conn, item.task_id, "notice.sent", {"notice_id": item.notice_id, "sent": sent}
-                )
-        except psycopg.errors.UniqueViolation:
-            pass
 
     async def reacted(self, item: ReactionDue, error: str | None = None, *, superseded: bool = False) -> None:
         """The reaction's one result: `reaction.failed` with `error`, else

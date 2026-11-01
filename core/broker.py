@@ -42,7 +42,7 @@ bridge in one transaction, and answers `released`. The bridge calls
 again, writes the intent, and performs. A release refused there appends one
 `effect.refused`, so nothing asks for it again.
 
-An `act` effect whose outcome is `done` owes Tom a report of what left
+A merge whose outcome is `done` owes its session a report of what landed
 (`notices.report`), written with the outcome.
 
 Performers are the task's own: the composition root builds a `Performers`
@@ -532,7 +532,7 @@ async def _perform(conn, performers, task_id, effect_id, action, described) -> O
 
 async def _outcome(conn, task_id: str, outcome: dict[str, Any], described: dict[str, Any]) -> dict[str, Any]:
     """Write `effect.outcome` and return what was written, with the report
-    a `done` act owes Tom (`notices.report`). The performer's result and
+    a `done` merge owes (`notices.report`). The performer's result and
     error can carry what the turn asked for, which Postgres jsonb may
     refuse: then the row holds neither, its error saying why."""
     from core import notices
@@ -543,9 +543,7 @@ async def _outcome(conn, task_id: str, outcome: dict[str, Any], described: dict[
         written = {**outcome, "result": {}, "error": f"the performer's answer: {ledger.UNSTORABLE}: {why}"}
         await ledger.append(conn, task_id, "effect.outcome", written)
     if written["kind"] == "done":
-        await notices.report(
-            conn, task_id, {**described, "effect_id": outcome["effect_id"]}, written["result"]
-        )
+        await notices.report(conn, task_id, {**described, "effect_id": outcome["effect_id"]})
     return written
 
 

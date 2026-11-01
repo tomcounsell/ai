@@ -215,19 +215,19 @@ server accepts a message only on the end of data line (RFC 5321 section
 connection or login, a refused `MAIL`, every recipient refused, a refused
 `DATA`, or a write that fails) is definite: the outcome is `failed`
 with the reason, and Sent Mail is not read. A stop before that line went is the same: nothing was sent, so the
-outcome is `failed`, with no Sent Mail read and no notice. A stop after the
+outcome is `failed`, with no Sent Mail read and no report. A stop after the
 line writes no outcome: the send stays in flight, as after a kill, and the
 next wake reads Sent Mail for it. After it, a 250 is `done`, and
 a 4xx or 5xx reply is `failed` (section 4.2.1: the action did not occur).
 Any other end (no reply because the connection closed, a garbled reply, a reply
 line too long to read, another code) raises `broker.Unknown`: the server
 may have stored the message. The intent stays in flight with no outcome, and
-a notice goes to Tom at once, once per send, saying it is in doubt. The send
+the session that sent it hears at once, once per send, that it is in doubt. The send
 is settled on the next wake (every `serve_tick_s` or ledger row, not at once)
 by reading Sent Mail for its Message-ID once no process performs it: found is
 `done`; not found leaves it in flight for the next wake, and `python -m
 core status` shows it `in_flight`. A send cut off by a restart before it was settled gets the same
-notice on the first wake after. After the 250,
+report on the first wake after. After the 250,
 `QUIT` is sent and its reply is not awaited, since the send is already
 done. When the server accepts
 the message for some recipients and refuses others, the outcome is `done`
@@ -235,13 +235,9 @@ with `refused` listing each address and its reply; reaching them is a new
 request. The bridge keeps no retry loop, backoff
 schedule, or dead-letter queue.
 
-**Notices.** A notice for a task an email thread started goes to that
-thread: the bridge sends it over SMTP as a reply to all of the thread's newest
-received email (or of the one the notice replies to), with the notice's text as
-the body, and writes `notice.sent`. A send in doubt is not sent again; each
-later wake reads Sent Mail for it under the key `notice:<id>`, as for an
-effect. Every other notice goes to Tom's operator channel, Telegram or the
-local chat page.
+**Reports.** The bridge sends only a chat session's `email.send`. What a
+task an email thread started has to say is a report to the thread's
+session (`core/notices.py`), which answers the thread with a send of its own.
 
 ## Stop and recovery
 
@@ -251,12 +247,12 @@ bridge ends a call only around its own server call: an SMTP send, after the
 broker has written the intent, and a Sent Mail lookup. When Tom stops the
 task, a send blocked on its server ends: its connection is shut down. A send
 that had not yet sent the end of data line is settled `failed` with no
-notice, since the server cannot have taken it. A send that had is written
-no outcome and no notice, and what Tom sees after his own stop is nothing at
+report, since the server cannot have taken it. A send that had is written
+no outcome and no report, and what Tom sees after his own stop is nothing at
 that moment. It stays in flight, and each later wake asks
 Sent Mail for it (a lookup for a task stopped earlier runs in full, and only
 a stop that arrives while it runs ends it). Sent Mail holding it settles it
-`done`, silently. A miss sends the one `send_in_doubt` notice, which says
+`done`, silently. A miss makes the one `send_in_doubt` report, which says
 the email may or may not have gone. A failure of the stop listener is not a stop: the call
 runs on, and a listener that dropped is set up again on the next wake, so
 Tom's stop still ends a send or lookup blocked on its server. The new
@@ -270,8 +266,8 @@ found or not found by `lookup`; a send killed before its intent is still in
 the outbox. launchd runs the bridge as a resident process and restarts it if
 it exits. Its job carries the operator settings the kernel's job carries
 (`VALOR_OPERATOR_TELEGRAM_ID`, `VALOR_OPERATOR_EMAIL`, `VALOR_OPERATOR_SLACK_IDS`,
-`VALOR_OPERATOR_CHANNEL`, `VALOR_OPERATOR_CHAT`), so a report notice reaches the
-operator from the bridge too.
+`VALOR_OPERATOR_CHANNEL`, `VALOR_OPERATOR_CHAT`), so the bridge's binding
+and reports read the operator as the kernel does.
 
 ## What the bridge never does
 
@@ -287,15 +283,15 @@ operator from the bridge too.
   directory.
 - **Alerts.** It raises no operator alerts of its own. A login that fails is
   a line in its log and, for a send, a failed outcome on the ledger;
-  telling Tom is `core/`'s job. The one notice it writes is `send_in_doubt`
-  (`EmailBridge.in_doubt`), a `notice.requested` row for a send that may or
-  may not have gone, which goes where any notice for its task goes.
+  telling Tom is a session's job. The one report it makes is `send_in_doubt`
+  (`EmailBridge.in_doubt`), a `child.reported` row for a send that may or
+  may not have gone, which the sending session hears.
 
 ## The implementation
 
 | Module | Holds |
 |---|---|
-| `bridges/email/__init__.py` | `EmailBridge`: `channel`, `limits`, `performers()` giving `email.send`'s `(perform, lookup)`, and `run(outbox)`, the IMAP watch beside each released send, each notice to a thread (`notice`) and each Sent Mail lookup as a task of its own, reconnected on `tick()` |
+| `bridges/email/__init__.py` | `EmailBridge`: `channel`, `limits`, `performers()` giving `email.send`'s `(perform, lookup)`, and `run(outbox)`, the IMAP watch beside each released send and each Sent Mail lookup as a task of its own, reconnected on `tick()` |
 | `bridges/email/__main__.py` | The verbs `run`, `keys`, and `--plist` (`KeepAlive`, logs in `log_dir/email.log`); `run` logs at INFO, each line `time level message` |
 | `bridges/email/config.py` | `Config`, from settings and `mail-keys`; the passwords are held here only |
 | `bridges/email/parse.py` | Raw mail to a record's fields, and attachments to files |

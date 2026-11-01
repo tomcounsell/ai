@@ -197,13 +197,13 @@ from core.settings import (
 
 
 def _performers(b: tasks.Brief) -> broker.Performers:
-    """The task's own performers, built from its Brief, and every channel's
-    declared send (`core/bridge.py`).
-    push_branch goes to the task's own bare
+    """The task's own performers, built from its Brief, and for a chat
+    session every channel's declared send (`core/bridge.py`): only a chat
+    session speaks as Valor. push_branch goes to the task's own bare
     origin; the merge pushes to the Brief's origin URL, from the kernel mirror
     with the GitHub credential when the kernel provisioned the task, and from
     the workspace with none otherwise. A declared send sizes its files in the
-    task's workspace. A chat session also starts, answers and stops its
+    session's workspace or a reporting task's. A chat session also starts, answers and stops its
     tasks (`tools/chat_tasks.py`), and a group chat's asks Valor into a
     Meet call (`tools/meet.py`)."""
     from core.bridge import declared_performers
@@ -221,9 +221,9 @@ def _performers(b: tasks.Brief) -> broker.Performers:
                 credential=settings.github_keyfile if b.mirror else None,
             ),
         ]
-    return broker.Performers(
-        *kernel, *chat_tasks.performers(b), *meet.performers(b), *declared_performers(b.workspace)
-    )
+    # Only a chat session sends (Tom's grant of 2026-11-01, guard `send.sessions_only`).
+    sends = declared_performers(b.workspace, b.id) if b.chat else []
+    return broker.Performers(*kernel, *chat_tasks.performers(b), *meet.performers(b), *sends)
 
 
 def _harnesses() -> dict:

@@ -24,6 +24,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
 | `project`, `branch` | the project spec and branch a runner that starts a workspace task provisions | |
+| `wakes` | true when the run's result wakes the session it reports to (default false: held in the record) | Mission item 6 |
 | `[schedule]` | `minute`, `hour`, `day`, `weekday`, `month` (whole numbers in launchd's ranges: 0-59, 0-23, 1-31, 0-7, 1-12), or `interval` in seconds, a whole number that fits a plist integer (signed 64-bit); calendar keys and `interval` are not given together, since the printer writes one trigger | launchd for the ranges; the printer for "not both" |
 
 The launchd job is printed and never committed, since it names the checkout
@@ -52,7 +53,10 @@ when the work was only effects. It starts nothing, returning
 `nothing_due`, on a Mac the project is not placed on, so a routine
 installed on every Mac runs on one. `invoices` (Mondays 09:00) is its
 first: the week's reminders for Yudame's unpaid Mercury invoices
-(`skills/valor/skills/mercury-invoicing`).
+(`skills/valor/skills/mercury-invoicing`). Its run drafts each reminder
+`email.send` in its stop note and sends nothing; its toml sets `wakes`, so
+the result wakes the session it reports to, which sends them as its own,
+the PDFs from the run's workspace.
 
 ## How a run starts
 
@@ -90,7 +94,7 @@ The four routines the kernel holds:
 
 - **expiry** (04:00 daily): `routines.due` folds the ledger and lists the
   guards and routines past their ninety days. The list is the run's summary,
-  the report to Tom. The run starts no task and deletes nothing. An expiry
+  held in the record. The run starts no task and deletes nothing. An expiry
   firing holds the session lock `routine:expiry` throughout.
 - **conditions** (05:00 daily, ceiling `propose`): checks each committed
   decision's watched conditions in the own repository of every business
@@ -128,7 +132,9 @@ objective's Brief, and never widens at run time; a child's ceiling is at or
 below its parent's. Least privilege [11] sets the default: a routine gets the
 lowest class its job needs.
 
-**Attention.** A routine spends Tom's attention only through a question or a report of an `act` that left, and each is ledgered against the run (Mission item 6). A
+**Attention.** A routine spends Tom's attention only through a question, which wakes the session it
+reports to, and each is ledgered against the run (Mission item 6). Its result is a quiet report: it
+wakes no turn and is shown at the session's next one as "A routine result, held in the record". A
 routine's attention is counted on the same footing as its money when the
 ninety-day review below asks whether it earned its place.
 
@@ -143,7 +149,7 @@ running turn does is interrupted for it.
 |---|---|---|
 | `read` | run a test suite against real Postgres and report; read error reports from a service; list workspaces whose branches have merged | the routine's committed Brief |
 | `propose` | open a branch with a fix for a failure it found; draft a summary; start a child task, inside its own ceiling, to investigate a failure; remove a workspace whose commits are already on the origin | the Brief; the performer declares the class |
-| `act` | merge, send, deploy, pay, delete anything not recoverable elsewhere | the Brief's ceiling, which Tom set; the broker performs it at request and Tom gets a report of it |
+| `act` | merge, send, deploy, pay, delete anything not recoverable elsewhere | the Brief's ceiling, which Tom set; the broker performs it at request. A routine's turn is offered no send: only a chat session sends |
 
 An `act` requested by a routine is performed at request when its ceiling
 is `act`, like any task's, and refused when the ceiling is lower; the
@@ -294,9 +300,11 @@ one's entry is removed in the same commit.
 - Widen its ceiling, or start a child with a higher one than it holds.
   The kernel refuses; a routine has no path to ask for more
   except a question to Tom.
-- Send Tom a status message. Status is read on the dashboard. A message to
-  Tom is a question with a decision in it, ledgered as attention, or it is
-  not sent (Mission item 6: requiring Tom to adjudicate internal process is a
+- Send anyone anything. Only a chat session's turn holds the send types
+  (guard `send.sessions_only`, Tom's grant of 2026-11-01). Status is read
+  on the dashboard; what needs Tom is a question with a decision in it,
+  which the session it reports to puts to him, ledgered as attention
+  (Mission item 6: requiring Tom to adjudicate internal process is a
   product defect).
 - Kill or restart other processes on a heuristic. Stop and recovery live in
   `core/`, not in a scheduled sweep.
@@ -319,15 +327,17 @@ rule. Workspace reclaim, which removes things, is not; it is work.
 
 - **The ledger.** Every run is a task, so its start, its turns, its spend,
   its effects, and its end are ledger rows like any task's. A run's result
-  is its delivery, read with `python -m core status <task>`.
+  is its delivery or its stop note, read with `python -m core status <task>`
+  or a session's `valor-record tasks --search`.
 - **The status page.** `python -m ui` serves `http://127.0.0.1:8790` (set by
   `VALOR_UI_PORT`): tasks and what needs Tom, what is alive (`/live`), one task
   with its ledger, the attention log, and each routine with its last run,
   its last result, its period spending and its runs. It is read-only and answers GET only; the
   address is the loopback one.
-- **Attention.** A question from a routine reaches Tom through the same
-  path as any task's question and is ledgered with its answer and
-  provenance. An `act` that left reaches Tom as a report.
+- **Attention.** A question from a routine reaches its session, which asks
+  Tom, as any task's question does, and is ledgered with its answer and
+  provenance. Its result is a quiet report on that session (`quiet`,
+  `core/notices.py`): no turn, unless the routine `wakes`.
 
 Nothing a routine finds is pushed to Tom unless it needs a decision.
 

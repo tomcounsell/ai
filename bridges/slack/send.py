@@ -1,5 +1,5 @@
-"""`slack.send_message` and `slack.write_canvas`: perform, lookup, the
-notice send, and reactions.
+"""`slack.send_message` and `slack.write_canvas`: perform, lookup, and
+reactions.
 
 A payload is `{text, reply_to, files: [{path, sha256}]}`; the target is
 `<team>/<channel>`, or `<team>/<user>` for a DM. Text is split by the
@@ -27,7 +27,8 @@ What a failure means, as the broker reads it:
 `lookup` before the bridge has connected is `Unknown`. It scans the
 target chat from `since` less five minutes (the thread when there is a
 root, else the history), keeping Valor's own posts
-not already claimed by a recorded send or notice. When any kept post
+not already claimed by a recorded send (or a kernel notice before
+2026-11-01). When any kept post
 carries a marker, a text part is the post with this key's marker and its
 part number; otherwise it is the earliest kept post after the previous
 part whose text, decoded from Slack's form, equals the part's (both
@@ -91,10 +92,6 @@ BOARD = "Valor Decisions"
 SEEN_NAME = "eyes"
 
 
-def notice_key(notice_id: str) -> str:
-    return f"notice:{notice_id}"
-
-
 def read_file(entry: dict[str, str]) -> tuple[str, bytes]:
     """The file's bytes, read once and hashed; raises before anything is
     posted when they are not the bytes the request named."""
@@ -112,14 +109,6 @@ class Part:
     name: str = ""
     data: bytes = b""
     size: int | None = None
-
-
-@dataclass(frozen=True)
-class _Notice:
-    """A due notice in the shape of a send's action."""
-
-    target: str
-    payload: dict[str, Any]
 
 
 class Sender:
@@ -341,24 +330,6 @@ class Sender:
         except self.kernel.Failed:
             return None
 
-    # -- notices -----------------------------------------------------------
-
-    async def notice(self, item, outbox) -> None:
-        """Send one due notice to the chat its row names, finishing what is
-        already posted; mark it sent through the outbox. A notice that
-        cannot be sent now is logged once and tried on the next wake."""
-        action = _Notice(item.chat_id, {"text": item.text, "reply_to": item.reply_to})
-        key = notice_key(item.notice_id)
-        try:
-            found = await self.lookup(action, key, item.at)
-            sent = found["sent"] if found else (await self.perform(action, key))["sent"]
-        except (self.kernel.Unknown, self.kernel.Failed, WireError) as e:
-            if item.notice_id not in self._logged:
-                self._logged.add(item.notice_id)
-                log.warning("notice %s not sent: %s", item.notice_id, e)
-            return
-        await outbox.sent(item, sent)
-
     # -- reactions ---------------------------------------------------------
 
     async def react(self, item, outbox) -> None:
@@ -366,7 +337,7 @@ class Sender:
         for a row with no label, written before rows named it), then remove
         each name its message's earlier stages placed (`previous`) that
         differs from it, so the message carries one. A 429 or a
-        lost connection leaves it unmarked for a later wake, as a notice is;
+        lost connection leaves it unmarked for a later wake;
         Slack's refusal (`missing_scope`, `message_not_found`, `invalid_name`)
         is its result."""
         name = item.emoji if item.label else SEEN_NAME

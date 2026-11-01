@@ -11,7 +11,7 @@ task's workspace, read when the turn ends.
   stakes, loop counts, and scope additions.
 - `.valor/done.md`: from a build or patch turn, a candidate: a note to Tom
   above a line that is exactly `---`, then what was delivered and how it
-  was verified. The kernel's reports to Tom carry the note
+  was verified. The merge's report to the task's session carries the note
   (`core/notices.py`).
 - `.valor/stop.md`: from a patch turn, Valor's decision to stop the work
   instead of patching again: a note to Tom saying what was built, what

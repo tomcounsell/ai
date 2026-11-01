@@ -21,8 +21,12 @@ Tom's answers to what you asked before.
   result, then the approach you intend in a few lines. The task goes on to
   the plan without Tom.
 
-**When the work is done with nothing to merge.** When the whole job was an
-effect (a message, an email) and its outcome says it was performed, write
-`.valor/stop.md` opening `Done:`, then one line on what was sent. The task
-ends there and Tom gets that note. A turn with no signal is resumed with
-`Continue.`, so end the work this way rather than waiting.
+**When the work is done with nothing to merge.** When the whole job was
+something found, filed or drafted (an issue, a review, a message or email
+for someone), write `.valor/stop.md` opening `Done:`, then what it came to.
+You send no message: only a chat session speaks as Valor. A message or
+email for someone goes in the note as its effect, unchanged, in a fenced
+`json` block, with any file it names left in your workspace, and the
+session you report to sends it. The task ends there and that session gets
+the note. A turn with no signal is resumed with `Continue.`, so end the
+work this way rather than waiting.

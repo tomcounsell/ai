@@ -1,8 +1,8 @@
 """`TelegramBridge`: the `Bridge` the port's `serve` runs.
 
 `run(outbox)` connects, registers the live handler, fills the gap, and
-iterates the outbox: a `Release` goes to `outbox.perform`, a `NoticeDue`
-is sent here, and a `ReactionDue` is set here. `tick()`, which `serve`
+iterates the outbox: a `Release` goes to `outbox.perform`, and a
+`ReactionDue` is set here. `tick()`, which `serve`
 calls on every `serve_tick_s` wake,
 fills the gap again and drops the record of every send the ledger has
 settled. The bridge keeps the connection up itself and fills the gap on
@@ -41,7 +41,7 @@ import signal
 from pathlib import Path
 
 from bridges.telegram import gap, inbound
-from bridges.telegram.send import Sender, notice_key
+from bridges.telegram.send import Sender
 from bridges.telegram.state import State
 from bridges.telegram.wire import FloodWait, Msg, Refused, Wire, WireError
 
@@ -120,8 +120,6 @@ class TelegramBridge:
             try:
                 if isinstance(item, self.kernel.Release):
                     await outbox.perform(item)
-                elif isinstance(item, self.kernel.NoticeDue):
-                    await self.sender.notice(item, outbox)
                 elif isinstance(item, self.kernel.ReactionDue):
                     await self.sender.react(item, outbox)
             finally:
@@ -156,17 +154,16 @@ class TelegramBridge:
 
     async def tidy(self) -> None:
         """Keep the record of each send still in flight: an effect with an
-        intent and no outcome, or a notice not yet marked sent."""
+        intent and no outcome."""
         if self._outbox is None:
             return
         try:
             async with self.kernel.conn() as conn:
                 effects = await self.kernel.dangling(conn, self._outbox.types())
-            notices = [i for i in await self._outbox.due() if isinstance(i, self.kernel.NoticeDue)]
         except Exception:
             log.exception("could not read the sends in flight; their records stay")
             return
-        self.sender.keep_only(set(effects) | {notice_key(n.notice_id) for n in notices})
+        self.sender.keep_only(set(effects))
 
     async def settled(self) -> None:
         """Until every receive running off the update stream has ended."""

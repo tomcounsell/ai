@@ -159,23 +159,19 @@ async def key_of(dsn: str, effect_id: str) -> str:
     return held["idempotency_key"]
 
 
-async def notice(dsn: str, chat_id: str, text: str = "waiting on approval") -> tuple[str, str]:
-    """One `notice.requested` row for a fresh task, to `chat_id`; (task, notice id)."""
+async def due(box, wanted: str):
+    """The outbox's due item for one effect id."""
+    (item,) = [i for i in await box.due() if getattr(i, "effect_id", None) == wanted]
+    return item
+
+
+async def report(dsn: str, text: str = "waiting on approval") -> str:
+    """A fresh task's report, which the kernel writes for a session and
+    never for a bridge; the task."""
     task = await bridges.new_task(dsn)
     async with await db.connect(dsn) as conn:
-        notice_id = await notices.request(conn, task, kind="effect", about_key=f"about:{task}", text=text,
-                                          channel="telegram", chat_id=chat_id)  # fmt: skip
-    return task, notice_id
-
-
-async def due(box, wanted: str):
-    """The outbox's due item for one effect or notice id."""
-    (item,) = [
-        i
-        for i in await box.due()
-        if getattr(i, "effect_id", None) == wanted or getattr(i, "notice_id", None) == wanted
-    ]
-    return item
+        await notices.request(conn, task, kind="ended", about_key=f"about:{task}", text=text)
+    return task
 
 
 class Only:
@@ -191,6 +187,6 @@ class Only:
     async def __aiter__(self):
         while True:
             for item in await self.box.due():
-                if {getattr(item, k, None) for k in ("effect_id", "notice_id", "reaction_id")} & self.wanted:
+                if {getattr(item, k, None) for k in ("effect_id", "reaction_id")} & self.wanted:
                     yield item
             await asyncio.sleep(0.05)

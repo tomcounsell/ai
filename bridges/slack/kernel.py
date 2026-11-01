@@ -16,7 +16,6 @@ from typing import Any
 class Kernel:
     Inbound: type
     Release: type
-    NoticeDue: type
     ReactionDue: type
     Unknown: type
     Failed: type
@@ -52,7 +51,6 @@ def from_core(dsn: str | None = None) -> Kernel:
     return Kernel(
         Inbound=intake.Inbound,
         Release=bridge.Release,
-        NoticeDue=bridge.NoticeDue,
         ReactionDue=bridge.ReactionDue,
         Unknown=broker.Unknown,
         Failed=broker.Failed,

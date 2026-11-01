@@ -39,11 +39,15 @@ carries on as before.
 person, the report names the PDF's absolute path, outside `.valor/`, so
 the chat session can send it.
 
-**When the work is done with nothing to merge.** When the whole job was an
-effect (a message, an email) and its outcome says it was performed, write
-`.valor/stop.md` opening `Done:`, then one line on what was sent. The task
-ends there and Tom gets that note. A turn with no signal is resumed with
-`Continue.`, so end the work this way rather than waiting.
+**When the work is done with nothing to merge.** When the whole job was
+something found, filed or drafted (an issue, a review, a message or email
+for someone), write `.valor/stop.md` opening `Done:`, then what it came to.
+You send no message: only a chat session speaks as Valor. A message or
+email for someone goes in the note as its effect, unchanged, in a fenced
+`json` block, with any file it names left in your workspace, and the
+session you report to sends it. The task ends there and that session gets
+the note. A turn with no signal is resumed with `Continue.`, so end the
+work this way rather than waiting.
 
 **Restating the stakes.** When the change risks more than the plan's stakes say, write `.valor/stakes.json` beside `done.md`: `{"stakes": "<one accurate sentence>", "review_rounds": 1}`. 1 is the ceiling, and a restatement cannot lower the count.
 

@@ -26,8 +26,8 @@ launchd job.
 never reaches the server or its log. With no token file, `open` writes
 nothing and says to start the bridge first.
 
-The page shows Tom's messages, Valor's notices, and released sends, oldest
-first. It polls `GET /log` every two seconds and adds each row whose
+The page shows Tom's messages and Valor's released sends (and the
+kernel's notices from before 2026-11-01), oldest first. It polls `GET /log` every two seconds and adds each row whose
 `event_id` it has not shown, in event id order. It renders every text,
 Tom's and Valor's, as Markdown (GitHub-flavored, a single newline kept as
 a line break) and never lets it run:
@@ -70,10 +70,9 @@ opens its own database connection and closes it.
 Each `/log` row carries `event_id` (for deduplication), `message_id`,
 `from` (`tom` or `valor`), `text`, and `reply_to`. Tom's rows are his
 `message.received` rows on the `local` stream, with the page's `id` as
-`message_id`. Valor's rows are `notice.sent` rows sent on `local`, with the
-notice id as `message_id` and the text of its `notice.requested`, and
-`effect.outcome` rows sent on `local`, with the effect id as `message_id`
-and the text of its `effect.held`. `/log` sends the whole chat each poll:
+`message_id`. Valor's rows are `effect.outcome` rows sent on `local`, with the effect id as `message_id`
+and the text of its `effect.held`, and the old `notice.sent` rows on
+`local` with the text of their `notice.requested`. `/log` sends the whole chat each poll:
 event ids are identity values that commit out of order, so a cursor would
 skip a row.
 
@@ -86,9 +85,8 @@ server's clock in UTC, and `reply_to` as posted. Every local record is
 verified and from the operator: the bridge writes one only after the
 request's token matched (`secrets.compare_digest`) the token file, and the
 chat has one member. The kernel binds it as it binds a Telegram message:
-the exact word `stop` binds on a reply, a near miss steers
-and owes a notice, and a binding notice goes back in reply in the local
-chat.
+every message goes to the chat's session, and an exact `stop` stops the
+task whose post it replies to, else every task reporting to the session.
 
 ## Sending
 
@@ -104,8 +102,7 @@ string, and when the payload names files: the page shows text only. There is no 
 `{"sent": [{"channel": "local", "chat_id": "local", "message_id":
 <effect_id>}]}`; the outcome row is what shows it on the page. `lookup`
 returns the same, since the ledger is the platform: a crash between the
-intent and the outcome reconciles `done`, and the text is shown once. A
-notice is marked sent with its notice id as the message id.
+intent and the outcome reconciles `done`, and the text is shown once.
 
 ## Settings and files
 
@@ -123,7 +120,7 @@ notice is marked sent with its notice id as the message id.
   program, and reads the token from the browser's history or profiles
   under `~/Library/Application Support`; the kernel key directory that
   holds the token file is denied to it ([workspace.md](../workspace.md)).
-- **A message's text.** A notice or a send is text a turn wrote,
+- **A message's text.** A send is text a turn wrote,
   shown on the page that holds the token and takes stops, so it must
   never run. It is rendered as [above](#the-page): HTML in it escaped,
   the Markdown output sanitized, and inline script refused by the page's
@@ -132,7 +129,7 @@ notice is marked sent with its notice id as the message id.
   page: `GET /` sends `frame-ancestors 'none'`.
 - **Why not a terminal chat.** A turn can write to Tom's terminal devices
   (`/dev/ttys*`), so a terminal chat can be overprinted with a
-  forged notice at once. The browser route needs a browser restart and has
+  forged message at once. The browser route needs a browser restart and has
   to get past the browser's own protections.
 - **Other local processes and web pages** are what the token is for.
   Another macOS user reaches `127.0.0.1` but reads neither the key

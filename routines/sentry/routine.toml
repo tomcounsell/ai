@@ -21,7 +21,7 @@ E. A real defect with none.
 
 One issue with a high event count from a retry loop is one defect: one GitHub issue, one fix task. For each C, D or E, run `gh issue list --repo tomcounsell/ai --state all --search 'VALOR-N in:title' --json number,title`; a match counts only when a title contains the literal `[VALOR-N]`. For each E with no match, file an issue titled `[VALOR-N] <Sentry title>` and start a fix task.
 
-Stop with `Done:` listing each issue filed and each task started. With neither, stop with `Done: nothing new. Send Tom nothing.`"""
+Stop with `Done:` listing each issue filed and each task started, or `Done: nothing new`. This goes to the record, never to Tom; send no one anything."""
 
 [schedule]
 hour = 6

@@ -50,29 +50,32 @@ verified, so none carries Tom's rights: `stop` there is a steer.
 *Tom's own chat* (`_toms_own`: the operator chat, his Telegram DM, his
 Slack DMs, the local chat) has a chat session too, under the project
 listing the chat, else `valor` (`_project_for`). Only Tom is heard there,
-and every message of his wakes it. A reply that resolves to a task
-other than one of this chat's sessions (an older task's notice or send,
-another chat's session's post, or a notice that stays Tom's: credential,
-binding, rollout) keeps the reply binding below; any other message of his
-there, a reply to the session's own post included, is a `message.steered`
-row on the chat's open session (one that ended goes to a new one). Stop is
-immediate there by structure: an exact `stop` also stops at once every
-open task that reports to the session (`tasks.reporting`: those it
-started, and those whose report is on it), by Tom, never the session
-itself. With no project to put the session under, the message starts a
-task.
+and every message of his, a reply under any post included, is a
+`message.steered` row on the chat's open session (one that ended goes to a
+new one): only a chat session speaks as Valor, so only it answers him
+(docs/plans/one-voice.md; on 2026-11-01 his questions in a routine
+report's thread were bound as feedback and never answered). A reply under
+one of Valor's posts carries the post (`replying_to`, `_replying_to`): its
+text, and its task when that is no chat session, which from then on
+reports to the session (`tasks.reporting`), so the session answers, steers
+or reopens it (`tools/chat_tasks.py`). Stop is immediate there by
+structure: an exact `stop` stops at once the task whose post it replies
+to, else every open task that reports to the session, by Tom, never the
+session itself. With no project to put the session under, the message
+starts a task.
 
 A chat's session is picked under the chat's lock (`open_session`) and
 read again once its tree and task locks are held; if it ended in between,
-a new session takes the message, in the same transaction. The operator
-chat's session also takes the reports of root tasks that are no session
+a new session takes the message, in the same transaction. A report with a
+chat to go to and no open session there starts one (`session_for`); the
+operator chat's session takes the reports of work under no chat session
 (`operator_session`, `core/notices.py`).
 
 The binding table, first match wins:
 
 | The record | Bound as |
 | --- | --- |
-| In Valor's engineering room (its spec's `update_chat`), exactly `/update` or `/update@<bot>` | `update`: an update request (`request_update`), replied to there when it ends |
+| In Valor's engineering room (its spec's `update_chat`), exactly `/update` or `/update@<bot>` | `update`: an update request (`request_update`), its report to the room's session when it ends |
 | In a team chat, with no text or files | `none` |
 | In a team chat, waking the chat session | `steer`, to the chat session |
 | In a team chat, otherwise | `heard`, to the chat session |
@@ -80,41 +83,33 @@ The binding table, first match wins:
 | An email | `steer`, to the thread's session |
 | Not verified, or not from the operator | `none` |
 | In Tom's own chat, with no text or files | `none` |
-| In Tom's own chat, exactly `stop`, not a reply to a task other than its session | `stop`: each open task reporting to the session stopped, and a steer to the session |
-| In Tom's own chat, not a reply to a task other than its session | `steer`, to the chat's session |
-| A reply to a merge's report, task in `merged`, not `stop` or a near miss | `feedback` |
-| A reply to a task's notice or send, task in `ended`, not `stop` or a near miss | `feedback` |
-| A reply to a merged or stopped task | `none`, with a notice |
-| A reply, exactly `stop` | `stop` |
-| A reply to the open question's notice | `answer` |
-| Any other reply to a task's notice or send | `steer` |
-| Not a reply, with text or files (a chat with no project) | `start` |
-| Not a reply, empty | `none` |
+| In Tom's own chat, exactly `stop` | `stop`: the replied-to task, else each open task reporting to the session, stopped, and a steer to the session |
+| In Tom's own chat | `steer`, to the chat's session |
+| Anywhere else, with text or files (a chat with no project) | `start` |
+| Anywhere else, empty | `none` |
 
 "Exactly" is the whole text, trimmed and casefolded (`/update`: trimmed,
-any verified member of the room). A near miss steers
-and owes a notice.
+any verified member of the room).
 
-A chat session passes what its chat says about a task it started with
-`task.steer` (`tools/chat_tasks.py`), which follows the same rows: on a
-task in `merged` or `ended` it is `feedback` (with the sender's name, via
-`chat`), on a stopped task it stays a steer, otherwise it is a steer.
+A chat session passes what its chat says about a task that reports to it
+with `task.steer` (`tools/chat_tasks.py`): on a task in `merged` or
+`ended` it is `feedback` (with the sender's name, via `chat`), on a
+stopped task it stays a steer, otherwise it is a steer; and answers its
+question with `task.answer`.
 
 On a threaded channel (Slack) a reply names its thread's root, not the
-message it answers, so a reply binds to the newest of Valor's posts in
+message it answers, so a reply resolves to the newest of Valor's posts in
 that thread that is older than it (the root included), read from the
-ledger's `sent` entries.
+ledger's `sent` entries: a session's sends, and the kernel's notices
+before 2026-11-01.
 
-A binding notice goes back in reply only in Tom's own chat: the operator
-chat, or his DM on a channel where he replies. About any other message
-(a project group, a client channel, an email) it goes to the operator
-channel and chat, so kernel text never reaches anyone else. A binding that raises is rolled back
-and bound `none` with the error, owing a notice; later messages never wait
-behind it. `message.bound` is the first row a binding writes, so a
-second binder of the same message stops there and writes nothing. Last in
-the same transaction, a message bound to a task on a channel that reacts
-gets its reaction row (`reactions.on_bound`), and a session reads each
-message with the reaction on it (`chat_line`).
+A binding that raises is rolled back and bound `none` with the error,
+reported to the session (`notices.request`, kind `binding`); later
+messages never wait behind it. `message.bound` is the first row a binding
+writes, so a second binder of the same message stops there and writes
+nothing. Last in the same transaction, a message bound to a task on a
+channel that reacts gets its reaction row (`reactions.on_bound`), and a
+session reads each message with the reaction on it (`chat_line`).
 """
 
 import re
@@ -125,8 +120,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-from core import channels, ledger, machine, notices, reactions, session, tasks, workspace
-from core.machine import State
+from core import channels, ledger, machine, notices, reactions, tasks, workspace
 from core.settings import resolve_seat, settings
 
 
@@ -471,15 +465,6 @@ async def request_update(conn, *, by: str, via: str, reply: dict[str, str] | Non
         return request_id
 
 
-def _bare(text: str) -> str:
-    return re.sub(r"[^\w\s]", "", text).strip().casefold()
-
-
-def _near(text: str, word: str) -> bool:
-    bare = _bare(text)
-    return bare == word or bare.startswith(word + " ")
-
-
 async def bind(conn) -> list[tuple[str, str]]:
     """Bind every recorded message not yet bound, in order. Returns each
     `(received_id, as)`."""
@@ -544,23 +529,32 @@ async def _bind_failed(conn, p: dict[str, Any], exc: Exception) -> str | None:
     task_id = None
     try:
         task_id, _ = await _replied(conn, p)
-    except Exception:  # noqa: BLE001, S110  the notice goes to the channel's stream instead
+    except Exception:  # noqa: BLE001, S110  the report comes from the channel's stream instead
         pass
     try:
         async with conn.transaction():
             as_ = await _bound(conn, p, task_id, "none", error=repr(exc))
-            await _notice(conn, task_id or p["channel"], p, await _unread(conn, task_id, p))
+            await notices.request(
+                conn,
+                task_id or p["channel"],
+                kind="binding",
+                about_key=f"reply:{p['received_id']}",
+                text=await _unread(conn, task_id, p),
+            )
     except AlreadyBound:
         return None
     return as_
 
 
 async def _unread(conn, task_id: str | None, p: dict[str, Any]) -> str:
-    """What Tom is told when his message could not be bound: his own words
-    quoted, so he knows which; the error stays on `message.bound`."""
+    """What the session hears when a message could not be bound: its words
+    quoted, where and who sent it; the error stays on `message.bound`."""
     said = notices.short(p.get("text"), 60)
-    sentence = (f'your message "{said}"' if said else "your message") + (
-        " was not acted on: something went wrong reading it. Send it again, or reply stop."
+    who = "Tom" if _from_operator(p) else (p.get("sender_name") or "someone")
+    sentence = (
+        f"{who}'s message {p['message_id']} on {p['channel']}"
+        + (f' ("{said}")' if said else "")
+        + " was not acted on: something went wrong reading it."
     )
     return notices.lead(await notices.headline(conn, task_id) if task_id else None, sentence)
 
@@ -625,22 +619,6 @@ def _toms_own(p: dict[str, Any]) -> bool:
     return channel == "local" and chat == LOCAL_CHAT
 
 
-async def _notice(conn, task_id: str, p: dict[str, Any], text: str, suffix: str = "") -> None:
-    replies = _toms_own(p)
-    await notices.request(
-        conn,
-        task_id,
-        kind="binding",
-        about_key=f"reply:{p['received_id']}{suffix}",
-        text=text,
-        # In reply in Tom's own chat; about any other message, to the
-        # operator channel and chat.
-        reply_to=p["message_id"] if replies else None,
-        chat_id=p["chat_id"] if replies else None,
-        channel=p["channel"] if replies else None,
-    )
-
-
 async def _bind(conn, p: dict[str, Any]) -> str | None:
     team = team_spec(p)
     if team is None and p["channel"] == "email":
@@ -658,91 +636,10 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
         return await _chat(conn, p, team)
     if not _from_operator(p):
         return await _bound(conn, p, None, "none")
-    task_id, replied = await _replied(conn, p)
-    if _toms_own(p) and (task_id is None or replied is None or await _session_of(conn, task_id, p)):
-        spec = _project_for(p)
-        if spec is not None:
-            return await _chat(conn, p, spec, own=True)
-    if task_id is None or replied is None:
-        return await _start(conn, p)
-    # Tree, then task: the order every tree writer takes (a stop or
-    # feedback below takes the tree's lock again).
-    await tasks.lock_tree(conn, task_id)
-    await ledger.lock(conn, f"task:{task_id}")
-    rows = await ledger.read(conn, task_id)
-    f = machine.fold(rows)
-    text = (p.get("text") or "").strip()
-    exact = text.casefold()
-    via = p["channel"]
-    notice = (replied.get("notice") or {}) if "notice" in replied else {}
-    kind, about = notice.get("kind"), notice.get("about_key") or ""
-    merge = f.merge_effect or {}
-    if (
-        kind == "report"
-        and f.state is State.MERGED
-        and about == f"report:{merge.get('effect_id')}"
-        and text
-        and not _near(text, "stop")
-    ):
-        as_ = await _bound(conn, p, task_id, "feedback")
-        await session.feedback(conn, task_id, text, by="tom", via=via)
-        return as_
-    if f.state is State.ENDED and text and not _near(text, "stop"):
-        as_ = await _bound(conn, p, task_id, "feedback")
-        await session.feedback(conn, task_id, text, by="tom", via=via)
-        return as_
-    if f.state in (State.MERGED, State.STOPPED):
-        as_ = await _bound(conn, p, task_id, "none")
-        await _notice(
-            conn,
-            task_id,
-            p,
-            notices.lead(
-                await notices.headline(conn, task_id),
-                f"this work is already {f.state.value}, so your reply changed nothing.",
-            ),
-        )
-        return as_
-
-    if exact == "stop":
-        as_ = await _bound(conn, p, task_id, "stop")
-        await tasks.stop(conn, task_id, reason=f"Tom replied stop ({p['message_id']})", by="tom", via=via)
-        return as_
-    if kind == "question" and f.state is State.WAITING and about == f"question:{f.open_question}":
-        as_ = await _bound(conn, p, task_id, "answer")
-        await session.answer(conn, task_id, text, by="tom", via=via)
-        return as_
-
-    as_ = await _bound(conn, p, task_id, "steer")
-    await ledger.append(
-        conn,
-        task_id,
-        "message.steered",
-        {
-            "received_id": p["received_id"],
-            "channel": p["channel"],
-            "chat_id": p["chat_id"],
-            "message_id": p["message_id"],
-            "text": text,
-            "attachments": p.get("attachments") or [],
-            "provenance": ledger.provenance("tom", via, False),
-        },
-    )
-    if _near(text, "stop"):
-        said = "that was not a stop, so your message steers the work. To stop it, reply stop."
-        await _notice(conn, task_id, p, notices.lead(await notices.headline(conn, task_id), said))
-    return as_
-
-
-async def _session_of(conn, task_id: str, p: dict[str, Any]) -> bool:
-    """Whether `task_id` is a session of the message's own chat. A stream
-    (a channel's id) is no task, and another chat's session keeps the
-    reply binding."""
-    try:
-        chat = (await tasks.brief(conn, task_id)).chat
-    except KeyError:
-        return False
-    return chat == {"channel": p["channel"], "chat_id": p["chat_id"]}
+    spec = _project_for(p) if _toms_own(p) else None
+    if spec is not None:
+        return await _chat(conn, p, spec, own=True)
+    return await _start(conn, p)
 
 
 def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
@@ -788,13 +685,16 @@ async def _start(conn, p: dict[str, Any]) -> str | None:
 async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False) -> str:
     """Bind a message to its chat's session, started here when the chat
     has none open: a team chat's, or with `own` Tom's own chat's, where
-    every message wakes it and an exact `stop` also stops at once every
-    open task that reports to the session. A session picked here and
-    found ended once its locks are held gives way to a new one."""
+    every message wakes it and an exact `stop` also stops at once the task
+    whose post it replies to, else every open task that reports to the
+    session. A session picked here and found ended once its locks are held
+    gives way to a new one. A reply under one of Valor's posts carries the
+    post (`replying_to`: its text, and the task when that is no chat
+    session, which then reports to this one, `tasks.reporting`)."""
     text = (p.get("text") or "").strip()
     if not text and not p.get("attachments"):
         return await _bound(conn, p, None, "none")
-    replied, _ = await _replied(conn, p)
+    replied, post = await _replied(conn, p)
     wakes = own or not _mentions_only(spec, p) or bool(MENTION.search(text)) or replied is not None
     channel, chat = p["channel"], p["chat_id"]
     task_id, brief = await open_session(conn, channel, chat, spec, own=own, before=p["received_id"])
@@ -823,6 +723,7 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
         "text",
         "attachments",
     )
+    under = await _replying_to(conn, replied, post)
     await ledger.append(
         conn,
         task_id,
@@ -830,14 +731,46 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
         {
             **{k: p.get(k) for k in keep},
             "thread_tag": thread_tag(p),
+            **({"replying_to": under} if under else {}),
             "provenance": ledger.provenance(by, channel, False),
         },
     )
     if stop:
-        for t in await tasks.reporting(conn, task_id):
+        reach = [under["task_id"]] if under and under.get("task_id") else await tasks.reporting(conn, task_id)
+        for t in reach:
             if machine.fold(await ledger.read(conn, t)).state not in tasks.TERMINAL:
                 await tasks.stop(conn, t, reason=f"Tom said stop ({p['message_id']})", by="tom", via=channel)
     return as_
+
+
+# How much of the post a reply is under the session reads with it.
+POST_CHARS = 500
+
+
+async def _replying_to(conn, task_id: str | None, post: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The post a reply is under, as its session reads it: its text, cut
+    at `POST_CHARS`, and its task when that is no chat session. None when
+    the reply resolves to no post of Valor's."""
+    if task_id is None or post is None:
+        return None
+    if "notice" in post:
+        text = str(post["notice"].get("text") or "")
+    else:
+        held = await (
+            await conn.execute(
+                "SELECT payload->'payload'->>'text' FROM events WHERE type IN ('effect.held', 'effect.intent') "
+                "AND payload->>'effect_id' = %s ORDER BY id LIMIT 1",
+                (post["send"].get("effect_id"),),
+            )
+        ).fetchone()
+        text = (held and held[0]) or ""
+    if len(text) > POST_CHARS:
+        text = text[: POST_CHARS - 3] + "..."
+    try:
+        session = bool((await tasks.brief(conn, task_id)).chat)
+    except KeyError:
+        session = True  # a stream's post: no task to reach
+    return {"text": text, **({} if session else {"task_id": task_id})}
 
 
 def _mentions_only(spec: workspace.Spec, p: dict[str, Any]) -> bool:
@@ -892,13 +825,23 @@ async def operator_session(conn) -> str | None:
     dm = chat == settings.operator_telegram_id or chat in settings.operator_slack_ids
     if dm and chat not in (ident for ident, _ in _project_chats(channel)):
         return None
-    found = await chat_session(conn, channel, chat)
+    return await session_for(conn, channel, chat)
+
+
+async def session_for(conn, channel: str, chat_id: str, spec: workspace.Spec | None = None) -> str | None:
+    """The chat's open session, started when it has none (a report that
+    has a chat to go to, `core/notices.py`): under `spec`, else the spec
+    listing the chat, else for Tom's own chat the one `_project_for` names.
+    None when no project takes the chat."""
+    found = await chat_session(conn, channel, chat_id)
     if found is not None:
         return found
-    spec = _project_for(p)
+    p = {"channel": channel, "chat_id": chat_id, "sender_id": chat_id}
+    own = _toms_own(p)
+    spec = spec or dict(reversed(_project_chats(channel))).get(chat_id) or (_project_for(p) if own else None)
     if spec is None:
         return None
-    task_id, brief = await open_session(conn, channel, chat, spec, own=True)
+    task_id, brief = await open_session(conn, channel, chat_id, spec, own=own)
     if brief is not None:
         await tasks.start(conn, brief, by="valor", via="kernel")
     return task_id
@@ -983,7 +926,15 @@ def chat_line(m: dict[str, Any], reaction: str | None = None) -> str:
     ids += f"; {reaction}" if reaction else ""
     files = _files(m.get("attachments") or [])
     said = (m.get("text") or "").strip() or "(no text)"
-    return f"[{when}] {who} ({ids}): {said}" + (f"\n{files}" if files else "")
+    under = m.get("replying_to")
+    post = ""
+    if under:
+        whose = f"task {under['task_id']}'s post" if under.get("task_id") else "your post"
+        quoted = (
+            "\n".join("  > " + line for line in str(under.get("text") or "").splitlines()) or "  > (no text)"
+        )
+        post = f"\n  under {whose}:\n{quoted}"
+    return f"[{when}] {who} ({ids}): {said}" + post + (f"\n{files}" if files else "")
 
 
 _FILLER = frozenset(

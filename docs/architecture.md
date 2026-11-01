@@ -30,8 +30,9 @@ stops there.
 persona orchestrates and workers do the work. Each chat's session, a team chat's, an email
 thread's, or Tom's own chat's, reads and dispatches; the tasks it starts use the skills and report
 to it, and only it speaks in its chat. A root task that is no session (from the CLI or a routine)
-reports to the operator chat's session (The task and its Brief, the signal channel), or, when that chat is
-one of Tom's DMs that no spec on this Mac lists, straight to it.
+reports to the operator chat's session (The task and its Brief, the signal channel), or, when there is
+none on this Mac, to the record alone. Only a chat session's turn can send (`core/__main__.py`
+`_performers`, docs/plans/one-voice.md); the kernel posts nothing itself.
 
 The off switch and the bounds live in the kernel because an agent's
 incentive to accept correction depends on its uncertainty and is fragile
@@ -110,7 +111,7 @@ everything beneath it [11].
 |---|---|---|
 | `read` | no effect | the grant |
 | `propose` | reversible: a file in the workspace, a branch, a draft, anything that can be withdrawn | the grant; Valor asks first when Tom would want to be asked |
-| `act` | irreversible or money: push to a shared remote, merge, send, pay, deploy | the task's ceiling; performed when requested, and reported to Tom |
+| `act` | irreversible or money: push to a shared remote, merge, send, pay, deploy | the task's ceiling; performed when requested; a merge reported to its session |
 
 **Built.** The broker is the one path for a typed action; model calls and a bridge's receive leave
 by other recorded paths, and a turn using a credential it found on the Mac is a gap (How an act
@@ -205,18 +206,15 @@ lockfile, no schema), carries the verdicts to the candidate replayed onto the ne
 (`verdicts.carried`) and merges at once, its other new commits never tested with the candidate,
 which the status page shows (tested at one sha, merged at another); any other move sends the work
 to `patch` to rebase onto the new tip, as often as it moves, spending no review round; a refusal ends the
-task. A merge that needs the push credential is the one case that reaches Tom, as a request for the
+task. A merge that needs the push credential is the one case that reaches Tom, through its session, as a request for the
 token, and it is tried again on its own until the token works. Each try is one request (`request_id`
 `merge:<digest>:<grants>:<tries>`), so a second step asks nothing twice.
 
-What reaches Tom is a report of what left: when an `act` effect's outcome is `done`, the same
-transaction requests one `report` notice (`report:<effect_id>`) to the chat Tom started the task from when it is his own, else the operator channel, saying what
-left. A merge's report names the request, says it is merged into its branch, carries the note to Tom
-the delivering turn wrote above the `---` line of `done.md`; a reply to it is feedback. No notice
-carries an id, commit, path, command or link (`core/notices.py`); the checks and findings are on the
-task's status page. No report is written for a push (a step
-inside the task), for a send that itself reached Tom (a Telegram or Slack send to the operator, an
-email only to Tom's addresses, any local chat send).
+What reaches Tom of a merge goes through a session: when a merge's outcome is `done`, the same
+transaction writes one `report` (`report:<effect_id>`, `core/notices.py`) to the session the task
+reports to, naming the request, the branch it merged into, and the note the delivering turn wrote
+above the `---` line of `done.md`. The session tells its chat in its own words. No report is written
+for a push (a step inside the task) or a send (only a session sends, and it knows what it sent).
 
 `approval.granted` rows the ledger already holds are read and counted; nothing writes one.
 `db.migrate` refuses each effect still held for an approval (`effect.refused`, `at: migrate`),
@@ -246,7 +244,7 @@ and asserts the audit is empty.
 
 Ending is not stopping. When Valor ends a task (`task.ended`: the working session decided to stop
 after the plan's rounds, a step or provisioning kept failing, or a merge cannot land), nothing runs
-and Tom gets a report, but the task is not fenced: feedback reopens it in `patch`. A stop (`python
+and its session gets a report, but the task is not fenced: feedback reopens it in `patch`. A stop (`python
 -m core stop`) is final.
 
 **Built.** Stopping a task fences its whole subtree: `stop_tree` writes a `task.stopped` row for the
@@ -442,14 +440,14 @@ record today; the tree design is in [objective-tree.md](objective-tree.md).
 
 **Built.** The kernel, `python -m core serve`, one process per machine kept alive by launchd, holds
 the gateway and the broker and runs every task. It wakes on each ledger row (a notification) and
-every `serve_tick_s`, binds new messages, requests the notices owed, and advances each task one
+every `serve_tick_s`, binds new messages, writes the reports owed, and advances each task one
 step: it folds the task's state from the store and runs that state's runner once (`router.step`). A
 task steps again only when a row it did not write arrives, including one written while its step ran,
 so one event is one step. A step that fails or raises writes `step.failed` (the state, the check,
 the reason, the turn), which the task's status shows. The kernel steps it again itself once a delay
 has passed, a minute doubling with each failure in a row (`router.retry_due`), and the next working
 turn opens with the reason; at four failures in a row of the same state and check it writes
-`task.ended`, and Tom gets a report of what failed. A provisioning that fails is tried again the
+`task.ended`, and its session gets a report of what failed. A provisioning that fails is tried again the
 same way, and the third failure ends the task with a report. At most `settings.max_turns` harness turns or checks run at once on a machine (default 2; a turn
 slot is a Postgres lock that `python -m core run` also takes; the test, review, and docs checks hold
 one throughout); the judge and the merge run beside them. The rendered
@@ -481,7 +479,7 @@ on the `updates` stream; a tip the running commit has ends it `up_to_date`. An u
 stops the restart before the checkout moves, since the restart would run an edit nothing merged. A
 failed step steps the checkout and its dependencies back when they had moved, lifts the hold, writes
 `rollout.failed`, and is tried again on the next `serve_tick_s` wake. Once one merge's rollout has
-failed three times (`rollout.NOTICE_AFTER`), Tom gets one notice reporting the step and the reason.
+failed three times (`rollout.NOTICE_AFTER`), the operator chat's session gets one report of the step and the reason.
 
 **Steering.** A message for a task is a ledger row (`message.steered`). While a working or chat
 turn runs, it reaches the turn after the step in progress, never cutting one off: the runner hears the
@@ -498,13 +496,13 @@ a question ends its turn, and feedback reopens finished work. Serves: correction
 
 ## Bridges
 
-A bridge is I/O: it turns an inbound message into a request or a reply on a task, and renders the
-kernel's outbound records (questions, deliveries, reports) on its medium. The kernel's loop is the
+A bridge is I/O: it turns an inbound message into a request or a reply on a task, and renders a
+chat session's sends on its medium. The kernel's loop is the
 one execution engine; delivery is keyed by transport, so an email thread is answered by email.
 The kernel side of the port is built (`core/intake.py`, `core/notices.py`, `core/bridge.py`): one
 `message.received` row per inbound message, bound by the kernel to start, steer, answer, feedback,
-stop, or none; notices owed by the fold; and an outbox that hands each bridge the sends the broker
-released. Telegram is built in `bridges/telegram/` ([bridges/telegram.md](bridges/telegram.md))
+stop, or none; reports owed by the fold, to sessions; and an outbox that hands each bridge the sends
+the broker released, all of them a chat session's. Telegram is built in `bridges/telegram/` ([bridges/telegram.md](bridges/telegram.md))
 email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `bridges/slack/`
 ([bridges/slack.md](bridges/slack.md)), and a local chat page in `bridges/local/`
 ([bridges/local.md](bridges/local.md)), each a process of its own.
@@ -529,15 +527,13 @@ email in `bridges/email/` ([bridges/email.md](bridges/email.md)), Slack in `brid
    findings go together to one patch in the resumed working session, and
    the three run again on the new candidate, within the loop counts.
 7. **Merge.** A passing delivery merges itself when the merge predicate
-   holds, and the merge's report reaches Tom: what shipped, in the
+   holds, and the merge's report reaches its session: what shipped, in the
    delivering turn's note. Work that has
    not passed when the plan's rounds are spent gets one last round, in
    which Valor patches once more or stops; when it stops, or that round
-   does not pass either, the task ends and Tom gets a report of what was
-   built, what did not pass, and why it stopped. Feedback by reply to a report or that
-   notice goes to `patch` on the same task; nothing waits for it. So does a
-   chat session's `task.steer` of a task it started that is `merged` or
-   `ended` (`tools/chat_tasks.py`): the task reopens in its own workspace,
+   does not pass either, the task ends and its session gets a report of what was
+   built, what did not pass, and why it stopped. A chat session's `task.steer` of a task reporting to it that is `merged` or
+   `ended` goes to `patch` on the same task (`tools/chat_tasks.py`); nothing waits for it: the task reopens in its own workspace,
    resuming its working session, and reports to the session again, so a
    deliverable's task is the worker for its revision rounds.
 

@@ -99,10 +99,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_one_message
     WHERE type = 'message.received';
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_binding
     ON events ((payload->>'received_id')) WHERE type = 'message.bound';
+-- The kernel's notices before 2026-11-01, which a bridge sent: nothing
+-- writes them now; the index finds a reporter's old notice by its key
+-- (`notices._made`). One report per reporter and key (`notices.request`).
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_notice
     ON events (task_id, (payload->>'about_key')) WHERE type = 'notice.requested';
-CREATE UNIQUE INDEX IF NOT EXISTS events_one_notice_sent
-    ON events ((payload->>'notice_id')) WHERE type = 'notice.sent';
+DROP INDEX IF EXISTS events_one_notice_sent;
+CREATE UNIQUE INDEX IF NOT EXISTS events_one_report
+    ON events ((payload->>'from'), (payload->>'about_key')) WHERE type = 'child.reported' AND payload ? 'from';
 -- One reaction per message and stage (`seen` 👀, then its `shape`), and one
 -- result per reaction, so a second kernel or bridge writes nothing twice.
 CREATE UNIQUE INDEX IF NOT EXISTS events_one_reaction

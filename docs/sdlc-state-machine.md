@@ -417,7 +417,7 @@ loop counts (see Loops), and moves the task once:
 | anything else | anything | a plan's round left | `patch`, with every finding |
 | `pass` | test `gaps`, docs passing | none left | `merge`, with the gaps listed |
 | anything else | anything | the last round unspent | `patch`, with every finding, to patch or stop |
-| anything else | anything | the last round spent | `ended`, with a report to Tom |
+| anything else | anything | the last round spent | `ended`, with a report to its session |
 
 The rows are read in order and the first match decides. No row records the join. The
 verdict that completes a join to `merge` or `ended` writes `task.delivered` with it, and the kernel
@@ -457,9 +457,9 @@ each, $0.89 and $0.85 (rebuild-demonstration.md, Money).
 it was verified, the test, review, and docs verdicts with any breadth gaps, the tech-debt additions,
 and the decisions Valor made that Tom may want to change, the one that most changes the outcome
 first. It then requests the merge, and the broker performs it at request when the predicate below
-holds. A done merge owes Tom a `report` notice of what shipped: the note the delivering turn wrote
-above the `---` line of `done.md`, led by the request's first line; a reply to it is
-`feedback.given`.
+holds. A done merge owes its session a `report` of what shipped: the note the delivering turn wrote
+above the `---` line of `done.md`, led by the request's first line; the session's `task.steer` of it
+is `feedback.given`.
 
 **Exit evidence.** `merged`: `effect.intent` and `effect.outcome` `done` for the merge. `feedback`:
 `feedback.given`, to `patch`. `verdicts.carried`: the target moved disjointly, and the merge

@@ -157,7 +157,8 @@ async def task_list(
     conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query
 ) -> list[dict[str, Any]]:
     """Newest first: each task's chat or parent, state, instruction, open
-    question, and the summary of its latest delivery."""
+    question, and its latest result: its delivery's summary, or the note it
+    stopped with (`Done: ...`), where a routine's run leaves what it found."""
     q = (query.get("q") or "").casefold()
     picked = [(t, b) for t, b in tasks.items() if q in str(b.get("instruction") or "").casefold()]
     picked.sort(key=lambda tb: tb[1]["created_at"], reverse=True)
@@ -176,14 +177,20 @@ async def task_list(
                 "open_question": next(
                     (a.get("text") for a in reversed(asked) if a.get("question_id") not in answered), None
                 ),
-                "delivered": next(
-                    (r["payload"].get("summary") for r in reversed(rows) if r["type"] == "task.delivered"),
-                    None,
-                ),
+                "delivered": next((_result(r) for r in reversed(rows) if _result(r) is not None), None),
                 "last_at": rows[-1]["at"] if rows else None,
             }
         )
     return found
+
+
+def _result(row: dict[str, Any]) -> str | None:
+    p = row["payload"]
+    if row["type"] == "task.delivered":
+        return p.get("summary")
+    if row["type"] == "task.ended" and p.get("kind") == "decided":
+        return p.get("text")
+    return None
 
 
 async def task(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query) -> list[dict[str, Any]]:

@@ -448,12 +448,12 @@ async def ensure_merge(
     moved target first carries the verified candidate onto the new tip
     (`_carry`, `verdicts.carried`) and requests its merge at once, else
     writes `rebase.requested`; a
-    credential asks Tom for it once per candidate (`notices.credential`)
+    credential is reported to the session once per candidate (`notices.credential`)
     and is tried again every `CREDENTIAL_RETRY_S`; a transient failure is
     tried again after `_backoff`; a refusal or a transient failure past
     `MERGE_TRIES` ends the task
     (`task.ended`, kind `merge`). A merge whose credential is missing is
-    not requested; Tom is asked for it. Before a try is due the answer is
+    not requested; the session is told. Before a try is due the answer is
     `unknown` with the time it is due, so the step parks."""
     from core import notices
 
@@ -600,8 +600,8 @@ async def _rebase(
 
 
 async def end(conn, task_id: str, kind: str, reason: str, **more: Any) -> bool:
-    """Write `task.ended` from the kernel: Valor stops the work and Tom gets
-    a report (`notices.owe`). `kind` names what ended it: `step`,
+    """Write `task.ended` from the kernel: Valor stops the work and its
+    session gets a report (`notices.owe`). `kind` names what ended it: `step`,
     `provision`, or `merge`. False when the task is already merged, ended,
     or stopped."""
     async with conn.transaction():

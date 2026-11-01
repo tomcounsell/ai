@@ -1,20 +1,21 @@
-"""Notices: sent to the row's chat, once, and marked through the outbox."""
+"""The outbox: Telegram gets what a chat session sends, and nothing the
+kernel wrote of its own (Tom, 2026-11-01: "No routine or system should be
+impersonating you.")."""
 
 import asyncio
 
 import pytest
 
-from tests.bridges import of_type, outbox
+from tests.bridges import outbox
 from tests.telegram_port import (
     Only,
     chat,
     connected,
-    due,
     emu_chat,
     machine,
-    notice,
     outcome,
     release,
+    report,
     send,
     until,
 )
@@ -33,64 +34,18 @@ def c(emu, tmp_path):
 run = asyncio.run
 
 
-async def marked(dsn, notice_id):
-    return await of_type(dsn, "notice.sent", notice_id=notice_id)
-
-
-class Dies:
-    """The process dies between the send and `notice.sent`."""
-
-    async def sent(self, item, sent):
-        raise SystemExit("killed")
-
-
-def test_a_notice_goes_to_the_rows_chat_and_is_marked(emu, dsn, tmp_path, c):
+def test_the_bridge_sends_a_release_and_nothing_for_a_kernel_report(emu, dsn, tmp_path, c):
     operator, project = c
 
     async def go():
-        _, nid = await notice(dsn, project)
-        async with connected(emu.url, dsn, tmp_path) as bridge, outbox(dsn, bridge) as box:
-            await bridge.sender.notice(await due(box, nid), box)
-        [m] = emu.own(int(project))
-        assert m["text"] == "waiting on approval"
-        assert emu.own(int(operator)) == []
-        [row] = await marked(dsn, nid)
-        assert row["sent"] == [{"channel": "telegram", "chat_id": project, "message_id": str(m["id"])}]
-
-    run(go())
-
-
-def test_killed_between_send_and_sent_the_restart_finds_it_and_sends_nothing(emu, dsn, tmp_path, c):
-    _, project = c
-
-    async def go():
-        _, nid = await notice(dsn, project)
-        async with connected(emu.url, dsn, tmp_path) as bridge, outbox(dsn, bridge) as box:
-            with pytest.raises(SystemExit):
-                await bridge.sender.notice(await due(box, nid), Dies())
-        async with connected(emu.url, dsn, tmp_path) as bridge, outbox(dsn, bridge) as box:
-            await bridge.sender.notice(await due(box, nid), box)
-        [m] = emu.own(int(project))
-        assert (await marked(dsn, nid))[0]["sent"][0]["message_id"] == str(m["id"])
-
-    run(go())
-
-
-def test_the_bridge_consumes_releases_and_notices_from_the_outbox(emu, dsn, tmp_path, c):
-    _, project = c
-
-    async def go():
         effect = await release(dsn, send(project, "released"))
-        _, nid = await notice(dsn, project, "a notice")
+        await report(dsn, "a report")
         async with connected(emu.url, dsn, tmp_path) as bridge, outbox(dsn, bridge) as box:
-            consume = asyncio.create_task(bridge._consume(Only(box, {effect, nid})))
-
-            async def both():
-                return await outcome(dsn, effect) is not None and await marked(dsn, nid)
-
-            await until(both)
+            assert all(hasattr(i, "effect_id") or hasattr(i, "reaction_id") for i in await box.due())
+            consume = asyncio.create_task(bridge._consume(Only(box, {effect})))
+            await until(lambda: outcome(dsn, effect))
             consume.cancel()
         assert (await outcome(dsn, effect))["result"]["sent"]
-        assert sorted(m["text"].split("\n")[0] for m in emu.own(int(project))) == ["a notice", "released"]
+        assert [m["text"] for m in emu.own(int(project))] == ["released"] and emu.own(int(operator)) == []
 
     run(go())

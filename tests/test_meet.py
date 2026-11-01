@@ -528,7 +528,7 @@ def test_with_others_present_readbacks_go_to_toms_slack_dm_which_answers_on_his_
 # -- what the call writes ----------------------------------------------------------------
 
 
-def test_a_calls_posts_says_and_thread_copies_owe_no_report_and_a_send_elsewhere_does(dsn, team):
+def test_a_calls_posts_says_and_sends_owe_no_report_since_it_wrote_them(dsn, team):
     async def go():
         _brief, session_id = await a_call(dsn, team)
         out = {}
@@ -538,11 +538,10 @@ def test_a_calls_posts_says_and_thread_copies_owe_no_report_and_a_send_elsewhere
                                        ("elsewhere", "slack.send_message", "T0ABC/C0OTHER")):  # fmt: skip
                 effect = {"action_type": kind, "effect_class": "act", "target": target,
                           "payload": {"text": "hi"}, "effect_id": ledger.new_id()}  # fmt: skip
-                out[name] = await notices.report(conn, session_id, effect, {})
+                out[name] = await notices.report(conn, session_id, effect)
         return out
 
-    out = run(go())
-    assert out["post"] is None and out["say"] is None and out["copy"] is None and out["elsewhere"]
+    assert set(run(go()).values()) == {None}
 
 
 def test_a_calls_post_is_refused_empty_or_over_500_characters(dsn, team):

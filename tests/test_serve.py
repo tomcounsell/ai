@@ -182,7 +182,9 @@ def test_kill_after_ended_before_collected(fresh, op, tmp_path):
     written = run(rows(fresh, task))
     assert done["recollected"] == [turn] and again["recollected"] == []
     assert len(typed(written, "turn.collected", turn_id=turn)) == 1
-    assert len(typed(written, "effect.held", request_id=f"{turn}/a.json")) == 1
+    # An SDLC task has no send (only a chat session does): the request is
+    # refused once, and the recollection does not ask it again.
+    assert len(typed(written, "effect.refused", request_id=f"{turn}/a.json")) == 1
     assert machine.fold(written).state is State.CRITIQUE
 
 

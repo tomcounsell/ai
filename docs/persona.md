@@ -46,9 +46,9 @@ in the third person, Valor still answers as itself.
 Each chat Valor is in has one long-lived session, and it is the one voice
 there: every team chat a project lists, and Tom's own chat (his Telegram
 DM, his Slack DMs, the operator chat, the local chat page), where it is a
-1:1 with the CEO. Every message in the chat that does not bind to running
-work is the session's next prompt; a steer, answer, or stop on a reply to
-an older task's post binds to that task (`core/intake.py`). An email
+1:1 with the CEO. Every message in the chat is the session's, a reply
+under an older task's post included, which shows the session the post and
+lets it answer or steer that task (`core/intake.py`). An email
 thread is a chat too, with a session of its own; no email carries Tom's
 rights, since a From header is a claim.
 
@@ -66,12 +66,13 @@ shaped first and starts nothing; what only the asker could settle is
 asked one question per message, as the `yudame-dev:ask-me` skill says,
 ending with a readback the asker's next message accepts. The tasks it starts send their questions, progress, and
 deliveries to the session that started them, never to a chat; only the
-session speaks there (Tom's grant, 2026-10-16), and it tells the chat in
-its own words (`core/notices.py`). This is the session's prompt and the
-persona, with no tool taken from it. A root task that is no session (one
-started from the CLI or a routine) reports to the operator
-chat's session. In Tom's own chat his exact `stop` stops at once every
-task reporting to the session.
+session speaks there (Tom's grants, 2026-10-16 and 2026-11-01), and it tells the chat in
+its own words (`core/notices.py`). No task, routine or part of the kernel
+sends: only a chat session's turn holds the send types. A root task that
+is no session (one started from the CLI or a routine) reports to the
+operator chat's session; a routine's result is held in the record and
+wakes no one. In Tom's own chat his exact `stop` stops at once the task
+whose post it replies to, else every task reporting to the session.
 
 ## Voice
 

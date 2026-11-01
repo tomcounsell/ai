@@ -583,17 +583,26 @@ async def tom_says(dsn, dm, text, ts, *, sender=None, **kw) -> dict:
     return bound
 
 
+async def legacy_notice(conn, task, kind, about, text, entries) -> None:
+    """A kernel notice as the bridge sent it before 2026-11-01: its
+    `notice.requested` and `notice.sent` rows."""
+    nid = ledger.new_id()
+    await ledger.append(conn, task, "notice.requested", {"notice_id": nid, "channel": "slack",
+                        "chat_id": entries[0]["chat_id"], "kind": kind, "about_key": about, "text": text,
+                        "reply_to": None})  # fmt: skip
+    await ledger.append(conn, task, "notice.sent", {"notice_id": nid, "sent": entries})
+
+
 async def posted(dsn, task, chat, ts, text, *, question=False) -> None:
-    """Valor's post in a Slack chat: a send, or the notice of the task's
-    open question sent there directly."""
+    """Valor's post in a Slack chat: a send, or with `question` the notice
+    of the task's open question the kernel sent there itself, as it did
+    before 2026-11-01."""
     entries = [{"channel": "slack", "chat_id": chat, "message_id": ts, "thread_ts": None}]
     async with await db.connect(dsn) as conn:
         if question:
-            about = f"question:{machine.fold(await ledger.read(conn, task)).open_question}"
-            nid = await notices.request(
-                conn, task, kind="question", about_key=about, text=text, channel="slack", chat_id=chat
-            )
-            await ledger.append(conn, task, "notice.sent", {"notice_id": nid, "sent": entries})
+            await legacy_notice(conn, task, "question",
+                                f"question:{machine.fold(await ledger.read(conn, task)).open_question}",
+                                text, entries)  # fmt: skip
             return
         effect, payload = ledger.new_id(), {"text": text}
         await ledger.append(conn, task, "effect.intent",
@@ -708,11 +717,14 @@ def test_in_a_slack_mentions_chat_valors_own_tag_or_a_reply_in_his_thread_wakes_
     assert b.chat == {"channel": "slack", "chat_id": chat} and b.project == {"name": "office"}
 
 
-def test_replies_bind_to_an_older_task_another_chats_session_or_this_chats_session(dsn, dm):
-    """A threaded reply to a question sent before the DM had a session
-    answers it; a reply to a team session's post steers that session, as
-    any reply binds; a reply to this DM session's own post is its next
-    prompt."""
+def test_every_reply_in_toms_dm_is_his_sessions_with_the_post_it_is_under(dsn, dm):
+    """Only a chat session speaks as Valor, so every message of Tom's in
+    his DM is his session's: a threaded reply under an older task's
+    question notice (sent before 2026-11-01) carries the notice and its
+    task, which then reports to the session, so the session's `task.answer`
+    reaches it; a reply under a team session's post carries its text, no
+    task; a reply under the DM session's own post carries that send."""
+    from tools import chat_tasks
 
     async def go():
         waiting = await asking(dsn)
@@ -722,55 +734,78 @@ def test_replies_bind_to_an_older_task_another_chats_session_or_this_chats_sessi
         team = await new_task(dsn, chat=team_chat, max_effect_class="act")
         await posted(dsn, team, dm, at(30), "From the team chat: can you confirm?")
         to_team = await tom_says(dsn, dm, "confirmed", at(40), reply_to=at(30))
-        chat = (await tom_says(dsn, dm, "hello", at(50)))["task_id"]
+        chat = answer["task_id"]
         await posted(dsn, chat, dm, at(60), "Hello Tom.")
         thanks = await tom_says(dsn, dm, "thanks", at(70), reply_to=at(60))
-        return waiting, answer, team, to_team, chat, thanks, await bridges.rows(dsn, waiting)
+        async with await db.connect(dsn) as conn:
+            b = await tasks.brief(conn, chat)
+            reporting = await tasks.reporting(conn, chat)
+            rows = await ledger.read(conn, chat)
+        _, answering, _, _ = chat_tasks.performers(b, dsn)
+        async with await db.connect(dsn) as conn:
+            refused = await answering.refuse(conn, broker.Action("task.answer", waiting, {"text": "blue"}))
+        await answering.perform(broker.Action("task.answer", waiting, {"text": "blue", "by": "tom"}), "a1")
+        return waiting, answer, team, to_team, chat, thanks, reporting, rows, refused, await bridges.rows(
+            dsn, waiting
+        )
 
-    waiting, answer, team, to_team, chat, thanks, rows_ = run(go())
-    assert (answer["task_id"], answer["as"]) == (waiting, "answer")
-    assert [r["payload"]["text"] for r in rows_ if r["type"] == "question.answered"] == ["blue"]
-    assert (to_team["task_id"], to_team["as"]) == (team, "steer")
-    assert chat not in (waiting, team) and (thanks["task_id"], thanks["as"]) == (chat, "steer")
+    waiting, answer, team, to_team, chat, thanks, reporting, rows, refused, waited = run(go())
+    assert chat not in (waiting, team)
+    assert [(x["task_id"], x["as"]) for x in (answer, to_team, thanks)] == [(chat, "steer")] * 3
+    under = [p.get("replying_to") for p in bridges.typed(rows, "message.steered")]
+    assert under == [
+        {"text": "Which colour?", "task_id": waiting},
+        {"text": "From the team chat: can you confirm?"},
+        {"text": "Hello Tom."},
+    ]
+    assert reporting == [waiting] and refused is None
+    assert [r["payload"]["text"] for r in waited if r["type"] == "question.answered"] == ["blue"]
+    shown = session.chat_prompt(rows)
+    assert "under task " + waiting + "'s post:\n  > Which colour?" in shown
+    assert "under your post:\n  > Hello Tom." in shown
 
 
 def test_stop_in_toms_dm_stops_every_task_reporting_to_its_session_and_tells_the_session(dsn, dm):
     """Exactly `stop`, top level or in reply to the session's own post,
     stops at once each open task the session started or that reported to
     it, never the session; the session gets the stop as a steer. A reply
-    `stop` to an older task's question still stops that task."""
+    `stop` under an older task's question stops that task alone. A kernel
+    report (a credential, a stream's) puts no task in its reach."""
 
     async def go():
         chat = (await tom_says(dsn, dm, "hello", at(10)))["task_id"]
         child, other = await child_of(dsn, chat), await new_task(dsn, max_effect_class="act")
+        merging = await new_task(dsn, max_effect_class="act")
         async with await db.connect(dsn) as conn:
             await ledger.append(conn, chat, "child.reported",
                                 {"child_id": other, "kind": "question", "about_key": "q", "text": "?"})  # fmt: skip
+            for reporter, kind in ((merging, "credential"), (intake.UPDATES, "rollout")):
+                await notices.request(conn, reporter, kind=kind, about_key=f"{kind}:x", text="!", session=chat)
         top = await tom_says(dsn, dm, "stop", at(20))
         later = await child_of(dsn, chat)
         await posted(dsn, chat, dm, at(30), "Started the next one.")
         replied = await tom_says(dsn, dm, " Stop ", at(40), reply_to=at(30))
-        waiting = await asking(dsn)
+        waiting, untouched = await asking(dsn), await child_of(dsn, chat)
         await posted(dsn, waiting, dm, at(50), "Should I go on?", question=True)
         old = await tom_says(dsn, dm, "stop", at(60), reply_to=at(50))
-        states = [await state(dsn, t) for t in (child, other, later, waiting, chat)]
-        return chat, top, replied, old, waiting, states, await bridges.rows(dsn, chat)
+        states = [await state(dsn, t) for t in (child, other, later, waiting, chat, merging, untouched)]
+        return chat, top, replied, old, states, await bridges.rows(dsn, chat)
 
-    chat, top, replied, old, waiting, states, rows = run(go())
-    assert (top["task_id"], top["as"]) == (chat, "stop") and (replied["task_id"], replied["as"]) == (
-        chat,
-        "stop",
-    )
-    assert (old["task_id"], old["as"]) == (waiting, "stop")
-    assert states[:4] == [State.STOPPED] * 4 and states[4] is not State.STOPPED
+    chat, top, replied, old, states, rows = run(go())
+    assert [(x["task_id"], x["as"]) for x in (top, replied, old)] == [(chat, "stop")] * 3
+    assert states[:4] == [State.STOPPED] * 4
+    assert [s is State.STOPPED for s in states[4:]] == [False, False, False]
     steered = [p["text"] for p in bridges.typed(rows, "message.steered")]
-    assert steered[-2:] == ["stop", " Stop "]
+    assert steered[-3:] == ["stop", " Stop ", "stop"]
+    kernel = [p for p in bridges.typed(rows, "child.reported") if p.get("from")]
+    assert [(p["kind"], p["child_id"]) for p in kernel] == [("credential", None), ("rollout", None)]
 
 
 def test_a_root_task_with_no_session_reports_to_the_operator_chats_session(dsn, dm):
     """Its question is `child.reported` on the operator chat's session,
     started for it; the session can answer, steer and stop it. Its push
-    credential request still goes to Tom."""
+    credential request goes to that session too, waking it, and nothing
+    is left for a bridge to send."""
     from tools import chat_tasks
 
     async def go():
@@ -798,9 +833,11 @@ def test_a_root_task_with_no_session_reports_to_the_operator_chats_session(dsn, 
         "name": "valor"
     }
     assert "Tom's own chat on Telegram" in b.instruction
-    reported = [p for p in bridges.typed(operator_rows, "child.reported") if p["child_id"] == root]
-    assert [p["kind"] for p in reported] == ["question"]
-    assert [n["kind"] for n in bridges.typed(root_rows, "notice.requested")] == ["credential"]
+    reported = [p for p in bridges.typed(operator_rows, "child.reported") if p["from"] == root]
+    assert [(p["kind"], p["child_id"]) for p in reported] == [("question", root), ("credential", None)]
+    assert not any(p.get("quiet") for p in reported) and session.chat_waiting(operator_rows)
+    assert "Your task " + root + " reports (credential):" in session.chat_prompt(operator_rows)
+    assert not bridges.typed(root_rows, "notice.requested")
     assert refused.endswith("does not report to this chat") and found == {"task_id": root}
     assert [p["text"] for p in bridges.typed(root_rows, "question.answered")] == ["green"]
     assert [p["text"] for p in bridges.typed(root_rows, "message.steered")] == ["and make it bold"]
@@ -966,54 +1003,67 @@ def test_the_patch_stage_tells_a_revised_deliverable_how_to_come_back():
     assert "absolute path" in text and "opening `Done:`" in text
 
 
-def test_a_sessions_and_its_childs_notices_are_at_home_in_the_chat_they_came_from(dsn, dm):
+def test_a_sessions_child_and_grandchild_report_to_it_and_nothing_goes_to_a_bridge(dsn, dm):
+    """A routine run is a child of its objective, not of a session: the
+    nearest chat session up the tree hears a task's report, at any depth."""
+
     async def go():
         chat = (await tom_says(dsn, dm, "hello", at(10)))["task_id"]
         child = await child_of(dsn, chat)
-        team = await new_task(dsn, chat={"channel": "telegram", "chat_id": "-1009"}, max_effect_class="act")
+        grandchild = await new_task(dsn, parent_id=child)
         async with await db.connect(dsn) as conn:
-            await notices.credential(conn, child, "abc", missing=True)
-            homes = [await notices.home(conn, t) for t in (chat, child, team)]
-            heads = [await notices.headline(conn, t) for t in (chat, team, child)]
-        child_rows, chat_rows = await bridges.rows(dsn, child), await bridges.rows(dsn, chat)
-        return (
-            homes,
-            heads,
-            bridges.typed(child_rows, "notice.requested"),
-            [(r["child_id"] == child, r["kind"]) for r in bridges.typed(chat_rows, "child.reported")],
-        )
+            for t in (child, grandchild):
+                await notices.credential(conn, t, "abc", missing=True)
+            heads = [await notices.headline(conn, t) for t in (chat, child)]
+            rows = await ledger.read(conn, chat)
+            (n,) = await (
+                await conn.execute(
+                    "SELECT count(*) FROM events WHERE type = 'notice.requested' AND task_id = ANY(%s)",
+                    ([chat, child, grandchild],),
+                )
+            ).fetchone()
+        return heads, [(p["from"], p["kind"]) for p in bridges.typed(rows, "child.reported")], n
 
-    homes, heads, notes, reported = run(go())
-    assert homes == [("slack", dm), ("slack", dm), ("telegram", "-1009")]
-    assert heads[:2] == [None, None] and heads[2]
-    assert not notes and reported == [(True, "credential")]
+    heads, reported, n = run(go())
+    assert heads[0] is None and heads[1]
+    assert [k for _, k in reported] == ["credential", "credential"] and n == 0
 
 
-def test_a_chat_session_that_kept_failing_on_a_message_says_so_in_reply_to_it(dsn):
+def test_a_chat_session_that_kept_failing_on_a_message_hands_it_to_the_next_session_once(dsn, dm):
     """The adatum chat, 2026-10-23: a broken install failed four turns on
-    Tom's message, and the chat was told "one of its steps failed" about
-    no work it could name."""
+    Tom's message. The chat's next session hears which message went
+    unanswered and answers it; a session that ends holding only that report
+    passes nothing on, so the chain ends; one that answered says nothing."""
     ended = {"by": "kernel", "kind": "step", "check": None, "state": "clarify", "tries": 4, "reason": "boom"}
 
-    async def go():
-        team = await new_task(dsn, chat={"channel": "telegram", "chat_id": "-1009"}, max_effect_class="act")
-        answered = await new_task(dsn, chat={"channel": "telegram", "chat_id": "-1010"}, max_effect_class="act")
-        async with await db.connect(dsn) as conn:
-            for task in (team, answered):
-                said = {"text": "Can this be used?", "message_id": "11706"}
-                await ledger.append(conn, task, "message.steered", said)
-                for verdict in ("idle", "failed") if task == answered else ("failed",):
-                    turn = {"state": "clarify", "verdict": verdict, "turn_id": ledger.new_id()}
-                    await ledger.append(conn, task, "turn.collected", turn)
-                await ledger.append(conn, task, "task.ended", ended)
-                await notices.owe(conn, task)
-        return [bridges.typed(await bridges.rows(dsn, t), "notice.requested")[0] for t in (team, answered)]
+    async def fail(conn, task, *verdicts):
+        for verdict in verdicts:
+            turn = {"state": "clarify", "verdict": verdict, "turn_id": ledger.new_id()}
+            await ledger.append(conn, task, "turn.collected", turn)
+        await ledger.append(conn, task, "task.ended", ended)
+        await notices.owe(conn, task)
 
-    failed, later = run(go())
-    assert failed["reply_to"] == "11706" and failed["chat_id"] == "-1009"
-    assert failed["text"].startswith("I could not answer this: something in my own system failed 4 times")
-    assert "Send it again" in failed["text"] and notices.AGAIN not in failed["text"]
-    assert later["reply_to"] is None and later["text"].endswith(notices.AGAIN)
+    async def go():
+        first = (await tom_says(dsn, dm, "Can this be used?", at(10)))["task_id"]
+        async with await db.connect(dsn) as conn:
+            await fail(conn, first, "failed")
+            second = await intake.chat_session(conn, "slack", dm)
+            await fail(conn, second, "failed")
+            third = await intake.chat_session(conn, "slack", dm)
+        answered = (await tom_says(dsn, dm, "hello", at(20)))["task_id"]
+        async with await db.connect(dsn) as conn:
+            await fail(conn, answered, "idle", "failed")
+            fourth = await intake.chat_session(conn, "slack", dm)
+        return first, second, third, answered, fourth, [await bridges.rows(dsn, t) for t in (second, answered)]
+
+    first, second, third, answered, fourth, (second_rows, answered_rows) = run(go())
+    assert second not in (None, first) and third is None and answered not in (first, second) and fourth is None
+    handed, held = bridges.typed(second_rows, "child.reported")
+    assert handed["from"] == first and not handed.get("quiet")
+    assert (held["from"], held["quiet"]) == (second, True)
+    assert handed["text"].startswith("The session before you in this chat failed 4 times in a row on message")
+    assert '("Can this be used?")' in handed["text"] and handed["text"].endswith("answer it.")
+    assert [p.get("quiet") for p in bridges.typed(answered_rows, "child.reported")] == [True]
 
 
 def test_a_session_ended_after_its_pick_gives_way_to_a_new_one(dsn, dm):
@@ -1673,8 +1723,8 @@ def test_task_start_in_another_chat_starts_under_that_chats_session_and_reads_it
 def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_it(dsn, team):
     """`task.start` makes a child on the project, named by who asked; its
     question reaches the session, never a chat, and `task.answer` answers
-    it. The push credential request stays Tom's; a task not the session's
-    is refused."""
+    it. The push credential request reaches it too, naming no task it can
+    stop; a task not the session's is refused."""
     from tools import chat_tasks
 
     async def go():
@@ -1704,8 +1754,8 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
     assert found == {"task_id": child}
     (started,) = [r["payload"] for r in child_rows if r["type"] == "task.started"]
     assert started["provenance"]["by"] == "Robin"
-    reported = [p["kind"] for p in bridges.typed(parent_rows, "child.reported") if p["child_id"] == child]
-    assert reported == ["question", "credential"]
+    reported = [(p["kind"], p["child_id"]) for p in bridges.typed(parent_rows, "child.reported") if p.get("from") == child]
+    assert reported == [("question", child), ("credential", None)]
     assert not [r for r in child_rows if r["type"] == "notice.requested"]
     (answered,) = [r["payload"] for r in child_rows if r["type"] == "question.answered"]
     assert (answered["text"], answered["provenance"]["by"]) == ("v12", "Kim")
@@ -1713,19 +1763,37 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
     assert machine.fold(child_rows).state is State.STOPPED
 
 
-def test_a_chat_sessions_send_to_its_own_chat_owes_no_report_and_one_elsewhere_is_told_there(dsn, team):
-    async def go():
-        task = (await said(dsn, "valor, tell the florist we're live"))["task_id"]
-        async with await db.connect(dsn) as conn:
-            for kind, target in (("telegram.send_message", GROUP), ("email.send", "x@florist.test")):
-                effect = {"effect_id": ledger.new_id(), "effect_class": "act", "action_type": kind,
-                          "target": target, "payload": {"text": "We're live.", "to": [target]}}  # fmt: skip
-                await notices.report(conn, task, effect, {})
-        return [r["payload"] for r in await rows_of(dsn, task) if r["type"] == "notice.requested"]
+def test_only_a_chat_session_is_offered_or_may_request_a_send(dsn, team):
+    """Tom, 2026-11-01: "No routine or system should be impersonating
+    you." A routine's run, or any task that is no chat session, has no
+    send or canvas type among its performers, so its turn is told of none
+    and a request for one is refused as unknown; a chat session has every
+    one. A send owes no report: the session that sent it knows."""
+    from core import __main__ as composition
+    from core.bridge import DECLARED
 
-    (reported,) = run(go())
-    assert (reported["chat_id"], reported["reply_to"]) == (GROUP, None)
-    assert "an email to x@florist.test" in reported["text"]
+    sends = {t for t, d in DECLARED.items() if d.owner != "meet"}
+
+    async def go():
+        session_id = (await said(dsn, "valor, tell the florist we're live"))["task_id"]
+        objective = await new_task(dsn, routine="sentry")
+        run_ = await new_task(dsn, parent_id=objective, routine="sentry", max_effect_class="act")
+        async with await db.connect(dsn) as conn:
+            briefs = [await tasks.brief(conn, t) for t in (session_id, run_)]
+            built = [composition._performers(b) for b in briefs]
+            effect = {"effect_id": ledger.new_id(), "effect_class": "act", "action_type": "email.send",
+                      "target": "x@florist.test", "payload": {"text": "We're live.", "to": ["x@florist.test"]}}  # fmt: skip
+            owed = await notices.report(conn, session_id, effect)
+            refused = await broker.request(
+                conn, built[1], run_, broker.Action("slack.send_message", "T0ABC/U1", {"text": "hi"})
+            )
+        return built, owed, refused
+
+    (session_p, run_p), owed, refused = run(go())
+    assert {t for t in sends if session_p.get(t)} == sends
+    assert not any(run_p.get(t) for t in sends)
+    assert not any(t in line for line in run_p.offered("act") for t in sends)
+    assert owed is None and (refused.kind, refused.error) == ("refused", broker.NO_PERFORMER)
 
 
 # -- an email thread: a chat with its own session ------------------------------
@@ -1817,11 +1885,11 @@ def test_toms_slack_dm_is_owned_only_on_the_mac_valor_is_placed_on(tmp_path):
 
 
 def test_toms_dm_as_operator_chat_has_a_session_only_on_the_mac_its_spec_is_placed_on(dsn, tmp_path):
-    """Every Mac's kernel names Tom's Slack DM as its operator chat, so its
-    notices reach him (the Bald's update failures of 2026-10-26 had no
-    chat). Only the Cowboy, where `valor.toml` lists the DM, opens a
-    session there; a root task's notice on the Pirate goes to the DM
-    itself. A group operator chat no spec lists keeps its session."""
+    """Every Mac's kernel names Tom's Slack DM as its operator chat. Only
+    the Cowboy, where `valor.toml` lists the DM, opens a session there; on
+    the Pirate a root task's report has no session to hear it and stays in
+    the task's own record, quiet: the kernel never posts to the DM itself.
+    A group operator chat no spec lists keeps its session."""
     root = tmp_path / "projects"
     placed_specs(root)
 
@@ -1844,14 +1912,14 @@ def test_toms_dm_as_operator_chat_has_a_session_only_on_the_mac_its_spec_is_plac
             with mac("Valor the Cowboy"):
                 cowboy = await intake.operator_session(conn)
                 b = await tasks.brief(conn, cowboy)
-        return pirate, group, cowboy, b, await bridges.rows(dsn, task)
+        return pirate, group, cowboy, b, task, await bridges.rows(dsn, task)
 
-    pirate, group, cowboy, b, rows = run(go())
+    pirate, group, cowboy, b, task, rows = run(go())
     assert pirate is None and group is not None and cowboy is not None
     assert b.chat == {"channel": "slack", "chat_id": TOM_SLACK}
-    (notice,) = bridges.typed(rows, "notice.requested")
-    assert (notice["channel"], notice["chat_id"], notice["kind"]) == ("slack", TOM_SLACK, "ended")
-    assert bridges.typed(rows, "notice.undeliverable") == []
+    (held,) = bridges.typed(rows, "child.reported")
+    assert (held["from"], held["kind"], held["quiet"]) == (task, "ended", True)
+    assert bridges.typed(rows, "notice.requested") == []
 
 
 def test_in_a_slack_dev_channel_every_message_wakes_the_session_and_tom_is_tom(dsn, tmp_path):
@@ -1893,8 +1961,7 @@ def test_in_a_slack_dev_channel_every_message_wakes_the_session_and_tom_is_tom(d
 
 def test_an_email_thread_is_a_chat_whose_session_every_email_in_it_steers(dsn, mail):
     """Each thread has one session, under the sender's project, else
-    `valor`; an email names its sender, never Tom, so `stop` steers. The
-    session's reply in its thread owes Tom no report; a send elsewhere does."""
+    `valor`; an email names its sender, never Tom, so `stop` steers."""
 
     async def go():
         first = await emailed(dsn, "The florist page\n\nit 500s on mobile")
@@ -1905,11 +1972,6 @@ def test_an_email_thread_is_a_chat_whose_session_every_email_in_it_steers(dsn, m
         task = first["task_id"]
         async with await db.connect(dsn) as conn:
             b, c = await tasks.brief(conn, task), await tasks.brief(conn, client["task_id"])
-            for refs in ([root, second["message_id"]], ["<elsewhere@mail.test>"]):
-                effect = {"effect_id": ledger.new_id(), "effect_class": "act", "action_type": "email.send",
-                          "target": "kim@florist.test",
-                          "payload": {"to": ["kim@florist.test"], "body": "On it.", "references": refs}}  # fmt: skip
-                await notices.report(conn, task, effect, {})
         return first, second, empty, client, b, c, await rows_of(dsn, task)
 
     first, second, empty, client, b, c, rows = run(go())
@@ -1920,50 +1982,28 @@ def test_an_email_thread_is_a_chat_whose_session_every_email_in_it_steers(dsn, m
     steered = [r["payload"] for r in rows if r["type"] == "message.steered"]
     assert [p["provenance"]["by"] for p in steered] == ["Tom", "Tom"]
     assert machine.fold(rows).state is not State.STOPPED
-    (reported,) = [r["payload"] for r in rows if r["type"] == "notice.requested"]
-    assert (reported["channel"], reported["chat_id"]) == ("email", first["message_id"])
 
 
-def test_a_notice_to_an_email_thread_is_a_reply_to_all_of_its_newest_email(dsn, mail, monkeypatch):
-    """The email bridge sends it over SMTP and marks it sent; a send in
-    doubt is not sent again, but found in Sent Mail."""
-    from bridges.email import EmailBridge, smtp
-    from core import bridge
-
-    calls = []
-
-    def send(kind):
-        def call(cfg, action, key, *rest):
-            calls.append((kind, action.payload, key))
-            if len(calls) == 1:
-                raise broker.Unknown("cut off")
-            return {"sent": [{"channel": "email", "chat_id": "root", "message_id": "<m>"}]}
-
-        return call
-
-    monkeypatch.setattr(smtp, "perform", send("perform"))
-    monkeypatch.setattr(smtp, "lookup", send("lookup"))
+def test_an_email_send_in_doubt_wakes_the_session_that_sent_it(dsn, mail):
+    """The email bridge sends nothing of its own: a send in doubt is a
+    report to the session that requested it, once, which wakes it."""
+    from bridges.email import EmailBridge
 
     async def go():
         first = await emailed(dsn, "The florist page\n\nit 500s", sender="kim@florist.test", name="Kim")
-        second = await emailed(dsn, "Re: The florist page\n\nstill", sender="kim@florist.test",
-                               name="Kim", thread=(first["message_id"],))  # fmt: skip
+        task, effect = first["task_id"], ledger.new_id()
         async with await db.connect(dsn) as conn:
-            nid = await notices.request(conn, first["task_id"], kind="ended", about_key="x", text="Done.")
-            outbox = bridge.Outbox(SimpleNamespace(channel="email"), {}, conn, conn, None)
-            (due,) = [i for i in await outbox.due() if isinstance(i, bridge.NoticeDue) and i.notice_id == nid]
+            await ledger.append(conn, task, "effect.held", {"effect_id": effect, "action_type": "email.send",
+                                "target": "kim@florist.test", "payload": {"to": ["kim@florist.test"]}})  # fmt: skip
             b = EmailBridge(SimpleNamespace(address="valor@yuda.me"), dsn)
-            with pytest.raises(broker.Unknown):
-                await b.notice(outbox, due)
-            await b.notice(outbox, due)
-            return nid, second, await bridges.of_type(dsn, "notice.sent", notice_id=nid)
+            for _ in range(2):
+                await b.in_doubt(conn, effect)
+        return task, await rows_of(dsn, task)
 
-    nid, second, sent = run(go())
-    assert [k for k, *_ in calls] == ["perform", "lookup"] and calls[0][2] == calls[1][2]
-    payload = calls[0][1]
-    assert payload["to"] == ["kim@florist.test"] and payload["in_reply_to"] == second["message_id"]
-    assert payload["body"] == "Done."
-    assert [s["notice_id"] for s in sent] == [nid]
+    task, rows = run(go())
+    (doubt,) = [p for p in bridges.typed(rows, "child.reported") if p["kind"] == "send_in_doubt"]
+    assert doubt["from"] == task and doubt["child_id"] is None and not doubt.get("quiet")
+    assert "may or may not have gone" in doubt["text"] and session.chat_waiting(rows)
 
 
 def test_provisioning_fetches_as_valor_when_the_mac_has_the_github_key(tmp_path, monkeypatch):

@@ -196,7 +196,7 @@ receive that fails is not acked, so Slack retries it.
 chat in the connected workspace, the bridge reads `conversations.history`
 from the chat's seen `ts`, then `conversations.replies` from that `ts` for
 every thread with recent activity: a parent in the history whose
-`latest_reply` is newer, the roots of Valor's sends and notices in the
+`latest_reply` is newer, the roots of Valor's sends (and old notices) in the
 chat, the threads of messages recorded there (both from the last 14 days,
 `intake.threads`), and the roots of receives that failed. The receipt
 index makes each replay land once.
@@ -231,10 +231,10 @@ each chat then starts at its lowest recorded `ts`.
 The path is the one in [telegram.md](telegram.md#how-a-message-becomes-work).
 What differs is threading: a reply in a thread names the root, not the
 message it answers. So when `reply_to` matches no sent message, Tom's
-thread reply binds to the newest of Valor's posts in that thread older than
+thread reply resolves to the newest of Valor's posts in that thread older than
 the reply (the root included), read from the `sent` entries in the ledger,
-with no cap. A notice posted inside a long thread binds however far down
-it sits. Bindings record `via: "slack"`.
+with no cap: the post the session reads it under (`replying_to`), and the
+task a `stop` there stops. Bindings record `via: "slack"`.
 
 People also answer in a DM without threading. Tom's Slack DM has a chat
 session, as his Telegram DM does
@@ -242,10 +242,10 @@ session, as his Telegram DM does
 so a top-level message there is the session's next prompt, read against
 the whole DM, and the session takes it for what it is: an answer to a
 question it relayed, or new work; it answers, steers and stops the tasks
-that report to it. An exact `stop` there stops those tasks at once
-([telegram.md](telegram.md#bound-replies-decided-by-the-kernel)). A
-threaded reply to a question a task sent before the DM had a session
-still binds to that task.
+that report to it. Every message of his there binds to the session, a
+threaded reply included; an exact `stop` stops the task whose post it is
+under, else those tasks, at once
+([telegram.md](telegram.md#replies-decided-by-the-kernel)).
 
 ## Sending
 
@@ -312,7 +312,7 @@ that post is the outcome.
 **Lookup.** `lookup(action, key, since)` scans the target chat (the thread
 when there is a root, else the history) from `since` less five minutes,
 with `include_all_metadata`, keeping Valor's own posts not already claimed
-by another recorded send or notice (`intake.claimed`). The expected parts
+by another recorded send (`intake.claimed`). The expected parts
 are the split text, then the files. For each part in order:
 
 1. if any kept post carries a marker, the post with this key's marker and
@@ -336,12 +336,6 @@ done. A part found after a missing one, or two candidates for one part, is
 `serve` runs before connecting leaves the send in flight for the next wake.
 There is no send state file.
 
-**Notices.** Notices to a Slack chat (the operator chat when the operator
-channel is Slack, or a binding notice's chat) take the same path, keyed by
-the notice id, with `since` the request row's time: a notice already posted
-is found and marked sent, not posted again. A notice that cannot be sent is
-logged once and tried on the next wake.
-
 **Reactions.** The kernel marks a message it acts on (`core/reactions.py`;
 the Telegram port's Reactions section says when): 👀, then the
 classifier's handling reaction, then its done. The outbox yields each
@@ -355,7 +349,7 @@ carries one, and a done that repeats its handling keeps it.
 `already_reacted` and `no_reaction` count as done. Slack's refusal
 (`missing_scope` until the app is reinstalled with `reactions:write`) is
 written as `reaction.failed`; a 429 or a lost connection leaves the
-reaction for the next wake, as a notice. A reaction below a later one of
+reaction for the next wake. A reaction below a later one of
 its message (a 👀 once that is placed, any other once it is requested) is
 closed `superseded` by the outbox and never added.
 
@@ -412,7 +406,7 @@ file's name.
 | `bridges/slack/inbound.py` | One message, or Tom's reaction, to the `Inbound` fields; `person`, the one function that builds a person's id |
 | `bridges/slack/bridge.py` | `SlackBridge`: connect, the live handler and its acks, gap fill, the outbox loop, and SIGTERM |
 | `bridges/slack/gap.py` | The per-method budget and a chat's pass in progress |
-| `bridges/slack/send.py` | `slack.send_message` and `slack.write_canvas` perform and lookup, the notice send, and reactions |
+| `bridges/slack/send.py` | `slack.send_message` and `slack.write_canvas` perform and lookup, and reactions |
 | `bridges/slack/state.py` | `slack-seen.json` |
 | `bridges/slack/kernel.py` | The port gathered into one object, so the bridge imports only `core.bridge`, `core.broker`, `core.db`, `core.intake`, `core.settings`, and `core.credentials` |
 | `bridges/slack/__main__.py` | The verbs `run`, `keys`, `manifest`, and `--plist` |

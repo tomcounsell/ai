@@ -10,9 +10,12 @@ need = [
 created = 2026-10-21
 project = "valor"
 branch = "main"
-instruction = """Send this week's reminders for Yudame's unpaid Mercury invoices (skills/valor/skills/mercury-invoicing/SKILL.md).
+# Its result wakes the session it reports to, which sends the reminders the run drafted:
+# only a chat session sends (docs/plans/one-voice.md).
+wakes = true
+instruction = """Draft this week's reminders for Yudame's unpaid Mercury invoices (skills/valor/skills/mercury-invoicing/SKILL.md). You send nothing: the session you report to sends them.
 
-Run `python3 skills/valor/skills/mercury-invoicing/mercury.py remind`. Write each item of its `send` list, unchanged, as `.valor/effects/remind-<invoice number>.json`. Once every send's outcome is known, write `.valor/stop.md`: `Done:`, then each invoice reminded and to whom, then each invoice in `for_tom` (past its fourth reminder) with its customer, amount and days overdue. With nothing to send, `Done: no reminders due`. If the script fails, send nothing and stop with `Done: no reminders sent`, then its error."""
+Run `python3 skills/valor/skills/mercury-invoicing/mercury.py remind`. Write `.valor/stop.md`: `Done:`, then for each item of its `send` list, unchanged, one fenced `json` block holding that `email.send` effect (its PDF stays where the script wrote it, in this workspace), then each invoice in `for_tom` (past its fourth reminder) with its customer, amount and days overdue. With nothing to send, `Done: no reminders due`. If the script fails, stop with `Done: no reminders drafted`, then its error."""
 
 [schedule]
 weekday = 1

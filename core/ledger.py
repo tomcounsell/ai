@@ -43,6 +43,7 @@ def digest(value: Any) -> str:
 
 # Rows the kernel writes beside a task without anything having happened to it.
 QUIET = (
+    # The kernel's notices before 2026-11-01 (`core/notices.py`).
     "notice.requested",
     "notice.sent",
     "notice.undeliverable",
@@ -73,11 +74,12 @@ QUIET_SITES = ("reaction.handling", "reaction.completed", "response.shape", "mee
 
 def quiet(row: dict[str, Any]) -> bool:
     """Whether a row was written beside a task without anything having
-    happened to it: a `QUIET` type, a reaction row, or a judgement of a
+    happened to it: a `QUIET` type, a reaction row, a row whose payload says
+    `quiet` (a routine's result, `core/notices.py`), or a judgement of a
     `QUIET_SITES` site. The readers that ask for a task's latest row (its
     retry, its failed step, the resident loop's scheduling) skip these."""
     kind = row["type"]
-    if kind in QUIET or kind.startswith("reaction."):
+    if kind in QUIET or kind.startswith("reaction.") or (row.get("payload") or {}).get("quiet") is True:
         return True
     return kind.startswith("judgement.") and (row.get("payload") or {}).get("site") in QUIET_SITES
 

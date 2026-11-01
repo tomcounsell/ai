@@ -499,11 +499,14 @@ async def children(conn, task_id: str) -> list[str]:
 
 async def reporting(conn, session_id: str) -> list[str]:
     """The tasks that report to a chat session: its children, then every
-    other task whose report is on it (`child.reported`; a board row names
-    none), each once, in the order they first did."""
+    other task whose report is on it (`child.reported` naming a
+    `child_id`; a board row and the kernel's own kinds name none) or under
+    whose post Tom replied in its chat (`message.steered` `replying_to`),
+    each once, in the order they first did."""
     rows = await (
         await conn.execute(
-            "SELECT payload->>'child_id' FROM events WHERE task_id = %s AND type = 'child.reported' ORDER BY id",
+            "SELECT COALESCE(payload->>'child_id', payload->'replying_to'->>'task_id') FROM events "
+            "WHERE task_id = %s AND type IN ('child.reported', 'message.steered') ORDER BY id",
             (session_id,),
         )
     ).fetchall()
@@ -522,22 +525,28 @@ async def subtree(conn, task_id: str) -> list[str]:
     return found
 
 
-async def background(conn, task_id: str) -> bool:
-    """Whether the task is background work: it or an ancestor carries
-    `Brief.routine`. An unknown task is foreground."""
+async def routine_of(conn, task_id: str) -> str | None:
+    """The routine the task's work belongs to: the nearest `Brief.routine`
+    on it or an ancestor. None for an unknown task or Tom's own work."""
     row = await (
         await conn.execute(
-            "WITH RECURSIVE up (id) AS ("
-            "  SELECT %s::text"
+            "WITH RECURSIVE up (id, depth) AS ("
+            "  SELECT %s::text, 0"
             "  UNION ALL"
-            "  SELECT d.body->>'parent_id' FROM documents d JOIN up ON d.kind = 'task' AND d.id = up.id"
+            "  SELECT d.body->>'parent_id', up.depth + 1 FROM documents d JOIN up ON d.kind = 'task' AND d.id = up.id"
             "  WHERE d.body->>'parent_id' IS NOT NULL"
-            ") SELECT 1 FROM documents d JOIN up ON d.kind = 'task' AND d.id = up.id"
-            " WHERE d.body->>'routine' IS NOT NULL LIMIT 1",
+            ") SELECT d.body->>'routine' FROM documents d JOIN up ON d.kind = 'task' AND d.id = up.id"
+            " WHERE d.body->>'routine' IS NOT NULL ORDER BY up.depth LIMIT 1",
             (task_id,),
         )
     ).fetchone()
-    return row is not None
+    return row[0] if row else None
+
+
+async def background(conn, task_id: str) -> bool:
+    """Whether the task is background work: it or an ancestor carries
+    `Brief.routine`. An unknown task is foreground."""
+    return await routine_of(conn, task_id) is not None
 
 
 # -- the queue (docs/plans/ask-reconciliation.md) ---------------------------------

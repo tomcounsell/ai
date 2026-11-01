@@ -543,14 +543,15 @@ MERGE_OUTCOMES = (
     "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type = 'rollout.ended' "
     "AND e.payload->>'effect_id' = o.payload->>'effect_id') ORDER BY o.id"
 )
-# The update requests asked in a chat that ended with no reply yet: id,
+# The update requests asked in a chat that ended with no report yet: id,
 # the chat, the `rollout.ended` payload, and the `rollout.restarting` one.
 UNREPLIED = (
     "SELECT r.payload->>'request_id', r.payload->'reply', e.payload, s.payload FROM events r "
     "JOIN events e ON e.type = 'rollout.ended' AND e.payload->>'effect_id' = r.payload->>'request_id' "
     "LEFT JOIN events s ON s.type = 'rollout.restarting' AND s.payload->>'effect_id' = r.payload->>'request_id' "
     "WHERE r.task_id = 'updates' AND r.type = 'update.requested' AND r.payload ? 'reply' "
-    "AND NOT EXISTS (SELECT 1 FROM events n WHERE n.task_id = 'updates' AND n.type = 'notice.requested' "
+    "AND NOT EXISTS (SELECT 1 FROM events n WHERE ((n.task_id = 'updates' AND n.type = 'notice.requested') "
+    "OR (n.type = 'child.reported' AND n.payload->>'from' = 'updates')) "
     "AND n.payload->>'about_key' = 'update:' || (r.payload->>'request_id')) ORDER BY r.id"
 )
 
@@ -874,8 +875,9 @@ class Kernel:
             )
         ).fetchone()
         update, where = m.task_id == intake.UPDATES, {}
-        if update:
-            # An update asked in the room is told there, as its sender may not be Tom.
+        if update and (tries >= rollout.NOTICE_AFTER or mixed):
+            # An update asked in the room is reported to the room's session,
+            # as its sender may not be Tom.
             asked = await (
                 await conn.execute(
                     "SELECT payload->'reply' FROM events WHERE task_id = %s AND type = 'update.requested' "
@@ -884,8 +886,7 @@ class Kernel:
                 )
             ).fetchone()
             if asked and asked[0]:
-                where = {"reply_to": asked[0]["message_id"], "channel": asked[0]["channel"],
-                         "chat_id": asked[0]["chat_id"]}  # fmt: skip
+                where = {"session": await intake.session_for(conn, asked[0]["channel"], asked[0]["chat_id"])}
         async with conn.transaction():
             if mixed or latest is None or (latest[0].get("step"), latest[0].get("reason")) != (step, reason):
                 await ledger.append(
@@ -922,8 +923,9 @@ class Kernel:
                 )
 
     async def _replied(self, conn) -> None:
-        """One reply in the room for each update asked there that ended,
-        under `update:<request>`, so a restart never sends it twice."""
+        """One report to the room's session for each update asked there
+        that ended, under `update:<request>`, so a restart never makes it
+        twice; the session tells the room."""
         for request_id, reply, ended, restarting in await (await conn.execute(UNREPLIED)).fetchall():
             start = ended.get("from") or (restarting or {}).get("from")
             if ended.get("outcome") == "up_to_date":
@@ -946,10 +948,8 @@ class Kernel:
                 intake.UPDATES,
                 kind="update",
                 about_key=f"update:{request_id}",
-                text=text,
-                reply_to=reply["message_id"],
-                channel=reply["channel"],
-                chat_id=reply["chat_id"],
+                text=f"Your /update in this chat (message {reply['message_id']}): {text}",
+                session=await intake.session_for(conn, reply["channel"], reply["chat_id"]),
             )
 
     async def active(self, conn) -> list[str]:

@@ -391,6 +391,23 @@ def updates(dsn) -> list[dict]:
     return run(rows(dsn, intake.UPDATES))
 
 
+def reports(dsn) -> list[tuple[str, dict]]:
+    """The update stream's reports, wherever they were written: the
+    session that heard each, or the stream itself when none did."""
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            return await (
+                await conn.execute(
+                    "SELECT task_id, payload FROM events WHERE type = 'child.reported' "
+                    "AND payload->>'from' = %s ORDER BY id",
+                    (intake.UPDATES,),
+                )
+            ).fetchall()
+
+    return [tuple(r) for r in run(go())]
+
+
 def test_an_update_to_a_tip_ahead_restarts_and_recover_ends_it_kicking_the_dashboard(fresh, tmp_path):
     repo = Repo(tmp_path)
     sha = repo.land("core/b.py")
@@ -496,9 +513,10 @@ def test_a_failed_update_fetch_waits_for_the_tick_and_tells_the_room(fresh, tmp_
         k.parked_at = float("-inf")
         run(tick(k, fresh))
     assert len(calls) == rollout.NOTICE_AFTER
-    (notice,) = typed(updates(fresh), "notice.requested")
+    # No project lists the room here, so no session hears it: the record holds it.
+    ((where, notice),) = reports(fresh)
     assert notice["text"].startswith("I could not update my own system: ")
-    assert (notice["channel"], notice["chat_id"], notice["reply_to"]) == ("telegram", ROOM, "77")
+    assert (where, notice["kind"], notice["quiet"]) == (intake.UPDATES, "rollout", True)
     assert len(typed(updates(fresh), "rollout.failed")) == 1  # the same step and reason: one row
 
 
@@ -518,7 +536,7 @@ def test_a_failed_update_fetch_stays_open_across_a_start_and_rolls_on_the_next_f
     assert run(recovered(fresh, repo, repo.base)) == []
     assert typed(updates(fresh), "rollout.ended") == []
     assert run(tick(kernel(fresh, repo, "none"), fresh)) == sha and repo.head() == sha
-    assert not [n for n in typed(updates(fresh), "notice.requested") if n["text"].startswith("I run")]
+    assert not [n for _, n in reports(fresh) if "I run" in n["text"]]
     assert run(recovered(fresh, repo, sha)) == [request]
     (ended,) = typed(updates(fresh), "rollout.ended")
     assert (ended["outcome"], ended["head"]) == ("done", sha)
@@ -567,7 +585,7 @@ def test_until_the_spec_names_update_chat_the_old_room_still_updates(fresh, tmp_
         assert run(posted(fresh, "/update", room))["as"] == "update"
 
 
-def test_update_in_the_engineering_room_is_a_request_and_one_reply(fresh, tmp_path):
+def test_update_in_the_engineering_room_is_a_request_and_one_report_to_its_session(fresh, tmp_path):
     with bridges.operator(tmp_path):
         (Path(settings.projects_dir) / "valor.toml").write_text(
             bridges.VALOR_SPEC
@@ -588,10 +606,37 @@ def test_update_in_the_engineering_room_is_a_request_and_one_reply(fresh, tmp_pa
             k = kernel(fresh, repo, "none")
             run(tick(k, fresh))
             run(tick(k, fresh))
-        (reply,) = typed(updates(fresh), "notice.requested")
+        ((where, reply),) = reports(fresh)
         assert (reply["about_key"], reply["kind"]) == (f"update:{request['request_id']}", "update")
-        assert (reply["chat_id"], reply["reply_to"]) == (ROOM, first["message_id"])
-        assert reply["text"] == f"I am already up to date, at {repo.base[:12]}."
+        assert where == run(session_of(fresh, ROOM)) and not reply.get("quiet")
+        assert reply["text"] == (
+            f"Your /update in this chat (message {first['message_id']}): "
+            f"I am already up to date, at {repo.base[:12]}."
+        )
+        assert not typed(updates(fresh), "notice.requested")
+
+
+def test_update_in_a_room_with_no_session_open_opens_one_for_its_report(fresh, tmp_path):
+    """`/update` binds to no session; when it ends, the room's session is
+    opened to hear its report, once over several ticks."""
+    with bridges.operator(tmp_path):
+        (Path(settings.projects_dir) / "valor.toml").write_text(
+            bridges.VALOR_SPEC + f'chats = ["telegram:{ROOM}"]\nupdate_chat = "telegram:{ROOM}"\n'
+        )
+        first = run(posted(fresh, "/update"))
+        assert first["as"] == "update" and run(session_of(fresh, ROOM)) is None
+        repo = Repo(tmp_path)
+        k = kernel(fresh, repo, "none")
+        for _ in range(3):
+            run(tick(k, fresh))
+        opened = run(session_of(fresh, ROOM))
+        ((where, reply),) = reports(fresh)
+        assert opened is not None and where == opened and reply["kind"] == "update"
+
+
+async def session_of(dsn, chat):
+    async with await db.connect(dsn) as conn:
+        return await intake.chat_session(conn, "telegram", chat)
 
 
 def test_the_update_routine_writes_one_request_and_no_task(fresh, monkeypatch):
@@ -615,7 +660,7 @@ def test_the_update_routine_writes_one_request_and_no_task(fresh, monkeypatch):
     assert objective["objective"] == "update"
 
 
-def test_the_update_routine_prunes_uv_and_tells_tom_once_a_day_when_disk_is_low(fresh, tmp_path, monkeypatch):
+def test_the_update_routine_prunes_uv_and_reports_low_disk_once_a_day(fresh, tmp_path, monkeypatch):
     import dataclasses
     import shutil
 
@@ -637,9 +682,9 @@ def test_the_update_routine_prunes_uv_and_tells_tom_once_a_day_when_disk_is_low(
     assert (tmp_path / "argv").read_text() == "cache prune\n" * 2
     ran = run(of_type(fresh, "routine.ran"))
     assert ran[0]["summary"].endswith("; Removed 3 files (1.0GiB); 8 GB free")
-    (notice,) = typed(updates(fresh), "notice.requested")
+    ((_, notice),) = reports(fresh)
     assert notice["kind"] == "rollout" and notice["about_key"].startswith("disk:20")
-    assert "8 GB of disk left" in notice["text"]
+    assert "8 GB of disk left" in notice["text"] and notice["child_id"] is None
 
 
 def test_python_m_ui_plist_is_the_dashboards_job():

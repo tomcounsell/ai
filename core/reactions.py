@@ -4,8 +4,8 @@ both picked by the reaction classifier (docs/plans/reactions-fun.md).
 
 Binding (`core/intake.py`) calls `on_bound` in the binding's transaction.
 A Telegram or Slack message bound to a task as `start`, `answer`,
-`feedback`, `steer`, `stop`, or `none` with a task (Tom's reply to merged
-or stopped work) gets a `seen` reaction, 👀, at once. A `start` (handed to
+`feedback`, `steer`, `stop`, or `none` with a task (a message whose
+binding failed, reported to the session) gets a `seen` reaction, 👀, at once. A `start` (handed to
 a new task) and a `none` owe their `done` at once (`reaction.owed`); a
 `stop` gets 👌 as its done at once. A message bound `none` with no task, or
 `heard`, and any message on a channel that does not react (email, local),
@@ -133,7 +133,7 @@ ORDER = ("code", "present", "document", "issue", "schedule", "send", "task", "we
 # done at binding, and what that done is told.
 SEEN = ("start", "answer", "feedback", "steer", "none", "stop")
 BOUND = {"start": "handed to a new task, which does the work",
-         "none": "a reply to finished work: the kernel answers it with a notice"}  # fmt: skip
+         "none": "a message that could not be read: its session is told"}  # fmt: skip
 # A reply's text as the completed question reads it.
 REPLY_CHARS = 400
 

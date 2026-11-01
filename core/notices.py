@@ -1,213 +1,151 @@
-"""Operator notices: what the kernel tells Tom, as rows a bridge sends.
+"""Reports: what the kernel and the tasks under it tell Valor's sessions.
 
-Tom hears reports of what was done and questions only he can answer
-(Tom's rulings of 2026-10-03 and 2026-10-09). Each kernel-written text
-speaks to Tom as Valor, the way a deputy and general manager writes to
-the CEO: it names the task by the first line of its request (`headline`,
-`lead`), says what was done and why in outcome terms, and asks at most one
-plain thing. No task, notice, or effect id, commit, path, command, link, stage
-name, or raw error is in the text; those stay in the ledger. Where a turn wrote
-a note to Tom (the text of `done.md` above its first `---` line, or
-`stop.md`), the note is the message.
+Only a chat session speaks as Valor, and only by its own sends (Tom,
+2026-11-01: "No routine or system should be impersonating you."; plan
+`docs/plans/one-voice.md`). The kernel never posts: everything it has to
+say is a report, one `child.reported` row on the session that hears it,
+which tells its chat in its own words, or nothing.
 
-`owe(conn, task_id)` writes the `notice.requested` rows a task's fold owes
-and has not requested, to the session it reports to (below), else to the
-task's home chat (`home`), the chat its work came in from, else to
-`settings.operator_channel` and `settings.operator_chat`:
+`request(conn, task_id, kind=, about_key=, text=)` writes the report,
+once per reporter (`from`, a task or a stream such as `updates`) and
+`about_key` (the `events_one_report` index; a reporter's `notice.requested`
+of the same key, from before 2026-11-01, counts as made). The session that
+hears it (`hears`): the reporter's nearest ancestor that is a chat session;
+else the operator chat's session (`intake.operator_session`). A chat
+session hears its own reports (a send in doubt, a message it could not
+bind), but its end goes to the next session of its chat only when it
+ended with a message unanswered (`unanswered`); a session that ends holding
+only reports says nothing further. A `session` the caller names (a
+`/update` reply, to its room's) is taken as given. With no session to hear
+it, the row is written on the reporter itself, quiet, so the record holds it.
 
-- `question` (`about_key` `question:<id>`): the open question; none to
-  its project's board session, whose board row carries it (`core/board.py`).
-- `ended` (`ended:<row>`): the task ended without merging: what was built,
-  and why it stopped, in plain words. A reply to it is feedback. A chat
-  session's, when its steps kept failing on a message, replies to it.
+`child_id` names the reporter for the kinds a session acts on (`ACTED`: a
+question, an end, a merge's report), so `tasks.reporting` and an exact
+`stop` reach what they reached before; the kernel's own kinds (credential,
+binding, rollout, update, disk, send in doubt) carry none.
 
-`credential(conn, task_id, sha, why)` asks Tom for the push credential a
-merge needs (`credential:<sha>`), the one merge failure that reaches him.
+A routine's result (`RESULTS` from background work, `tasks.routine_of`) is
+`quiet`: it wakes no turn and is shown at the session's next one as a
+routine result held in the record, unless its routine says it `wakes`
+(`invoices`, whose session sends what the run drafted). A routine's
+question wakes the session, as everything else does.
 
-`report(conn, task_id, effect, result)` writes the `report` notice
-(`report:<effect>`) an `act` effect owes once its outcome is `done`: what
-left. A merge's says what shipped; a send's carries its channel,
-recipients, and text. A push owes none (a step inside the task), nor does
-a send that itself reached Tom (to the operator chat or Tom's Telegram id,
-an email only to Tom's addresses, any local send), nor does a chat
-session's send or canvas write to its own chat (`intake.chat_session`;
-an email thread's session's reply in its thread), which the chat saw.
-A reply to a merge's report is feedback.
-
-Every task reports to a Valor session, never to a chat (Tom's rule of
-2026-10-16: kernel tasks report to the parent Valor agent). A task whose
-parent is a chat session reports to it; a root task that is not itself a
-session (one started from the CLI or a routine) reports to
-the operator chat's session (`intake.operator_session`), started when
-none is open. Each notice it owes is then a `child.reported` row on that
-session (`child_id`, `kind`, `about_key`, `text`), once per `about_key`,
-which wakes the session; the session tells its chat in its own words and
-can answer, steer and stop the task (`tools/chat_tasks.py`). Only a chat
-session speaks to Tom, and only in the chat it serves (Tom's rule of
-2026-10-19), so a session's child reports every kind up to it. The kinds
-that stay Tom's (`TOMS`: the push credential request, a binding notice,
-and a rollout's) skip the operator session: a root task's go to Tom
-directly. So does every notice when there is no session to take it: a
-session's own (to its chat), a child of a task that is not a session, or
-no operator chat or project for the operator session.
-
-A notice with no channel or chat (the operator's unset) is written with a
-`notice.undeliverable` row beside it, so the ledger shows it was never
-sent. `request` writes one notice; binding (`core/intake.py`) uses it for
-its own. A notice is requested once
-per task and `about_key` (`events_one_notice`): a second request, from
-another kernel or a retry, is skipped in a savepoint. A notice whose text
-Postgres jsonb refuses is written with kernel text in its place, naming
-what it is about. The bridge sends notices as they come.
+`owe(conn, task_id)` writes the reports a task's fold owes: its open
+question (`question:<id>`; none to its project's board session, whose board
+row carries it, `core/board.py`) and its end without a merge
+(`ended:<row>`). `credential` is the push credential a merge needs, and
+`report` the merge that landed (`report:<effect>`). A report whose text
+Postgres jsonb refuses is written with kernel text in its place.
 """
 
-from pathlib import Path
 from typing import Any
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from core import ledger, machine
 from core.machine import State
-from core.settings import settings
+
+# The kinds whose reporter a session answers, steers and stops.
+ACTED = ("question", "ended", "report")
+# A routine's results: quiet unless its routine `wakes`.
+RESULTS = ("ended", "report")
 
 
 async def request(
-    conn,
-    task_id: str,
-    *,
-    kind: str,
-    about_key: str,
-    text: str,
-    reply_to: str | None = None,
-    channel: str | None = None,
-    chat_id: str | None = None,
+    conn, task_id: str, *, kind: str, about_key: str, text: str, session: str | None = None
 ) -> str | None:
-    """One `notice.requested` row; its id, or None when one with this
-    `about_key` already stands for the task."""
-    found = await (
-        await conn.execute(
-            "SELECT 1 FROM events WHERE task_id = %s AND type = 'notice.requested' "
-            "AND payload->>'about_key' = %s",
-            (task_id, about_key),
-        )
-    ).fetchone()
-    if found is not None:
+    """One report, on the session that hears it; its `about_key`, or None
+    when the reporter already made it."""
+    if await _made(conn, task_id, about_key):
         return None
-    if channel is None and chat_id is None:
-        parent = await reports_to(conn, task_id, toms=kind in TOMS)
-        if parent is not None:
-            return await _to_parent(conn, parent, task_id, kind, about_key, text)
-    notice_id = ledger.new_id()
-    if channel is None and chat_id is None:
-        channel, chat_id = await home(conn, task_id)
-    channel = channel or settings.operator_channel
-    chat_id = chat_id if chat_id is not None else settings.operator_chat
-    try:
-        async with conn.transaction():
-            notice = {
-                "notice_id": notice_id,
-                "channel": channel,
-                "chat_id": chat_id,
-                "kind": kind,
-                "about_key": about_key,
-                "text": text,
-                "reply_to": reply_to,
-            }
-            written, why = await ledger.try_append(conn, task_id, "notice.requested", notice)
-            if written is None:
-                await ledger.append(conn, task_id, "notice.requested", {**notice, "text": _unstorable(
-                    await headline(conn, task_id), kind), "unstorable": why})  # fmt: skip
-            if not channel or not chat_id:
-                # No bridge sends a notice with no chat: the ledger says so.
-                await ledger.append(
-                    conn,
-                    task_id,
-                    "notice.undeliverable",
-                    {
-                        "notice_id": notice_id,
-                        "reason": "no operator channel or chat is set "
-                        "(VALOR_OPERATOR_CHANNEL, VALOR_OPERATOR_CHAT)",
-                    },
-                )
-    except psycopg.errors.UniqueViolation:
-        return None
-    return notice_id
-
-
-# The notice kinds that go to Tom, never to a session.
-TOMS = ("credential", "binding", "rollout")
-
-
-async def reports_to(conn, task_id: str, *, toms: bool = False) -> str | None:
-    """The session the task reports to: its parent when that is a chat
-    session; for a root task that is no session, the operator chat's
-    session, unless the notice is one of Tom's own kinds (`toms`). None for
-    a session, a child of a task that is not one, a stream (a channel's id,
-    no task), or no operator session to have."""
-    from core import intake, tasks
-
-    try:
-        b = await tasks.brief(conn, task_id)
-    except KeyError:
-        return None
-    if b.chat:
-        return None
-    if b.parent_id is not None:
-        return b.parent_id if (await tasks.brief(conn, b.parent_id)).chat else None
-    return None if toms else await intake.operator_session(conn)
-
-
-async def _to_parent(conn, parent: str, task_id: str, kind: str, about_key: str, text: str) -> str | None:
-    found = await (
-        await conn.execute(
-            "SELECT 1 FROM events WHERE task_id = %s AND type = 'child.reported' "
-            "AND payload->>'child_id' = %s AND payload->>'about_key' = %s",
-            (parent, task_id, about_key),
-        )
-    ).fetchone()
-    if found is not None:
-        return None
-    payload = {"child_id": task_id, "kind": kind, "about_key": about_key, "text": text}
-    await ledger.append(conn, parent, "child.reported", payload)
-    return about_key
-
-
-async def home(conn, task_id: str) -> tuple[str | None, str | None]:
-    """The chat the task's notices go to: the chat its work came in from, a
-    team chat as much as Tom's own, since only the chat session speaks to
-    Tom and only in the chat it serves (Tom's rule of 2026-10-19): a chat
-    session's own chat, a session's child's session's chat, else the chat
-    of the message that started the task; an email thread's is its root
-    message id, and the email bridge replies to the thread. Else (None,
-    None), the operator's: a task no chat started."""
+    hearer = session or await hears(conn, task_id, kind)
     from core import tasks
 
     try:
         b = await tasks.brief(conn, task_id)
     except KeyError:
         b = None
-    chat = b.chat if b is not None else None
-    if b is not None and chat is None and b.parent_id is not None:
-        chat = (await tasks.brief(conn, b.parent_id)).chat
-    if chat:
-        return chat["channel"], chat["chat_id"]
+    payload: dict[str, Any] = {
+        "from": task_id,
+        "child_id": task_id if b is not None and kind in ACTED else None,
+        "kind": kind,
+        "about_key": about_key,
+        "text": text,
+    }
+    if b is None:
+        payload["stream"] = True
+    if hearer is None or (b is not None and kind in RESULTS and await _routine_result(conn, task_id)):
+        payload["quiet"] = True
+    try:
+        async with conn.transaction():
+            written, why = await ledger.try_append(conn, hearer or task_id, "child.reported", payload)
+            if written is None:
+                await ledger.append(conn, hearer or task_id, "child.reported", {
+                    **payload, "text": _unstorable(await headline(conn, task_id), kind), "unstorable": why})  # fmt: skip
+    except psycopg.errors.UniqueViolation:
+        return None
+    return about_key
 
-    row = await (
+
+async def _made(conn, task_id: str, about_key: str) -> bool:
+    """Whether the reporter made this report already: a `child.reported`
+    naming it (by `from`, or by `child_id` before reports named their
+    reporter), or a `notice.requested` of the kernel's notices before
+    2026-11-01, which a bridge sent."""
+    found = await (
         await conn.execute(
-            "SELECT r.payload FROM events b JOIN events r ON r.type = 'message.received' "
-            "AND r.payload->>'received_id' = b.payload->>'received_id' "
-            "WHERE b.type = 'message.bound' AND b.payload->>'as' = 'start' "
-            "AND b.payload->>'task_id' = %s ORDER BY b.id LIMIT 1",
-            (task_id,),
+            "SELECT 1 FROM events WHERE (type = 'child.reported' AND (payload @> %s OR payload @> %s)) "
+            "OR (type = 'notice.requested' AND task_id = %s AND payload->>'about_key' = %s) LIMIT 1",
+            (
+                Jsonb({"from": task_id, "about_key": about_key}),
+                Jsonb({"child_id": task_id, "about_key": about_key}),
+                task_id,
+                about_key,
+            ),
         )
     ).fetchone()
-    if row is None:
-        return None, None
-    return row[0]["channel"], row[0]["chat_id"]
+    return found is not None
+
+
+async def _routine_result(conn, task_id: str) -> bool:
+    """Whether the task is a routine's work whose routine does not wake its
+    session with its results."""
+    from core import routines, tasks
+
+    name = await tasks.routine_of(conn, task_id)
+    return name is not None and not routines.wakes(name)
+
+
+async def hears(conn, task_id: str, kind: str) -> str | None:
+    """The session that hears the reporter's report (module docstring)."""
+    from core import intake, tasks
+
+    try:
+        b = await tasks.brief(conn, task_id)
+    except KeyError:
+        return await intake.operator_session(conn)
+    if b.chat:
+        if kind != "ended":
+            return b.id
+        if await unanswered(conn, task_id, await ledger.read(conn, task_id)) is None:
+            return None
+        from core import workspace
+
+        try:
+            spec = workspace.Spec.load(b.project["name"]) if b.project else None
+        except workspace.Refused, FileNotFoundError:
+            spec = None
+        return await intake.session_for(conn, b.chat["channel"], b.chat["chat_id"], spec)
+    while b.parent_id is not None:
+        b = await tasks.brief(conn, b.parent_id)
+        if b.chat:
+            return b.id
+    return await intake.operator_session(conn)
 
 
 async def owe(conn, task_id: str) -> list[str]:
-    """Request every notice the task's fold owes. Returns the new ids. A
+    """Request every report the task's fold owes. Returns the new keys. A
     Meet call's session owes none: its call reports to the chat that asked
     for it (`core/call.py`)."""
     rows = await ledger.read(conn, task_id)
@@ -236,7 +174,6 @@ async def owe(conn, task_id: str) -> list[str]:
                         [
                             lead(await headline(conn, task_id), "I have a question for you."),
                             str(asked.get("text", "")),
-                            "Reply to this message to answer.",
                         ]
                     ),
                 )
@@ -250,7 +187,6 @@ async def owe(conn, task_id: str) -> list[str]:
                 kind="ended",
                 about_key=f"ended:{f.entry.get('id')}",
                 text=ended_text(f, await headline(conn, task_id), said),
-                reply_to=said and said.get("message_id"),
             )
         )
     return [m for m in made if m]
@@ -319,34 +255,35 @@ def note(summary: str | None) -> str | None:
     return "\n".join(lines[:at]).strip() or None
 
 
-# A check or state, as a notice names the step that kept failing.
+# A check or state, as a report names the step that kept failing.
 STEPS = {"test": "its tests", "review": "its review", "docs": "its documentation check"}
 # Why a merge that ended the task did not land (`verdicts.merge_failure`;
-# a moved target rebases, it never ends one), in Tom's words.
+# a moved target rebases, it never ends one).
 MERGE_WHY = {
     "refused": "the merge was refused, and trying again would get the same answer",
     "transient": "the merge kept failing on errors from GitHub or the network",
 }
-AGAIN = "Reply to this message if you want me to pick it up again or change course."
 
 
 def ended_text(f: machine.Fold, head: str | None, said: dict[str, Any] | None = None) -> str:
     """The report owed when a task ends without merging: why it stopped,
     in Valor's words when the working session decided it, in plain words
     for the kernel's own reasons (the raw error stays on `task.ended`), and
-    what was built. A reply to it is feedback. A chat session whose steps
-    kept failing on a message (`said`, `unanswered`) is sent in reply to
-    that message: it went unanswered, the fault was Valor's, and saying it
-    again reaches a new session, which reads the chat's history."""
+    what was built. A chat session whose steps kept failing on a message
+    (`said`, `unanswered`) tells its chat's next session which message went
+    unanswered, so that session answers it."""
     entry = f.entry or {}
     p = entry.get("payload") or {}
     built = note((f.delivery or {}).get("summary"))
     kind = p.get("kind") if entry.get("type") == "task.ended" else "rounds"
     parts: list[str | None]
     if kind == "step" and said is not None:
+        quoted = short(said.get("text"), 200)
         return (
-            f"I could not answer this: something in my own system failed {p.get('tries') or 'several'} "
-            "times in a row as I tried, so I sent nothing. Send it again to have it answered."
+            f"The session before you in this chat failed {p.get('tries') or 'several'} times in a row on "
+            f"message {said.get('message_id')}"
+            + (f' ("{quoted}")' if quoted else "")
+            + " and sent nothing. It is unanswered: answer it."
         )
     if kind == "decided":
         text = str(p.get("text") or "")
@@ -389,13 +326,12 @@ def ended_text(f: machine.Fold, head: str | None, said: dict[str, Any] | None = 
         ]
     else:
         parts = [lead(head, "I stopped this work without merging it."), built and f"What was built: {built}"]
-    parts.append(AGAIN)
     return "\n\n".join(x for x in parts if x)
 
 
 async def credential(conn, task_id: str, sha: str, *, missing: bool) -> str | None:
-    """Ask Tom for the push credential a merge needs, once per candidate:
-    the one merge failure only he can resolve. `missing` tells a token not
+    """Report the push credential a merge needs, once per candidate: the
+    one merge failure only Tom can resolve, which wakes the session. `missing` tells a token not
     set up from one GitHub refused, since the fix differs. The merge is
     tried again on its own once the credential is in place."""
     why = (
@@ -413,128 +349,29 @@ async def credential(conn, task_id: str, sha: str, *, missing: bool) -> str | No
     return await request(conn, task_id, kind="credential", about_key=f"credential:{sha}", text=text)
 
 
-def _to_tom(effect: dict[str, Any]) -> bool:
-    """Whether a send is itself a message to Tom."""
-    kind, target, payload = (
-        effect.get("action_type"),
-        str(effect.get("target") or ""),
-        effect.get("payload") or {},
-    )
-    if kind == "local.send_message":
-        return True
-    if kind == "telegram.send_message":
-        own = {settings.operator_telegram_id}
-        if settings.operator_channel == "telegram":
-            own.add(settings.operator_chat)
-        return target in own - {None}
-    if kind == "slack.send_message":
-        own = set(settings.operator_slack_ids)
-        if settings.operator_channel == "slack":
-            own.add(settings.operator_chat)
-        return target.upper() in own - {None}
-    if kind == "email.send":
-        sent = [*(payload.get("to") or []), *(payload.get("cc") or [])]
-        mine = {a.casefold() for a in settings.operator_email}
-        return bool(sent) and not payload.get("reply_to") and all(str(a).casefold() in mine for a in sent)
-    return False
-
-
-def _own_chat(
-    chat: dict[str, str], kind: str, effect: dict[str, Any], asked: dict[str, str] | None = None
-) -> bool:
-    """Whether a chat session's send, or its canvas write, went to its own
-    chat: by email, a reply in its thread, whose `References` start at the
-    thread's root. A Meet call's session (`core/call.py`) speaks and posts
-    in its call, and copies what it posts to the chat that asked for the
-    call (`asked`): both are its own."""
-    if asked and kind == f"{asked['channel']}.send_message" and str(effect.get("target")) == asked["chat_id"]:
-        return True
-    if kind == "meet.say":
-        return chat["channel"] == "meet"
-    if kind == "email.send":
-        refs = (effect.get("payload") or {}).get("references") or []
-        return chat["channel"] == "email" and refs[:1] == [chat["chat_id"]]
-    sends = (f"{chat['channel']}.send_message", f"{chat['channel']}.write_canvas")
-    return kind in sends and str(effect.get("target")) == chat["chat_id"]
-
-
-async def report(conn, task_id: str, effect: dict[str, Any], result: dict[str, Any]) -> str | None:
-    """The `report` notice a `done` act owes Tom, inside the caller's
-    transaction; None when it owes none (see the module docstring)."""
-
-    kind = effect.get("action_type")
-    if effect.get("effect_class") != "act" or kind == "push_branch" or _to_tom(effect):
+async def report(conn, task_id: str, effect: dict[str, Any]) -> str | None:
+    """The `report` a merge that landed owes, inside the caller's
+    transaction; None for any other effect. Only a chat session sends, and
+    it knows what it sent."""
+    if effect.get("action_type") != "merge":
         return None
     payload = effect.get("payload") or {}
-    from core import tasks
-
-    chat = (await tasks.brief(conn, task_id)).chat
-    asked = None
-    if chat and chat["channel"] == "meet":
-        from core import call
-
-        asked = ((await call.marker(conn, task_id)) or {}).get("asked_by")
-    if chat and _own_chat(chat, kind, effect, asked):
-        return None
-    if kind == "merge":
-        f = machine.fold(await ledger.read(conn, task_id))
-        branch = payload.get("target_branch") or effect.get("target")
-        built = note((f.delivery or {}).get("summary"))
-        text = "\n\n".join(
-            x
-            for x in (
-                lead(await headline(conn, task_id), f"it is done and merged into {branch}."),
-                built,
-            )
-            if x
-        )
-    else:
-        body = payload.get("text") or payload.get("subject") or payload.get("body") or ""
-        files = [Path(f.get("path", "")).name for f in payload.get("files") or []]
-        text = "\n\n".join(
-            x
-            for x in (
-                lead(await headline(conn, task_id), f"I sent {_sent_to(effect)}:"),
-                body,
-                files and f"Files: {', '.join(files)}",
-            )
-            if x
-        )
+    f = machine.fold(await ledger.read(conn, task_id))
+    branch = payload.get("target_branch") or effect.get("target")
+    built = note((f.delivery or {}).get("summary"))
+    text = "\n\n".join(
+        x for x in (lead(await headline(conn, task_id), f"it is done and merged into {branch}."), built) if x
+    )
     return await request(conn, task_id, kind="report", about_key=f"report:{effect['effect_id']}", text=text)
 
 
-def _sent_to(effect: dict[str, Any]) -> str:
-    """What a send was and who it went to, as Tom knows them: email
-    addresses, else the project whose chat it is (`Spec.chats`), never a
-    chat id."""
-    kind, target, payload = (
-        effect.get("action_type"),
-        str(effect.get("target") or ""),
-        effect.get("payload") or {},
-    )
-    if kind == "email.send":
-        if payload.get("reply_to"):
-            return "a reply to everyone on an email thread"
-        return "an email to " + ", ".join([*(payload.get("to") or []), *(payload.get("cc") or [])])
-    if kind not in ("telegram.send_message", "slack.send_message"):
-        return "a message"
-    channel = kind.split(".")[0]
-    place = "Telegram" if channel == "telegram" else "Slack"
-    from core import workspace
-
-    for spec in workspace.Spec.all():
-        if f"{channel}:{target}".casefold() in {c.casefold() for c in spec.chats}:
-            return f"a message to the {spec.name} chat on {place}"
-    return f"a message to a {place} chat" if channel == "telegram" else "a message to a Slack channel"
-
-
 def _unstorable(head: str | None, kind: str) -> str:
-    """A notice's text when Postgres jsonb refuses the one rendered: kernel
-    words only, so Tom still hears of it; the row's `unstorable` holds
-    Postgres's reason."""
+    """A report's text when Postgres jsonb refuses the one rendered: kernel
+    words only, so the session still hears of it; the row's `unstorable`
+    holds Postgres's reason."""
     what = kind.replace("_", " ")
     return lead(
         head,
-        f"I had a {what} message for you about this work that I could not store, so this note "
+        f"I had a {what} report about this work that I could not store, so this note "
         "stands in for it. The record of the work holds what it is about.",
     )

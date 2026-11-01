@@ -167,7 +167,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `core serve`'s also needs `VALOR_OPERATOR_CHANNEL=slack` and
    `VALOR_OPERATOR_CHAT=<team>/<Tom's id>` (Tom's Slack DM, as the private
    `valor.toml` in `~/Desktop/Valor/projects/` lists it) on every
-   Mac, or its update-failure notices go nowhere (the Pirate, the Captain
+   Mac, or its update-failure reports reach no session (the Pirate, the Captain
    and the Bald ran without them until 2026-10-27); only the Mac whose spec
    lists the DM opens a session there. The bridges' jobs do not take them.
    A plist takes only `PLIST_ENV` from the shell, so when regenerating a

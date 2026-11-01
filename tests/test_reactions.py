@@ -205,10 +205,9 @@ def test_a_local_message_is_not_marked(dsn, dm):
     assert run(go()) == []
 
 
-def test_toms_reply_to_stopped_work_ends_on_noted_without_a_judgement(dsn, dm):
-    """Tom's reply to a stopped task's post is bound `none` to it: 👀, its
-    done owed at once, and, the task stopped and so not billable, 📝 with
-    no judgement; nothing is due after."""
+def test_toms_reply_under_stopped_work_goes_to_his_session_with_its_seen_only(dsn, dm):
+    """Tom's reply under a stopped task's post is his DM session's steer:
+    👀 at once, and nothing owed until a turn of the session reads it."""
 
     async def go():
         async with await db.connect(dsn) as conn:
@@ -217,15 +216,11 @@ def test_toms_reply_to_stopped_work_ends_on_noted_without_a_judgement(dsn, dm):
         async with await db.connect(dsn) as conn:
             await tasks.stop(conn, done, reason="test")
         late = await tom_says(dsn, dm, "one more thing", at(30), reply_to=at(20))
-        port = Port()
-        first = await react_all(dsn, port, late)
-        again = await react_all(dsn, port, late)
-        return late, first, again, port.asked, await requested(dsn, late["received_id"])
+        return done, late, await requested(dsn, late["received_id"])
 
-    late, first, again, asked, rows = run(go())
-    assert late["as"] == "none" and first == [("done", "noted")] and again == [] and asked == []
-    assert stages(rows) == [("seen", "seen"), ("done", "noted")]
-    assert rows[1]["why"] == "done: noted, its task was stopped"
+    done, late, rows = run(go())
+    assert late["as"] == "steer" and late["task_id"] != done
+    assert stages(rows) == [("seen", "seen")]
 
 
 def test_a_message_gets_a_handling_pick_then_noted_when_there_is_none(dsn, team):

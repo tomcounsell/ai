@@ -1,7 +1,7 @@
 """The facts each channel's bridge port differs in, one row per channel.
 
-`core/bridge.py`, `core/intake.py`, `core/notices.py` and
-`core/workspace.py` read this table instead of each asking
+`core/bridge.py`, `core/intake.py` and `core/workspace.py` read this
+table instead of each asking
 `if channel == ...`. It imports nothing from `core`, so any of them may
 import it.
 
@@ -10,8 +10,8 @@ A row says:
 - `verified`: whether every record on the channel is verified, because
   the platform authenticates the sender (Telegram's MTProto, Slack's
   socket, the local bridge's token); an email record is not.
-- `replies`: whether Tom replies to a message there, so an exact `stop`
-  binds and a near miss is answered "reply `stop`".
+- `replies`: whether Tom replies to a message there, so his DM there is
+  his own chat (`intake._toms_own`) and an exact `stop` binds.
 - `threaded`: whether a reply names its thread's root, not the message it
   answers (Slack), so binding falls back to the newest of Valor's posts
   in the thread.

@@ -10,13 +10,13 @@ as that chat's session's child, reading that chat (a product room
 approving a build in its sibling dev chat, `skills/sdlc/roles/product.md`); answers a task's open question with what the chat said; steers a
 task with what the chat added; and stops a task. A steer of a task waiting
 on its question answers it, since a waiting task reads nothing else. A steer of a task that has
-delivered (`merged` or `ended`) is feedback (`session.feedback`), as a
-direct reply to its report is (`core/intake.py`): the task reopens in
+delivered (`merged` or `ended`) is feedback (`session.feedback`): the task reopens in
 `patch`, in its own workspace, resuming its own harness session, and
 reports again, so each deliverable's task is the worker for its revision
 rounds. Its tasks report to it
 (`core/notices.py`), never to a chat, and so does every root task that is
-no session when the session is the operator chat's. Each is `propose`:
+no session when the session is the operator chat's, and any task under
+whose post Tom replied in its chat (`tasks.reporting`). Each is `propose`:
 the work a task does is bounded by its own ceiling, its parent's, and a
 stop undoes a start.
 

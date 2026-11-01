@@ -8,7 +8,7 @@ ceiling, so its worker has that chat's access (`tasks.dispatch` gives it
 the asking chat's room). Its `task.started` carries `call`: the link,
 this Mac, the chat and thread it was asked in (`asked_by`), and `prep`,
 the asking turn's notes on the topic. It runs no turn (`router.has_step`)
-and owes no notice (`notices.owe`); everything it says goes to the asking
+and owes no report of its own (`notices.owe`); everything it says goes to the asking
 chat's session as a `child.reported` row of kind `call` (`report`): first
 the link, which that session posts in the thread, and at the end what the
 call settled. A steer of it is posted in the call's chat while it is

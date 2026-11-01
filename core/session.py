@@ -41,14 +41,16 @@ ledger (`tasks.status`).
 A chat session (`Brief.chat`, `core/intake.py`) is one long-lived
 working session in `clarify`, resumed once per wake. Its prompt is what
 reached it since its last finished turn, in order (`chat_prompt`): the
-chat's messages, woken or heard, each with when, who and its id, and its
-tasks' reports (`child.reported`, `core/notices.py`); its first opens
+chat's messages, woken or heard, each with when, who and its id (and the
+post a reply is under), and the reports it hears (`child.reported`,
+`core/notices.py`: its tasks', the kernel's, and routine results held in
+the record, which wake no turn); its first opens
 with its instruction. A message that wakes it while a turn runs reaches
 that turn after its current step (`mid_turn`, `core/runs.py`), and its
 next prompt leaves out what the turn took. It answers by requesting sends; `stop.md` ends it,
 and no other signal counts. A turn ends the run `listening`: it is
-stepped again only when a message wakes it, a task reports
-(`chat_waiting`), or a wake it asked for is due (`wake_due`), never on its
+stepped again only when a message wakes it, a report that is not quiet
+arrives (`chat_waiting`), or a wake it asked for is due (`wake_due`), never on its
 own effects' outcomes. A turn's `wake.md` asks to be woken after a delay,
 watching a post (`wakes`): a reply to the post, or a message in its
 thread, drops the wake; anything else leaves it pending, and the turn
@@ -314,11 +316,14 @@ CHAT_ROWS = ("message.steered", "message.heard", "child.reported")
 
 def chat_waiting(rows: list[dict]) -> bool:
     """Whether a chat session has something to answer: a message that
-    wakes it or a task's report, since the prompt of its last finished
-    turn, that the turn did not take mid-turn."""
+    wakes it or a report that is not a routine's quiet result, since the
+    prompt of its last finished turn, that the turn did not take mid-turn."""
     f = machine.fold(rows)
     return any(
-        r["type"] in CHAT_WAKES and int(r.get("id") or 0) > f.steer_since and r["id"] not in f.spent
+        r["type"] in CHAT_WAKES
+        and not ledger.quiet(r)
+        and int(r.get("id") or 0) > f.steer_since
+        and r["id"] not in f.spent
         for r in rows
     )
 
@@ -391,11 +396,27 @@ def chat_prompt(rows: list[dict]) -> str:
             lines.append("- The decision board changed:")
             lines += ["  " + line if line else "" for line in str(p.get("text") or "").splitlines()]
         elif r["type"] == "child.reported":
-            lines.append(f"- Your task {p.get('child_id')} reports ({p.get('kind')}):")
+            lines.append(f"- {_reporter(p)}:")
             lines += ["  " + line if line else "" for line in str(p.get("text") or "").splitlines()]
         else:
             lines.append(f"- {intake.chat_line(p, shown.get(p.get('received_id')))}")
     return "\n".join(["# In the chat since your last turn", "", *lines]) if lines else ""
+
+
+def _reporter(p: dict[str, Any]) -> str:
+    """Who a report is from, as a session reads it: a routine's result is
+    held in the record and is no news to tell; a stream's report is the
+    kernel's (`core/notices.py`)."""
+    who = p.get("from") or p.get("child_id")
+    kind = p.get("kind")
+    if p.get("quiet"):
+        return (
+            f"A routine result, held in the record (task {who}, {kind}); Tom did not ask for it, "
+            "so tell no one unless he asks"
+        )
+    if p.get("stream"):
+        return f"The kernel reports ({who}, {kind})"
+    return f"Your task {who} reports ({kind})"
 
 
 def compact_prompt(text: str) -> str:

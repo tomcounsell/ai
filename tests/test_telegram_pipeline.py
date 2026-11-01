@@ -74,7 +74,7 @@ def test_a_message_is_recorded_once_through_intake(emu, dsn, tmp_path, op):
     run(go())
 
 
-def test_a_requested_send_goes_out_with_no_tap_and_a_reply_to_it_steers(emu, dsn, tmp_path, op):
+def test_a_requested_send_goes_out_with_no_tap_and_a_reply_under_it_is_the_sessions(emu, dsn, tmp_path, op):
     async def go():
         task = await new_task(dsn)
         async with connected(emu.url, dsn, tmp_path) as bridge:
@@ -84,22 +84,22 @@ def test_a_requested_send_goes_out_with_no_tap_and_a_reply_to_it_steers(emu, dsn
             async with bridges.outbox(dsn, bridge) as box:
                 assert (await box.perform(await due(box, held.effect_id))).kind == "done"
             assert "the requested words" in [m["text"] for m in emu.own(int(op))]
-            # A send to Tom's own chat is itself the message: no report.
-            assert not await of_type(dsn, "notice.requested", about_key=f"report:{held.effect_id}")
+            assert not await of_type(dsn, "child.reported", about_key=f"report:{held.effect_id}")
             (outcome,) = await of_type(dsn, "effect.outcome", effect_id=held.effect_id)
             target = outcome["result"]["sent"][0]["message_id"]
 
+            # Tom's reply under it is the operator chat's session's, with the post and its task.
             near = await tom(emu, dsn, op, "approve", reply_to=int(target))
-            assert near["as"] == "steer" and near["task_id"] == task
             stopish = await tom(emu, dsn, op, "stop it now", reply_to=int(target))
-            (said,) = await replies_to(dsn, stopish["received_id"])
-            assert stopish["as"] == "steer" and said["text"] == (
-                'On "test": that was not a stop, so your message steers the work. To stop it, reply stop.'
-            )
+            assert near["as"] == stopish["as"] == "steer" and near["task_id"] == stopish["task_id"] != task
+            assert not await replies_to(dsn, stopish["received_id"])
+            session_rows = await rows(dsn, near["task_id"])
+            (first, _) = [r["payload"] for r in session_rows if r["type"] == "message.steered"]
+            assert first["replying_to"] == {"text": "the requested words", "task_id": task}
 
-            # Not a reply: the operator chat's session hears it, and no task starts from it.
+            # Not a reply: the same session hears it, and no task starts from it.
             heard = await tom(emu, dsn, op, "write a haiku")
-            assert heard["as"] == "steer" and heard["task_id"] not in (task, None)
+            assert heard["as"] == "steer" and heard["task_id"] == near["task_id"]
             async with await db.connect(dsn) as conn:
                 b = await tasks.brief(conn, heard["task_id"])
                 assert b.chat == {"channel": "telegram", "chat_id": op} and b.parent_id is None
@@ -113,15 +113,13 @@ def test_stop_by_reply_and_a_released_send_of_that_task_is_refused_once(emu, dsn
         effect = await release(dsn, send(op, "never sent"))
         async with await db.connect(dsn) as conn:
             task = await scripted.task_of(conn, effect)
-            await notices.request(conn, task, kind="test", about_key=f"t:{task}", text="about it", chat_id=op)
+            said = await broker.request(conn, bridges.declared(), task, send(op, "about it"))
         async with connected(emu.url, dsn, tmp_path) as bridge:
             async with bridges.outbox(dsn, bridge) as box:
-                (nid,) = [
-                    r["notice_id"] for r in await of_type(dsn, "notice.requested", about_key=f"t:{task}")
-                ]
-                await bridge.sender.notice(await due(box, nid), box)
-            (sent,) = await of_type(dsn, "notice.sent", notice_id=nid)
-            stop = await tom(emu, dsn, op, " STOP ", reply_to=int(sent["sent"][0]["message_id"]))
+                assert (await box.perform(await due(box, said.effect_id))).kind == "done"
+            (sent,) = await of_type(dsn, "effect.outcome", effect_id=said.effect_id)
+            under = int(sent["result"]["sent"][0]["message_id"])
+            stop = await tom(emu, dsn, op, " STOP ", reply_to=under)
             assert stop["as"] == "stop"
             assert machine.fold(await rows(dsn, task)).state is State.STOPPED
 
@@ -130,11 +128,9 @@ def test_stop_by_reply_and_a_released_send_of_that_task_is_refused_once(emu, dsn
                 assert effect not in [getattr(i, "effect_id", None) for i in await box.due()]
             assert len(await of_type(dsn, "effect.refused", effect_id=effect)) == 1
             assert "never sent" not in [m["text"] for m in emu.own(int(op))]
-            after = await tom(emu, dsn, op, "go on", reply_to=int(sent["sent"][0]["message_id"]))
-            (said,) = await replies_to(dsn, after["received_id"])
-            assert after["as"] == "none" and said["text"] == (
-                'On "test": this work is already stopped, so your reply changed nothing.'
-            )
+            after = await tom(emu, dsn, op, "go on", reply_to=under)
+            assert after["as"] == "steer" and after["task_id"] == stop["task_id"]
+            assert not await replies_to(dsn, after["received_id"])
 
     run(go())
 
@@ -166,42 +162,26 @@ def test_every_notice_names_the_work_by_its_request_and_carries_no_internals(dsn
             fold = lambda p: SimpleNamespace(entry={"type": "task.ended", "payload": p}, delivery=None)
             texts = [notices.ended_text(fold(p), head) for p in ended]
             assert texts[1] != texts[2] and len(set(texts[4 : 5 + len(why)])) == len(why) + 1
-            assert texts[0].endswith(notices.AGAIN)
             for missing in (True, False):
                 await notices.credential(conn, task, f"deadbeef{missing}", missing=missing)
-            sends = [
-                (
-                    "email.send",
-                    "a@b.com",
-                    {"to": ["a@b.com"], "files": [{"path": "/w/q.pdf"}]},
-                    "an email to a@b.com",
-                ),
-                ("email.send", "x", {"reply_to": "<m@x>"}, "everyone on an email thread"),
-                ("telegram.send_message", "-100777", {"text": "hi"}, "the tg chat on Telegram"),
-                ("telegram.send_message", "555", {"text": "hi"}, "a Telegram chat"),
-                ("slack.send_message", "T1/C1", {"text": "hi"}, "a Slack channel"),
-            ]
-            for n, (kind, target, payload, _) in enumerate(sends):
-                effect = {"effect_class": "act", "action_type": kind, "target": target, "payload": payload}
-                await notices.report(conn, task, {**effect, "effect_id": f"E1{n}"}, {})
             await ledger.append(conn, task, "effect.held", {"effect_id": "E1x", "target": "a@b.com"})
             await EmailBridge.in_doubt(object(), conn, "E1x")
             await notices.request(conn, task, kind="send_in_doubt", about_key="bad", text="\x00")
-            requested = [r["text"] for r in await of_type(dsn, "notice.requested") if r["task_id"] == task]
+            requested = [r["text"] for r in await of_type(dsn, "child.reported") if r.get("from") == task]
             texts += requested + [
                 notices.lead(head, serve._rollout_text(s, 3)) for s in (*serve.ROLLOUT_STEPS, "?")
             ]
             for text in texts:
                 leaked = [s for s in (*LEAKS, task) if s in text]
                 assert text.startswith(f'On "{HEAD}": ') and not leaked, text
-            assert requested[0] != requested[1]
-            for (*_, said), text in zip(sends, requested[2:], strict=False):
-                assert said in text
-            assert "q.pdf" in requested[2] and "I could not store" in requested[-1]
+            assert requested[0] != requested[1] and "may or may not have gone" in requested[2]
+            assert "I could not store" in requested[-1]
             # No Brief (a failed binding names the channel): no empty quote.
             assert await notices.headline(conn, "telegram") is None
-            unread = await intake._unread(conn, None, {"text": "do the thing"})
-            assert unread.startswith('Your message "do the thing" was not acted on')
+            unread = await intake._unread(
+                conn, None, {"text": "do the thing", "channel": "telegram", "message_id": "9", "sender_name": "Kim"}
+            )
+            assert unread.startswith('Kim\'s message 9 on telegram ("do the thing") was not acted on')
 
     with this_machine(tmp_path, ["9001", "-100777"]):
         run(go())
@@ -220,7 +200,11 @@ def test_the_mailbox_connection_keeps_its_idle_path_alive():
             assert sock.getsockopt(socket.IPPROTO_TCP, idle) == smtp.KEEPALIVE["idle"]
 
 
-def test_a_task_a_chat_started_is_answered_there(dsn, tmp_path):
+def test_a_task_with_no_session_to_hear_it_keeps_its_report_in_its_record(dsn, tmp_path):
+    """A message in a chat with no project started the task, so no session
+    hears its report: it is written on the task itself, quiet, and no row
+    is left for a bridge to send to the chat it came from."""
+
     async def go(chat):
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="Hi Valor"))
@@ -230,17 +214,15 @@ def test_a_task_a_chat_started_is_answered_there(dsn, tmp_path):
                 conn, "telegram", "message.bound", {"as": "start", "task_id": task, "received_id": task}
             )
             await notices.request(conn, task, kind="question", about_key="q", text="What next?")
-        return [
-            (r["channel"], r["chat_id"])
-            for r in await of_type(dsn, "notice.requested")
-            if r["task_id"] == task
-        ]
+        mine = await rows(dsn, task)
+        return [(r["task_id"], r["payload"]["quiet"]) for r in mine if r["type"] == "child.reported"] == [
+            (task, True)
+        ] and not [r for r in mine if r["type"] == "notice.requested"]
 
-    # No project: the message started the task itself, and there is no session to report to.
     with bridges.configure(
         operator_telegram_id=OPERATOR,
         operator_channel="slack",
         operator_chat="T/U",
         projects_dir=str(tmp_path),
     ):
-        assert run(go(OPERATOR)) == [("telegram", OPERATOR)] and run(go("-100")) == [("telegram", "-100")]
+        assert run(go(OPERATOR)) and run(go("-100"))
