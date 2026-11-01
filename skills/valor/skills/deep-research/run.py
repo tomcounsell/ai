@@ -125,13 +125,15 @@ def op_read(ref: str) -> str | None:
 
 
 def resolve_keys(env: dict, refs: dict[str, str], read=op_read) -> dict[str, str]:
-    """The keys to add to env: each missing from the environment, read from 1Password."""
+    """The keys to add to env: each read from Valor's vault, over the environment's.
+    The environment keeps only a key the vault cannot give: on 2026-11-01 the shared
+    .env's GEMINI_API_KEY was a free-tier key, which Gemini deep research refused,
+    while the vault's was accepted."""
     found = {}
     for name, ref in refs.items():
-        if not env.get(name):
-            value = read(ref)
-            if value:
-                found[name] = value
+        value = read(ref)
+        if value:
+            found[name] = value
     return found
 
 

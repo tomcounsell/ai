@@ -40,4 +40,4 @@ Only when asked: `python3 run.py episode <dir> [--podcast yudame-research] [--ti
 ## Setup
 
 - Read access to `yudame/cuttlefish` through `gh` (the runner clones it to `~/.cache/yudame/cuttlefish`, or uses `CUTTLEFISH_DIR`), and `uv`.
-- The keys: `PERPLEXITY_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROK_API_KEY`, `ANTHROPIC_API_KEY` (required: it runs every analysis step), `OPENROUTER_API_KEY`. Any not in the environment is read with `op read` from the references in `keys.env`. A missing key skips its tool and the report says so.
+- The keys: `PERPLEXITY_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROK_API_KEY`, `ANTHROPIC_API_KEY` (required: it runs every analysis step), `OPENROUTER_API_KEY`. Each is read with `op read` from the references in `keys.env` (Valor's vault), and the environment's is used only when that read fails. A missing key skips its tool and the report says so.
