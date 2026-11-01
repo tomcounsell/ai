@@ -397,7 +397,9 @@ def test_key_resolution():
         read=lambda ref: read.setdefault(ref, "op") if ref != refs["GEMINI_API_KEY"] else None,
     )
     assert got["OPENAI_API_KEY"] == "op" and refs["OPENAI_API_KEY"] in read, "the vault wins"
-    assert "GEMINI_API_KEY" not in got and got["PERPLEXITY_API_KEY"] == "op", "the environment's when op fails"
+    assert "GEMINI_API_KEY" not in got and got["PERPLEXITY_API_KEY"] == "op", (
+        "the environment's when op fails"
+    )
 
 
 def test_cuttlefish_location():
