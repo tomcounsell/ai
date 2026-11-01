@@ -78,8 +78,8 @@ end of November (rule 5).
    Mac's record has none of the last week's turns and its run would
    delete their events (in `docs/routines.md` too).
 4. The three work-vault invoice skills' Valor rows read the client's
-   calendar on valor@yuda.me, events tagged `valor_hours`, hours =
-   duration, in place of the CSV Tom prompts for; committed in the vault.
+   calendar on valor@yuda.me, events tagged `valor_hours` and Busy (a
+   Free event is a block marked not billed), hours = duration, in place of the CSV Tom prompts for; committed in the vault.
 
 ## Out of scope
 
