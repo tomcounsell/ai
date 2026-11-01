@@ -165,9 +165,14 @@ def lanes(the):
 
 
 async def settle(the, *jobs, rounds=200):
-    """Until every turn and lane is idle."""
+    """Until every turn and lane is idle: a sentence or post taken off its
+    queue counts as busy until its effect is written."""
     for _ in range(rounds):
         await asyncio.sleep(0.01)
+        try:
+            await asyncio.wait_for(asyncio.gather(the.says.join(), the.posts.join()), 0.5)
+        except TimeoutError:
+            continue
         if not the.jobs and the.says.empty() and the.posts.empty() and not the.asking:
             await asyncio.sleep(0.05)
             if not the.jobs and the.says.empty() and the.posts.empty() and not the.asking:

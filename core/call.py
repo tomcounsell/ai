@@ -969,28 +969,37 @@ class Call:
         """One sentence spoken at a time, never holding up a post."""
         while True:
             turn, n, text = await self.says.get()
-            if self.current is turn:
-                await self._effect("meet.say", {"text": text, "turn": turn.id}, f"meet/{turn.id}/{n}/say")
-            self._spoken.pop(text, None)
+            try:
+                if self.current is turn:
+                    await self._effect("meet.say", {"text": text, "turn": turn.id}, f"meet/{turn.id}/{n}/say")
+                self._spoken.pop(text, None)
+            finally:
+                self.says.task_done()
 
     async def posts_lane(self) -> None:
         """Each post in the call's chat, then its copy to the thread it was
         asked in, which the thread's bridge sends while the next post goes."""
-        from core import bridge
-
         while True:
             post = await self.posts.get()
-            turn = post.turn or ledger.new_id()
-            done = []
-            for i, part in enumerate(bridge.split_text("meet", post.text)):
-                payload = {"text": part, **({"settles": post.settles} if post.settles and i == 0 else {})}
-                n = self._n(turn)
-                out = await self._effect("meet.send_message", payload, f"meet/{turn}/{n}/post")
-                if out.kind == "done":
-                    done.append(part)
-            if post.copy and done:
-                kind, payload, chat = self._copy(" ".join(done))
-                await self._effect(kind, payload, f"meet/{turn}/{n}/copy", chat)
+            try:
+                await self._send(post)
+            finally:
+                self.posts.task_done()
+
+    async def _send(self, post: Post) -> None:
+        from core import bridge
+
+        turn = post.turn or ledger.new_id()
+        done = []
+        for i, part in enumerate(bridge.split_text("meet", post.text)):
+            payload = {"text": part, **({"settles": post.settles} if post.settles and i == 0 else {})}
+            n = self._n(turn)
+            out = await self._effect("meet.send_message", payload, f"meet/{turn}/{n}/post")
+            if out.kind == "done":
+                done.append(part)
+        if post.copy and done:
+            kind, payload, chat = self._copy(" ".join(done))
+            await self._effect(kind, payload, f"meet/{turn}/{n}/copy", chat)
 
     def _copy(self, text: str) -> tuple[str, dict[str, Any], str]:
         asked = self.info["asked_by"]
