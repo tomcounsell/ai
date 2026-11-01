@@ -40,11 +40,17 @@ def gws(*args: str, params: dict, body: dict | None = None) -> dict:
     return json.loads(got.stdout or "{}")
 
 
-def rows(sheet: str, tab: str, columns: list[str]) -> list[dict[str, str]]:
-    values = gws(
+def values(sheet: str, tab: str) -> list[list[str]]:
+    """The tab's rows under its header, blank rows included."""
+    got = gws(
         "sheets", "spreadsheets", "values", "get", params={"spreadsheetId": sheet, "range": f"{tab}!A2:Z"}
     )
-    return [dict(zip(columns, [*r, *[""] * len(columns)])) for r in values.get("values", []) if any(r)]
+    return got.get("values", [])
+
+
+def rows(found: list[list[str]], columns: list[str]) -> list[dict[str, str]]:
+    """Each non-blank row as a dict of `columns`."""
+    return [dict(zip(columns, [*r, *[""] * len(columns)])) for r in found if any(r)]
 
 
 def _band(row: dict[str, str], name: str) -> int:
@@ -120,18 +126,23 @@ def main(argv: list[str] | None = None) -> int:
             "shared": args.share,
         }
     elif args.command == "read":
-        out = rows(args.sheet, "Queue", QUEUE)
+        out = rows(values(args.sheet, "Queue"), QUEUE)
     elif args.command == "order":
-        before = rows(args.sheet, "Queue", QUEUE)
+        found = values(args.sheet, "Queue")
+        before = rows(found, QUEUE)
         after = ordered(before)
+        # Every row read is written back, blank ones moved to the end, so no old row survives below.
+        written = [[r[c] for c in QUEUE] for r in after] + [[""] * len(QUEUE)] * (len(found) - len(after))
         gws("sheets", "spreadsheets", "values", "update",
-            params={"spreadsheetId": args.sheet, "range": f"Queue!A2:M{len(after) + 1}", "valueInputOption": "RAW"},
-            body={"values": [[r[c] for c in QUEUE] for r in after]})  # fmt: skip
+            params={"spreadsheetId": args.sheet, "range": f"Queue!A2:M{len(found) + 1}", "valueInputOption": "RAW"},
+            body={"values": written})  # fmt: skip
         place = {r["id"]: i for i, r in enumerate(before)}
         out = [{"id": r["id"], "item": r["item"], "rank": r["rank"], "from": place[r["id"]] + 1, "to": i + 1}
                for i, r in enumerate(after) if place[r["id"]] != i]  # fmt: skip
     else:
-        out = due(rows(args.sheet, "Blocked", BLOCKED), rows(args.sheet, "Queue", QUEUE), args.today)
+        out = due(
+            rows(values(args.sheet, "Blocked"), BLOCKED), rows(values(args.sheet, "Queue"), QUEUE), args.today
+        )
     json.dump(out, sys.stdout, indent=1)
     print()
     return 0

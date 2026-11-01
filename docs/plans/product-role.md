@@ -34,7 +34,8 @@ spec from the shared folder.
    filing issues are fine; engineering goes to the project's Eng chat; ported
    from old-system `config/personas/teammate.md`), `customer-service` (ported
    from its old file), `product` (below). `mentions` stays separate.
-4. **The product role** (`roles/product.md`): Tom's points; the Sheet standard
+4. **The product role** (`roles/product.md`; the Sheet standard below was
+   replaced on 2026-11-02 by `skills/valor/skills/product-sheet/SKILL.md`): Tom's points; the Sheet standard
    (one Sheet per product room owned by valor@yuda.me, row order = rank, columns
    from Shape Up plus job, hook, value, effort, status, issue, dev thread); the
    readiness review (guidance, not a gate or state); sharing the Sheet with a
