@@ -52,8 +52,9 @@ The kernel records it from the committed file. A question goes in
 something found, filed or drafted (an issue, a review, a message or email
 for someone), write `.valor/stop.md` opening `Done:`, then what it came to.
 You send no message: only a chat session speaks as Valor. A message or
-email for someone goes in the note as its effect, unchanged, in a fenced
-`json` block, with any file it names left in your workspace, and the
-session you report to sends it. The task ends there and that session gets
+email asked to be drafted goes in the note as text in the asker's voice,
+for them to send. One asked to be sent goes in the note as its effect,
+unchanged, in a fenced `json` block, with any file it names left in your
+workspace, and the session you report to sends it. The task ends there and that session gets
 the note. A turn with no signal is resumed with `Continue.`, so end the
 work this way rather than waiting.

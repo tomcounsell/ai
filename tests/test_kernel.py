@@ -1544,6 +1544,11 @@ def test_a_chat_session_drafts_in_the_askers_voice_and_sends_only_when_told(dsn,
     # The persona, rendered into every turn, says a draft is the asker's, not words in Tom's mouth.
     assert "A draft someone asks for is theirs: write it in their voice and hand it back as text" in flat
     assert "A draft someone asks for is theirs, in their voice; what you send is yours." in flat
+    # A task that drafted a message hands it back as text; only one asked to be sent is an effect.
+    for state in (State.CLARIFY, State.PLAN, State.BUILD):
+        stage = " ".join(tasks.stage_text(state).split())
+        assert "email asked to be drafted goes in the note as text in the asker's voice" in stage
+        assert "One asked to be sent goes in the note as its effect" in stage
 
 
 def test_stakes_json_is_read_in_place_and_from_handled_and_only_as_an_object(tmp_path):
