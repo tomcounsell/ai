@@ -26,8 +26,9 @@ session's `converse.md`:
 - `teammate`: a team chat, someone's DM, client email; no engineering
   starts here.
 - `customer-service`: a customer's room.
-- `product`: a product room; a product owner keeping one ranked queue,
-  which approves the next ready item into the sibling dev room.
+- `product`: a product room; a product owner keeping the project's
+  product Sheet (the `product-sheet` skill), who approves each item that
+  passes its readiness review into the sibling dev room.
 
 Tom's own chats carry none: there Valor is his deputy, as the persona
 says. A role is what Tom calls a **hat**: one person wearing many hats,

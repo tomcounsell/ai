@@ -29,8 +29,9 @@ made by Valor with Tom invited (Tom adds the other members), listed in its
 project's spec with `chat_roles` `product` (ONTOLOGIES.md), not
 mentions-only, and received by the same Mac as the project's dev channel.
 Its room line names the project's backlog Sheet and its dev channel; the
-role (`skills/sdlc/roles/product.md`) keeps the queue in the Sheet and
-approves the next ready item with a new thread in the dev channel and a
+role (`skills/sdlc/roles/product.md`) keeps the queue in the Sheet, copied
+from the product Sheet template and kept by the `product-sheet` skill
+(`skills/valor/skills/product-sheet/`), and approves the next ready item with a new thread in the dev channel and a
 `task.start` with `"in"` the dev channel, so the task reads and reports
 there (`tools/chat_tasks.py`).
 
