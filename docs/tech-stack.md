@@ -477,8 +477,8 @@ token sits there as `github-keys`, from `python -m core github-key`; it
 belongs to Valor's own account, `valorengels`, a collaborator only on the
 repositories Valor builds, and that reach is the bound on where a merge
 can land ([machine.md](machine.md), Where a merge lands). Status: **in use**. Telegram's keys and
-session sit there too (**in use**), as do Slack's `slack-keys`, written by `python -m bridges.slack keys` ([slack.md](bridges/slack.md)), email's `mail-keys`, written by
-`python -m bridges.email keys` ([email.md](bridges/email.md)), and the local chat's `local-token`, made by `python -m bridges.local run` ([local.md](bridges/local.md)). Nothing secret is
+session sit there too (**in use**), as do Slack's `slack-keys`, written by `python -m bridges.slack keys` ([slack.md](bridges/slack.md)), email's `mail-keys`, copied from the Cowboy's (its users also by
+`python -m bridges.email keys`, [email.md](bridges/email.md)), and the local chat's `local-token`, made by `python -m bridges.local run` ([local.md](bridges/local.md)). Nothing secret is
 in the repository; the frontier credential is Claude Code's, and the
 workspace database password is a fixed test value.
 

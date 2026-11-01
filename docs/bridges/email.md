@@ -7,7 +7,8 @@ intake, performers, and the outbox. This doc covers what is particular to
 email.
 
 **Status.** Built in `bridges/email/`. `python -m bridges.email run`
-runs it under `bridge.serve`; `keys` copies its credentials and `--plist`
+runs it under `bridge.serve`; `keys` copies the mailbox users from the vault and reports
+the passwords, which come only from the Cowboy's `mail-keys`; `--plist`
 prints its launchd job. The last section lists the modules.
 
 ## What it serves
