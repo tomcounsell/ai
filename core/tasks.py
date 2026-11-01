@@ -348,6 +348,12 @@ def channel_text(offered: list[str], name: str = "channel.md") -> str:
     return (Path(settings.stages_dir) / name).read_text().strip().replace("{effects}", effects)
 
 
+def role_text(name: str) -> str:
+    """The guidance of the role Valor plays in a chat (`intake.role`); a
+    role with no file raises `FileNotFoundError`."""
+    return (Path(settings.stages_dir) / "roles" / f"{name}.md").read_text().strip()
+
+
 def verdict_text() -> str:
     return (Path(settings.stages_dir) / "verdict.md").read_text().strip()
 
@@ -371,7 +377,8 @@ async def dispatch(
     turn reaches Tom (`skills/sdlc/channel.md`, listing `offered`, the
     usage lines of the task's own performers) and the stage file for the state the task
     is in (`skills/sdlc/<state>.md`); a chat session gets `skills/sdlc/converse.md`
-    in place of both. A `fresh` session (critique, review,
+    in place of both, then its chat's role (`skills/sdlc/roles/<role>.md`)
+    when it has one, as a call's worker does its asking chat's. A `fresh` session (critique, review,
     docs: the stage's name) gets the verdict channel
     (`skills/sdlc/verdict.md`) in place of the working session's, offering
     no effect and no question, and its stage's file; the advisor (`advice`)
@@ -391,13 +398,15 @@ async def dispatch(
     standing = await corrections.in_force(conn)
     rendered = persona.render(settings.persona_dir)
     head = f"# Brief\n\nTask: {b.id}\nInstruction: {b.instruction}"
+    played = None
     if b.chat:
         from core import call  # call imports tasks
-        from core.intake import room  # intake imports tasks
+        from core.intake import role, room  # intake imports tasks
 
-        # A call's session has the room of the chat that asked for the call.
+        # A call's session has the room and role of the chat that asked for the call.
         chat = ((await call.marker(conn, task_id)) or {}).get("asked_by") or b.chat
         found = room(chat["channel"], chat["chat_id"], (b.project or {}).get("name"))
+        played = role(chat["channel"], chat["chat_id"], (b.project or {}).get("name"))
         if found:
             head += f"\nRoom: {found}"
         listed = repos((b.project or {}).get("name"))
@@ -432,6 +441,8 @@ async def dispatch(
         stage = stage_text(state)
         if stage:
             sections.append(stage)
+    if played and fresh in (None, "call"):  # a call's worker plays the asking chat's role
+        sections.append(role_text(played))
     if not fresh:
         found = await reports(conn, task_id)
         if found:

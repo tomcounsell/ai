@@ -5,7 +5,9 @@ A chat session (`core/intake.py`) does no work itself. It starts a task
 for the work, as a child of itself, with the request as written and who
 asked, under its own project or the one it names (its Brief's `Repos:`
 line lists its spec's `projects`, the repository the request is about), carrying the session's chat so the
-child reads it (`project.chat`); answers a task's open question with what the chat said; steers a
+child reads it (`project.chat`), or with `in` another chat of its project
+as that chat's session's child, reading that chat (a product room
+approving a build in its sibling dev chat, `skills/sdlc/roles/product.md`); answers a task's open question with what the chat said; steers a
 task with what the chat added; and stops a task. A steer of a task waiting
 on its question answers it, since a waiting task reads nothing else. A steer of a task that has
 delivered (`merged` or `ended`) is feedback (`session.feedback`), as a
@@ -33,7 +35,7 @@ by the question it answered, a steer by its key on the `message.steered`,
 `feedback.given` or `question.answered` row, a stop by the task's stop.
 """
 
-from core import board, call, db, ledger, machine, session, tasks
+from core import board, call, channels, db, intake, ledger, machine, session, tasks, workspace
 from core.machine import State
 from core.settings import resolve_seat
 
@@ -74,34 +76,57 @@ class TaskStart(_ChatTask):
     action_type = "task.start"
     usage = (
         '`task.start`: target "work", payload `{"instruction": "<the request as written, with what the chat '
-        'said it needs>", "by": "<who asked>", "project": null}`; starts a task that does the work and '
+        'said it needs>", "by": "<who asked>", "project": null, "in": null}`; starts a task that does the work and '
         "reports to you, under this project, or under one of the projects your Repos line names when "
-        '`"project"` names it. Your next prompt names it.'
+        '`"project"` names it. With `"in"` another chat of this project (`"slack:<team>/<channel>"`), it '
+        "starts under that chat's session instead, reads that chat and reports there, not to you. "
+        "Your next prompt names it."
     )
 
     async def perform(self, action, key: str) -> dict:
         seat, model = resolve_seat("frontier")
-        async with await db.connect(self.dsn) as conn:
+        async with await db.connect(self.dsn) as conn, conn.transaction():
+            parent, chat = self.session, self.chat
+            if action.payload.get("in"):
+                parent, chat = await self._sibling(conn, str(action.payload["in"]))
             child = await tasks.start_child(
                 conn,
-                self.session,
+                parent,
                 marker={"sdlc": 1, "effect_key": key},
                 by=str(action.payload.get("by") or "valor"),
                 via="chat",
                 instruction=str(action.payload["instruction"]).strip(),
                 model=model,
                 harness_name=seat,
-                project=self._child_project(action.payload.get("project")),
+                project=self._child_project(action.payload.get("project"), chat),
             )
         return {"task_id": child}
 
-    def _child_project(self, name) -> dict | None:
+    async def _sibling(self, conn, into: str) -> tuple[str, str]:
+        """The session of `into`, another chat of this session's project
+        (so one this Mac owns), opened under the chat's lock and started in
+        this transaction when it has none, as `intake.operator_session`
+        does; and the chat as a child's `project.chat` names it."""
+        channel, _, ident = into.partition(":")
+        row = channels.get(channel)
+        found = f"{channel}:{row.normal(ident)}" if row is not None and ident else into
+        spec = workspace.Spec.load(self.project["name"]) if self.project else None
+        if spec is None or found not in spec.chats:
+            raise ValueError(f"{into} is not one of this project's chats")
+        chat_id = found.partition(":")[2]
+        own = intake._toms_own({"channel": channel, "chat_id": chat_id})
+        session_id, brief = await intake.open_session(conn, channel, chat_id, spec, own=own)
+        if brief is not None:
+            await tasks.start(conn, brief, by="valor", via="kernel")
+        return session_id, found
+
+    def _child_project(self, name, chat: str | None) -> dict | None:
         """The child's project: the named one, else the session's own, with
-        the session's chat, which the child reads (`_reading_env`)."""
+        the chat it was started in, which the child reads (`_reading_env`)."""
         if self.project is None and name is None:
             return None
         found = {"name": name or self.project["name"]}
-        return {**found, "chat": self.chat} if self.chat else found
+        return {**found, "chat": chat} if chat else found
 
     async def lookup(self, action, key: str) -> dict | None:
         async with await db.connect(self.dsn) as conn:

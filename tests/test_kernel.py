@@ -8,6 +8,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tomllib
 import uuid
 from types import SimpleNamespace
 
@@ -39,6 +40,8 @@ from core.settings import settings
 from tests import bridges, scripted
 from tests.performers import OutboxAppend, WorkspaceWrite
 from tests.test_machine import Ledger
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
 def audit(state) -> list[str]:
@@ -1559,6 +1562,112 @@ def test_a_chat_sessions_every_turn_says_what_its_room_is_for(dsn, tmp_path):
         # A fresh session of the chat task carries it too: it is the chat's.
         assert "Room: The florist's site." in run(text(chat, fresh="advice"))
         assert "\nRoom: " not in run(text(plain))
+
+
+def test_a_chat_roles_entry_matches_its_chat_as_chats_normalises_it():
+    spec = workspace.Spec.from_dict(
+        {
+            "name": "p",
+            "repo": "r",
+            "kind": "plain",
+            "suite": "true",
+            "chats": ["slack:t0abc/c0123", "telegram:-1001"],
+            "chat_roles": {"slack:t0abc/c0123": " product ", "telegram:-1001": "engineer", "email": "teammate"},
+        }
+    )
+    assert spec.chat_roles == {"slack:T0ABC/C0123": "product", "telegram:-1001": "engineer", "email": "teammate"}
+    assert workspace.Spec.from_dict({"name": "p", "repo": "r", "kind": "plain", "suite": "true"}).chat_roles == {}
+
+
+def test_each_role_file_renders_and_the_example_spec_names_only_roles_that_exist():
+    example = workspace.Spec.from_dict(tomllib.loads((REPO / "projects" / "example.toml").read_text()))
+    names = {p.stem for p in (pathlib.Path(settings.stages_dir) / "roles").glob("*.md")}
+    assert names == {"engineer", "teammate", "customer-service", "product"}
+    assert set(example.chat_roles.values()) <= names
+    for name in names:
+        assert tasks.role_text(name).startswith("# Your role here: ")
+
+
+def test_a_chat_sessions_turn_plays_its_chats_role_and_toms_own_chat_none(dsn, tmp_path):
+    group, quiet = (f"-{uuid.uuid4().int % 10**12}" for _ in range(2))
+
+    async def text(task, **kw):
+        async with await db.connect(dsn) as conn:
+            return (await tasks.dispatch(conn, task, **kw))["text"]
+
+    async def start(chat, project=None):
+        async with await db.connect(dsn) as conn:
+            return await tasks.start(
+                conn, tasks.Brief(instruction="chat", workspace=str(tmp_path), chat=chat, project=project)
+            )
+
+    with bridges.operator(tmp_path):
+        (pathlib.Path(settings.projects_dir) / "flowers.toml").write_text(
+            f'name = "flowers"\nrepo = "r"\nkind = "plain"\nsuite = "true"\n'
+            f'chats = ["telegram:{group}", "telegram:{quiet}"]\n'
+            f'chat_roles."telegram:{group}" = "product"\nchat_roles.email = "teammate"\n'
+        )
+        played = run(start({"channel": "telegram", "chat_id": group}, {"name": "flowers"}))
+        none = run(start({"channel": "telegram", "chat_id": quiet}, {"name": "flowers"}))
+        mail = run(start({"channel": "email", "chat_id": "<root@example.com>"}, {"name": "flowers"}))
+        own = run(start({"channel": "telegram", "chat_id": bridges.OPERATOR}, {"name": "flowers"}))
+        found = run(text(played))
+        assert found.index("# A chat session") < found.index(tasks.role_text("product"))
+        assert tasks.role_text("teammate") in run(text(mail))
+        for task in (none, own):
+            assert "# Your role here: " not in run(text(task))
+        assert intake.role("telegram", bridges.OPERATOR, "flowers") is None
+
+
+def test_task_start_in_another_chat_starts_under_that_chats_session_and_reads_it(dsn, tmp_path):
+    """`in` names a chat of the session's project: the child starts under
+    that chat's open session, one opened when it has none, reads that chat
+    and reports to its session; on its board only when that chat is the
+    board. A chat the project does not list fails with the reason."""
+    from core import board
+    from tools import chat_tasks
+
+    def chat():
+        return f"T0ABC/C{uuid.uuid4().int % 10**9}"
+
+    async def go(product, dev, board_chat):
+        (pathlib.Path(settings.projects_dir) / "flowers.toml").write_text(
+            f'name = "flowers"\nrepo = "r"\nkind = "plain"\nsuite = "true"\n'
+            f'chats = ["slack:{product}", "slack:{dev}"]\nboard = "slack:{board_chat}"\n'
+        )
+        async with await db.connect(dsn) as conn:
+            session_id = await tasks.start(
+                conn,
+                tasks.Brief(instruction="chat", chat={"channel": "slack", "chat_id": product},
+                            project={"name": "flowers"}),
+            )  # fmt: skip
+            b = await tasks.brief(conn, session_id)
+        start = chat_tasks.performers(b, dsn)[0]
+        made = []
+        for n in (1, 2):
+            action = broker.Action("task.start", "work", {"instruction": f"Build {n}", "in": f"slack:{dev.lower()}"})
+            made.append((await start.perform(action, f"in-{uuid.uuid4()}"))["task_id"])
+        with pytest.raises(ValueError, match="not one of this project's chats"):
+            await start.perform(
+                broker.Action("task.start", "work", {"instruction": "x", "in": f"slack:{chat()}"}), "in-x"
+            )
+        async with await db.connect(dsn) as conn:
+            dev_session = await intake.chat_session(conn, "slack", dev)
+            briefs = [await tasks.brief(conn, c) for c in made]
+            reports = [await notices.reports_to(conn, c) for c in made]
+            on_board = await board.here(conn, made[0])
+        return session_id, dev_session, briefs, reports, on_board
+
+    with bridges.operator(tmp_path):
+        product, dev = chat(), chat()
+        session_id, dev_session, briefs, reports, on_board = run(go(product, dev, dev))
+        assert dev_session is not None and dev_session != session_id
+        assert [b.parent_id for b in briefs] == [dev_session] * 2  # one session, opened once
+        assert [b.project for b in briefs] == [{"name": "flowers", "chat": f"slack:{dev}"}] * 2
+        assert reports == [dev_session] * 2 and on_board is True
+        product = chat()
+        *_, on_board = run(go(product, chat(), product))  # the dev chat is not the board
+        assert on_board is False
 
 
 def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_it(dsn, team):

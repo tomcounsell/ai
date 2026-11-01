@@ -23,6 +23,17 @@ group's. Which project has which channel, and on which Mac, is in the private sp
 ([projects/README.md](../../projects/README.md)); a project with no Eng group
 has no dev channel, and one with no Mac yet goes unanswered.
 
+**Product channels** (Tom, 2026-10-31: a "product" role and room; one
+project first, others when he asks). Each is private, `<project>-product`,
+made by Valor with Tom invited (Tom adds the other members), listed in its
+project's spec with `chat_roles` `product` (ONTOLOGIES.md), not
+mentions-only, and received by the same Mac as the project's dev channel.
+Its room line names the project's backlog Sheet and its dev channel; the
+role (`skills/sdlc/roles/product.md`) keeps the queue in the Sheet and
+approves the next ready item with a new thread in the dev channel and a
+`task.start` with `"in"` the dev channel, so the task reads and reports
+there (`tools/chat_tasks.py`).
+
 **Decision boards** (Tom, 2026-10-27: "more like a todo board that can be
 reorganized and evolve"; "I won't do work on the board. I'll chat with
 you or call you, or leave emoji reactions"). Each dev channel of a project

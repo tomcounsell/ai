@@ -364,6 +364,18 @@ def room(channel: str, chat_id: str, project: str | None = None) -> str | None:
     return workspace.Spec.load(project).rooms.get("email", EMAIL_ROOM) if project else EMAIL_ROOM
 
 
+def role(channel: str, chat_id: str, project: str | None = None) -> str | None:
+    """The role Valor plays in the chat (`skills/sdlc/roles/<role>.md`): its
+    `chat_roles` entry in a spec this machine owns, else for an email thread
+    its `project`'s `chat_roles.email`, else None, as in Tom's own chats."""
+    for chat, spec in _project_chats(channel):
+        if chat == chat_id and f"{channel}:{chat}" in spec.chat_roles:
+            return spec.chat_roles[f"{channel}:{chat}"]
+    if channel != "email" or not project or _toms_own({"channel": channel, "chat_id": chat_id}):
+        return None
+    return workspace.Spec.load(project).chat_roles.get("email")
+
+
 def owned(channel: str) -> list[str]:
     """Every id this machine's bridge on `channel` receives."""
     ids: list[str] = []

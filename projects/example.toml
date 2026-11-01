@@ -22,8 +22,13 @@ chats = [
 mentions = ["telegram:-1009000000011"]
 board = "slack:T0EXAMPLE1/C0EXAMPLE2"
 rooms."telegram:-1009000000010" = "Engineering on the example app."
-rooms."telegram:-1009000000011" = "The client's team chat. No engineering or SDLC work starts here; engineering requests go to the Eng group."
+rooms."telegram:-1009000000011" = "The client's team chat."
 rooms."slack:T0EXAMPLE1/C0EXAMPLE2" = "Engineering on the example app."
-rooms.email = "Email with the client's team, as a teammate."
+rooms.email = "Email with the client's team."
+# The role Valor plays in each chat (skills/sdlc/roles/<role>.md).
+chat_roles."telegram:-1009000000010" = "engineer"
+chat_roles."telegram:-1009000000011" = "teammate"
+chat_roles."slack:T0EXAMPLE1/C0EXAMPLE2" = "engineer"
+chat_roles.email = "teammate"
 machine = "Valor the Example"
 knowledge_base = "Example"

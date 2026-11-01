@@ -264,6 +264,7 @@ def test_a_call_worker_turn_reads_its_stage_and_the_asking_chats_room_and_no_ver
     (team.profile.parent / "projects" / f"{team.project}.toml").write_text(
         (team.profile.parent / "projects" / f"{team.project}.toml").read_text()
         + f'[rooms]\n"slack:{team.chat}" = "The launch team."\n'
+        + f'[chat_roles]\n"slack:{team.chat}" = "product"\n'
     )
 
     async def go():
@@ -273,6 +274,7 @@ def test_a_call_worker_turn_reads_its_stage_and_the_asking_chats_room_and_no_ver
 
     text = run(go())["text"]
     assert "# Stage: call" in text and "Room: The launch team." in text
+    assert tasks.role_text("product") in text  # the asking chat's role, not the call chat's
     assert tasks.verdict_text() not in text
 
 

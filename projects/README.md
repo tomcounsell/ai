@@ -57,6 +57,13 @@ it (they come from settings), and loading a spec names the folder.
   email thread under the project), rendered on every turn of its chat
   session; Tom's own chat's is in `core/intake.py`
   ([telegram.md](../docs/bridges/telegram.md)).
+- `chat_roles` maps chats to the role Valor plays there, "the hat"
+  (`chat_roles."slack:<team>/<channel>" = "product"`, and `chat_roles.email`):
+  `engineer`, `teammate`, `customer-service` or `product`, each a file in
+  `skills/sdlc/roles/` rendered after the chat session's `converse.md`
+  ([ONTOLOGIES.md](../ONTOLOGIES.md)). Tom's own chats have none. A role
+  named with no file fails that chat's turns, so after editing it render a
+  dispatch for each listed chat.
 - `mentions` lists those chats where only a message naming Valor, or a
   reply to his post, wakes the chat session, as the old teammate groups
   did; the rest reach it with the next.
@@ -72,7 +79,7 @@ it (they come from settings), and loading a spec names the folder.
   `task.start` takes `"project"` to start its task under one of them, its
   Brief lists them on a `Repos:` line, and its board covers their tasks.
   Every chat of the project gets them, its team chats too; their room
-  line is what keeps engineering out of a team chat. A child runs on the
+  role (`teammate`) is what keeps engineering out of a team chat. A child runs on the
   Mac holding the chat session, whatever the listed spec's `machine`, so a
   listed project is placed on the same machine as the one listing it. Another
   repository is one spec and one name here.

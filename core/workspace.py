@@ -81,6 +81,17 @@ class Refused(ValueError):
 # -- project specs -----------------------------------------------------------------
 
 
+
+def _by_chat(table: dict[str, Any] | None) -> dict[str, str]:
+    """A `rooms` or `chat_roles` table, each chat key normalised as `chats`
+    normalises it (`email` stays as written)."""
+    found = {}
+    for chat, text in (table or {}).items():
+        channel, _, ident = chat.partition(":")
+        row = channels.get(channel)
+        found[f"{channel}:{row.normal(ident)}" if row is not None and ident else chat] = str(text).strip()
+    return found
+
 @dataclass(frozen=True)
 class Spec:
     """A project, read once at start and copied into the Brief, so editing
@@ -98,7 +109,9 @@ class Spec:
     starts work only when it names Valor; a reply to Valor's post binds
     anywhere. `rooms` maps some of its chats to a description of what the
     chat is for, rendered into every turn of its chat session
-    (`intake.room`). `board` names the one of its Slack channels whose
+    (`intake.room`), and `chat_roles` maps them to the role Valor plays
+    there (`skills/sdlc/roles/<role>.md`, rendered after the room;
+    `intake.role`); `roles` is the Postgres roles. `board` names the one of its Slack channels whose
     canvas is the project's decision board (`core/board.py`).
     `update_chat` names the one of its chats where exactly `/update`
     updates the Mac that receives it (`core/intake.py`).
@@ -132,6 +145,7 @@ class Spec:
     chats: tuple[str, ...] = ()
     mentions: tuple[str, ...] = ()
     rooms: dict[str, str] = field(default_factory=dict)
+    chat_roles: dict[str, str] = field(default_factory=dict)
     board: str | None = None
     update_chat: str | None = None
     projects: tuple[str, ...] = ()
@@ -188,11 +202,7 @@ class Spec:
             if found not in normal:
                 raise Refused(f"mentions names {chat!r}, which is not one of the spec's chats")
             mentions.append(found)
-        rooms = {}
-        for chat, text in (raw.get("rooms") or {}).items():
-            channel, _, ident = chat.partition(":")
-            row = channels.get(channel)
-            rooms[f"{channel}:{row.normal(ident)}" if row is not None and ident else chat] = str(text).strip()
+        rooms, chat_roles = _by_chat(raw.get("rooms")), _by_chat(raw.get("chat_roles"))
         board = raw.get("board")
         if board is not None:
             channel, _, ident = board.partition(":") if isinstance(board, str) else ("", "", "")
@@ -242,6 +252,7 @@ class Spec:
             chats=tuple(normal),
             mentions=tuple(mentions),
             rooms=rooms,
+            chat_roles=chat_roles,
             board=board,
             update_chat=update_chat,
             projects=projects,

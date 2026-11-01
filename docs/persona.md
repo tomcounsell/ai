@@ -501,7 +501,9 @@ every resumed turn (`--system-prompt-snapshot off`), so a correction or a
 persona change reaches a running session at its next turn
 (`harnesses/claude_code.py`, `workspace_turn`; see `docs/harnesses.md`).
 A chat session's Brief also carries its chat's `Room:` description there
-(`intake.room`, docs/bridges/telegram.md), and, when its spec lists
+(`intake.room`, docs/bridges/telegram.md), its role's guidance
+(`skills/sdlc/roles/<role>.md`, from the spec's `chat_roles`; `intake.role`)
+after `converse.md`, and, when its spec lists
 `projects`, a `Repos:` line naming each repository (`tasks.repos`), so
 both survive compaction as the persona does.
 
