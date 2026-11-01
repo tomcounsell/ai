@@ -48,7 +48,10 @@ end of November (rule 5).
 3. **Titles, client-readable, written once per block** (Tom approved this):
    a new block's title comes from the `light` seat (`claude-haiku-5-5`),
    one `claude -p` through the kernel's `Gateway` on a grant for the run,
-   as `call.Front` does, so it is metered on the run. Input: the block's
+   as `call.Front` does: the runner starts the gateway, issues the grant
+   on the run, holds `run:<run>` (each call's recorded holder) and closes
+   it when done, so it is metered on the run. Registered in
+   `core/__main__.py` `_routine_runners()` as `hours`. Input: the block's
    tasks' delivered results (`turn.ended` result text, in Valor's own
    words), not their instructions, which for a chat session open with the
    chat id. Output: under 60 characters, the value delivered, no tooling
@@ -62,12 +65,13 @@ end of November (rule 5).
 1. The merge lands; every Mac updates (`docs/rollout.md`), because
    `Spec.from_dict` refuses an unknown key and an old Mac would drop a spec
    carrying `calendar`, unbinding its chats.
-2. Only then: `calendar = {id, since = 2026-11-01}` in the cyndra,
-   psyoptimal and mastery specs in `~/Desktop/Valor/projects/` (ids from
-   `calendar_config.json`); a new "Mastery" calendar on valor@yuda.me,
-   shared with tom@yuda.me (make changes). Each spec loaded with the loader.
-3. Plist installed on the Bald (cyndra) and the Captain (psyoptimal,
-   mastery); the live check is `launchctl kickstart` of the installed job,
+2. Only then: `calendar = {id, since = 2026-11-01}` in the specs of the
+   three clients Yudame invoices, in `~/Desktop/Valor/projects/` (ids from
+   `calendar_config.json`); a new calendar on valor@yuda.me for the one
+   client that has none, shared with tom@yuda.me (make changes). Each spec loaded with the loader.
+3. Plist installed on every Mac, as `docs/rollout.md` installs each
+   routine (a Mac with no calendar project starts no run); the live check
+   on the two Macs those clients are placed on is `launchctl kickstart` of the installed job,
    then a read of each calendar against `valor-record hours` for November.
    Moving a client's placement to another Mac later: only after its last
    run on the old Mac, with `since` set to the move date, since the new
@@ -80,7 +84,7 @@ end of November (rule 5).
 ## Out of scope
 
 October: nothing written, edited or removed on any calendar (Tom: the
-invoices are final). SATSOL, Fuse and other projects. Tom's or Charlie's
+invoices are final). Every other project. Tom's or the team's
 hours. Rates, rendering, Mercury.
 
 ## Tests (real Postgres; a stub `gws` at `VALOR_GWS` keeps events in a
@@ -107,8 +111,8 @@ JSON file; titles from the local scripted upstream)
   spec without `calendar`, or on another Mac, is skipped; a chat-session
   block's title comes from its results, not its chat id; a gws failure on
   one project leaves `calendar.unwritten` and the next project is written.
-- Read-only, before step 2: `valor-record hours` for October on the Bald
-  and the Captain against the hand-built October events' totals, reported
+- Read-only, before step 2: `valor-record hours` for October on the two
+  Macs against the hand-built October events' totals, reported
   as numbers; nothing written.
 
 ## Docs

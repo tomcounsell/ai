@@ -19,7 +19,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 
 | Key | Holds | Serves |
 |---|---|---|
-| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`, `update`, `task`) | Mac native (launchd for scheduling) |
+| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`, `hours`, `update`, `task`) | Mac native (launchd for scheduling) |
 | `ceiling`, `model` | the effect class every run's tree is capped at, and the model seat | Bounded authority, metered spending |
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
@@ -92,7 +92,7 @@ changes nothing. `python -m core routines` lists every routine with its last
 run and its period spending; a run stopped after its firing is listed
 `stopped`, whatever outcome the firing recorded.
 
-The four routines the kernel holds:
+The five routines the kernel holds:
 
 - **expiry** (04:00 daily): `routines.due` folds the ledger and lists the
   guards and routines past their ninety days. The list is the run's summary,
@@ -107,6 +107,24 @@ The four routines the kernel holds:
   provisions, and starts one fix task for each group of red tests that no
   task holds (Findings, below). The runner holds the session lock
   `run:<run>`.
+- **hours** (02:00 daily, ceiling `act`, installed on every Mac): for each
+  project placed on this Mac whose spec names a `calendar` (`{id, since}`,
+  in the private spec only), writes Valor's working time from the record
+  (`record.blocks`: each turn of the project's tasks and chat sessions,
+  overlaps once, gaps of 20 minutes or less joined, split at Bangkok
+  midnight, rounded out to 0.1h with a 0.2h floor; a turn a kernel restart
+  ended runs to its last call, and a turn still running waits for its end)
+  to that calendar as valor@yuda.me, over whole Bangkok days from the later
+  of `since` and seven days ago. Its events carry the private extended
+  property `valor_hours=1` and are matched one-to-one to the blocks, so a
+  re-run writes nothing and an event made by hand is never touched; no
+  attendees, `sendUpdates=none`. A new event's title is one call on the
+  `light` seat through a gateway the runner starts, metered on the run.
+  Each write is `calendar.written` on the run, a failure
+  `calendar.unwritten`. On a Mac with no such project it starts no run.
+  A client's placement moves to another Mac only after its last run on the
+  old one, with `since` set to the move date: the new Mac's record holds
+  none of the last week's turns, and its run would delete their events.
 - **update** (03:00 daily, ceiling `act`): asks the resident kernel to roll
   this Mac to its branch's tip (`intake.request_update`, `by: routine`), as
   `python -m core update` does, and starts no task. Having no run task, the

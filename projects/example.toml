@@ -32,3 +32,6 @@ chat_roles."slack:T0EXAMPLE1/C0EXAMPLE2" = "engineer"
 chat_roles.email = "teammate"
 machine = "Valor the Example"
 knowledge_base = "Example"
+# Valor's working time on this project, written daily by the `hours` routine
+# to this Google Calendar from `since` on.
+calendar = { id = "example-calendar-id@group.calendar.google.com", since = 2026-11-01 }

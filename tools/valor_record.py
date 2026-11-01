@@ -5,6 +5,7 @@ valor-record tasks [--search TEXT] [--limit N] [--json]
 valor-record task ID [--json]
 valor-record memory WORDS [--limit N] [--offset N] [--json]
 valor-record call CODE [--before RECORD] [--limit N] [--json]
+valor-record hours [--since DATE] [--until DATE] [--json]
 
 Reads the ledger of this turn's own project: its chats, the messages each
 received and what they were bound to, its tasks and what became of them.
@@ -14,7 +15,9 @@ is `<channel>:<id>` as `chats` prints it. Messages print oldest first. `memory` 
 this project (the records recall reads, and standards of working), best
 match first, each record quoted as data. `call` reads a Meet call's
 transcript by its meeting code, oldest first a page at a time: who said
-or typed what, what Valor spoke and posted.
+or typed what, what Valor spoke and posted. `hours` prints the blocks of
+time Valor worked on this project (Bangkok days, default this month), as
+the `hours` routine writes them to the project's calendar.
 Standard library only, and Python 3.9 (macOS's own `python3`), so it runs
 in any workspace.
 """
@@ -81,6 +84,9 @@ def main(argv: list[str] | None = None) -> int:
     call.add_argument("code")
     call.add_argument("--before", help="only lines older than this record number (#N)")
     call.add_argument("--limit", "-n", type=int, default=200, help="how many (at most 200)")
+    hrs = sub.add_parser("hours", help="the time Valor worked on this project, block by block")
+    hrs.add_argument("--since", help="first Bangkok day, YYYY-MM-DD (default the 1st of this month)")
+    hrs.add_argument("--until", help="last Bangkok day, YYYY-MM-DD (default today)")
     mem = sub.add_parser("memory", help="search this project's memory, best match first")
     mem.add_argument("words", nargs="+", help="what to search for")
     mem.add_argument("--limit", "-n", type=int, default=10, help="how many (at most 50)")
@@ -101,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
         "before": (getattr(args, "before", None) or "").lstrip("#") or None,
         "id": getattr(args, "id", None),
         "code": getattr(args, "code", None),
+        "since": getattr(args, "since", None),
+        "until": getattr(args, "until", None),
     }
     url = f"{base}/{args.verb}?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
     try:
@@ -136,6 +144,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.verb == "tasks":
         for t in out:
             print(task_line(t))
+    elif args.verb == "hours":
+        for b in out:
+            print(
+                f"{b['start'][:10]} {b['start'][11:16]}-{b['end'][11:16]} {b['hours']:>4}h  {', '.join(b['tasks'])}"
+            )
+        print(f"total {round(sum(b['hours'] for b in out), 1)}h")
     elif args.verb == "call":
         for r in reversed(out):
             print(f"#{r['record']} [{_when(r['at'])}] {r['who']} ({r['how']}): {r['text']}".rstrip())

@@ -16,6 +16,8 @@ A project's reach is the chats its spec lists now (`chats`):
   one of its tasks. A message bound to another project's task (the
   operator chat, where every project reports) shows that task's id; the
   task itself is outside;
+- its hours (`hours`): the time Valor worked on it, from its tasks' turns
+  (`blocks`), which the `hours` routine writes to the project's calendar;
 - its Meet calls (`call`): a call's session is inside when the chat that
   asked for it is (`core/call.py`), and its transcript is what it heard
   and what Valor said and posted there.
@@ -27,8 +29,11 @@ client.
 Everything here is a SELECT.
 """
 
+from dataclasses import dataclass, field
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from core import db, ledger, machine, reactions, workspace
 
@@ -277,6 +282,136 @@ async def call(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], que
     return lines
 
 
+# Valor's hours (Tom, 2026-11-01): days are Bangkok's; turns whose gaps are
+# this short are one block of work; blocks round out to the engagement
+# letters' 0.1h, and none is shorter than 0.2h.
+TZ = ZoneInfo("Asia/Bangkok")
+JOIN = timedelta(minutes=20)
+GRID = timedelta(minutes=6)
+FLOOR = timedelta(minutes=12)
+RESTARTED = "kernel restarted"
+
+
+@dataclass
+class Block:
+    """A block of Valor's work on a project: Bangkok times on the 0.1h grid,
+    the tasks whose turns it holds, and what those turns delivered."""
+
+    start: datetime
+    end: datetime
+    tasks: list[str] = field(default_factory=list)
+    said: list[str] = field(default_factory=list)
+
+    def shown(self) -> dict[str, Any]:
+        hours = round((self.end - self.start) / timedelta(hours=1), 1)
+        return {
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat(),
+            "hours": hours,
+            "tasks": self.tasks,
+        }
+
+
+def _midnight(day: date) -> datetime:
+    return datetime.combine(day, time(), TZ)
+
+
+async def _turns(
+    conn, task_ids: list[str], lo: datetime, hi: datetime
+) -> list[tuple[datetime, datetime, str, str]]:
+    """Each ended turn of `task_ids` overlapping `[lo, hi)`: its start, its
+    end, its task and its result text. A turn ended by a kernel restart is
+    stamped at the restart, not when it died: it ends at its last evidence
+    of work, its latest `gateway.opened` or `gateway.charged` row that the
+    restart's recovery did not write, and with none it is left out. A turn
+    not ended yet is left out until it ends."""
+    rows = await (
+        await conn.execute(
+            "SELECT s.task_id, s.at, e.at, e.payload->>'reason', e.payload->'result'->>'text', "
+            "(SELECT max(g.at) FROM events g WHERE g.task_id = s.task_id "
+            " AND g.payload->>'turn_id' = s.payload->>'turn_id' AND (g.type = 'gateway.opened' "
+            " OR (g.type = 'gateway.charged' AND g.payload->>'reason' IS DISTINCT FROM %s))) "
+            "FROM events s JOIN events e ON e.task_id = s.task_id AND e.type = 'turn.ended' "
+            "AND e.payload->>'turn_id' = s.payload->>'turn_id' "
+            "WHERE s.type = 'turn.started' AND s.task_id = ANY(%s) AND s.at < %s AND e.at > %s ORDER BY s.at",
+            (RESTARTED, task_ids, hi, lo),
+        )
+    ).fetchall()
+    found = []
+    for task_id, began, ended, reason, text, worked in rows:
+        if reason == RESTARTED:
+            if worked is None:
+                continue
+            ended = worked
+        if ended > lo and ended > began:
+            found.append((began, ended, task_id, text or ""))
+    return found
+
+
+def _floor(at: datetime) -> datetime:
+    """`at` in Bangkok, down to the 0.1h grid (Bangkok's offset is whole
+    hours, so the grid is the hour's)."""
+    at = at.astimezone(TZ)
+    return at.replace(second=0, microsecond=0) - timedelta(minutes=at.minute % 6)
+
+
+def _ceil(at: datetime) -> datetime:
+    down = _floor(at)
+    return down if down == at.astimezone(TZ) else down + GRID
+
+
+async def blocks(conn, task_ids: list[str], first: date, last: date) -> list[Block]:
+    """Valor's work on `task_ids` over the Bangkok days `first` to `last`:
+    overlapping turns once, gaps of `JOIN` or less joined, split at Bangkok
+    midnight, rounded out to the 0.1h grid, and widened to `FLOOR`
+    (backwards when the day ends first)."""
+    lo, hi = _midnight(first), _midnight(last + timedelta(days=1))
+    joined: list[Block] = []
+    for began, ended, task_id, text in await _turns(conn, task_ids, lo, hi):
+        if joined and began <= joined[-1].end + JOIN:
+            b = joined[-1]
+            b.end = max(b.end, ended)
+        else:
+            b = Block(began, ended)
+            joined.append(b)
+        if task_id not in b.tasks:
+            b.tasks.append(task_id)
+        if text.strip():
+            b.said.append(text.strip())
+    out: list[Block] = []
+    for b in joined:
+        start = max(b.start, lo)
+        while start < min(b.end, hi):
+            day_end = _midnight(start.astimezone(TZ).date() + timedelta(days=1))
+            piece = Block(_floor(start), _ceil(min(b.end, day_end)), b.tasks, b.said)
+            if piece.end - piece.start < FLOOR:
+                if piece.start + FLOOR <= day_end:
+                    piece.end = piece.start + FLOOR
+                else:
+                    piece.start, piece.end = day_end - FLOOR, day_end
+            out.append(piece)
+            start = day_end
+    return out
+
+
+def _day(query: dict[str, str], key: str, default: date) -> date:
+    given = query.get(key)
+    if not given:
+        return default
+    try:
+        return date.fromisoformat(given)
+    except ValueError:
+        raise NotFound(f"{key} {given!r} is not a date (YYYY-MM-DD)") from None
+
+
+async def hours(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query) -> list[dict[str, Any]]:
+    """Valor's blocks of work on the project from `since` to `until`
+    (Bangkok days, both included; default this month to today)."""
+    today = datetime.now(TZ).date()
+    first, last = _day(query, "since", today.replace(day=1)), _day(query, "until", today)
+    return [b.shown() for b in await blocks(conn, list(tasks), first, last)]
+
+
 VERBS = {
     "chats": chats,
     "messages": messages,
@@ -284,6 +419,7 @@ VERBS = {
     "task": task,
     "memory": memory_search,
     "call": call,
+    "hours": hours,
 }
 
 

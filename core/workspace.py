@@ -61,6 +61,7 @@ import tomllib
 import urllib.parse
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -126,7 +127,11 @@ class Spec:
     working task's turns read and write.
 
     `client` names the client the project is for (one Mac per client); every
-    memory record ingested from its tasks carries it (docs/memory.md)."""
+    memory record ingested from its tasks carries it (docs/memory.md).
+
+    `calendar` (`{id = "...", since = DATE}`) names the Google Calendar the
+    `hours` routine writes Valor's working time on this project to, from
+    `since` on (`routines/hours`); `since` is kept as `YYYY-MM-DD`."""
 
     name: str
     repo: str
@@ -152,6 +157,7 @@ class Spec:
     machine: str | None = None
     knowledge_base: str | None = None
     client: str | None = None
+    calendar: dict[str, str] | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Spec:
@@ -234,6 +240,18 @@ class Spec:
         client = raw.get("client")
         if client is not None and (not isinstance(client, str) or not client.strip()):
             raise Refused("client names a client")
+        calendar = raw.get("calendar")
+        if calendar is not None:
+            if (
+                not isinstance(calendar, dict)
+                or set(calendar) != {"id", "since"}
+                or not isinstance(calendar["id"], str)
+                or not calendar["id"]
+                or not isinstance(calendar["since"], date)
+                or isinstance(calendar["since"], datetime)
+            ):
+                raise Refused('calendar is {id = "<calendar id>", since = <date>}')
+            calendar = {"id": calendar["id"], "since": calendar["since"].isoformat()}
         return cls(
             name=raw["name"],
             repo=raw["repo"],
@@ -259,6 +277,7 @@ class Spec:
             machine=machine,
             knowledge_base=kb,
             client=client,
+            calendar=calendar,
         )
 
     @classmethod

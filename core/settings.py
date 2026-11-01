@@ -362,6 +362,10 @@ class Settings:
     # checkout (`core/rollout.py`), named the same way: inside Homebrew's
     # prefix, never looked up on a PATH.
     uv: str = field(default_factory=lambda: _env("VALOR_UV", "/opt/homebrew/bin/uv"))
+    # Google Workspace's CLI, as Valor's Google account (valor@yuda.me); the
+    # `hours` routine writes calendars with it, from a launchd job whose PATH
+    # does not hold Homebrew's bin.
+    gws: str = field(default_factory=lambda: _env("VALOR_GWS", "/opt/homebrew/bin/gws"))
 
     # -- the headless browser `look` runs: one fixed Playwright build, never
     # the newest in the cache (a turn cannot write that cache) ---------------

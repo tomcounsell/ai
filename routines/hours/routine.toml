@@ -1,0 +1,15 @@
+name = "hours"
+runner = "hours"
+ceiling = "act"
+model = "light"
+mission_item = "Tom's ask (rule 2): Valor's working time on each client project on its calendar, for invoicing"
+need = [
+    "Tom, 2026-11-01 (Slack, Valor team chat): record Valor's work time on its calendar for each client project, as a routine, from November 1st",
+    "The old system logged it (tools/valor_calendar.py at old-system); without it October's hours were rebuilt by hand",
+]
+created = 2026-11-01
+instruction = "Write the time Valor worked on each client project placed on this Mac, from its record, to the project's calendar for the last seven days."
+
+[schedule]
+hour = 2
+minute = 0
