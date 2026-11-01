@@ -307,6 +307,8 @@ ENV/
 env.bak/
 venv.bak/
 *.env
+# 1Password references only, no secrets (skills/README.md, Imports).
+!skills/valor/skills/deep-research/keys.env
 
 # Spyder project settings
 .spyderproject
