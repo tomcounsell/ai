@@ -1704,7 +1704,7 @@ def test_task_start_in_another_chat_starts_under_that_chats_session_and_reads_it
         async with await db.connect(dsn) as conn:
             dev_session = await intake.chat_session(conn, "slack", dev)
             briefs = [await tasks.brief(conn, c) for c in made]
-            reports = [await notices.reports_to(conn, c) for c in made]
+            reports = [await notices.hears(conn, c, "question") for c in made]
             on_board = await board.here(conn, made[0])
         return session_id, dev_session, briefs, reports, on_board
 
