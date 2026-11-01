@@ -414,10 +414,15 @@ DM a spec lists), an email thread's its project's `rooms.email`, and for
 Tom's own chat (his Telegram and Slack DMs, the local chat) and any other
 email thread, the text in `core/intake.py` (`TOMS_OWN_ROOM`, `EMAIL_ROOM`;
 Tom, 2026-10-17: "each 'room' should have a description that anchors the
-purpose"). Every team chat's says no engineering or SDLC work starts
-there, that web search and filing GitHub issues are fine, and which Eng
-group engineering requests go to (Tom, 2026-10-17; a description, not a
-lock: no incident yet calls for one). It is the
+purpose"). Beside its room a chat may carry a role, the spec's
+`chat_roles` entry (`chat_roles.email` for its email threads; Tom's own
+chats have none), whose guidance (`skills/sdlc/roles/<role>.md`,
+`intake.role`) is rendered after `converse.md` on every dispatch; a room
+and its role together are what Tom calls a "hat" (ONTOLOGIES.md). The
+`teammate` role says no engineering or SDLC work starts there, that web
+search and filing GitHub issues are fine, and that engineering requests
+go to the project's Eng chat (Tom, 2026-10-17; guidance, not a lock: no
+incident yet calls for one). The room is the
 Brief's `Room:` line, read on every dispatch (`intake.room`), so it rides
 in the appended system prompt beside the persona and the corrections and
 no compaction removes it; editing it reaches an open session at its next
@@ -428,7 +433,9 @@ with a send to the chat, threaded; stays quiet by sending nothing; and
 starts, answers and stops tasks (`task.start`, `task.answer`,
 `task.stop`, `tools/chat_tasks.py`). A task it started reports its
 questions, deliveries and ends to the session (`child.reported`), never
-to a chat; the session answers what it can of a question, raises only the
+to a chat; one started with `"in"` another chat of the project (a product
+room approving a build in its dev channel, [slack.md](slack.md)) is that
+chat's session's child instead, reads that chat and reports there; the session answers what it can of a question, raises only the
 rest in the chat, and passes one `task.answer`; a project's board session
 (`board` in its spec) gets its tasks' questions in its board row instead
 ([slack.md](slack.md)). Its workspace is the project's
@@ -463,7 +470,9 @@ which reports to the session, and the session tells him.
 A task starts when a chat session asks for one (`task.start`, under the
 project its `"project"` names, one its Brief's `Repos:` line lists, else
 the session's own; the child carries
-the session's chat as `project.chat`, the chat it reads), or from a
+the session's chat as `project.chat`, the chat it reads, or with `"in"`
+the named chat of the project, under that chat's session, opened if it
+has none), or from a
 message of Tom's that is not a reply and has no chat session to go to: an
 email, or a chat no project lists when there is no `valor` spec. Before
 its first turn, the request-underspecification classifier
