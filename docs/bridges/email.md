@@ -28,8 +28,8 @@ certificates verified. The bridge signs in with an app password held
 only in `mail-keys` in the kernel key directory (mode 600), copied from
 the Cowboy's ([rollout.md](../rollout.md), step 5); it is in no vault `.env`
 or 1Password vault a turn reads, and `python -m bridges.email keys`, which
-prints each name with `written`, `kept`, or `missing` and never a value,
-keeps it. Every message Valor sends leaves from this address, as Valor,
+copies only the users, reports the password `kept` when `mail-keys` holds
+it and otherwise `missing` with the copy from the Cowboy to run, never a value. Every message Valor sends leaves from this address, as Valor,
 and only as a chat session's `email.send`: `gws`'s Google sign-in reads
 mail and cannot send it ([plans/one-voice-mail.md](../plans/one-voice-mail.md)).
 

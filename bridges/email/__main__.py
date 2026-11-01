@@ -11,7 +11,7 @@ from pathlib import Path
 from core import credentials
 from core.settings import settings
 
-from .config import KEY_NAMES
+from .config import PASSWORD_COMMAND, PASSWORD_NAMES, USER_NAMES
 
 LABEL = "com.valor.email"
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -76,10 +76,16 @@ def main(argv: list[str] | None = None) -> int:
         print(plist().decode(), end="")
         return 0
     if args.verb == "keys":
-        status = credentials.copy_keys(settings.vault_env, settings.mail_keyfile, KEY_NAMES)
-        for name in KEY_NAMES:
+        status = credentials.copy_keys(settings.vault_env, settings.mail_keyfile, USER_NAMES)
+        for name in PASSWORD_NAMES:  # held only in mail-keys, copied from the Cowboy's
+            try:
+                credentials.read_key(settings.mail_keyfile, name, PASSWORD_COMMAND)
+                status[name] = "kept"
+            except credentials.MissingKey:
+                status[name] = f"missing; copy the Cowboy's mail-keys: {PASSWORD_COMMAND}"
+        for name in [*USER_NAMES, *PASSWORD_NAMES]:
             print(f"{name}: {status[name]}")
-        return 1 if "missing" in status.values() else 0
+        return 1 if any(v.startswith("missing") for v in status.values()) else 0
     if args.verb == "run":
         from core import sentry
 

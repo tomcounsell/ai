@@ -53,7 +53,9 @@ when the work was only effects. It starts nothing, returning
 `nothing_due`, on a Mac the project is not placed on, so a routine
 installed on every Mac runs on one. `invoices` (Mondays 09:00) is its
 first: the week's reminders for Yudame's unpaid Mercury invoices
-(`skills/valor/skills/mercury-invoicing`). Its run drafts each reminder
+(`skills/valor/skills/mercury-invoicing`). Its run reads Valor's Sent mail
+through `gws`, whose Google sign-in reads mail and cannot send it
+([plans/one-voice-mail.md](plans/one-voice-mail.md)), drafts each reminder
 `email.send` in its stop note and sends nothing; its toml sets `wakes`, so
 the result wakes the session it reports to, which sends them as its own,
 the PDFs from the run's workspace.

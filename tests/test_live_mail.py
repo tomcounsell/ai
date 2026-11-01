@@ -63,3 +63,38 @@ def test_no_mail_password_is_where_a_turn_reads():
         items = json.loads(subprocess.run(["op", "item", "list", "--vault", v["id"], "--format", "json"],
                                           capture_output=True, text=True, check=True).stdout)  # fmt: skip
         assert not [i["title"] for i in items if i["title"].upper() in MAIL_PASSWORDS], v["name"]
+
+
+def test_keys_copies_the_mail_users_and_keeps_passwords_only_the_cowboys_copy_supplies(
+    tmp_path, monkeypatch, capsys
+):
+    """`python -m bridges.email keys` copies the mailbox users from the vault;
+    the passwords are not there, so it keeps those `mail-keys` holds and,
+    when it holds none, names the copy from the Cowboy, as the bridge's
+    start does."""
+    import dataclasses
+
+    from bridges.email import __main__ as email_main
+    from bridges.email import config
+    from core import credentials
+
+    vault, keys = tmp_path / "vault.env", tmp_path / "keys" / "pgpass"
+    vault.write_text("IMAP_USER=valor@yuda.me\nSMTP_USER=valor@yuda.me\n")
+    s = dataclasses.replace(settings, vault_env=str(vault), pg_passfile=str(keys), email_address="valor@yuda.me",
+                            email_since="2026-11-01")  # fmt: skip
+    monkeypatch.setattr(email_main, "settings", s)
+    monkeypatch.setattr(config, "settings", s)
+    assert email_main.main(["keys"]) == 1
+    out = capsys.readouterr().out
+    assert (
+        "IMAP_USER: written" in out
+        and f"SMTP_PASSWORD: missing; copy the Cowboy's mail-keys: {config.PASSWORD_COMMAND}" in out
+    )
+    with pytest.raises(credentials.MissingKey, match="valor-the-cowboy cat .config/valor-kernel/mail-keys"):
+        config.Config.from_settings()
+    mail_keys = keys.parent / "mail-keys"
+    mail_keys.write_text(mail_keys.read_text() + "IMAP_PASSWORD=a\nSMTP_PASSWORD=b\n")
+    assert email_main.main(["keys"]) == 0
+    out = capsys.readouterr().out
+    assert "IMAP_USER: kept" in out and "SMTP_PASSWORD: kept" in out
+    assert "SMTP_PASSWORD=b" in mail_keys.read_text()

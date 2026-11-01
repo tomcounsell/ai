@@ -9,8 +9,15 @@ from datetime import date
 from core import credentials
 from core.settings import settings
 
-KEY_NAMES = ["IMAP_USER", "IMAP_PASSWORD", "SMTP_USER", "SMTP_PASSWORD"]
+USER_NAMES = ["IMAP_USER", "SMTP_USER"]
+PASSWORD_NAMES = ["IMAP_PASSWORD", "SMTP_PASSWORD"]
 KEYS_COMMAND = "python -m bridges.email keys"
+# The app password is in no vault a turn reads (docs/plans/one-voice-mail.md):
+# a Mac gets it only by copying the Cowboy's `mail-keys` (docs/rollout.md, step 5).
+PASSWORD_COMMAND = (
+    "ssh valorengels@valor-the-cowboy cat .config/valor-kernel/mail-keys > ~/.config/valor-kernel/mail-keys; "
+    "chmod 600 ~/.config/valor-kernel/mail-keys"
+)
 
 
 @dataclass(frozen=True)
@@ -39,7 +46,8 @@ class Config:
             raise credentials.CredentialError("email_address is not set (VALOR_EMAIL_ADDRESS)")
         if not settings.email_since:
             raise credentials.CredentialError("email_since is not set (VALOR_EMAIL_SINCE, YYYY-MM-DD)")
-        keys = {n: credentials.read_key(settings.mail_keyfile, n, KEYS_COMMAND) for n in KEY_NAMES}
+        keys = {n: credentials.read_key(settings.mail_keyfile, n, KEYS_COMMAND) for n in USER_NAMES}
+        keys |= {n: credentials.read_key(settings.mail_keyfile, n, PASSWORD_COMMAND) for n in PASSWORD_NAMES}
         return cls(
             address=settings.email_address.lower(),
             since=date.fromisoformat(settings.email_since),

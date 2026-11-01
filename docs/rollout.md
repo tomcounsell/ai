@@ -91,7 +91,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    Mode token must not run on two bridges. Each Mac has its own (step 9).
    `mail-keys` comes only this way: the mailbox's app password is in no
    vault a turn reads (2026-11-01), so `python -m bridges.email keys`
-   keeps whatever `mail-keys` already holds for it.
+   reports it `kept` when `mail-keys` holds it.
    Calibrate the judge from a copy of the Cowboy's whole `~/src/valor-demo/items/`
    (the judgement file names case files beside it):
    `$PY -m core calibrate <items>/judgement/intake.underspecified.json`
