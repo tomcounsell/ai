@@ -1519,6 +1519,31 @@ def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team
     )
 
 
+def test_a_chat_session_drafts_in_the_askers_voice_and_sends_only_when_told(dsn, team, tmp_path):
+    """2026-11-01: asked to draft a client email, a chat session wrote it as from Valor,
+    ended "Anything I missed? If not, I'll send it" and sent it when Tom was silent."""
+    from core import verdicts
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            b = tasks.Brief(
+                instruction="chat", workspace=str(tmp_path), chat={"channel": "telegram", "chat_id": LONE}
+            )
+            task = await tasks.start(conn, b)
+            await verdicts.record_chat(conn, task)
+            return (await tasks.dispatch(conn, task))["text"]
+
+    flat = " ".join(run(go()).split())
+    assert "write it in the asker's voice, as from them, and give it back in the chat as text" in flat
+    assert "for them to send; send nothing" in flat
+    assert "A send to anyone outside the chat goes when the asker says send" in flat
+    assert "Silence, a wake or a timer is never a yes to a send" in flat
+    assert "When Tom says send, send it, with no further check" in flat
+    assert "This is for work you build, never for a send" in flat
+    # The persona, rendered into every turn, says a draft is the asker's, not words in Tom's mouth.
+    assert "A draft someone asks for is theirs: write it in their voice and hand it back as text" in flat
+
+
 def test_stakes_json_is_read_in_place_and_from_handled_and_only_as_an_object(tmp_path):
     v = tmp_path / ".valor"
     v.mkdir()
