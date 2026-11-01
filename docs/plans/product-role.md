@@ -28,9 +28,10 @@ spec from the shared folder.
 2. **A chat's role.** Spec key `chat_roles`, a table chat → role name, keyed and
    normalised as `rooms` (and `chat_roles.email`, as `rooms.email`). No new
    refusal. `intake.role(channel, chat_id, project)` resolves it as `room`
-   does; Tom's own chats have none. `tasks.dispatch` renders, for a chat
-   session with a role, `skills/sdlc/roles/<role>.md` as a section after
-   `converse.md`; a missing file raises, as an unreadable persona does.
+   does; Tom's own chats have none. `tasks.dispatch` resolves it from the same
+   `chat` as the room (a call's asking chat, else `b.chat`) and renders
+   `skills/sdlc/roles/<role>.md` as a section after `converse.md`; a missing
+   file raises, as an unreadable persona does.
 3. **Four roles** in `skills/sdlc/roles/`, without client names: `engineer`
    (engineering starts here, per converse.md), `teammate` (the sentence now in
    every team room line: no engineering or SDLC work starts here; web search and
@@ -38,9 +39,9 @@ spec from the shared folder.
    from old-system `config/personas/teammate.md`), `customer-service` (ported
    from its old file), `product` (below). `mentions` stays separate.
 4. **The product role** guidance: Tom's points; the Sheet standard; the
-   readiness review; how to share the Sheet with a member Tom adds (gws
-   `drive permissions create`, writer). **Sheet standard**, one Sheet per
-   product room owned by valor@yuda.me, tab `Queue`, one row per item, row
+   readiness review; sharing the Sheet with a member Tom adds (gws
+   `drive permissions create`, writer). **Sheet standard**: one Sheet per
+   product room, owned by valor@yuda.me, tab `Queue`, one row per item, row
    order = rank: `rank`, `item`, `kind` (bug/feature), `job` (JTBD: when…,
    I want…, so I can…), `hook` (trigger/action/reward/investment/none),
    `problem`, `appetite` (small batch ≤2 wk / big batch ≤6 wk), `value` 1-5,
@@ -51,24 +52,37 @@ spec from the shared folder.
    rows down and the room says which. **Readiness review** (guidance, not a
    gate or state): `ready` only when problem, appetite, sketch, rabbit holes and
    no-gos are written and every blocking dependency is cleared; then the room
-   approves the top ready row.
+   approves the top ready row. **Where state comes from**: an approved task
+   reports to the dev chat, not here, so on every queue review the room reads
+   each approved/building row's linked issue, PR and dev thread (`gh`,
+   `valor-slack read`) and moves `building`/`shipped` from them.
 5. **Handoff: `task.start` takes `"in": "<chat>"`**, a chat of the session's own
-   spec. The child is started under that chat's open session (opened as
-   `intake.open_session` does when none is), so it reports to the dev session
-   and sits on its board. The product room first posts the approval as a new
-   top-level message in the dev channel (`slack.send_message`), then starts the
+   spec, so one this Mac owns (one spec, one machine). `perform` resolves it;
+   a chat the spec does not list raises `ValueError` with the reason (no new
+   `refuse` branch). Under `ledger.lock` on that chat it takes the chat's open
+   session (`intake.chat_session`), or opens one with `intake.open_session`
+   and `tasks.start`s its Brief in the same transaction, as
+   `operator_session` does; the child starts under it, with `project.chat` the
+   `in` chat, which the child reads. So it reports to the dev session; it sits
+   on the board only when the `in` chat is the project's `board` (for the first
+   project it is: its dev channel is its board). The product room first posts
+   the approval as a new top-level message in the dev channel, then starts the
    task with `in` the dev chat and the instruction holding the row, the issue
    and that thread's `ts`; `converse.md` says a task started from another room
    is reported in the thread its instruction names. One path, extended.
-6. **Live** (build stage, as Valor): create the private channel, invite Tom
-   only, set its description; create the Sheet, share with Tom; its URL goes in
-   the room line. **After all four Macs run the merge** (older code refuses
-   `chat_roles` and every Mac reads every spec): add the channel to the
-   project's spec with `rooms`, `chat_roles` (product), not in `mentions`; give
-   every spec chat with a room its role and drop the moved sentence from team
-   room lines; load each with `Spec.load`. The project's Mac (the Captain)
-   receives it as it does that project's dev channel; confirm in its bridge log.
-   Docs: `docs/bridges/slack.md` (product channels), `projects/README.md`,
+6. **Build stage, reversible live objects only** (as Valor): create the private
+   channel, invite Tom only, set its description; create the Sheet, share with
+   Tom. No spec is edited before merge.
+7. **After merge** (a feedback round on this task, as private-projects stage
+   2a/2b): once each of the four Macs is confirmed on the merged commit (older
+   code refuses `chat_roles`, and every Mac reads every spec), edit
+   `~/Desktop/Valor/projects/*.toml`: the product channel in its project's spec
+   with `rooms` (the Sheet's URL in it), `chat_roles` product, not in
+   `mentions`; every spec chat with a room gets its role, and the moved sentence
+   leaves team room lines. Load each with `Spec.load`, and render a dispatch
+   section per listed chat so a misspelt role fails there, not in the chat.
+   Confirm the Captain's Slack bridge log receives the channel. Docs:
+   `docs/bridges/slack.md` (product channels), `projects/README.md`,
    `skills/README.md`, `core/README.md` (`chat_roles`).
 
 **Out of scope.** Product rooms for other projects; any check on readiness;
@@ -76,11 +90,13 @@ bulk rating of existing issues; a Slack canvas of the queue.
 
 **Tests.** Spec: `chat_roles` parsed and normalised like `rooms`, `email` key.
 Dispatch: a role section for a session with a role, none without, none in Tom's
-own chat, email thread's from `chat_roles.email`; each role file renders.
-`task.start` with `in`: child's parent is the dev chat's open session, a new one
-opened when none, `notices.reports_to` and `board.here` point there; without
-`in` unchanged; `in` a chat not in the spec is refused (the outcome says why).
-Example spec in `projects/example.toml` carries `chat_roles`.
+own chat, an email thread's from `chat_roles.email`, a call's from its asking
+chat's role; each role file renders. `task.start` with `in`: the child's parent
+is the `in` chat's open session, a new one opened when none, the child's
+`project.chat` is the `in` chat, `notices.reports_to` points to that session,
+`board.here` true when the `in` chat is the board and false otherwise; without
+`in` unchanged; `in` a chat not in the spec fails with the reason.
+`projects/example.toml` carries `chat_roles`.
 
 **Done** when Tom posts in the product channel and Valor answers as a product
 owner, e.g. rating and ranking a backlog item in the Sheet.
