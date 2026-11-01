@@ -168,6 +168,8 @@ payload carries the ids listed; a reader relies on nothing else.
 | `core/call.py` | `call.heard` | `turn_id`, `who` (the page's participant id), `name`, `via` (`spoke` or `typed`), `text`: one finished turn someone took in the call, Valor's own dropped. Quiet | The call's transcript (`valor-record call`) |
 | `core/call.py` | `call.participant` | `id`, `name`: someone other than Valor in the call, once each. Quiet | The transcript; who was there when the call ends |
 | `core/call.py` | `call.ended` | `reason`, `stopped`, `late` (worker answers after leaving: `question`, `answer`), `unanswered`; written once, by the call's process or the kernel's sweep (`call.sweep`), in one transaction with `task.ended` unless stopped, its read-backs sent to Tom's Slack DM's session to confirm by 👍 (Meet gives display names only), the refusal of its undelivered says and posts, and the `call` report to the asking chat's session | Constraint "Reliable stop, recovery, and correction" |
+| `routines/hours/runner.py` | `calendar.written` | `project`, `op` (`insert`, `patch`, `delete`), `start`, `end`, `event_id`; an insert also `title`. On the `hours` routine's run, one row per event it wrote on the project's calendar as valor@yuda.me ([routines.md](routines.md)) | What the routine changed on a calendar is seen |
+| `routines/hours/runner.py` | `calendar.unwritten` | `project`, `op` (`list`, `insert`, `patch`, `delete`), `start`, `end`, `why`: a gws call or a new block's title call that failed; the run goes on with the other blocks and projects, and the next run retries | A calendar write that did not happen is seen |
 
 One table holds every execution record. Gateway calls, turns, and effects
 are rows of the types above, with no separate log table for each. What a

@@ -586,7 +586,9 @@ same project. Because privacy is scoped by access to comms."
 
 The workspace has `valor-record` (`tools/valor_record.py`): `chats`,
 `messages [CHAT] [--search] [--limit] [--before]`, `tasks [--search]`,
-`task ID`, and `memory WORDS [--limit] [--offset]`, which searches the
+`task ID`, `call CODE`, `hours [--since D] [--until D]` (the blocks of
+time Valor worked on the project, as the `hours` routine writes them to
+its calendar, [routines.md](routines.md)), and `memory WORDS [--limit] [--offset]`, which searches the
 project's memory as recall reads it ([memory.md](memory.md), Search). The kernel answers it: each harness sets `VALOR_RECORD_URL`, the
 turn's gateway base URL with `/record`, and the gateway's `record/` route
 (before the catch-all that forwards upstream) resolves the turn's token to
