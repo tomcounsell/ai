@@ -31,7 +31,9 @@ mentions-only, and received by the same Mac as the project's dev channel.
 Its room line names the project's backlog Sheet and its dev channel; the
 role (`skills/sdlc/roles/product.md`) keeps the queue in the Sheet, copied
 from the product Sheet template and kept by the `product-sheet` skill
-(`skills/valor/skills/product-sheet/`), and approves the next ready item with a new thread in the dev channel and a
+(`skills/valor/skills/product-sheet/`). Valor approves each item that
+passes the skill's full readiness review (Tom, 2026-11-01: "the system
+should be the approver"), with a new thread in the dev channel and a
 `task.start` with `"in"` the dev channel, so the task reads and reports
 there (`tools/chat_tasks.py`).
 
