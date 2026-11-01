@@ -40,9 +40,9 @@ rolled out to, at least the Cowboy (rule 5, 6).
    what keeps the clone current, not Claude Code's autoUpdate.
 3. **`valor:researcher`.** Copy yudame/skills' research skill verbatim at
    c906f00ea (`run.py`, `keys.env`, `SKILL.md`) to
-   `skills/valor/skills/research/`, and its agent to
+   `skills/valor/skills/deep-research/` (named `deep-research`, not `research`: BAMA's `plan/research` has that name inside `valor:mac-app`), and its agent to
    `skills/valor/agents/researcher.md`, edited only to: name the runner
-   `${CLAUDE_PLUGIN_ROOT}/skills/research/run.py` (yudame's agent searches
+   `${CLAUDE_PLUGIN_ROOT}/skills/deep-research/run.py` (yudame's agent searches
    `~/.claude/plugins/cache`, which turns do not load); pass
    `--out ~/Desktop/Valor/research/<date>-<slug>` so every run's report,
    `raw.json` and Method line (time, cost, tools skipped) is kept and

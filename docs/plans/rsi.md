@@ -128,6 +128,16 @@ old controller, it starts from what Tom said and counts what Tom used.
   adds ventures and money.
 - Tests and docs as in Build 1.
 
+## Abilities RSI improves
+
+- **Research** (`valor:researcher`, Tom 2026-11-01,
+  [researcher.md](researcher.md)): an ordinary task on this repo changes
+  its runner, `skills/valor/skills/deep-research/`. Every run is kept in
+  `~/Desktop/Valor/research/` with its report, `raw.json`, time, cost and
+  tools skipped, so a changed runner is compared with the prior one on the
+  same question (claims with sources, cost, time), as Constraints require.
+  Nothing scores or gates a run.
+
 ## Builds 3–5 (each its own plan)
 
 3. Blind replay runner (G1).

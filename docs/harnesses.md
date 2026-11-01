@@ -91,8 +91,8 @@ It runs as a developer's Claude Code would there: the project's CLAUDE.md, setti
 MCP servers and web tools all load (WebFetch and WebSearch run inside the web agent alone; see
 Skill rendering), and so do the plugin directories in `settings.plugin_dirs`: Valor's own,
 `skills/valor` in the kernel's checkout, always first, then `VALOR_PLUGIN_DIRS` (colon-separated;
-by default the yudame and yudame-dev plugins of the yudame marketplace Claude Code keeps under
-`~/.claude/plugins/marketplaces/`), each passed as `--plugin-dir` when it exists. The operator's own user-scope MCP servers (`mcpServers` in
+by default the yudame and yudame-dev plugins of the yudame marketplace clone under
+`~/.claude/plugins/marketplaces/`, which the vault's nightly job `com.valor.brew-nightly` pulls), each passed as `--plugin-dir` when it exists. The operator's own user-scope MCP servers (`mcpServers` in
 `settings.claude_json`, `VALOR_CLAUDE_JSON`, default `~/.claude.json`; the logged-in browser
 among them) are passed as `--mcp-config`, since the turn's own config directory holds none.
 

@@ -6,8 +6,8 @@ Versioned skills.
 
 A worker's skills come from three sources together:
 
-- **Valor's own plugin**, `valor/` here, loaded first in every workspace turn (`settings.plugin_dirs`): the web agent `valor:web` and its guard hook (`valor/agents/`, `valor/hooks/`), the Mac-app agent `valor:mac-app`, which reads BAMA's skills by path (Imports, below), the SubagentStart hook that gives every subagent the Brief, the PreCompact hook that gives a chat session's compaction its instructions (`VALOR_COMPACT`), and Valor's own skills (`valor/skills/`: `authenticity-pass`, and `mercury-invoicing`, Yudame's Mercury invoices, pay links and reminders from valor@yuda.me). Each further skill is built by an ordinary task on this repository.
-- **The yudame plugins**, from `yudame/skills` in the Agent Skills format: the `yudame` and `yudame-dev` plugins listed in `settings.plugin_dirs`, kept current by the marketplace. Codex and Pi read the same clone through `~/.agents/skills` ([docs/plans/skills-and-harnesses.md](../docs/plans/skills-and-harnesses.md)).
+- **Valor's own plugin**, `valor/` here, loaded first in every workspace turn (`settings.plugin_dirs`): the web agent `valor:web` and its guard hook (`valor/agents/`, `valor/hooks/`), the Mac-app agent `valor:mac-app`, which reads BAMA's skills by path (Imports, below), the deep-research agent `valor:researcher` and its runner (`valor/skills/deep-research/`, Imports, below), the SubagentStart hook that gives every subagent the Brief, the PreCompact hook that gives a chat session's compaction its instructions (`VALOR_COMPACT`), and Valor's own skills (`valor/skills/`: `authenticity-pass`, and `mercury-invoicing`, Yudame's Mercury invoices, pay links and reminders from valor@yuda.me). Each further skill is built by an ordinary task on this repository.
+- **The yudame plugins**, from `yudame/skills` in the Agent Skills format: the `yudame` and `yudame-dev` plugins listed in `settings.plugin_dirs`, from the marketplace clone in `~/.claude/plugins/marketplaces/yudame`, which the vault's nightly job (`com.valor.brew-nightly`, 04:00) pulls with `claude plugin marketplace update yudame`; Claude Code's own autoUpdate runs only in interactive sessions. Codex and Pi read the same clone through `~/.agents/skills` ([docs/plans/skills-and-harnesses.md](../docs/plans/skills-and-harnesses.md)).
 - **The project's own skills**, in the repository the task works in.
 
 Workers load and use the skills; the persona turn does not. The persona reads and dispatches, and the work, skills included, is done by the subagents and kernel tasks it starts (planned: [docs/plans/orchestration.md](../docs/plans/orchestration.md), wave 2). Until that split is built, a workspace turn loads all three sources itself ([docs/harnesses.md](../docs/harnesses.md), Skill rendering).
@@ -28,8 +28,9 @@ These are Brief text, rendered by the kernel, not skills a harness loads. [docs/
 ## Imports
 
 - `valor/bama/`: BAMA's `skills/`, `specs/` and MIT `LICENSE` (github.com/daveebbelaar/bama), copied verbatim at commit 9b986714f248036cdf3bdf458b93cd4b67fe120f. Only `valor:mac-app` reads them, by path from its prompt; they sit outside `valor/skills/`, so no harness lists them to a session. Claude Code's agent `skills:` preload was measured (2.1.309, 2026-10-27) and cannot load a skill that sessions are not also shown. A newer BAMA is a task re-copying at a new pin ([docs/plans/mac-app.md](../docs/plans/mac-app.md)).
+- `valor/skills/deep-research/` (`run.py`, `keys.env`, `SKILL.md`) and `valor/agents/researcher.md`: yudame/skills' research skill and agent, copied at commit c906f00ea974. The copy is Valor's own (Tom, 2026-11-01): Valor improves it here through RSI ([docs/plans/rsi.md](../docs/plans/rsi.md)), while yudame/skills ships a pared-down version. The skill is named `deep-research` (yudame's is `research`), since BAMA's `plan/research` is read by that name inside `valor:mac-app`. The agent was edited to run its runner from this plugin and keep each run in `~/Desktop/Valor/research/`; `tests/test_research.py` is yudame's `tests/check_research.py` ported.
 
-A yudame or project skill is loaded where it lives, never copied here.
+Otherwise a yudame or project skill is loaded where it lives, never copied here.
 
 ## Effect classes
 
@@ -39,5 +40,5 @@ Holds none. A skill describes work; effects happen through the broker under the 
 
 **Governance is restrained by structure, not sentiment.** Before any check, gate, hook, validator, review round, approval step, isolation, sandbox rule, denial, allowlist, refusal, capability removal, or verification layer is added, the change names the mission item it serves and the incident that already happened without it; missing either, it is not added. A bug fix never adds a guard; it fixes the code. Adding governance needs Tom's grant, one per instance, written in the plan file that adds it. Every guard is ledgered with the incident it prevents, the mission item it serves, and a ninety-day expiry; a guard that has not fired by expiry is listed for Tom, and deleted unless he keeps it. The reviewer asks whether the diff adds governance; a yes with no grant in the plan file is a refused merge. The same paragraph, in the same words, sits at the top of `CLAUDE.md`, in the persona rendered into every turn, and in the Not-here section of every directory README. No restraint skill, no hook that blocks hooks, no governance dashboard: each is the disease presenting as the cure.
 
-- A copy of a yudame or project skill.
+- A copy of a yudame or project skill, other than the research copy above.
 - Kernel rules expressed as skill text. Authority is in `core/`.

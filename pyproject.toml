@@ -38,6 +38,8 @@ markers = [
 
 [tool.ruff]
 line-length = 110
+# Vendored verbatim from yudame/skills at a pin (skills/README.md, Imports).
+extend-exclude = ["skills/valor/skills/deep-research/run.py"]
 
 # tests/test_bloat.py: production code nothing in production uses fails the
 # suite. The names below are reached from outside the code vulture reads:

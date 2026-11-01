@@ -68,7 +68,11 @@ def test_the_web_guard_is_ledgered_with_its_grant_and_expiry(dsn):
     )  # fmt: skip
     assert "d0ec204a0" in restated["incident"] and restated["provenance"]["at"] == "2026-10-30"
     sends = by_id["send.sessions_only"]
-    assert (sends["granted_at"], sends["expires"], sends["mission_items"]) == ("2026-11-01", "2027-01-30", [6])
+    assert (sends["granted_at"], sends["expires"], sends["mission_items"]) == (
+        "2026-11-01",
+        "2027-01-30",
+        [6],
+    )
     assert "Sentry routine" in sends["incident"] and "impersonating you" in sends["note"]
     assert sends["source"] == sends["provenance"]["via"] == "docs/plans/one-voice.md, Grant"
     mail = by_id["mail.sessions_only"]
@@ -111,6 +115,29 @@ def test_every_subagent_but_the_web_agent_opens_with_the_brief():
     assert opens("valor:web") == ""
 
 
+def test_valor_researcher_runs_its_own_runner_with_keys_from_valors_vault():
+    """docs/plans/researcher.md: `valor:researcher` names its runner under its
+    plugin root, which a turn loads, and keeps every run in the synced folder;
+    each of the six research keys is a reference into Valor's vault."""
+    plugin = Path(VALOR_PLUGIN)
+    agent = (plugin / "agents" / "researcher.md").read_text()
+    front, prompt = agent.split("---")[1], agent.split("---", 2)[2]
+    assert "name: researcher" in front.splitlines() and "not yudame:researcher" in front
+    assert "`${CLAUDE_PLUGIN_ROOT}/skills/deep-research/run.py`" in prompt and "plugins/cache" not in prompt
+    assert "--out ~/Desktop/Valor/research/" in prompt
+    assert (plugin / "skills" / "deep-research" / "run.py").is_file()
+    refs = dict(
+        line.split("=", 1)
+        for line in (plugin / "skills" / "deep-research" / "keys.env").read_text().splitlines()
+        if line and not line.startswith("#")
+    )
+    assert set(refs) == {
+        "PERPLEXITY_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+        "GROK_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY",
+    }  # fmt: skip
+    assert all(ref.startswith("op://m-valor/") for ref in refs.values())
+
+
 def test_the_mac_app_agent_alone_reads_bamas_skills():
     """docs/plans/mac-app.md: BAMA's skills are vendored beside Valor's plugin
     skills, read by path from `valor:mac-app`'s prompt, and listed to no session."""
@@ -125,7 +152,9 @@ def test_the_mac_app_agent_alone_reads_bamas_skills():
     assert len(vendored) == 21 and named == vendored
     assert (bama / "specs" / "window-snapper.md").is_file()
     assert (bama / "LICENSE").read_text().startswith("MIT License\n\nCopyright (c) 2026 Dave Ebbelaar")
-    names = {s.rsplit("/", 1)[1] for s in vendored}
+    # By content, not name: the yudame plugin's `research` skill shares a name
+    # with BAMA's `plan/research` and is not BAMA's.
+    texts = {p.read_text() for p in bama.glob("skills/*/*/SKILL.md")}
     for plugin in settings.plugin_dirs:
         listed = Path(plugin) / "skills"
-        assert not names & {p.parent.name for p in listed.glob("*/SKILL.md")}, plugin
+        assert not texts & {p.read_text() for p in listed.glob("*/SKILL.md")}, plugin

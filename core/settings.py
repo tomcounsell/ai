@@ -328,7 +328,7 @@ class Settings:
     # The plugins a workspace turn loads (`--plugin-dir`, each that exists):
     # Valor's own (`skills/valor` in the kernel's checkout: the web agent, its
     # guard, Valor's skills) always first, then by default the yudame
-    # marketplace Claude Code keeps current on the machine.
+    # marketplace clone, which the vault's nightly brew job pulls.
     plugin_dirs: tuple[str, ...] = field(
         default_factory=lambda: (
             (VALOR_PLUGIN,)
