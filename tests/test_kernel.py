@@ -780,7 +780,7 @@ def test_stop_in_toms_dm_stops_every_task_reporting_to_its_session_and_tells_the
             await ledger.append(conn, chat, "child.reported",
                                 {"child_id": other, "kind": "question", "about_key": "q", "text": "?"})  # fmt: skip
             for reporter, kind in ((merging, "credential"), (intake.UPDATES, "rollout")):
-                await notices.request(conn, reporter, kind=kind, about_key=f"{kind}:x", text="!", session=chat)
+                await notices.request(conn, reporter, kind=kind, about_key=f"{kind}:{uuid.uuid4().hex}", text="!", session=chat)
         top = await tom_says(dsn, dm, "stop", at(20))
         later = await child_of(dsn, chat)
         await posted(dsn, chat, dm, at(30), "Started the next one.")

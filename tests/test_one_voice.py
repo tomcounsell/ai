@@ -180,7 +180,10 @@ def test_what_wakes_the_session_and_what_does_not(dsn, dm):
                 ("invoices result", invoices, "ended"),
                 ("routine result", quiet, "ended"),
             ):
-                await notices.request(conn, reporter, kind=kind, about_key=f"{name}:x", text=name)
+                # The `updates` stream is shared by every test on this database: a key of its own.
+                await notices.request(
+                    conn, reporter, kind=kind, about_key=f"{name}:{uuid.uuid4().hex}", text=name
+                )
             hearer = await operator(dsn)
             for p in bridges.typed(await ledger.read(conn, hearer), "child.reported"):
                 made[p["text"]] = p
