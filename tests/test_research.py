@@ -224,6 +224,9 @@ def test_each_tool_gets_its_own_prompt_and_time():
     ):
         assert sent[name][0].endswith(f"Research query:\nP-{field}"), (name, sent[name][0][-40:])
     assert "Context:\nQD-TEXT" in sent["claude"][0], "targeted tools get the question discovery as context"
+    assert sent["together"][1] == {"model": "meta-llama/llama-4-maverick:online"}, (
+        "a model every provider fits"
+    )
     assert sent["gemini"][1] == {"poll_interval": 60, "max_attempts": 30}
     assert sent["perplexity"][1] == {"timeout": 600, "max_retries": 2} and sent["grok"][1] == {"timeout": 300}
     assert calls["craft_targeted_prompts"][0][1]["question_discovery"] == "QD-TEXT"

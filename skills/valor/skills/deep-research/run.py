@@ -29,14 +29,16 @@ MANAGED = Path.home() / ".cache" / "yudame" / "cuttlefish"
 REPO = "yudame/cuttlefish"
 
 # name, label, key, module in apps/podcast/tools, field of TargetedResearchPrompts,
-# and the tool's own time parameters passed as they are.
+# and the tool's own parameters passed as they are. OpenRouter's Llama is Llama 4
+# Maverick, whose every provider takes 128k tokens or more: Cuttlefish's default,
+# Llama 3.3 70B, was routed on 2026-11-01 to a 12,288-token provider and refused the prompt.
 TOOLS = [
     ("perplexity", "Perplexity", "PERPLEXITY_API_KEY", "perplexity_deep_research", None, {"timeout": 600, "max_retries": 2}),
     ("chatgpt", "ChatGPT", "OPENAI_API_KEY", "chatgpt_deep_research", "gpt_prompt", {}),
     ("gemini", "Gemini", "GEMINI_API_KEY", "gemini_deep_research", "gemini_prompt", {"poll_interval": 60, "max_attempts": 30}),
     ("grok", "Grok", "GROK_API_KEY", "grok_deep_research", "grok_prompt", {"timeout": 300}),
     ("claude", "Claude", "ANTHROPIC_API_KEY", "claude_deep_research", "claude_prompt", {}),
-    ("together", "OpenRouter Llama", "OPENROUTER_API_KEY", "together_deep_research", "together_prompt", {}),
+    ("together", "OpenRouter Llama", "OPENROUTER_API_KEY", "together_deep_research", "together_prompt", {"model": "meta-llama/llama-4-maverick:online"}),
 ]
 LABEL = {t[0]: t[1] for t in TOOLS}
 CONTEXT_SOURCE = "caller-context"
