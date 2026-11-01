@@ -15,8 +15,12 @@ end of November (rule 5).
    every turn overlapping the range, `[turn.started.at, end]`. `end` is
    `turn.ended.at`, except a turn ended `interrupted` with reason `kernel
    restarted` (`core/serve.py`), stamped at the restart, not the death: it
-   ends at the last row carrying its `turn_id` before that `turn.ended`
-   (its last `gateway.*` call), or is dropped if there is none. Rules, in
+   ends at its last evidence of work, the latest of its `gateway.opened`
+   rows and its `gateway.charged` rows whose reason is not `kernel
+   restarted` (recovery charges open calls, and writes `turn.reaped`, at
+   the restart; neither counts), or is dropped if there is none. A turn
+   with no `turn.ended` yet (still running) is left out until it ends; a
+   later run inside the 7-day window then adds or extends its block. Rules, in
    order: union overlapping turns; join gaps of 20 minutes or less; split
    at Bangkok midnight and keep the days in the range; round start down and
    end up to the 6-minute grid (0.1h); a block under 12 minutes widens its
@@ -28,10 +32,13 @@ end of November (rule 5).
    `Spec.here()` with `calendar = {id = "...", since = DATE}`, the window
    is whole Bangkok days from max(`since`, today − 7) to now. It lists the
    calendar's events starting in the window that carry the private
-   extended property `valor_hours=1`, and for each block of `hours` over
-   the window: a tagged event overlapping it is patched to its start and
-   end, keeping its title; with none, an event is inserted with the tag.
-   A tagged event overlapping no block is deleted. Untagged (hand-made)
+   extended property `valor_hours=1` and matches them to the blocks of
+   `hours` over the window one-to-one, blocks in start order: each block
+   takes the earliest unassigned tagged event overlapping it, patched to
+   the block's start and end with its title kept; the other unassigned
+   tagged events overlapping that block are deleted; a block with none
+   gets a new tagged event. No event is assigned to two blocks; a tagged
+   event left unassigned is deleted. Untagged (hand-made)
    events are never touched. Events have no attendees and are written with
    `sendUpdates=none`, so no Google mail leaves. gws is run by its path,
    `settings.gws` (`VALOR_GWS`, default `/opt/homebrew/bin/gws`), since
@@ -62,6 +69,10 @@ end of November (rule 5).
 3. Plist installed on the Bald (cyndra) and the Captain (psyoptimal,
    mastery); the live check is `launchctl kickstart` of the installed job,
    then a read of each calendar against `valor-record hours` for November.
+   Moving a client's placement to another Mac later: only after its last
+   run on the old Mac, with `since` set to the move date, since the new
+   Mac's record has none of the last week's turns and its run would
+   delete their events (in `docs/routines.md` too).
 4. The three work-vault invoice skills' Valor rows read the client's
    calendar on valor@yuda.me, events tagged `valor_hours`, hours =
    duration, in place of the CSV Tom prompts for; committed in the vault.
@@ -78,7 +89,10 @@ JSON file; titles from the local scripted upstream)
 - Hours: overlapping turns count once; a 20-minute gap joins, 21 splits; a
   block across midnight becomes two; 0.1h rounding; the 12-minute floor; a
   23:55–24:00 block widens backwards, not into the next day; a turn ended
-  by a kernel restart ends at its last call, and with no call is dropped;
+  by a kernel restart ends at its last call's open, and a restart that
+  left a call open (charged by recovery at the restart) still ends at that
+  call's open time, not the restart; with no call it is dropped; a turn
+  still running is left out;
   another project's task and a chat outside the project's chats are
   excluded; a project chat session's turns are included; same rows twice,
   same blocks.
@@ -86,7 +100,10 @@ JSON file; titles from the local scripted upstream)
   `sendUpdates=none`; a re-run writes nothing; a block that grew patches
   its event's times and keeps its title; a vanished block deletes only its
   tagged event; a hand-made overlapping event is untouched; a turn spanning
-  the window's start yields no second event; nothing before `since`; a
+  the window's start yields no second event; two earlier events whose gap
+  a later turn filled give one event for the joined block; an event
+  overlapping two blocks gives one event per block; a turn running at one
+  run and ended by the next adds or extends its block once; nothing before `since`; a
   spec without `calendar`, or on another Mac, is skipped; a chat-session
   block's title comes from its results, not its chat id; a gws failure on
   one project leaves `calendar.unwritten` and the next project is written.
