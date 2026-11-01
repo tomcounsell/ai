@@ -71,7 +71,12 @@ def test_the_web_guard_is_ledgered_with_its_grant_and_expiry(dsn):
     assert (sends["granted_at"], sends["expires"], sends["mission_items"]) == ("2026-11-01", "2027-01-30", [6])
     assert "Sentry routine" in sends["incident"] and "impersonating you" in sends["note"]
     assert sends["source"] == sends["provenance"]["via"] == "docs/plans/one-voice.md, Grant"
-    own = ("web.agent_only", "update.room", "build.restated", "send.sessions_only")
+    mail = by_id["mail.sessions_only"]
+    assert (mail["granted_at"], mail["expires"], mail["mission_items"]) == ("2026-11-01", "2027-01-30", [6])
+    assert "gmail.modify" in mail["incident"] and '"Agreed"' in mail["note"]
+    assert mail["firing_record"] is False
+    assert mail["source"] == mail["provenance"]["via"] == "docs/plans/one-voice-mail.md, Grant"
+    own = ("web.agent_only", "update.room", "build.restated", "send.sessions_only", "mail.sessions_only")
     assert all(by_id[g]["expires"] == guards.EXPIRES.isoformat() for g in by_id if g not in own)
 
 

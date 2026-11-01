@@ -3,8 +3,9 @@ incident it prevents, the mission item it serves, and a ninety-day expiry.
 
 The four granted with the pipeline on 2026-10-01, and the web guard granted on
 2026-10-16 (docs/plans/orchestration.md), the update room granted on
-2026-10-20 (docs/plans/update.md), and the session-only send granted on
-2026-11-01 (docs/plans/one-voice.md), are seeded by `db.migrate` on the
+2026-10-20 (docs/plans/update.md), the session-only send granted on
+2026-11-01 (docs/plans/one-voice.md), and the read-only mail sign-in
+granted the same day (docs/plans/one-voice-mail.md), are seeded by `db.migrate` on the
 `guards` stream, once each. This module records; the expiry routine (`core/routines.py`) reads the
 rows and proposes the deletion of what is due.
 """
@@ -154,6 +155,30 @@ SEEDED: tuple[dict[str, Any], ...] = (
         ),
         "via": "docs/plans/one-voice.md, Grant",
         # A task's turn is never offered a send, so there is nothing to refuse and no firing.
+        "firing_record": False,
+    },
+    {
+        "guard_id": "mail.sessions_only",
+        "name": (
+            "Valor's Google sign-in for gws reads mail and cannot send it (gmail.readonly), and no "
+            "mailbox password is in a vault a turn reads: mail as Valor leaves only as a chat session's "
+            "email.send (docs/rollout.md step 6, docs/machine.md)"
+        ),
+        "incident": (
+            "2026-10-31: the nightly Sentry routine's report reached Tom's Slack DM as kernel text no "
+            "session wrote; after one-voice closed the kernel's sends, any task or routine could still "
+            "email people as Valor through gws with gmail.modify or the vault's SMTP_PASSWORD"
+        ),
+        "mission_items": [6],
+        "source": "docs/plans/one-voice-mail.md, Grant",
+        "granted_at": "2026-11-01",
+        "expires": "2027-01-30",
+        "note": (
+            'Tom, 2026-11-01: "No routine or system should be impersonating you." Confirmed with a :+1: '
+            'at 04:34 UTC; "Agreed" at 05:37 UTC to closing email the same way.'
+        ),
+        "via": "docs/plans/one-voice-mail.md, Grant",
+        # Google refuses the send; nothing in the kernel fires.
         "firing_record": False,
     },
 )

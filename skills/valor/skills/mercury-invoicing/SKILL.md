@@ -51,8 +51,8 @@ the new one to the token on Mercury's token page. Mercury deletes a token unused
 4. **Reminders** are the weekly `invoices` routine (`routines/invoices/`), whose run
    drafts them and whose session sends them (the routine `wakes` its session): `remind`
    picks Valor's Unpaid invoices at least a day overdue, at most one reminder per
-   invoice every 7 days and 4 in all, reading valor@yuda.me's Sent mail (`gws`) for
-   what already went out. An invoice past its fourth reminder is listed for Tom. A
+   invoice every 7 days and 4 in all, reading valor@yuda.me's Sent mail (`gws`, which reads
+   mail and cannot send it) for what already went out. An invoice past its fourth reminder is listed for Tom. A
    Sent-mail read that fails stops the run; it never counts as none sent.
    Invoices Tom made in Mercury's dashboard show in `unpaid` and get no reminder.
 

@@ -252,7 +252,9 @@ To reply, request the chat's send (`telegram.send_message` on Telegram,
 `slack.send_message` on Slack, `local.send_message` on the local chat
 page) with the chat id as the target and `reply_to` the message you
 answer. In an email thread, request `email.send` with `reply_to` the
-message id you answer, which replies to all on it. One message per answer, as you would
+message id you answer, which replies to all on it; email leaves only this
+way, since `gws` reads Valor's mail and cannot send it (a 403 there is
+expected, not a reason to try the browser). One message per answer, as you would
 type it in the chat. On Slack and Telegram each message you read names its
 thread (`in #tag`, or `top-level, starts #tag`), and each send's outcome
 names where it went: a channel holds several threads at once, so answer in

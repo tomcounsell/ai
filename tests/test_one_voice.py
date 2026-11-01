@@ -8,14 +8,21 @@ message of Tom's in his DM is his session's, with the post it is under.
 """
 
 import asyncio
+import email
+import email.policy
 import hashlib
+import json
 import pathlib
+import socket
+import ssl
+import subprocess
+import threading
 import uuid
 
 import pytest
 
 from core import broker, db, intake, ledger, machine, notices, record, router, routines, session, tasks
-from core.bridge import DECLARED, declared_performers
+from core.bridge import declared_performers
 from core.machine import State
 from core.settings import settings
 from tests import bridges
@@ -220,39 +227,121 @@ async def operator_ready(dsn) -> None:
         await intake.operator_session(conn)
 
 
-def test_a_session_sends_a_file_a_task_reporting_to_it_made_and_no_other(dsn, dm, tmp_path):
-    """The invoice reminders: the run drafts them with their PDFs in its own
-    workspace; the session it reports to sends them with those files. A
-    file in a task that does not report to the session is refused."""
+class Gmail:
+    """smtp.gmail.com as the email performer meets it: EHLO, STARTTLS with
+    a certificate the client is told to trust, AUTH, MAIL, RCPT, DATA. It
+    keeps each message it accepted, as bytes."""
 
-    def made(root):
-        root.mkdir(parents=True)
-        pdf = root / "invoice_1.pdf"
-        pdf.write_bytes(b"%PDF-1.4")
-        return {"path": str(pdf), "sha256": hashlib.sha256(b"%PDF-1.4").hexdigest()}
+    def __init__(self, cert, key):
+        self.ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        self.ctx.load_cert_chain(cert, key)
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.port, self.got = self.sock.getsockname()[1], []
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        conn, _ = self.sock.accept()
+        f = conn.makefile("rb")
+
+        def say(line):
+            conn.sendall(line.encode() + b"\r\n")
+
+        say("220 smtp.test")
+        while line := f.readline():
+            verb = line.split()[0].upper() if line.strip() else b""
+            if verb == b"EHLO":
+                say("250-smtp.test\r\n250-SIZE 35882577\r\n250-STARTTLS\r\n250 AUTH PLAIN LOGIN")
+            elif verb == b"STARTTLS":
+                say("220 go ahead")
+                conn = self.ctx.wrap_socket(conn, server_side=True)
+                f = conn.makefile("rb")
+            elif verb == b"AUTH":
+                say("235 accepted")
+            elif verb in (b"MAIL", b"RCPT"):
+                say("250 ok")
+            elif verb == b"DATA":
+                say("354 go")
+                data = b""
+                while (chunk := f.readline()) != b".\r\n":
+                    data += chunk[1:] if chunk.startswith(b"..") else chunk
+                self.got.append(data)
+                say("250 queued")
+            elif verb == b"QUIT":
+                break
+
+
+def test_the_weekly_run_drafts_a_reminder_with_its_pdf_and_the_session_sends_it(
+    dsn, dm, tmp_path, monkeypatch
+):
+    """The invoice reminders end to end: the `invoices` run drafts each
+    reminder with its PDF in its own workspace, reading Valor's Sent mail
+    only; its report wakes the operator session; the session's `email.send`
+    may attach that PDF, and the email performer delivers it to the mail
+    server with the PDF's bytes. A file in a task that does not report to
+    the session is refused."""
+    from bridges.email import smtp
+    from bridges.email.config import Config
+    from tests.test_mercury_invoicing import NORTHWIND, NOW, TODAY, inv, mercury
+    from tests.test_mercury_invoicing import Mercury as FakeMercury
+
+    cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1",
+         "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1"],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    server = Gmail(cert, key)
+    monkeypatch.setattr(mercury, "call", FakeMercury(invoices=[inv("NEW")], customers=[NORTHWIND]))
+    gws = []
+
+    def sent_mail(argv, **kw):
+        gws.append(argv[1:5])
+        return subprocess.CompletedProcess(argv, 0, '{"messages": []}', "")
+
+    monkeypatch.setattr(mercury.subprocess, "run", sent_mail)
+    workspace = tmp_path / "run"
+    ((effect,),) = [mercury.remind(TODAY, NOW, workspace / ".valor" / "invoices")["send"]]
+    stray = tmp_path / "stray" / "invoice_1.pdf"
+    stray.parent.mkdir()
+    stray.write_bytes(b"%PDF-1.4")
 
     async def go():
-        drafts = made(tmp_path / "run" / ".valor" / "invoices")
-        stray = made(tmp_path / "stray")
-        run_ = await routine_run(dsn, name="invoices", workspace=str(tmp_path / "run"))
-        await new_task(dsn, workspace=str(tmp_path / "stray"))
-        await end(dsn, run_, "Done: one reminder drafted.")
+        run_ = await routine_run(dsn, name="invoices", workspace=str(workspace))
+        await new_task(dsn, workspace=str(stray.parent))
+        await end(dsn, run_, f"Done: one reminder drafted.\n\n```json\n{json.dumps(effect)}\n```")
         hearer = await operator(dsn)
-        email = DECLARED["email.send"]
         send = next(
             d for d in declared_performers(str(tmp_path / "session"), hearer) if d.action_type == "email.send"
         )
+        action = broker.Action(effect["action_type"], effect["target"], effect["payload"])
+        foreign = {"path": str(stray), "sha256": hashlib.sha256(b"%PDF-1.4").hexdigest()}
         async with await db.connect(dsn) as conn:
-            ok = await send.refuse(
-                conn, broker.Action("email.send", "a@b.test", {"to": ["a@b.test"], "files": [drafts]})
-            )
+            ok = await send.refuse(conn, action)
             no = await send.refuse(
-                conn, broker.Action("email.send", "a@b.test", {"to": ["a@b.test"], "files": [stray]})
+                conn, broker.Action("email.send", "a@b.test", {"to": ["a@b.test"], "files": [foreign]})
             )
             rows_ = await ledger.read(conn, hearer)
-        return email, ok, no, rows_
+        return action, ok, no, rows_
 
-    email, ok, no, rows_ = run(go())
-    assert email.owner == "email" and ok is None
+    action, ok, no, rows_ = run(go())
+    assert session.chat_waiting(rows_) and ok is None
     assert no == "files[0] is not a regular file in your workspace or a reporting task's"
-    assert session.chat_waiting(rows_)
+    assert gws and all(
+        call[:3] == ["gmail", "users", "messages"] and call[3] in ("list", "get") for call in gws
+    )
+    cfg = Config(address="valor@yuda.me", since=TODAY, imap_host="", imap_port=0, smtp_host="127.0.0.1",
+                 smtp_port=server.port, imap_user="", smtp_user="valor@yuda.me", imap_password="",
+                 smtp_password="app-password", cafile=str(cert))  # fmt: skip
+    out = smtp.perform(cfg, action, "reminder-NEW")
+    assert out["accepted"] == ["someone@client.example"]
+    (raw,) = server.got
+    msg = email.message_from_bytes(raw, policy=email.policy.default)
+    assert (msg["From"], msg["To"], msg["Subject"]) == (
+        "valor@yuda.me",
+        "someone@client.example",
+        "Reminder: Invoice NEW from Yudame",
+    )
+    (pdf,) = list(msg.iter_attachments())
+    pdf_path = pathlib.Path(effect["payload"]["files"][0]["path"])
+    assert pdf.get_filename() == "invoice_NEW.pdf" and pdf.get_content() == pdf_path.read_bytes()
+    assert pdf_path.is_relative_to(workspace)

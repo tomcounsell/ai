@@ -24,11 +24,14 @@ prints its launchd job. The last section lists the modules.
 
 **The mailbox.** One mailbox, Valor's (`email_address`), on Gmail over IMAP
 (`imap_host`, port 993) and SMTP (`smtp_host`, port 587, STARTTLS), with
-certificates verified. The bridge signs in with an app password that
-`python -m bridges.email keys` copies from the vault `.env` into
-`mail-keys` in the kernel key directory (mode 600), printing each name
-with `written`, `kept`, or `missing` and never a value. Every message Valor
-sends leaves from this address, as Valor.
+certificates verified. The bridge signs in with an app password held
+only in `mail-keys` in the kernel key directory (mode 600), copied from
+the Cowboy's ([rollout.md](../rollout.md), step 5); it is in no vault `.env`
+or 1Password vault a turn reads, and `python -m bridges.email keys`, which
+prints each name with `written`, `kept`, or `missing` and never a value,
+keeps it. Every message Valor sends leaves from this address, as Valor,
+and only as a chat session's `email.send`: `gws`'s Google sign-in reads
+mail and cannot send it ([plans/one-voice-mail.md](../plans/one-voice-mail.md)).
 
 **The watch.** The bridge holds one IMAP connection and waits on it with
 IDLE (RFC 2177), so new mail arrives as an event: the server's `EXISTS`

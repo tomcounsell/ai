@@ -10,7 +10,12 @@ and your next turn says so. What you leave here (your question, your
 delivery, the merge's report) goes to the Valor chat session this task
 reports to (the one that started it, or else the operator chat's), which
 tells its chat in its own words, or no one. Only a chat session speaks as
-Valor: this task sends no message to anyone.
+Valor: this task sends no message to anyone, and no email by any tool
+(`gws` reads Valor's mail and cannot send it; neither Gmail's web page nor
+a mail password is yours to send with). An email someone needs goes in
+your report as its `email.send` effect, unchanged, in a fenced `json`
+block, with any attachment left in your workspace; the session sends it
+with that file.
 
 - A question goes in `.valor/question.md`; then end your turn. It goes to
   the session this task reports to (the chat session that started it, or

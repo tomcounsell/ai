@@ -89,6 +89,9 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `for K in claude-token github-keys judgement-keys openai-key mail-keys sentry-dsn telegram-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; chmod 600 ~/.config/valor-kernel/$K; done`.
    Never `slack-keys`: it holds the Cowboy's own Slack app, whose Socket
    Mode token must not run on two bridges. Each Mac has its own (step 9).
+   `mail-keys` comes only this way: the mailbox's app password is in no
+   vault a turn reads (2026-11-01), so `python -m bridges.email keys`
+   keeps whatever `mail-keys` already holds for it.
    Calibrate the judge from a copy of the Cowboy's whole `~/src/valor-demo/items/`
    (the judgement file names case files beside it):
    `$PY -m core calibrate <items>/judgement/intake.underspecified.json`
@@ -110,16 +113,27 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    (mode 600; anyone at yuda.me signs in their own account through it);
    `gws gmail users getProfile --params '{"userId":"me"}'` names valor@yuda.me.
    To sign in afresh (on the Cowboy, or after a revocation), Valor needs
-   no one at the screen: `gws auth logout`, then, over SSH, where the login
+   no one at the screen. When the old sign-in could send mail, first
+   revoke it at Google, which ends every Mac's copy of it: POST its
+   `refresh_token` (from `credentials.json`, never printed) to
+   `https://oauth2.googleapis.com/revoke`; a refresh with it then returns
+   `invalid_grant`. `gws auth logout` only clears this Mac's files. Then
+   `gws auth logout`, then, over SSH, where the login
    keychain is locked, with `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file` set
    for this and the export,
-   `gws auth login --scopes https://www.googleapis.com/auth/gmail.modify,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/tasks,https://www.googleapis.com/auth/contacts,https://www.googleapis.com/auth/chat.messages,https://www.googleapis.com/auth/chat.spaces,https://www.googleapis.com/auth/forms.body,https://www.googleapis.com/auth/forms.responses.readonly,https://www.googleapis.com/auth/meetings.space.created,https://www.googleapis.com/auth/meetings.space.readonly,openid,https://www.googleapis.com/auth/userinfo.email`,
+   `gws auth login --scopes https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/calendar,https://www.googleapis.com/auth/drive,https://www.googleapis.com/auth/documents,https://www.googleapis.com/auth/spreadsheets,https://www.googleapis.com/auth/presentations,https://www.googleapis.com/auth/tasks,https://www.googleapis.com/auth/contacts,https://www.googleapis.com/auth/chat.messages,https://www.googleapis.com/auth/chat.spaces,https://www.googleapis.com/auth/forms.body,https://www.googleapis.com/auth/forms.responses.readonly,https://www.googleapis.com/auth/meetings.space.created,https://www.googleapis.com/auth/meetings.space.readonly,openid,https://www.googleapis.com/auth/userinfo.email`,
    run in the background, and its printed URL opened and approved as
    valor@yuda.me in byob Chrome (choose the account, Continue, Allow; byob's
    auth-domain flag must be set, [browser.md](browser.md)), then
    `gws auth export --unmasked > ~/.config/gws/credentials.json && chmod 600 ~/.config/gws/credentials.json && rm ~/.config/gws/credentials.enc`.
    Never `--full` or the default scopes: they carry Cloud scopes, and
-   Yudame's Cloud session control then asks for the sign-in again.
+   Yudame's Cloud session control then asks for the sign-in again. Gmail
+   is `gmail.readonly`, never `gmail.modify`, `gmail.send`, `gmail.compose`
+   or `https://mail.google.com/`: a turn reads Valor's mail, and mail
+   under Valor's name leaves only as a chat session's `email.send`
+   (Tom, 2026-11-01, [plans/one-voice-mail.md](plans/one-voice-mail.md)).
+   `tests/test_live_mail.py` checks this list, and with `VALOR_LIVE=1
+   VALOR_MAIL_LIVE=1` the live sign-in.
 7. **The handover**, when the old system is there:
    - The old memory, exported while its Redis is up:
      `$OLDPY -I scripts/cutover_export_memory.py $CUT/memory.jsonl` (`PYTHONDONTWRITEBYTECODE=1`).

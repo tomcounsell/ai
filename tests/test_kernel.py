@@ -1768,7 +1768,9 @@ def test_only_a_chat_session_is_offered_or_may_request_a_send(dsn, team):
     you." A routine's run, or any task that is no chat session, has no
     send or canvas type among its performers, so its turn is told of none
     and a request for one is refused as unknown; a chat session has every
-    one. A send owes no report: the session that sent it knows."""
+    one. An SDLC task is no different: it may not request `email.send`
+    either (docs/plans/one-voice-mail.md). A send owes no report: the
+    session that sent it knows."""
     from core import __main__ as composition
     from core.bridge import DECLARED
 
@@ -1778,22 +1780,28 @@ def test_only_a_chat_session_is_offered_or_may_request_a_send(dsn, team):
         session_id = (await said(dsn, "valor, tell the florist we're live"))["task_id"]
         objective = await new_task(dsn, routine="sentry")
         run_ = await new_task(dsn, parent_id=objective, routine="sentry", max_effect_class="act")
+        sdlc = await new_task(dsn, max_effect_class="act")
+        mail = broker.Action("email.send", "x@florist.test", {"text": "We're live.", "to": ["x@florist.test"]})
+        slack = broker.Action("slack.send_message", "T0ABC/U1", {"text": "hi"})
         async with await db.connect(dsn) as conn:
-            briefs = [await tasks.brief(conn, t) for t in (session_id, run_)]
+            briefs = [await tasks.brief(conn, t) for t in (session_id, run_, sdlc)]
             built = [composition._performers(b) for b in briefs]
             effect = {"effect_id": ledger.new_id(), "effect_class": "act", "action_type": "email.send",
                       "target": "x@florist.test", "payload": {"text": "We're live.", "to": ["x@florist.test"]}}  # fmt: skip
             owed = await notices.report(conn, session_id, effect)
-            refused = await broker.request(
-                conn, built[1], run_, broker.Action("slack.send_message", "T0ABC/U1", {"text": "hi"})
-            )
+            refused = [
+                await broker.request(conn, built[1], run_, slack),
+                await broker.request(conn, built[1], run_, mail),
+                await broker.request(conn, built[2], sdlc, mail),
+            ]
         return built, owed, refused
 
-    (session_p, run_p), owed, refused = run(go())
-    assert {t for t in sends if session_p.get(t)} == sends
-    assert not any(run_p.get(t) for t in sends)
-    assert not any(t in line for line in run_p.offered("act") for t in sends)
-    assert owed is None and (refused.kind, refused.error) == ("refused", broker.NO_PERFORMER)
+    (session_p, *tasks_p), owed, refused = run(go())
+    assert {t for t in sends if session_p.get(t)} == sends and "email.send" in sends
+    for task_p in tasks_p:
+        assert not any(task_p.get(t) for t in sends)
+        assert not any(t in line for line in task_p.offered("act") for t in sends)
+    assert owed is None and [(r.kind, r.error) for r in refused] == [("refused", broker.NO_PERFORMER)] * 3
 
 
 # -- an email thread: a chat with its own session ------------------------------
