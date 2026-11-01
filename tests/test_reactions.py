@@ -849,8 +849,13 @@ def test_a_working_turn_reads_the_reaction_on_toms_steer():
     )
 
 
-def test_the_resident_kernel_writes_each_due_reaction_in_a_job_of_its_own(dsn, team):
+def test_the_resident_kernel_writes_each_due_reaction_in_a_job_of_its_own(fresh, team):
+    """On a database of its own: the kernel reacts to every pending message,
+    and the session's shared one holds every earlier test's (140 in a full
+    run, 2026-11-02), one connection each, past the server's 100."""
     from core import serve
+
+    dsn = fresh
 
     async def go():
         m = await said(dsn, "valor, the shop looks great today")
