@@ -49,8 +49,13 @@ def values(sheet: str, tab: str) -> list[list[str]]:
 
 
 def rows(found: list[list[str]], columns: list[str]) -> list[dict[str, str]]:
-    """Each non-blank row as a dict of `columns`."""
-    return [dict(zip(columns, [*r, *[""] * len(columns)])) for r in found if any(r)]
+    """Each non-blank row as a dict of `columns`; `_rest` holds any cells
+    past them (columns people added), which move with the row."""
+    return [
+        {**dict(zip(columns, [*r, *[""] * len(columns)])), "_rest": r[len(columns) :]}
+        for r in found
+        if any(r)
+    ]
 
 
 def _band(row: dict[str, str], name: str) -> int:
@@ -132,9 +137,11 @@ def main(argv: list[str] | None = None) -> int:
         before = rows(found, QUEUE)
         after = ordered(before)
         # Every row read is written back, blank ones moved to the end, so no old row survives below.
-        written = [[r[c] for c in QUEUE] for r in after] + [[""] * len(QUEUE)] * (len(found) - len(after))
+        # Each row is padded to the full A:Z width read, so a moved row clears what stood there before.
+        written = [[*[r[c] for c in QUEUE], *r.get("_rest", [])] for r in after]
+        written = [[*w, *[""] * (26 - len(w))] for w in written] + [[""] * 26] * (len(found) - len(after))
         gws("sheets", "spreadsheets", "values", "update",
-            params={"spreadsheetId": args.sheet, "range": f"Queue!A2:M{len(found) + 1}", "valueInputOption": "RAW"},
+            params={"spreadsheetId": args.sheet, "range": f"Queue!A2:Z{len(found) + 1}", "valueInputOption": "RAW"},
             body={"values": written})  # fmt: skip
         place = {r["id"]: i for i, r in enumerate(before)}
         out = [{"id": r["id"], "item": r["item"], "rank": r["rank"], "from": place[r["id"]] + 1, "to": i + 1}

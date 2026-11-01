@@ -78,7 +78,7 @@ def test_order_writes_the_whole_queue_back_and_prints_what_moved(monkeypatch, ca
         json.loads(update[update.index("--params") + 1]),
         json.loads(update[update.index("--json") + 1]),
     )
-    assert params["range"] == "Queue!A2:M3"
+    assert params["range"] == "Queue!A2:Z3"
     assert [r[0] for r in body["values"]] == ["P-2", "P-1"] and [r[2] for r in body["values"]] == ["1", ""]
     moved = json.loads(capsys.readouterr().out)
     assert [(m["id"], m["from"], m["to"]) for m in moved] == [("P-2", 2, 1), ("P-1", 1, 2)]
@@ -99,5 +99,21 @@ def test_order_writes_over_a_blank_row_so_no_stale_row_stays_below(monkeypatch, 
         json.loads(update[update.index("--params") + 1]),
         json.loads(update[update.index("--json") + 1]),
     )
-    assert params["range"] == "Queue!A2:M4"
+    assert params["range"] == "Queue!A2:Z4"
     assert [r[0] for r in body["values"]] == ["P-2", "P-1", ""] and not any(body["values"][2])
+
+
+def test_order_moves_a_column_people_added_with_its_row(monkeypatch, capsys):
+    stored = [[*row("P-1", "raw").values(), "note one"], [*row("P-2", "ready").values()]]
+    calls = []
+
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"values": stored} if "get" in cmd else {}), "")
+
+    monkeypatch.setattr(sheet.subprocess, "run", fake)
+    assert sheet.main(["order", "SHEET"]) == 0
+    (update,) = [c for c in calls if "update" in c]
+    body = json.loads(update[update.index("--json") + 1])
+    assert [(r[0], r[13]) for r in body["values"]] == [("P-2", ""), ("P-1", "note one")]
+    assert all(len(r) == 26 for r in body["values"])
