@@ -24,6 +24,7 @@ is `calendar.unwritten`, and the rest go on.
 
 import asyncio
 import json
+import textwrap
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -65,6 +66,11 @@ async def _gws(gws: str, method: str, params: dict[str, Any], body: dict[str, An
     return json.loads(text[text.index("{") :]) if "{" in text else {}
 
 
+def clip(title: str) -> str:
+    """A title of at most 60 characters, cut at a word."""
+    return textwrap.shorten(title, 60, placeholder="…", break_on_hyphens=False)
+
+
 async def _title(claude: str, base: str, home: Path, block: Block) -> str:
     said = "\n\n".join(s[:1500] for s in block.said)[:6000] or "(nothing reported)"
     argv = [claude, "-p", "--model", resolve_model("light"), "--system-prompt", TITLE, "--tools", "",
@@ -80,7 +86,7 @@ async def _title(claude: str, base: str, home: Path, block: Block) -> str:
     out, _ = await proc.communicate()
     try:
         got = json.loads(out)
-        title = str(got["result"]).strip().splitlines()[0].strip().strip('"')[:60]
+        title = clip(str(got["result"]).strip().splitlines()[0].strip().strip('"'))
     except ValueError, KeyError, IndexError:
         raise Failed(f"the title call returned {out.decode(errors='replace')[:200]!r}") from None
     if proc.returncode != 0 or got.get("is_error") or not title:

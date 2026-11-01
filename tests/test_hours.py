@@ -370,3 +370,9 @@ def test_the_routine_writes_each_block_once_and_keeps_hand_made_events(fresh, tm
     charged = [r["payload"] for r in run_rows if r["type"] == "gateway.charged"]
     assert len(charged) == 6 and {c["turn_id"] for c in charged} == {"titles"}
     assert "hours" in first
+
+
+def test_a_long_title_is_cut_at_a_word():
+    long = "Audit done; CRM feature and data sections await Tom's sign-in and review"
+    assert hours.clip(long) == "Audit done; CRM feature and data sections await Tom's…"
+    assert hours.clip("Fixed the login page") == "Fixed the login page"

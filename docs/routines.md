@@ -121,7 +121,10 @@ The five routines the kernel holds:
   attendees, `sendUpdates=none`. A new event's title is one call on the
   `light` seat through a gateway the runner starts, metered on the run.
   Each write is `calendar.written` on the run, a failure
-  `calendar.unwritten`. On a Mac with no such project it starts no run.
+  `calendar.unwritten`. A run only moves an event's start and end, so an
+  event someone marks Free (`transparency: transparent`) stays Free: that
+  is how a block is marked not billed (work on Yudame's own invoicing, say),
+  and the client invoice skills count only Busy events. On a Mac with no such project it starts no run.
   A client's placement moves to another Mac only after its last run on the
   old one, with `since` set to the move date: the new Mac's record holds
   none of the last week's turns, and its run would delete their events.
