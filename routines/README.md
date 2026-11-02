@@ -5,7 +5,7 @@ Every scheduled task and runner.
 ## Scope
 
 - Each routine is a directory holding `routine.toml`, and a runner module when its work is not a plain task. `python -m core routine NAME --plist` prints the launchd plist; none is committed.
-- Routines with runner modules: `expiry` (lists what is past ninety days, held in the record for Tom, deletes nothing) `verify` (the suite at the branch head, whose red groups start fix tasks through `core/findings.py`), and `hours` (Valor's working time on each client project placed on the Mac, from the record, written to the project's Google Calendar). `invoices` and `sentry` (the nightly review of the `valor` Sentry project's issues) have none: they name the kernel's `task` runner (`core/routines.py`), which starts one SDLC task with the instruction, only on the Mac the project is placed on.
+- Routines with runner modules: `expiry` (lists what is past ninety days, held in the record for Tom, deletes nothing) `verify` (the suite at the branch head, whose red groups start fix tasks through `core/findings.py`), and `hours` (Valor's working time on each client project placed on the Mac, from the record, written to the project's Google Calendar). `sentry` (the nightly review of the `valor` Sentry project's issues) has none: it names the kernel's `task` runner (`core/routines.py`), which starts one SDLC task with the instruction, only on the Mac the project is placed on.
 - Every routine is an objective in `core/` with an effect ceiling. A routine is never a bare script.
 - Extraction follows the mission rule: a routine exists on a demonstrated second need, and one unused for ninety days is deleted by default.
 
@@ -20,7 +20,7 @@ Governed by [docs/routines.md](../docs/routines.md); launchd on the machine is [
 
 - A routine's ceiling is set when its objective is committed and never widens at run time.
 - Most routines are `read` (sweeps, reports) or `propose` (drafts, branches, proposed memory). `conditions` is `propose`: it reads businesses' data and drafts agenda items for the next strategy meeting, and sends Tom nothing.
-- An `act` inside a routine is performed like any other `act`: when requested inside the routine task's ceiling. A routine's turn is offered no send (only a chat session sends); its result is a quiet report held in the record, unless its toml sets `wakes`. The expiry sweep's deletion merge lands as any merge does, when its delivery passes and the merge predicate holds.
+- An `act` inside a routine is performed like any other `act`: when requested inside the routine task's ceiling. A routine's turn is offered no send (only a chat session sends); its result is a quiet report held in the record. The expiry sweep's deletion merge lands as any merge does, when its delivery passes and the merge predicate holds.
 - Spend is metered on each run's task and the routine's spending over its period is reported; money never stops a routine.
 
 ## Not here

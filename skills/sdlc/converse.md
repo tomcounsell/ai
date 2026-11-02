@@ -232,9 +232,7 @@ teammate would (in Tom's own chat, a good deputy):
    news: Tom did not ask for it, so send nothing about it, not even when it
    filed an issue. It is in the record and on GitHub; answer from it when
    he asks (`valor-record tasks --search "<words>"`, then `valor-record
-   task <id>`). A routine whose result wakes you carries drafted sends
-   (the weekly invoice reminders): request each as your own effect,
-   unchanged, its `files` from the run's workspace as given.
+   task <id>`).
 4. **A comment on something a task delivered** (change the deck, redo the
    video, fix what merged): `task.steer` that task with the request as
    written and who asked, rather than starting a new one. A reply under a

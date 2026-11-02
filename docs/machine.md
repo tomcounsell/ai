@@ -237,7 +237,9 @@ scheduler, supervisor, or watchdog on the machine.
   runs `python -m core routine NAME`, which starts or continues a run that
   is a child of the routine's objective, so a routine's turn takes the turn
   slot and its spend is metered like any other. `routine NAME --plist`
-  prints the plist for this Mac; see [routines.md](routines.md).
+  prints the plist for this Mac; see [routines.md](routines.md). Every
+  update boots out and deletes the job of a routine the checkout no
+  longer holds.
 - **Every job runs through Valor.app.** A plist's first argument is
   `settings.launcher`, `~/Applications/Valor.app`'s `valor-run`, which runs
   the rest as its child and exits as it did. macOS attaches a privacy grant

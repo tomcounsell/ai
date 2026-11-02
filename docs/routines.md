@@ -24,7 +24,6 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
 | `project`, `branch` | the project spec and branch a runner that starts a workspace task provisions | |
-| `wakes` | true when the run's result wakes the session it reports to (default false: held in the record) | Mission item 6 |
 | `[schedule]` | `minute`, `hour`, `day`, `weekday`, `month` (whole numbers in launchd's ranges: 0-59, 0-23, 1-31, 0-7, 1-12), or `interval` in seconds, a whole number that fits a plist integer (signed 64-bit); calendar keys and `interval` are not given together, since the printer writes one trigger | launchd for the ranges; the printer for "not both" |
 
 The launchd job is printed and never committed, since it names the checkout
@@ -44,21 +43,21 @@ that sleeps through a schedule gets one late run, never a burst.
 
 A run that needs a credential of the business's reads it from the shared
 1Password vaults at use time, as any turn does ([machine.md](machine.md),
-Keychain): the `invoices` routine's Mercury token is the worked example.
+Keychain).
 
 The `task` runner is the routine whose work is one task: it starts an SDLC
 task (`{"sdlc": 1}`) on the routine's project with the routine's
 instruction and ceiling, and the working session ends it with `stop.md`
 when the work was only effects. It starts nothing, returning
 `nothing_due`, on a Mac the project is not placed on, so a routine
-installed on every Mac runs on one. `invoices` (Mondays 09:00) is its
-first: the week's reminders for Yudame's unpaid Mercury invoices
-(`skills/valor/skills/mercury-invoicing`). Its run reads Valor's Sent mail
-through `gws`, whose Google sign-in reads mail and cannot send it
-([plans/one-voice-mail.md](plans/one-voice-mail.md)), drafts each reminder
-`email.send` in its stop note and sends nothing; its toml sets `wakes`, so
-the result wakes the session it reports to, which sends them as its own,
-the PDFs from the run's workspace.
+installed on every Mac runs on one. `sentry` (the nightly review of the
+`valor` Sentry project's issues) is one. A run's result is held in the
+record and wakes no session.
+
+A routine is deleted by deleting its directory. Every update's check of
+the Mac's setup (`core.permissions.ensure`) then boots out the routine's
+launchd job and deletes its plist, so it leaves every Mac's schedule as
+each Mac updates.
 
 ## How a run starts
 
@@ -360,7 +359,7 @@ rule. Workspace reclaim, which removes things, is not; it is work.
 - **Attention.** A question from a routine reaches its session, which asks
   Tom, as any task's question does, and is ledgered with its answer and
   provenance. Its result is a quiet report on that session (`quiet`,
-  `core/notices.py`): no turn, unless the routine `wakes`.
+  `core/notices.py`): no turn.
 
 Nothing a routine finds is pushed to Tom unless it needs a decision.
 

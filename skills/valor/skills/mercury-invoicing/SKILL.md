@@ -1,6 +1,6 @@
 ---
 name: mercury-invoicing
-description: Create Yudame's client invoices in the company Mercury account (with a pay link), list who hasn't paid, and send the notice and reminders from valor@yuda.me. Use when an invoice is approved and should go to the client, for "who hasn't paid", or for an unpaid reminder.
+description: Create Yudame's client invoices in the company Mercury account (with a pay link), list who hasn't paid, and send the invoice notice from valor@yuda.me. Use when an invoice is approved and should go to the client, or for "who hasn't paid". Valor sends no payment reminders (Tom, 2026-11-02).
 ---
 
 # Mercury invoicing
@@ -20,7 +20,7 @@ The token is a Custom token whose write scopes need Mercury's IP allowlist, whic
 holds the Cowboy's public IP, so run it on the Cowboy. A refused call prints
 Mercury's answer and this Mac's public IP: when the IP has changed, ask Tom to add
 the new one to the token on Mercury's token page. Mercury deletes a token unused for
-45 days; the weekly `invoices` routine is its use.
+45 days; nothing calls it on a schedule, so after 45 idle days Tom makes a new one.
 
 ## How an invoice goes out
 
@@ -30,8 +30,8 @@ the new one to the token on Mercury's token page. Mercury deletes a token unused
 2. **Create.** `python3 mercury.py create SPEC.json --customer-email E --cc A B --account ID`.
    `SPEC.json` is the yudame-invoice spec the PDF was rendered from, so Mercury's
    amount is the PDF's TOTAL DUE. Mercury does not email it (`DontSend`), and the
-   invoice is marked as Valor's (`internalNote: valor`), which is what makes it
-   eligible for reminders. A number already in Mercury is printed and nothing is
+   invoice is marked as Valor's (`internalNote: valor`), which `unpaid` shows as
+   `valors`. A number already in Mercury is printed and nothing is
    created. The customer is found by email or created. `accounts` lists the account
    ids; payments go to Yudame's active checking account (••3031). A token without the
    accounts scope is refused `/accounts` (403 `tokenNotInScope`); `accounts` then lists
@@ -48,13 +48,8 @@ the new one to the token on Mercury's token page. Mercury deletes a token unused
    it reports to sends it with the PDF from the task's workspace.
    The pay link is `https://app.mercury.com/pay/<slug>`; it opened on Mercury's pay page
    with the right number, amount and due date for 250901DF and 251215DF (2026-10-21).
-4. **Reminders** are the weekly `invoices` routine (`routines/invoices/`), whose run
-   drafts them and whose session sends them (the routine `wakes` its session): `remind`
-   picks Valor's Unpaid invoices at least a day overdue, at most one reminder per
-   invoice every 7 days and 4 in all, reading valor@yuda.me's Sent mail (`gws`, which reads
-   mail and cannot send it) for what already went out. An invoice past its fourth reminder is listed for Tom. A
-   Sent-mail read that fails stops the run; it never counts as none sent.
-   Invoices Tom made in Mercury's dashboard show in `unpaid` and get no reminder.
+4. **No reminders.** Valor sends no payment reminders, weekly or otherwise (Tom,
+   2026-11-02). `unpaid` tells Tom who owes what when he asks.
 
 `unpaid` lists every Unpaid invoice with its customer, days overdue and pay link.
 `pdf ID` writes one invoice's PDF.
