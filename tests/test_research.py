@@ -496,9 +496,11 @@ class FakeCuttlefish:
         if verb == "manifest":  # Cuttlefish replaces the whole manifest, then defaults web_scope
             self.manifest = json.loads(args[args.index("--set") + 1])
             self.manifest.setdefault("web_scope", "partial")
-        elif verb == "attach":  # appends its input and keeps web_scope
-            self.manifest.setdefault("web_scope", "partial")
-            self.manifest.setdefault("inputs", []).append({"ref_type": "episode_upload", "content_hash": "abc"})
+        elif verb == "attach":  # stores the document; --require also makes it a manifest input
+            self.corpus = args[args.index("--file") + 1]
+            if "--require" in args:
+                self.manifest.setdefault("web_scope", "partial")
+                self.manifest.setdefault("inputs", []).append({"ref_type": "episode_upload", "content_hash": "abc"})
             out = {"slug": "ep-1", "episode_id": 7}
         elif verb == "status":
             if self.states and self._listed:  # the first status after the workflow is its stopping point
@@ -578,13 +580,13 @@ def test_publish_makes_the_episode_through_cuttlefish_and_ends_published(tmp_pat
     d = finished_run(tmp_path)
     result = publish(d, cf, podcast="yudame-staff")
     verbs = cf.verbs()
-    assert verbs[:4] == ["create", "manifest", "attach", "setup"], verbs
+    assert verbs[:3] == ["create", "attach", "setup"], verbs
     assert all(c[c.index("--podcast-slug") + 1] == "yudame-staff" for c, _ in cf.calls if "episode" in c)
     create = next(c for c, _ in cf.calls if "create" in c)
     assert "--defer-setup" in create and create[create.index("--title") + 1] == "Is X better than Y"
     assert create[create.index("--description") + 1] == "X is better."
-    assert cf.manifest["web_scope"] == "none" and cf.manifest["inputs"][0]["ref_type"] == "episode_upload", (
-        "the report stays the episode's required input and no web research runs")
+    assert cf.corpus == str(d / "report.md") and not cf.manifest.get("inputs"), (
+        "the report is in the research corpus, not a required input, which would send it to the tables-only analyst")
     claude = next(c for c, _ in cf.calls if c[0] == "claude")
     assert "/research-workflow ep-1 --auto-advance" in claude[-1]
     assert len(cf.workers) == 1 and "local_audio_worker" in cf.workers[0].cmd and cf.workers[0].terminated

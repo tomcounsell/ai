@@ -39,10 +39,11 @@ Done when Tom has had a report PDF and an episode he asked for from one topic (r
    - uses the managed checkout (`find_cuttlefish`), so `CUTTLEFISH_DIR` is no longer
      needed;
    - runs Cuttlefish's verbs in this order: `create --defer-setup` (title from the
-     question, description from the report's Summary), then `manifest --set
-     '{"web_scope":"none"}'`, then `attach report.md --require`, then `setup`.
-     `manifest --set` replaces the whole manifest, so it goes before `attach`;
-     `attach` adds its input and keeps `web_scope`;
+     question, description from the report's Summary), `attach report.md` (into the
+     research corpus, not `--require`), then `setup`. Built 2026-11-02: a required
+     input turns on Cuttlefish's tables-only analyst mode, and with `web_scope:
+     "none"` the live run failed at Targeted Research (1 of 3 sources). So
+     Cuttlefish runs its own research again, with the report as one more source;
    - runs `claude -p "/research-workflow <slug> --auto-advance"` in the checkout;
    - for audio, uses Cuttlefish's primary path, `manage.py local_audio_worker
      --base-url https://yudame.ai --max-concurrent 1`. It has no single-episode

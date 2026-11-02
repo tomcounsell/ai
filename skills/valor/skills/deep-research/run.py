@@ -597,8 +597,8 @@ def publish(run_dir: Path, podcast: str, title: str | None, env: dict, run=subpr
     """Make and publish a Cuttlefish episode on `podcast` from the run's report, through Cuttlefish's own pipeline.
 
     Waits for the research to finish, so it can start beside it. Then Cuttlefish's
-    verbs (create, manifest, attach, setup), its /research-workflow skill with the
-    report as the research (web_scope none), its local_audio_worker for the audio,
+    verbs (create, attach, setup), its /research-workflow skill with the report in
+    the episode's research corpus, its local_audio_worker for the audio,
     and its server for transcription, assets and publishing. Done is published_at.
     """
     def step(text: str, **fields) -> None:
@@ -639,9 +639,10 @@ def publish(run_dir: Path, podcast: str, title: str | None, env: dict, run=subpr
     step("creating the episode")
     slug_ = manage("create", "--title", title, "--description", summary_of(report.read_text()), "--defer-setup")["slug"]
     step("attaching the report", slug=slug_, url=f"{BASE_URL}/podcast/{podcast}/{slug_}/")
-    # manifest --set replaces the whole manifest, so it goes before attach, which adds its input and keeps web_scope.
-    manage("manifest", slug_, "--set", json.dumps({"web_scope": "none"}))
-    episode_id = manage("attach", slug_, "--file", str(report), "--title", "Deep research report", "--require")["episode_id"]
+    # Into the research corpus every later step reads, but not as a required input: a
+    # required one turns on Cuttlefish's analyst mode, which takes only tables, and on
+    # 2026-11-02 it failed the episode at Targeted Research (1 of 3 sources).
+    episode_id = manage("attach", slug_, "--file", str(report), "--title", "Deep research report")["episode_id"]
     manage("setup", slug_)
 
     step("Cuttlefish's research workflow")
