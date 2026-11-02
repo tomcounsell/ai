@@ -550,14 +550,19 @@ def http_json(url: str, headers: dict) -> dict | list:
 
 
 def production_env(api_key: str, get=http_json) -> dict[str, str]:
-    """Cuttlefish's production settings, read from its env group on Render and kept in memory only."""
+    """What Cuttlefish's web service runs with, from Render, kept in memory only: its
+    `cuttlefish` env group, then the service's own variables, which win as on Render
+    (on 2026-11-02 the group's LOCAL_WORKER_API_KEY was not the one the service checks)."""
     auth = {"Authorization": f"Bearer {api_key}"}
     groups = [g.get("envGroup", g) for g in get(f"{RENDER_API}/env-groups?limit=100", auth)]
     group = next((g for g in groups if g["name"] == "cuttlefish"), None)
-    if group is None:
-        raise RuntimeError("Render has no cuttlefish env group")
+    services = [s["service"] for s in get(f"{RENDER_API}/services?name=cuttlefish&type=web_service", auth)]
+    if group is None or not services:
+        raise RuntimeError("Render has no cuttlefish env group or web service")
     full = get(f"{RENDER_API}/env-groups/{group['id']}", auth)
-    return {v["key"]: v["value"] for v in full.get("envGroup", full)["envVars"]}
+    env = {v["key"]: v["value"] for v in full.get("envGroup", full)["envVars"]}
+    own = get(f"{RENDER_API}/services/{services[0]['id']}/env-vars?limit=100", auth)
+    return {**env, **{v["envVar"]["key"]: v["envVar"]["value"] for v in own}}
 
 
 def summary_of(report: str) -> str:

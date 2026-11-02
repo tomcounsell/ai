@@ -521,7 +521,11 @@ class FakeCuttlefish:
             return [{"envGroup": {"id": "evg-x", "name": "other"}}, {"envGroup": {"id": "evg-cf", "name": "cuttlefish"}}]
         if url.endswith("/env-groups/evg-cf"):
             return {"id": "evg-cf", "name": "cuttlefish", "envVars": [
-                {"key": "DATABASE_URL", "value": self.SECRET}, {"key": "LOCAL_WORKER_API_KEY", "value": "worker-key"}]}
+                {"key": "DATABASE_URL", "value": self.SECRET}, {"key": "LOCAL_WORKER_API_KEY", "value": "group-key"}]}
+        if url.endswith("/services?name=cuttlefish&type=web_service"):
+            return [{"service": {"id": "srv-cf", "name": "cuttlefish"}}]
+        if url.endswith("/services/srv-cf/env-vars?limit=100"):  # the service's own variable wins, as on Render
+            return [{"envVar": {"key": "LOCAL_WORKER_API_KEY", "value": "worker-key"}, "cursor": "c"}]
         assert url == "https://yudame.ai/api/podcast/pending-audio/", url
         ids = self.pending.pop(0) if self.pending else [7]
         return {"episodes": [{"id": i} for i in ids]}
