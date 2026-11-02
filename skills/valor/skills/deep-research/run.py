@@ -2,7 +2,7 @@
 """Deep research on one question with Cuttlefish's tools, written up as a long report.
 
     run.py "<question>" [--context FILE] [--title TEXT] [--out DIR]
-    run.py episode RUN_DIR [--podcast SLUG] [--title TEXT]
+    run.py episode RUN_DIR --podcast SLUG [--title TEXT]
 
 Returns at once with the run directory; the work goes on in the background and
 writes status.json at each step, then report.md and raw.json. Every research step is
@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,8 +53,8 @@ STYLE_GUIDE = (
 # --- status ---------------------------------------------------------------
 
 
-def write_status(run_dir: Path, **fields) -> None:
-    path = run_dir / "status.json"
+def write_status(run_dir: Path, file: str = "status.json", **fields) -> None:
+    path = run_dir / file
     current = json.loads(path.read_text()) if path.exists() else {}
     current.update(fields, updated=now())
     tmp = path.with_suffix(".tmp")
@@ -532,47 +533,181 @@ def inner(run_dir: Path) -> int:
 # --- a podcast episode from a finished report ------------------------------------
 
 
-def episode(run_dir: Path, podcast: str, title: str | None, env: dict, run=subprocess.run) -> dict:
-    """Draft a Cuttlefish episode on the podcast with the report attached; never publish.
+BASE_URL = "https://yudame.ai"
+RENDER_API = "https://api.render.com/v1"
+RENDER_KEY_REF = "op://m-valor/RENDER_API_KEY/credential"
+EPISODE_HOURS = 4
+# Cuttlefish's workflow steps that /research-workflow drives; the steps after them
+# (audio, transcription, assets, publish) run on Cuttlefish's own worker.
+RESEARCH_STEPS = {"Setup", "Perplexity Research", "Question Discovery", "Targeted Research", "Cross-Validation",
+                  "Master Briefing", "Synthesis", "Figure Review", "Episode Planning"}
 
-    Uses Cuttlefish's own operator commands (`episode create --defer-setup`, then
-    `episode attach --require`), so it needs a checkout configured for production.
-    Setting the episode up, producing its audio and publishing are left to a person.
+
+def http_json(url: str, headers: dict) -> dict | list:
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "valor", **headers})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.loads(response.read())
+
+
+def production_env(api_key: str, get=http_json) -> dict[str, str]:
+    """Cuttlefish's production settings, read from its env group on Render and kept in memory only."""
+    auth = {"Authorization": f"Bearer {api_key}"}
+    groups = [g.get("envGroup", g) for g in get(f"{RENDER_API}/env-groups?limit=100", auth)]
+    group = next((g for g in groups if g["name"] == "cuttlefish"), None)
+    if group is None:
+        raise RuntimeError("Render has no cuttlefish env group")
+    full = get(f"{RENDER_API}/env-groups/{group['id']}", auth)
+    return {v["key"]: v["value"] for v in full.get("envGroup", full)["envVars"]}
+
+
+def summary_of(report: str) -> str:
+    match = re.search(r"^## Summary\n(.*?)(?=^## )", report, re.S | re.M)
+    return (match.group(1) if match else report).strip()[:4000]
+
+
+def episode_start(run_dir: Path, podcast: str, title: str | None) -> Path:
+    """Start making and publishing the episode in the background; returns episode.json at once."""
+    write_status(run_dir, "episode.json", state="running", step="starting", podcast=podcast, title=title,
+                 slug=None, url=None, error=None, started=now())
+    with open(run_dir / "episode.log", "ab") as log:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--episode-worker", str(run_dir)],
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+        )
+    return run_dir / "episode.json"
+
+
+def episode_worker(run_dir: Path) -> int:
+    state = json.loads((run_dir / "episode.json").read_text())
+    try:
+        publish(run_dir, state["podcast"], state.get("title"), dict(os.environ))
+        return 0
+    except Exception as exc:  # noqa: BLE001 - the caller reads the reason in episode.json
+        write_status(run_dir, "episode.json", state="failed", error=f"{type(exc).__name__}: {exc}"[:800])
+        return 1
+
+
+def publish(run_dir: Path, podcast: str, title: str | None, env: dict, run=subprocess.run, get=http_json,
+            popen=subprocess.Popen, sleep=time.sleep, clock=time.monotonic, read=op_read, poll: int = 60) -> dict:
+    """Make and publish a Cuttlefish episode on `podcast` from the run's report, through Cuttlefish's own pipeline.
+
+    Waits for the research to finish, so it can start beside it. Then Cuttlefish's
+    verbs (create, manifest, attach, setup), its /research-workflow skill with the
+    report as the research (web_scope none), its local_audio_worker for the audio,
+    and its server for transcription, assets and publishing. Done is published_at.
     """
-    cuttlefish = env.get("CUTTLEFISH_DIR")
-    if not cuttlefish:
-        raise RuntimeError("drafting an episode needs CUTTLEFISH_DIR: a Cuttlefish checkout configured for production")
-    report = run_dir / "report.md"
-    if not report.exists():
-        raise RuntimeError(f"no report yet in {run_dir}")
+    def step(text: str, **fields) -> None:
+        write_status(run_dir, "episode.json", step=text, **fields)
+
+    deadline = clock() + EPISODE_HOURS * 3600
+
+    def wait(at: str) -> None:
+        if clock() > deadline:
+            raise RuntimeError(f"timeout: not published after {EPISODE_HOURS} hours, at {at}")
+        sleep(poll)
+
+    step("waiting for the report")
+    while (status := json.loads((run_dir / "status.json").read_text()))["state"] == "running":
+        wait("the research")
+    if status["state"] != "done":
+        raise RuntimeError(f"the research failed: {status.get('error')}")
+
+    step("loading Cuttlefish's production settings")
+    cuttlefish = str(find_cuttlefish(env, run=run))
+    key = env.get("RENDER_API_KEY") or read(RENDER_KEY_REF)
+    if not key:
+        raise RuntimeError("no RENDER_API_KEY: Cuttlefish's production settings cannot be read")
+    env = {**env, **production_env(key, get), "DJANGO_SETTINGS_MODULE": "settings"}
+    env.pop("ANTHROPIC_BASE_URL", None)
 
     def manage(*args: str) -> dict:
         done = run(
             ["uv", "run", "--project", cuttlefish, "python", "manage.py", "episode", *args, "--podcast-slug", podcast, "--json"],
-            cwd=cuttlefish, capture_output=True, text=True,
+            cwd=cuttlefish, env=env, capture_output=True, text=True,
         )
         if done.returncode:
             raise RuntimeError(f"episode {args[0]} failed: {(done.stderr or done.stdout).strip()[-300:]}")
         return json.loads(done.stdout)
 
+    report = run_dir / "report.md"
     title = title or (run_dir / "question.txt").read_text().strip().split(". ")[0][:120]
-    created = manage("create", "--title", title, "--defer-setup")
-    attached = manage("attach", created["slug"], "--file", str(report), "--title", "Deep research report", "--require")
-    result = {"podcast": podcast, "slug": created["slug"], "title": title, "attached": attached.get("artifact_title"), "published": False}
-    (run_dir / "episode.json").write_text(json.dumps(result, indent=2))
-    return result
+    step("creating the episode")
+    slug_ = manage("create", "--title", title, "--description", summary_of(report.read_text()), "--defer-setup")["slug"]
+    step("attaching the report", slug=slug_, url=f"{BASE_URL}/podcast/{podcast}/{slug_}/")
+    # manifest --set replaces the whole manifest, so it goes before attach, which adds its input and keeps web_scope.
+    manage("manifest", slug_, "--set", json.dumps({"web_scope": "none"}))
+    episode_id = manage("attach", slug_, "--file", str(report), "--title", "Deep research report", "--require")["episode_id"]
+    manage("setup", slug_)
+
+    step("Cuttlefish's research workflow")
+    done = run(
+        ["claude", "-p", "--dangerously-skip-permissions",
+         f"/research-workflow {slug_} --auto-advance\n\nThe Cuttlefish checkout is this directory, {cuttlefish}; "
+         "its production settings are already in the environment. The attached report is this episode's research."],
+        cwd=cuttlefish, env=env, capture_output=True, text=True,
+    )
+    (run_dir / "episode-workflow.log").write_text((done.stdout or "") + (done.stderr or ""))
+    wf = manage("status", slug_)
+    if wf.get("current_step") in RESEARCH_STEPS:
+        raise RuntimeError(f"Cuttlefish's research workflow stopped at {wf.get('current_step')} ({wf.get('status')}): "
+                           f"{(done.stdout or done.stderr or '').strip()[-300:]}")
+
+    pending_url = f"{BASE_URL}/api/podcast/pending-audio/"
+    bearer = {"Authorization": f"Bearer {env.get('LOCAL_WORKER_API_KEY', '')}"}
+    worker, others = None, set()
+    try:
+        while True:
+            mine = next(e for e in manage("list")["episodes"] if e["slug"] == slug_)
+            if mine.get("published_at"):
+                break
+            wf = manage("status", slug_)
+            at = f"{wf.get('current_step')} ({wf.get('status')})"
+            awaiting_audio = wf.get("status") == "paused_for_human" and wf.get("blocked_on") == "audio_generation"
+            if awaiting_audio or worker is not None:
+                pending = {e["id"] for e in get(pending_url, bearer)["episodes"]} - {episode_id}
+                if pending - others:
+                    others |= pending
+                    step(at, others_waiting_for_audio=sorted(others))
+            if awaiting_audio and worker is None:
+                if others:
+                    raise RuntimeError(f"other episodes are waiting for audio ({sorted(others)}); Cuttlefish's audio "
+                                       "worker takes any of them, so it was not started")
+                step("making the audio")
+                with open(run_dir / "audio.log", "ab") as log:
+                    worker = popen(
+                        ["uv", "run", "--project", cuttlefish, "python", "manage.py", "local_audio_worker",
+                         "--base-url", BASE_URL, "--max-concurrent", "1"],
+                        cwd=cuttlefish, env=env, stdout=log, stderr=log,
+                    )
+            elif awaiting_audio and worker.poll() is not None:
+                tail = (run_dir / "audio.log").read_text().strip()[-300:]
+                auth = "notebooklm auth expired: " if "authentication expired" in tail.lower() else ""
+                raise RuntimeError(f"{auth}the audio worker stopped: {tail}")
+            elif not awaiting_audio:
+                if worker is not None:
+                    worker.terminate()  # this episode has its audio; the worker would take the next one
+                    worker = None
+                if wf.get("status") in ("failed", "paused_for_human", "paused_at_gate"):
+                    raise RuntimeError(f"Cuttlefish stopped at {at}, blocked on {wf.get('blocked_on')!r}")
+                step(at)
+            wait(at)
+    finally:
+        if worker is not None and worker.poll() is None:
+            worker.terminate()
+    write_status(run_dir, "episode.json", state="published", step="published", published_at=str(mine["published_at"]), finished=now())
+    return json.loads((run_dir / "episode.json").read_text())
 
 
 def main(argv: list[str]) -> int:
-    if argv[:1] in (["--worker"], ["--inner"]):
-        return (worker if argv[0] == "--worker" else inner)(Path(argv[1]))
+    if argv[:1] in (["--worker"], ["--inner"], ["--episode-worker"]):
+        return {"--worker": worker, "--inner": inner, "--episode-worker": episode_worker}[argv[0]](Path(argv[1]))
     if argv[:1] == ["episode"]:
-        p = argparse.ArgumentParser(prog="run.py episode", description="Draft a podcast episode from a finished report; never publishes.")
+        p = argparse.ArgumentParser(prog="run.py episode", description="Make and publish a podcast episode from a run's report, in the background.")
         p.add_argument("run_dir", type=Path)
-        p.add_argument("--podcast", default="yudame-research", help="the podcast's slug in Cuttlefish (default yudame-research)")
+        p.add_argument("--podcast", required=True, help="the podcast's slug in Cuttlefish: yudame-research or yudame-staff")
         p.add_argument("--title")
         args = p.parse_args(argv[1:])
-        print(json.dumps(episode(args.run_dir.resolve(), args.podcast, args.title, dict(os.environ)), indent=2))
+        print(episode_start(args.run_dir.resolve(), args.podcast, args.title))
         return 0
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("question")

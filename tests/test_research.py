@@ -7,6 +7,7 @@ is a stand-in here, so no network, keys or Cuttlefish checkout is needed.
 
 import contextlib
 import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -469,35 +470,205 @@ def test_detached_run_returns_at_once_and_reports_status():
                 assert status["report"].endswith("report.md")
 
 
-def test_episode_drafts_and_never_publishes():
-    ran = []
+class FakeCuttlefish:
+    """Production Cuttlefish as run.publish sees it: its `episode` verbs (with their
+    manifest semantics), `claude -p /research-workflow`, the Render env group, the
+    pending-audio list and the local audio worker. `states` is the workflow's
+    (current_step, status, blocked_on) after the research workflow, one per poll."""
 
-    def fake(cmd, **kw):
-        ran.append(cmd)
-        out = {"slug": "ep-1"} if "create" in cmd else {"artifact_title": "p2-ctx-doc-abc"}
+    SECRET = "postgres://user:secret-password@db"
+
+    def __init__(self, states, pending=(), workflow_stops_at="Audio Generation", worker_exits=None):
+        self.calls, self.manifest, self.states = [], {}, list(states)
+        self.pending, self.worker_exits = list(pending), worker_exits
+        self.current, self.published, self.workers, self.gets = ("Setup", "running", ""), None, [], []
+        self.workflow_stops_at = workflow_stops_at
+
+    def run(self, cmd, **kw):
+        self.calls.append((cmd, kw.get("env") or {}))
+        if cmd[0] == "claude":
+            self.current = (self.workflow_stops_at, "running", "")
+            return SimpleNamespace(returncode=0, stdout="Research workflow complete.", stderr="")
+        if cmd[:3] == ["git", "-C", str(run.MANAGED)] or cmd[:2] == ["gh", "repo"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        verb, args = cmd[cmd.index("episode") + 1], cmd[cmd.index("episode") + 2 :]
+        out = {"slug": "ep-1"}
+        if verb == "manifest":  # Cuttlefish replaces the whole manifest, then defaults web_scope
+            self.manifest = json.loads(args[args.index("--set") + 1])
+            self.manifest.setdefault("web_scope", "partial")
+        elif verb == "attach":  # appends its input and keeps web_scope
+            self.manifest.setdefault("web_scope", "partial")
+            self.manifest.setdefault("inputs", []).append({"ref_type": "episode_upload", "content_hash": "abc"})
+            out = {"slug": "ep-1", "episode_id": 7}
+        elif verb == "status":
+            if self.states and self._listed:  # the first status after the workflow is its stopping point
+                self.current = self.states.pop(0)
+            step, status, blocked = self.current
+            out = {"current_step": step, "status": status, "blocked_on": blocked}
+        elif verb == "list":
+            self._listed = True
+            out = {"episodes": [{"slug": "other"}, {"slug": "ep-1", "published_at": self.published}]}
+            if self.current[0] == "Publish":
+                self.published = "2026-11-02T10:00:00Z"
+                out["episodes"][1]["published_at"] = self.published
         return SimpleNamespace(returncode=0, stdout=json.dumps(out), stderr="")
 
-    with tempfile.TemporaryDirectory() as tmp:
-        d = Path(tmp)
-        (d / "question.txt").write_text("Is X better than Y. More words")
-        try:
-            run.episode(d, "yudame-research", None, {"CUTTLEFISH_DIR": "/cf"}, run=fake)
-            raise AssertionError("no report means no episode")
-        except RuntimeError as exc:
-            assert "no report" in str(exc)
-        (d / "report.md").write_text("# report")
-        try:
-            run.episode(d, "yudame-research", None, {}, run=fake)
-            raise AssertionError("needs a configured checkout")
-        except RuntimeError as exc:
-            assert "CUTTLEFISH_DIR" in str(exc)
-        result = run.episode(d, "yudame-research", None, {"CUTTLEFISH_DIR": "/cf"}, run=fake)
-        verbs = [cmd[cmd.index("episode") + 1] for cmd in ran]
-        assert verbs == ["create", "attach"], verbs
-        assert "--defer-setup" in ran[0] and ran[0][ran[0].index("--title") + 1] == "Is X better than Y"
-        assert ran[1][ran[1].index("--file") + 1] == str(d / "report.md") and "--require" in ran[1]
-        assert all(cmd[cmd.index("--podcast-slug") + 1] == "yudame-research" for cmd in ran)
-        assert result["published"] is False and json.loads((d / "episode.json").read_text())["slug"] == "ep-1"
+    _listed = False
+
+    def get(self, url, headers):
+        self.gets.append((url, headers))
+        if url.endswith("/env-groups?limit=100"):
+            return [{"envGroup": {"id": "evg-x", "name": "other"}}, {"envGroup": {"id": "evg-cf", "name": "cuttlefish"}}]
+        if url.endswith("/env-groups/evg-cf"):
+            return {"id": "evg-cf", "name": "cuttlefish", "envVars": [
+                {"key": "DATABASE_URL", "value": self.SECRET}, {"key": "LOCAL_WORKER_API_KEY", "value": "worker-key"}]}
+        assert url == "https://yudame.ai/api/podcast/pending-audio/", url
+        ids = self.pending.pop(0) if self.pending else [7]
+        return {"episodes": [{"id": i} for i in ids]}
+
+    def popen(self, cmd, **kw):
+        exits = self.worker_exits
+        worker = SimpleNamespace(cmd=cmd, env=kw["env"], terminated=False)
+        worker.poll = lambda: exits
+        worker.terminate = lambda: setattr(worker, "terminated", True)
+        if exits is not None:
+            kw["stdout"].write(b"Authentication expired or invalid. Redirected to accounts.google.com")
+            kw["stdout"].flush()
+        self.workers.append(worker)
+        return worker
+
+    def verbs(self):
+        return [c[c.index("episode") + 1] for c, _ in self.calls if "episode" in c]
+
+
+AUDIO_PAUSE = ("Audio Generation", "paused_for_human", "audio_generation")
+PUBLISHED_PATH = [("Audio Generation", "running", ""), AUDIO_PAUSE, AUDIO_PAUSE, ("Audio Processing", "running", ""),
+                  ("Publish", "running", "")]
+
+
+def finished_run(tmp, state="done"):
+    d = Path(tmp)
+    (d / "question.txt").write_text("Is X better than Y. More words")
+    (d / "report.md").write_text("# Is X better\n\n## Summary\n\nX is better.\n\n## Findings by topic\n\nlong")
+    run.write_status(d, state=state, error="RuntimeError: boom" if state == "failed" else None)
+    run.write_status(d, "episode.json", state="running", podcast="yudame-staff")
+    return d
+
+
+def publish(d, cf, podcast="yudame-staff", **kw):
+    clock = kw.pop("clock", iter(range(0, 10**6, 60)).__next__)
+    return run.publish(d, podcast, None, {"RENDER_API_KEY": "render-key", "PATH": "/bin"}, run=cf.run, get=cf.get,
+                       popen=cf.popen, sleep=lambda s: None, clock=clock, read=lambda ref: None, **kw)
+
+
+def failure(d, cf, **kw):
+    with pytest.raises(RuntimeError) as exc:
+        publish(d, cf, **kw)
+    return str(exc.value)
+
+
+def test_publish_makes_the_episode_through_cuttlefish_and_ends_published(tmp_path):
+    """docs/plans/research-podcast.md: create, manifest, attach, setup, Cuttlefish's
+    research workflow, its audio worker on the expected audio pause, published_at as done."""
+    cf = FakeCuttlefish(PUBLISHED_PATH)
+    d = finished_run(tmp_path)
+    result = publish(d, cf, podcast="yudame-staff")
+    verbs = cf.verbs()
+    assert verbs[:4] == ["create", "manifest", "attach", "setup"], verbs
+    assert all(c[c.index("--podcast-slug") + 1] == "yudame-staff" for c, _ in cf.calls if "episode" in c)
+    create = next(c for c, _ in cf.calls if "create" in c)
+    assert "--defer-setup" in create and create[create.index("--title") + 1] == "Is X better than Y"
+    assert create[create.index("--description") + 1] == "X is better."
+    assert cf.manifest["web_scope"] == "none" and cf.manifest["inputs"][0]["ref_type"] == "episode_upload", (
+        "the report stays the episode's required input and no web research runs")
+    claude = next(c for c, _ in cf.calls if c[0] == "claude")
+    assert "/research-workflow ep-1 --auto-advance" in claude[-1]
+    assert len(cf.workers) == 1 and "local_audio_worker" in cf.workers[0].cmd and cf.workers[0].terminated
+    assert cf.workers[0].env["LOCAL_WORKER_API_KEY"] == "worker-key" and cf.workers[0].env["DATABASE_URL"] == cf.SECRET
+    assert ("https://yudame.ai/api/podcast/pending-audio/", {"Authorization": "Bearer worker-key"}) in cf.gets
+    assert result["state"] == "published" and result["url"] == "https://yudame.ai/podcast/yudame-staff/ep-1/"
+    for f in d.iterdir():
+        assert cf.SECRET not in f.read_text() and "worker-key" not in f.read_text(), f"production env written to {f.name}"
+
+
+def test_publish_routes_to_the_podcast_given(tmp_path):
+    cf = FakeCuttlefish(PUBLISHED_PATH)
+    result = publish(finished_run(tmp_path), cf, podcast="yudame-research")
+    assert all(c[c.index("--podcast-slug") + 1] == "yudame-research" for c, _ in cf.calls if "episode" in c)
+    assert result["url"] == "https://yudame.ai/podcast/yudame-research/ep-1/"
+
+
+def test_publish_waits_for_the_report_and_stops_on_a_failed_one(tmp_path):
+    d = finished_run(tmp_path, state="running")
+    cf = FakeCuttlefish(PUBLISHED_PATH)
+    sleeps = []
+
+    def sleep(s):
+        if not sleeps:
+            assert not cf.calls, "nothing reaches Cuttlefish before the report is done"
+            run.write_status(d, state="done")
+        sleeps.append(s)
+
+    run.publish(d, "yudame-staff", None, {"RENDER_API_KEY": "k"}, run=cf.run, get=cf.get, popen=cf.popen,
+                sleep=sleep, clock=lambda: 0, read=lambda ref: None)
+    assert sleeps and json.loads((d / "episode.json").read_text())["state"] == "published"
+    cf = FakeCuttlefish(PUBLISHED_PATH)
+    assert "the research failed: RuntimeError: boom" in failure(finished_run(tmp_path, state="failed"), cf)
+    assert not cf.calls
+
+
+def test_publish_stops_with_the_reason(tmp_path):
+    d = finished_run(tmp_path)
+    cf = FakeCuttlefish([("Audio Generation", "paused_for_human", "anchor_review")])
+    assert "Cuttlefish stopped at Audio Generation (paused_for_human), blocked on 'anchor_review'" in failure(d, cf)
+    cf = FakeCuttlefish([], workflow_stops_at="Synthesis")
+    assert "research workflow stopped at Synthesis" in failure(d, cf)
+    cf = FakeCuttlefish([AUDIO_PAUSE] * 3, worker_exits=1)
+    assert failure(d, cf).startswith("notebooklm auth expired")
+    cf = FakeCuttlefish([("Audio Generation", "running", "")] * 400)
+    assert "timeout: not published after 4 hours, at Audio Generation (running)" in failure(d, cf)
+
+
+def test_audio_worker_is_not_started_while_other_episodes_wait(tmp_path):
+    d = finished_run(tmp_path)
+    cf = FakeCuttlefish([AUDIO_PAUSE], pending=[[3, 7, 5]])
+    assert "other episodes are waiting for audio ([3, 5])" in failure(d, cf) and not cf.workers
+    cf = FakeCuttlefish(PUBLISHED_PATH, pending=[[7], [7, 9]])
+    publish(d, cf)
+    assert json.loads((d / "episode.json").read_text())["others_waiting_for_audio"] == [9], (
+        "an episode that joins the queue while the worker runs is named")
+
+
+def test_research_never_waits_on_publishing(tmp_path, monkeypatch):
+    """Tom, 2026-11-02: "full research and report generation shouldn't delay"."""
+    monkeypatch.setattr(run, "load_cuttlefish", lambda: None)
+    monkeypatch.setattr(run, "research", lambda *a, **kw: {})
+    monkeypatch.setattr(run, "render", lambda result: "# report")
+    monkeypatch.setattr(run, "publish", lambda *a, **kw: pytest.fail("the research run publishes nothing"))
+    for name in ("question.txt", "context.txt"):
+        (tmp_path / name).write_text("Q?")
+    assert run.inner(tmp_path) == 0
+    assert json.loads((tmp_path / "status.json").read_text())["state"] == "done"
+    assert not (tmp_path / "episode.json").exists()
+    assert "podcast" not in inspect.signature(run.start).parameters
+
+
+def test_wording_report_first_publish_on_toms_word():
+    """The session and the skill say: research starts at once, the PDF goes back,
+    an episode is made only when Tom said so with the topic or in his answer,
+    Staff for private topics, Research otherwise, and the ask carries a recommendation."""
+    converse = (Path(__file__).parent.parent / "skills/sdlc/converse.md").read_text()
+    para = converse[converse.index("**Research for Tom.**") :].split("\n\n")[0]
+    flat = " ".join(para.split())
+    for phrase in ("at once", "never waits", "PDF", "`yudame-staff`", "`yudame-research`", "recommend",
+                   "only on his answer", "silence", "with the topic"):
+        assert phrase in flat, phrase
+    skill = " ".join((ROOT / "skills/deep-research/SKILL.md").read_text().split())
+    agent = " ".join((ROOT / "agents/researcher.md").read_text().split())
+    for text in (skill, agent):
+        assert "waits for a person" not in text and "never publishes" not in text
+        assert "only on Tom's word" in text
+    assert "`yudame-staff`" in skill and "`yudame-research`" in skill and "never waits" in skill
 
 
 def test_agent_file_has_frontmatter():
