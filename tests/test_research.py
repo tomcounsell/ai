@@ -472,14 +472,14 @@ def test_detached_run_returns_at_once_and_reports_status():
 
 class FakeCuttlefish:
     """Production Cuttlefish as run.publish sees it: its `episode` verbs (with their
-    manifest semantics), `claude -p /research-workflow`, the Render env group, the
+    arguments), `claude -p /research-workflow`, the Render env group, the
     pending-audio list and the local audio worker. `states` is the workflow's
     (current_step, status, blocked_on) after the research workflow, one per poll."""
 
     SECRET = "postgres://user:secret-password@db"
 
     def __init__(self, states, pending=(), workflow_stops_at="Audio Generation", worker_exits=None):
-        self.calls, self.manifest, self.states = [], {}, list(states)
+        self.calls, self.attach, self.states = [], None, list(states)
         self.pending, self.worker_exits = list(pending), worker_exits
         self.current, self.published, self.workers, self.gets = ("Setup", "running", ""), None, [], []
         self.workflow_stops_at = workflow_stops_at
@@ -496,14 +496,8 @@ class FakeCuttlefish:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         verb, args = cmd[cmd.index("episode") + 1], cmd[cmd.index("episode") + 2 :]
         out = {"slug": "ep-1"}
-        if verb == "manifest":  # Cuttlefish replaces the whole manifest, then defaults web_scope
-            self.manifest = json.loads(args[args.index("--set") + 1])
-            self.manifest.setdefault("web_scope", "partial")
-        elif verb == "attach":  # stores the document; --require also makes it a manifest input
-            self.corpus = args[args.index("--file") + 1]
-            if "--require" in args:
-                self.manifest.setdefault("web_scope", "partial")
-                self.manifest.setdefault("inputs", []).append({"ref_type": "episode_upload", "content_hash": "abc"})
+        if verb == "attach":
+            self.attach = args
             out = {"slug": "ep-1", "episode_id": 7}
         elif verb == "status":
             if self.states and self._listed:  # the first status after the workflow is its stopping point
@@ -578,7 +572,7 @@ def failure(d, cf, **kw):
 
 
 def test_publish_makes_the_episode_through_cuttlefish_and_ends_published(tmp_path):
-    """docs/plans/research-podcast.md: create, manifest, attach, setup, Cuttlefish's
+    """docs/plans/research-podcast.md: create, attach, setup, Cuttlefish's
     research workflow, its audio worker on the expected audio pause, published_at as done."""
     cf = FakeCuttlefish(PUBLISHED_PATH)
     d = finished_run(tmp_path)
@@ -589,8 +583,8 @@ def test_publish_makes_the_episode_through_cuttlefish_and_ends_published(tmp_pat
     create = next(c for c, _ in cf.calls if "create" in c)
     assert "--defer-setup" in create and create[create.index("--title") + 1] == "Is X better than Y?"
     assert create[create.index("--description") + 1] == "X is better."
-    assert cf.corpus == str(d / "report.md") and not cf.manifest.get("inputs"), (
-        "the report is in the research corpus, not a required input, which would send it to the tables-only analyst")
+    assert cf.attach[cf.attach.index("--file") + 1] == str(d / "report.md") and "--require" not in cf.attach, (
+        "the report goes into the research corpus, not as a required input, which sends it to the tables-only analyst")
     claude = next(c for c, _ in cf.calls if c[0] == "claude")
     assert "/research-workflow ep-1 --auto-advance" in claude[-1]
     assert cf.queued.endswith("step_audio_generation.enqueue(episode_id=7)"), "the audio step is queued once research ends"

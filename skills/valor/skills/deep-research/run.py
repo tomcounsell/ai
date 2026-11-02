@@ -623,6 +623,10 @@ def publish(run_dir: Path, podcast: str, title: str | None, env: dict, run=subpr
     if not key:
         raise RuntimeError("no RENDER_API_KEY: Cuttlefish's production settings cannot be read")
     env = {**env, **production_env(key, get), "DJANGO_SETTINGS_MODULE": "settings"}
+    # Cuttlefish's steps, and the claude -p that drives them, call Anthropic with
+    # Cuttlefish's own key, as on its server; the calling turn's proxy URL is not
+    # theirs. On 2026-11-02 its metadata step got 429 twice through the proxy URL
+    # and passed at once without it.
     env.pop("ANTHROPIC_BASE_URL", None)
 
     def manage(*args: str) -> dict:

@@ -93,10 +93,10 @@ Done when Tom has had a report PDF and an episode he asked for from one topic (r
    - *report not delayed:* `start()` returns at once and the research worker never
      calls `episode`. The run reaches `done` with no podcast argument anywhere.
    - *episode verb:* waits for research `done` and stops on `failed`. Runs
-     create→manifest→attach→setup→research workflow→audio→publish, with the given
-     slug on every Cuttlefish call. A stand-in manifest store shows the final
-     manifest holds both `web_scope: "none"` and the report's `episode_upload` input.
-     Records `published` and `url` from `published_at`.
+     create→attach→setup→research workflow→audio step→audio worker→publish, with the
+     given slug on every Cuttlefish call. The report is attached without `--require`,
+     so it is in the research corpus and not a required input. Records `published`
+     and `url` from `published_at`.
    - *pauses and failures:* the `audio_generation` pause leads to audio. Another
      pause, a failed step, expired auth or a timeout records `failed` with its reason.
    - *audio queue:* with other episodes pending, the audio worker is not started and
