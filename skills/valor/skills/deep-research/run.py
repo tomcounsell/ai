@@ -658,6 +658,19 @@ def publish(run_dir: Path, podcast: str, title: str | None, env: dict, run=subpr
         raise RuntimeError(f"Cuttlefish's research workflow stopped at {wf.get('current_step')} ({wf.get('status')}): "
                            f"{(done.stdout or done.stderr or '').strip()[-300:]}")
 
+    if wf.get("current_step") == "Audio Generation" and wf.get("status") == "running":
+        # Nothing in Cuttlefish queues this step after the research workflow (only an
+        # audio upload does; on 2026-11-02 the episode sat at Audio Generation, running,
+        # with no task), and the audio worker sees only episodes it has paused.
+        step("queuing Cuttlefish's audio step")
+        queued = run(
+            ["uv", "run", "--project", cuttlefish, "python", "manage.py", "shell", "-c",
+             f"from apps.podcast.tasks import step_audio_generation; step_audio_generation.enqueue(episode_id={int(episode_id)})"],
+            cwd=cuttlefish, env=env, capture_output=True, text=True,
+        )
+        if queued.returncode:
+            raise RuntimeError(f"queuing the audio step failed: {(queued.stderr or queued.stdout).strip()[-300:]}")
+
     pending_url = f"{BASE_URL}/api/podcast/pending-audio/"
     bearer = {"Authorization": f"Bearer {env.get('LOCAL_WORKER_API_KEY', '')}"}
     worker, others = None, set()

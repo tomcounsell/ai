@@ -491,6 +491,9 @@ class FakeCuttlefish:
             return SimpleNamespace(returncode=0, stdout="Research workflow complete.", stderr="")
         if cmd[:3] == ["git", "-C", str(run.MANAGED)] or cmd[:2] == ["gh", "repo"]:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "shell" in cmd:  # queuing Cuttlefish's audio task
+            self.queued = cmd[-1]
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         verb, args = cmd[cmd.index("episode") + 1], cmd[cmd.index("episode") + 2 :]
         out = {"slug": "ep-1"}
         if verb == "manifest":  # Cuttlefish replaces the whole manifest, then defaults web_scope
@@ -516,6 +519,7 @@ class FakeCuttlefish:
         return SimpleNamespace(returncode=0, stdout=json.dumps(out), stderr="")
 
     _listed = False
+    queued = None
 
     def get(self, url, headers):
         self.gets.append((url, headers))
@@ -589,6 +593,7 @@ def test_publish_makes_the_episode_through_cuttlefish_and_ends_published(tmp_pat
         "the report is in the research corpus, not a required input, which would send it to the tables-only analyst")
     claude = next(c for c, _ in cf.calls if c[0] == "claude")
     assert "/research-workflow ep-1 --auto-advance" in claude[-1]
+    assert cf.queued.endswith("step_audio_generation.enqueue(episode_id=7)"), "the audio step is queued once research ends"
     assert len(cf.workers) == 1 and "local_audio_worker" in cf.workers[0].cmd and cf.workers[0].terminated
     assert cf.workers[0].env["LOCAL_WORKER_API_KEY"] == "worker-key" and cf.workers[0].env["DATABASE_URL"] == cf.SECRET
     assert ("https://yudame.ai/api/podcast/pending-audio/", {"Authorization": "Bearer worker-key"}) in cf.gets
