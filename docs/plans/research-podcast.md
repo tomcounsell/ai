@@ -121,6 +121,17 @@ Done when Tom has had a report PDF and an episode he asked for from one topic (r
      queue or the research workflow stops it, the delivery says at which step, with
      evidence.
 
+## Found while building (2026-11-02)
+
+- Render: the web service's own `LOCAL_WORKER_API_KEY` overrides the env group's,
+  so `production_env` reads both, service last.
+- Nothing in Cuttlefish queues `step_audio_generation` after `/research-workflow`, so
+  the episode sat at Audio Generation, running. `run.py` queues it once.
+- The audio worker needs Cuttlefish's `podcast` extra (pydub).
+- NotebookLM moved to `notebook.google.com` and its login lapses within about 30
+  minutes. A retry makes a new notebook, so the publish task refreshes the login
+  while the audio is being made.
+
 ## Not in scope
 
 - Cuttlefish code changes. A Cuttlefish defect found on the way is named in the
