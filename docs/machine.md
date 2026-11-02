@@ -248,7 +248,8 @@ scheduler, supervisor, or watchdog on the machine.
   permissions` (`core/permissions.py`) builds the app once and never
   rebuilds it, since a rebuild drops its grants, and asks for the grants at
   the Mac ([rollout.md](rollout.md), step 9). Every update checks this
-  (`permissions.ensure`): it builds a missing app, puts the launcher first
+  (`permissions.ensure`): it boots out and deletes the job of a routine
+  the checkout no longer holds, builds a missing app, puts the launcher first
   in any `com.valor.*` job still running a bare Python, and reloads it,
   and loads any `com.valor.*` job whose plist is in place but not loaded
   (a turn's sandbox cannot bootstrap a job).
