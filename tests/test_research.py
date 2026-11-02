@@ -558,7 +558,7 @@ PUBLISHED_PATH = [("Audio Generation", "running", ""), AUDIO_PAUSE, AUDIO_PAUSE,
 
 def finished_run(tmp, state="done"):
     d = Path(tmp)
-    (d / "question.txt").write_text("Is X better than Y. More words")
+    (d / "question.txt").write_text("Is X better than Y? More words")
     (d / "report.md").write_text("# Is X better\n\n## Summary\n\nX is better.\n\n## Findings by topic\n\nlong")
     run.write_status(d, state=state, error="RuntimeError: boom" if state == "failed" else None)
     run.write_status(d, "episode.json", state="running", podcast="yudame-staff")
@@ -587,7 +587,7 @@ def test_publish_makes_the_episode_through_cuttlefish_and_ends_published(tmp_pat
     assert verbs[:3] == ["create", "attach", "setup"], verbs
     assert all(c[c.index("--podcast-slug") + 1] == "yudame-staff" for c, _ in cf.calls if "episode" in c)
     create = next(c for c, _ in cf.calls if "create" in c)
-    assert "--defer-setup" in create and create[create.index("--title") + 1] == "Is X better than Y"
+    assert "--defer-setup" in create and create[create.index("--title") + 1] == "Is X better than Y?"
     assert create[create.index("--description") + 1] == "X is better."
     assert cf.corpus == str(d / "report.md") and not cf.manifest.get("inputs"), (
         "the report is in the research corpus, not a required input, which would send it to the tables-only analyst")
@@ -605,7 +605,11 @@ def test_publish_makes_the_episode_through_cuttlefish_and_ends_published(tmp_pat
 
 def test_publish_routes_to_the_podcast_given(tmp_path):
     cf = FakeCuttlefish(PUBLISHED_PATH)
-    result = publish(finished_run(tmp_path), cf, podcast="yudame-research")
+    d = finished_run(tmp_path)
+    (d / "title.txt").write_text("X against Y")
+    result = publish(d, cf, podcast="yudame-research")
+    create = next(c for c, _ in cf.calls if "create" in c)
+    assert create[create.index("--title") + 1] == "X against Y", "the report's title names the episode"
     assert all(c[c.index("--podcast-slug") + 1] == "yudame-research" for c, _ in cf.calls if "episode" in c)
     assert result["url"] == "https://yudame.ai/podcast/yudame-research/ep-1/"
 

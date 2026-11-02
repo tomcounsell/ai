@@ -635,7 +635,9 @@ def publish(run_dir: Path, podcast: str, title: str | None, env: dict, run=subpr
         return json.loads(done.stdout)
 
     report = run_dir / "report.md"
-    title = title or (run_dir / "question.txt").read_text().strip().split(". ")[0][:120]
+    titled = run_dir / "title.txt"
+    title = (title or (titled.read_text().strip() if titled.exists() else "")
+             or re.split(r"(?<=[.?!])\s", (run_dir / "question.txt").read_text().strip())[0][:120])
     step("creating the episode")
     slug_ = manage("create", "--title", title, "--description", summary_of(report.read_text()), "--defer-setup")["slug"]
     step("attaching the report", slug=slug_, url=f"{BASE_URL}/podcast/{podcast}/{slug_}/")
