@@ -595,6 +595,7 @@ def test_publish_makes_the_episode_through_cuttlefish_and_ends_published(tmp_pat
     assert "/research-workflow ep-1 --auto-advance" in claude[-1]
     assert cf.queued.endswith("step_audio_generation.enqueue(episode_id=7)"), "the audio step is queued once research ends"
     assert len(cf.workers) == 1 and "local_audio_worker" in cf.workers[0].cmd and cf.workers[0].terminated
+    assert cf.workers[0].cmd[cf.workers[0].cmd.index("--extra") + 1] == "podcast", "the audio worker needs pydub"
     assert cf.workers[0].env["LOCAL_WORKER_API_KEY"] == "worker-key" and cf.workers[0].env["DATABASE_URL"] == cf.SECRET
     assert ("https://yudame.ai/api/podcast/pending-audio/", {"Authorization": "Bearer worker-key"}) in cf.gets
     assert result["state"] == "published" and result["url"] == "https://yudame.ai/podcast/yudame-staff/ep-1/"

@@ -694,7 +694,8 @@ def publish(run_dir: Path, podcast: str, title: str | None, env: dict, run=subpr
                 step("making the audio")
                 with open(run_dir / "audio.log", "ab") as log:
                     worker = popen(
-                        ["uv", "run", "--project", cuttlefish, "python", "manage.py", "local_audio_worker",
+                        # pydub, which the worker needs, is in Cuttlefish's `podcast` extra.
+                        ["uv", "run", "--project", cuttlefish, "--extra", "podcast", "python", "manage.py", "local_audio_worker",
                          "--base-url", BASE_URL, "--max-concurrent", "1"],
                         cwd=cuttlefish, env=env, stdout=log, stderr=log,
                     )
