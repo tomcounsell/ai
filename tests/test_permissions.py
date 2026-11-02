@@ -5,6 +5,7 @@ import plistlib
 import signal
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,64 @@ def test_ensure_loads_a_job_whose_plist_is_in_place_but_not_loaded(exe, tmp_path
     assert permissions.ensure("com.valor.kernel", tmp_path, exe, reload, up.__contains__) == {}
 
 
+def test_ensure_takes_a_deleted_routines_job_off_the_mac_and_keeps_every_other(exe, tmp_path, monkeypatch):
+    """The weekly `invoices` routine, deleted (Tom, 2026-11-02): its job is
+    booted out and its plist deleted even when it is not loaded, and is never
+    reloaded; every routine the checkout holds, and every other job, stays."""
+    held = tmp_path / "routines"
+    for name in ("update", "verify"):
+        (held / name).mkdir(parents=True)
+        (held / name / "routine.toml").write_text(f'name = "{name}"\n')
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    labels = ["com.valor.routine.update", "com.valor.routine.verify", "com.valor.routine.invoices",
+              "com.valor.routine.update-old", "com.valor.kernel", "com.valor.backup"]  # fmt: skip
+    for label in labels:
+        argv = [str(exe), "/bin/true"]
+        (agents / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": argv}))
+    monkeypatch.setattr(permissions, "settings", replace(settings, routines_dir=str(held)))
+    up = set(labels) - {"com.valor.routine.invoices", "com.valor.routine.update-old"}
+    reloaded, booted = [], []
+
+    def ensure():
+        return permissions.ensure(
+            "com.valor.kernel", agents, exe, lambda label, *a: reloaded.append(label), up.__contains__,
+            booted.append,
+        )  # fmt: skip
+
+    assert ensure() == {
+        "fixed": [
+            "com.valor.routine.invoices: removed, no such routine",
+            "com.valor.routine.update-old: removed, no such routine",
+        ]
+    }
+    assert booted == ["com.valor.routine.invoices", "com.valor.routine.update-old"] and reloaded == []
+    assert sorted(p.stem for p in agents.glob("*.plist")) == sorted(up)
+    assert ensure() == {} and len(booted) == 2
+
+
+def test_ensure_removes_no_routine_job_without_a_routines_directory(exe, tmp_path, monkeypatch):
+    plist = tmp_path / "com.valor.routine.update.plist"
+    plist.write_bytes(plistlib.dumps({"Label": plist.stem, "ProgramArguments": [str(exe), "/bin/true"]}))
+    monkeypatch.setattr(permissions, "settings", replace(settings, routines_dir=str(tmp_path / "absent")))
+    booted = []
+    assert (
+        permissions.ensure("com.valor.kernel", tmp_path, exe, None, lambda label: True, booted.append) == {}
+    )
+    assert plist.exists() and booted == []
+
+
+def test_every_committed_routine_keeps_its_job(exe, tmp_path, monkeypatch):
+    monkeypatch.setattr(permissions, "settings", replace(settings, routines_dir=str(ROOT / "routines")))
+    for name in routines.names():
+        label = f"{routines.LABEL}.{name}"
+        (tmp_path / f"{label}.plist").write_bytes(
+            plistlib.dumps({"Label": label, "ProgramArguments": [str(exe)]})
+        )
+    assert "invoices" not in routines.names() and "update" in routines.names()
+    assert permissions.ensure("com.valor.kernel", tmp_path, exe, None, lambda label: True, pytest.fail) == {}
+
+
 # -- Slack on every Mac whose projects list a Slack chat (Tom, 2026-10-25) ----
 
 
@@ -126,13 +185,19 @@ def slack_mac(tmp_path, chats='["slack:T0ABC/C0DEV"]'):
 
     projects = tmp_path / "projects"
     projects.mkdir(parents=True)
-    (projects / "p.toml").write_text(f'name = "p"\nrepo = "r"\nkind = "plain"\nsuite = "true"\nchats = {chats}\n')
+    (projects / "p.toml").write_text(
+        f'name = "p"\nrepo = "r"\nkind = "plain"\nsuite = "true"\nchats = {chats}\n'
+    )
     agents = tmp_path / "agents"
     agents.mkdir()
     env = {"PATH": "/usr/bin", "HOME": "/Users/x", "VALOR_MACHINE": "m-test", "VALOR_DB": "valor_x",
            "VALOR_OPERATOR_SLACK_IDS": "T0ABC/U0TOM", "VALOR_INBOUND": "/tmp/in", "VALOR_SERVE_TICK_S": "7"}  # fmt: skip
     (agents / f"{permissions.TELEGRAM}.plist").write_bytes(plistlib.dumps({"EnvironmentVariables": env}))
-    return lambda: bridges.configure(projects_dir=str(projects), machine="m-test", default_machine="m-test"), agents, env
+    return (
+        lambda: bridges.configure(projects_dir=str(projects), machine="m-test", default_machine="m-test"),
+        agents,
+        env,
+    )
 
 
 def keys_said(stdout: str, code: int = 0, loaded: bool = True):
@@ -146,7 +211,9 @@ def keys_said(stdout: str, code: int = 0, loaded: bool = True):
             return subprocess.CompletedProcess(argv, 0 if loaded or argv[1] != "print" else 113, "", "")
         calls.append((argv[-1], kw["env"]))
         if argv[-1] == "keys":
-            return subprocess.CompletedProcess(argv, code, stdout, "SLACK_USER_TOKEN_M_TEST is missing" if code else "")
+            return subprocess.CompletedProcess(
+                argv, code, stdout, "SLACK_USER_TOKEN_M_TEST is missing" if code else ""
+            )
         return subprocess.run(argv, check=True, **kw)
 
     return run, calls
@@ -228,11 +295,16 @@ def test_keys_copies_this_machines_own_pair_and_never_anothers(tmp_path, monkeyp
     assert slack_main.copy(vault, keyfile, "Valor the Pirate") == {
         "T0ABC_SLACK_APP_TOKEN": "written", "T0ABC_SLACK_USER_TOKEN": "written",
     }  # fmt: skip
-    assert _parse_env(keyfile.read_text()) == {"T0ABC_SLACK_APP_TOKEN": "xapp-pirate", "T0ABC_SLACK_USER_TOKEN": "xoxp-pirate"}
+    assert _parse_env(keyfile.read_text()) == {
+        "T0ABC_SLACK_APP_TOKEN": "xapp-pirate",
+        "T0ABC_SLACK_USER_TOKEN": "xoxp-pirate",
+    }
     assert asked == ["xoxp-pirate"]
     with pytest.raises(SystemExit, match="SLACK_USER_TOKEN_VALOR_THE_BALD is missing"):
         slack_main.copy(vault, keyfile, "Valor the Bald")
-    assert "groups:write" in slack_main.manifest()["oauth_config"]["scopes"]["user"]  # creating the dev channels
+    assert (
+        "groups:write" in slack_main.manifest()["oauth_config"]["scopes"]["user"]
+    )  # creating the dev channels
 
 
 def test_granted_reads_the_databases_there_are_and_skips_one_that_is_absent(tmp_path, monkeypatch):

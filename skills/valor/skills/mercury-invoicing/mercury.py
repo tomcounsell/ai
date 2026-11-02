@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Yudame's invoices in Mercury: create one from a yudame-invoice spec, list
-the unpaid, and build the notice and reminder emails Valor sends from
-valor@yuda.me (SKILL.md beside this file says when).
+the unpaid, and build the notice email Valor sends from valor@yuda.me (SKILL.md beside this file says when).
 
 The Mercury token is read from 1Password at each run (`op read`) and lives
 only in this process's memory: never in a file, argv, a log, or output.
@@ -18,15 +17,13 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 API = "https://api.mercury.com/api/v1"
 TOKEN_REF = "op://m-valor/Mercury API Token/credential"
 PAY = "https://app.mercury.com/pay/{slug}"
 MARK = "valor"  # internalNote on every invoice Valor creates
-EVERY_DAYS = 7  # at most one reminder per invoice in this many days
-MOST = 4  # reminders per invoice; after these the invoice goes to Tom
 VAULT_ENV = Path(os.environ.get("VALOR_VAULT_ENV", Path.home() / "Desktop" / "Valor" / ".env"))
 SKIPPED = ("defer", "gratis", "included")
 
@@ -225,62 +222,22 @@ def write_pdf(inv: dict, folder: Path) -> dict:
     return {"path": str(path), "sha256": hashlib.sha256(data).hexdigest()}
 
 
-def email(inv: dict, customer: dict, folder: Path, *, reminder: bool, today: date) -> dict:
-    """The `email.send` effect for an invoice's notice or reminder, addressed
-    from the invoice's own customer and cc in Mercury."""
+def email(inv: dict, customer: dict, folder: Path) -> dict:
+    """The `email.send` effect for an invoice's notice, addressed from the
+    invoice's own customer and cc in Mercury."""
     n, amount, due = inv["invoiceNumber"], money(cents(inv["amount"])), inv["dueDate"]
-    hello = f"Hello {customer['name']},\n\n"
-    if reminder:
-        subject = f"Reminder: Invoice {n} from Yudame"
-        late = overdue_days(inv, today)
-        text = (
-            f"Yudame's invoice {n} for {amount} was due on {due}, {late} day{'s' * (late != 1)} ago, "
-            "and our records show it unpaid. The invoice is attached."
-        )
-        tail = "\n\nIf it is already on its way, thank you, and please ignore this note."
-    else:
-        subject = f"Invoice {n} from Yudame"
-        text = f"Yudame's invoice {n} for {amount} is attached. It is due on {due}."
-        tail = ""
     to = [customer["email"].strip().lower()]
     payload = {
         "to": to,
         "cc": [c.strip().lower() for c in inv.get("ccEmails") or []],
-        "subject": subject,
-        "body": f"{hello}{text}\n\nPay by bank transfer here: {pay_link(inv)}{tail}\n\nThank you,\nValor Engels\nYudame, Inc.\n",
+        "subject": f"Invoice {n} from Yudame",
+        "body": f"Hello {customer['name']},\n\nYudame's invoice {n} for {amount} is attached. It is due on {due}."
+        f"\n\nPay by bank transfer here: {pay_link(inv)}\n\nThank you,\nValor Engels\nYudame, Inc.\n",
         "in_reply_to": None,
         "references": [],
         "files": [write_pdf(inv, folder)],
     }
     return {"action_type": "email.send", "target": ",".join(sorted(to)), "payload": payload}
-
-
-def reminders_sent(number: str) -> list[datetime]:
-    """When each reminder for invoice `number` left valor@yuda.me, from its
-    Sent mail (gws). A failed read is an error, never zero."""
-    q = f'in:sent subject:"Reminder: Invoice {number}"'
-    listed = gws("gmail", "users", "messages", "list", params={"userId": "me", "q": q, "maxResults": 50})
-    out = []
-    for m in listed.get("messages") or []:
-        got = gws(
-            "gmail", "users", "messages", "get", params={"userId": "me", "id": m["id"], "format": "minimal"}
-        )
-        out.append(datetime.fromtimestamp(int(got["internalDate"]) / 1000, timezone.utc))  # noqa: UP017  (Python 3.9: macOS python3)
-    return out
-
-
-def gws(*args: str, params: dict) -> dict:
-    got = subprocess.run(
-        ["gws", *args, "--params", json.dumps(params)], capture_output=True, text=True, check=False
-    )
-    try:
-        if got.returncode == 0:
-            return json.loads(got.stdout)
-    except ValueError:
-        pass
-    raise Failed(
-        f"gws {' '.join(args)} failed, so the reminders already sent cannot be read: {got.stderr.strip()[:300]}"
-    )
 
 
 # -- commands ---------------------------------------------------------------
@@ -367,26 +324,6 @@ def summary(inv: dict) -> dict:
     }
 
 
-def remind(today: date, now: datetime, folder: Path) -> dict:
-    """The reminders due: Valor's Unpaid invoices at least a day overdue,
-    none reminded in the last EVERY_DAYS days, fewer than MOST in all.
-    Those past MOST are listed for Tom."""
-    send, for_tom = [], []
-    customers = None
-    for inv in paged("/ar/invoices", "invoices"):
-        if inv.get("status") != "Unpaid" or inv.get("internalNote") != MARK or overdue_days(inv, today) < 1:
-            continue
-        sent = reminders_sent(inv["invoiceNumber"])
-        if len(sent) >= MOST:
-            for_tom.append({**summary(inv), "reminders": len(sent), "days_overdue": overdue_days(inv, today)})
-            continue
-        if sent and now - max(sent) < timedelta(days=EVERY_DAYS):
-            continue
-        customers = customers or {c["id"]: c for c in paged("/ar/customers", "customers")}
-        send.append(email(inv, customers[inv["customerId"]], folder, reminder=True, today=today))
-    return {"send": send, "for_tom": for_tom}
-
-
 def accounts() -> list[dict]:
     """The accounts payments can go to. A token without the accounts scope
     is refused `/accounts` (403), so then each account an existing invoice
@@ -420,10 +357,9 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--account", required=True, help="destinationAccountId (see `accounts`)")
     c.add_argument("--dry-run", action="store_true", help="print the line items and total; call nothing")
     sub.add_parser("unpaid", help="every Unpaid invoice, with days overdue and pay link")
-    for name in ("remind", "notice", "pdf"):
+    for name in ("notice", "pdf"):
         s = sub.add_parser(name)
-        if name != "remind":
-            s.add_argument("id")
+        s.add_argument("id")
         s.add_argument(
             "--dir", default=".valor/invoices", help="where the PDFs are written (inside the workspace)"
         )
@@ -432,8 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("name", help="matched against counterparty and memo, e.g. USERCRO")
     g.add_argument("--since", default="2024-01-01")
     a = p.parse_args(argv)
-    now = datetime.now(timezone.utc)  # noqa: UP017
-    today = now.date()
+    today = datetime.now(timezone.utc).date()  # noqa: UP017
     try:
         if a.cmd == "create":
             spec = json.loads(Path(a.spec).read_text())
@@ -446,12 +381,10 @@ def main(argv: list[str] | None = None) -> int:
             out = received(a.name, a.since)
         elif a.cmd == "unpaid":
             out = unpaid(today)
-        elif a.cmd == "remind":
-            out = remind(today, now, Path(a.dir))
         elif a.cmd == "notice":
             inv = call("GET", f"/ar/invoices/{a.id}")
             customer = call("GET", f"/ar/customers/{inv['customerId']}")
-            out = email(inv, customer, Path(a.dir), reminder=False, today=today)
+            out = email(inv, customer, Path(a.dir))
         elif a.cmd == "pdf":
             inv = call("GET", f"/ar/invoices/{a.id}")
             out = write_pdf(inv, Path(a.dir))

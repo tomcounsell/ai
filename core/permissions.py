@@ -22,7 +22,11 @@ from a one-shot job of its own, since a job cannot reload itself. Any
 other `com.valor.*` job whose plist is in place but is not loaded is
 loaded: a turn's sandbox cannot bootstrap one (the Cowboy's
 `com.valor.brew-nightly`, put back by a turn on 2026-10-28), and launchd
-would otherwise read it only at the next login.
+would otherwise read it only at the next login. A routine's job
+(`com.valor.routine.<name>`) whose routine the checkout no longer holds is
+booted out and its plist deleted first, so deleting a routine takes it off
+every Mac's schedule at its next update (the weekly `invoices`, Tom,
+2026-11-02); with no routines directory none is removed.
 
 It also makes sure Slack is served where this Mac's projects list a
 Slack chat (`slack`, Tom, 2026-10-25): `python -m bridges.slack keys`
@@ -90,6 +94,7 @@ def ensure(
     exe: Path | None = None,
     reload: Callable[[str, Path, bool], str | None] | None = None,
     loaded: Callable[[str], bool] | None = None,
+    bootout: Callable[[str], object] | None = None,
 ) -> dict[str, list[str]]:
     """Every update's check of this Mac's setup (module docstring). `own` is
     the label of the job running this, reloaded by a one-shot job of its
@@ -98,7 +103,9 @@ def ensure(
     exe = exe or Path(settings.launcher)
     reload = reload or _reload
     loaded = loaded or _loaded
+    bootout = bootout or _bootout
     fixed, failed = [], []
+    gone(agents, bootout, fixed)
     if not exe.exists():
         build(exe)
         fixed.append(exe.parents[2].name)
@@ -140,7 +147,9 @@ def slack(
     if telegram.exists():
         job = plistlib.loads(telegram.read_bytes()).get("EnvironmentVariables", {})
         env |= {k: v for k, v in job.items() if k not in ("PATH", "HOME")}
-    keys = run([sys.executable, "-m", "bridges.slack", "keys"], cwd=ROOT, env=env, capture_output=True, text=True)
+    keys = run(
+        [sys.executable, "-m", "bridges.slack", "keys"], cwd=ROOT, env=env, capture_output=True, text=True
+    )
     if keys.returncode != 0:
         why = (keys.stderr.strip() or keys.stdout.strip()).splitlines()[-1:] or [f"status {keys.returncode}"]
         failed.append(f"slack: no keys ({why[0]})")
@@ -166,8 +175,30 @@ def slack(
         failed.append(f"{SLACK}: {why}")
 
 
+def gone(agents: Path, bootout: Callable[[str], object], fixed: list[str]) -> None:
+    """Boot out and delete each routine job whose routine the checkout no
+    longer holds; none when there is no routines directory."""
+    from core import routines
+
+    if not Path(settings.routines_dir).is_dir():
+        return
+    held = set(routines.names(settings.routines_dir))
+    prefix = routines.LABEL + "."
+    for plist in sorted(agents.glob(prefix + "*.plist")):
+        if plist.stem[len(prefix) :] not in held:
+            bootout(plist.stem)
+            plist.unlink()
+            fixed.append(f"{plist.stem}: removed, no such routine")
+
+
+def _bootout(label: str) -> None:
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], capture_output=True, check=False)
+
+
 def _loaded(label: str) -> bool:
-    done = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True, check=False)
+    done = subprocess.run(
+        ["launchctl", "print", f"gui/{os.getuid()}/{label}"], capture_output=True, check=False
+    )
     return done.returncode == 0
 
 
@@ -186,7 +217,7 @@ def _reload(label: str, plist: Path, own: bool) -> str | None:
         helper.write_bytes(plistlib.dumps(job))
         argv = [["launchctl", "bootstrap", domain, str(helper)]]
     else:
-        subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], capture_output=True, check=False)
+        _bootout(label)
         argv = [["launchctl", "bootstrap", domain, str(plist)]] * 20
     for a in argv:
         done = subprocess.run(a, capture_output=True, text=True, check=False)

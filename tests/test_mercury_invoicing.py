@@ -1,24 +1,17 @@
 """Mercury invoicing (skills/valor/skills/mercury-invoicing): the line items
 against the rendered TOTAL DUE, the create body, the customer lookup, the
-unpaid list, the reminder set and its emails, the token, and the weekly
-`invoices` routine. Mercury, `op` and `gws` are fakes shaped as their docs
-describe."""
+unpaid list, the notice email, and the token. Mercury and `op` are fakes
+shaped as their docs describe."""
 
-import asyncio
 import hashlib
 import importlib.util
 import io
-import json
 import subprocess
 import urllib.error
-from datetime import UTC, date, datetime, timedelta
+from datetime import date
 from pathlib import Path
 
 import pytest
-
-from core import db, machine, routines
-from tests import bridges
-from tests.bridges import of_type
 
 ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
@@ -28,7 +21,6 @@ mercury = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mercury)
 
 TODAY = date(2026, 11, 20)
-NOW = datetime(2026, 11, 20, 2, 0, tzinfo=UTC)
 SECRET = "secret-token:mercury-test-0123456789"
 
 
@@ -285,89 +277,32 @@ def test_unpaid_lists_only_unpaid_across_every_page_with_days_overdue(fake):
     assert (got["LATE"]["customer"], got["LATE"]["email"]) == ("Northwind AI LLC", "someone@client.example")
 
 
-# -- reminders ------------------------------------------------------------------
+# -- the notice -----------------------------------------------------------------
 
 
-def sent(**by_number):
-    """A fake `reminders_sent`: the times reminders for each number left."""
-    return lambda n: [NOW - timedelta(days=d) for d in by_number.get(n, [])]
-
-
-def test_remind_picks_valors_overdue_invoices_not_reminded_this_week(fake, monkeypatch, tmp_path):
-    fake(
-        invoices=[
-            inv("NEW"),
-            inv("WEEK", due="2026-10-01"),
-            inv("RECENT", due="2026-10-01"),
-            inv("DASH", note=None),
-            inv("TODAY", due="2026-11-20"),
-            inv("PAID", status="Paid"),
-            inv("MANY", due="2026-09-01"),
-        ],
-        customers=[NORTHWIND],
-    )
-    monkeypatch.setattr(mercury, "reminders_sent", sent(WEEK=[8], RECENT=[3], MANY=[1, 8, 15, 22]))
-    out = mercury.remind(TODAY, NOW, tmp_path / "invoices")
-    assert [e["payload"]["subject"] for e in out["send"]] == [
-        "Reminder: Invoice NEW from Yudame",
-        "Reminder: Invoice WEEK from Yudame",
-    ]
-    assert [(t["number"], t["reminders"]) for t in out["for_tom"]] == [("MANY", 4)]
-
-
-def test_a_reminder_is_addressed_from_the_invoice_itself_with_its_pdf(fake, monkeypatch, tmp_path):
-    fake(invoices=[inv("NEW")], customers=[NORTHWIND])
-    monkeypatch.setattr(mercury, "reminders_sent", sent())
-    monkeypatch.chdir(tmp_path)
-    ((effect,),) = [mercury.remind(TODAY, NOW, Path(".valor/invoices"))["send"]]
-    p = effect["payload"]
-    assert (effect["action_type"], effect["target"]) == ("email.send", "someone@client.example")
-    assert (p["to"], p["cc"]) == (["someone@client.example"], ["someone@client.example"])
-    assert "https://app.mercury.com/pay/slug-NEW" in p["body"] and "$8,003.61" in p["body"]
-    assert "10 days ago" in p["body"] and p["body"].startswith("Hello Northwind AI LLC,")
+def test_a_notice_is_addressed_from_the_invoice_itself_with_its_pdf(fake, tmp_path):
+    fake(invoices=[inv("N1", due="2026-12-01")], customers=[NORTHWIND])
+    e = mercury.email(mercury.call("GET", "/ar/invoices/i-N1"), NORTHWIND, tmp_path)
+    p = e["payload"]
+    assert (e["action_type"], e["target"]) == ("email.send", "someone@client.example")
+    assert (p["subject"], p["to"]) == ("Invoice N1 from Yudame", ["someone@client.example"])
+    assert p["body"].startswith("Hello Northwind AI LLC,") and "due on 2026-12-01" in p["body"]
+    assert "https://app.mercury.com/pay/slug-N1" in p["body"]
     ((f),) = p["files"]
     path = Path(f["path"])
-    assert path.is_absolute() and path == (tmp_path / ".valor/invoices/invoice_NEW.pdf").resolve()
-    assert path.is_file() and not path.is_symlink()
+    assert path.is_absolute() and path == (tmp_path / "invoice_N1.pdf").resolve() and not path.is_symlink()
     assert hashlib.sha256(path.read_bytes()).hexdigest() == f["sha256"]
 
 
-def test_a_notice_names_the_due_date_and_no_lateness(fake, tmp_path):
-    fake(invoices=[inv("N1", due="2026-12-01")], customers=[NORTHWIND])
-    e = mercury.email(
-        mercury.call("GET", "/ar/invoices/i-N1"), NORTHWIND, tmp_path, reminder=False, today=TODAY
-    )
-    assert e["payload"]["subject"] == "Invoice N1 from Yudame"
-    assert "due on 2026-12-01" in e["payload"]["body"] and "ago" not in e["payload"]["body"]
+def test_there_is_no_remind_command(capsys):
+    """Tom, 2026-11-02: no weekly reminder emails."""
+    with pytest.raises(SystemExit) as exit_:
+        mercury.main(["remind"])
+    assert exit_.value.code == 2 and not hasattr(mercury, "remind")
 
 
 def run_result(code=0, out="", err=""):
     return subprocess.CompletedProcess([], code, out, err)
-
-
-def test_reminders_sent_reads_valors_sent_mail_through_gws(monkeypatch):
-    calls = []
-
-    def gws(argv, **kw):
-        calls.append(argv)
-        params = json.loads(argv[argv.index("--params") + 1])
-        if argv[4] == "list":
-            return run_result(out=json.dumps({"messages": [{"id": "m1"}, {"id": "m2"}]}))
-        ms = {"m1": NOW - timedelta(days=2), "m2": NOW - timedelta(days=9)}[params["id"]]
-        return run_result(out=json.dumps({"internalDate": str(int(ms.timestamp() * 1000))}))
-
-    monkeypatch.setattr(mercury.subprocess, "run", gws)
-    got = mercury.reminders_sent("261101CA")
-    assert got == [NOW - timedelta(days=2), NOW - timedelta(days=9)]
-    q = json.loads(calls[0][calls[0].index("--params") + 1])["q"]
-    assert q == 'in:sent subject:"Reminder: Invoice 261101CA"'
-
-
-def test_a_failed_sent_mail_read_stops_the_reminders(fake, monkeypatch, tmp_path):
-    fake(invoices=[inv("NEW")], customers=[NORTHWIND])
-    monkeypatch.setattr(mercury.subprocess, "run", lambda *a, **k: run_result(1, "", "invalid_grant"))
-    with pytest.raises(mercury.Failed, match="cannot be read: invalid_grant"):
-        mercury.remind(TODAY, NOW, tmp_path)
 
 
 # -- the token ------------------------------------------------------------------
@@ -475,56 +410,6 @@ def test_accounts_other_refusals_are_not_hidden(monkeypatch):
     monkeypatch.setattr(mercury, "call", down)
     with pytest.raises(mercury.Failed, match="500"):
         mercury.accounts()
-
-
-# -- the weekly routine -----------------------------------------------------------
-
-
-VALOR = 'name = "valor"\nrepo = "https://example.invalid/valor.git"\nkind = "plain"\nsuite = "true"\n'
-
-
-def fire(dsn, tmp_path, placed):
-    projects = tmp_path / "projects"
-    projects.mkdir(exist_ok=True)
-    (projects / "valor.toml").write_text(VALOR + f'machine = "{placed}"\n')
-    started = []
-
-    async def start_project(conn, **kw):
-        started.append(kw)
-        return "t-run"
-
-    async def go():
-        async with await db.connect(dsn) as conn:
-            return await routines.run(
-                conn,
-                "invoices",
-                {"task": routines.task_runner},
-                start_project=start_project,
-                directory=ROOT / "routines",
-                dsn=dsn,
-            )
-
-    with bridges.configure(machine="m-here", default_machine="m-here", projects_dir=str(projects)):
-        asyncio.run(go())
-    return started
-
-
-def test_the_invoices_routine_starts_one_sdlc_task_on_the_placed_mac(fresh, tmp_path):
-    (kw,) = fire(fresh, tmp_path, "m-here")
-    r = routines.load("invoices", ROOT / "routines")
-    assert (kw["instruction"], kw["ceiling"], kw["project"]) == (r.instruction, "act", "valor")
-    assert "mercury.py remind" in kw["instruction"] and "stop.md" in kw["instruction"]
-    assert machine.fold([{"id": 1, "type": "task.started", "payload": kw["marker"]}]).legacy is False
-    (ran,) = asyncio.run(of_type(fresh, "routine.ran"))
-    assert (ran["run"], ran["outcome"]) == ("t-run", "started")
-    assert r.schedule == {"weekday": 1, "hour": 9, "minute": 0}
-
-
-def test_the_invoices_routine_starts_nothing_on_another_mac(fresh, tmp_path):
-    assert fire(fresh, tmp_path, "m-cowboy") == []
-    (ran,) = asyncio.run(of_type(fresh, "routine.ran"))
-    assert (ran["run"], ran["outcome"]) == (None, "nothing_due")
-    assert "not placed here" in ran["summary"] and "m-cowboy" in ran["summary"]
 
 
 def test_received_lists_a_client_s_incoming_payments_on_every_account_oldest_first(monkeypatch):

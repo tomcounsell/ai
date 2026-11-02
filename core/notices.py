@@ -26,8 +26,7 @@ binding, rollout, update, disk, send in doubt) carry none.
 
 A routine's result (`RESULTS` from background work, `tasks.routine_of`) is
 `quiet`: it wakes no turn and is shown at the session's next one as a
-routine result held in the record, unless its routine says it `wakes`
-(`invoices`, whose session sends what the run drafted). A routine's
+routine result held in the record. A routine's
 question wakes the session, as everything else does.
 
 `owe(conn, task_id)` writes the reports a task's fold owes: its open
@@ -48,7 +47,7 @@ from core.machine import State
 
 # The kinds whose reporter a session answers, steers and stops.
 ACTED = ("question", "ended", "report")
-# A routine's results: quiet unless its routine `wakes`.
+# A routine's results: quiet.
 RESULTS = ("ended", "report")
 
 
@@ -109,12 +108,10 @@ async def _made(conn, task_id: str, about_key: str) -> bool:
 
 
 async def _routine_result(conn, task_id: str) -> bool:
-    """Whether the task is a routine's work whose routine does not wake its
-    session with its results."""
-    from core import routines, tasks
+    """Whether the task is a routine's work."""
+    from core import tasks
 
-    name = await tasks.routine_of(conn, task_id)
-    return name is not None and not routines.wakes(name)
+    return await tasks.routine_of(conn, task_id) is not None
 
 
 async def hears(conn, task_id: str, kind: str) -> str | None:

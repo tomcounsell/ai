@@ -21,7 +21,7 @@ import uuid
 
 import pytest
 
-from core import broker, db, intake, ledger, machine, notices, record, router, routines, session, tasks
+from core import broker, db, intake, ledger, machine, notices, record, router, session, tasks
 from core.bridge import declared_performers
 from core.machine import State
 from core.settings import settings
@@ -159,15 +159,12 @@ def test_a_later_session_finds_a_routine_result_in_the_record(dsn, dm):
 
 def test_what_wakes_the_session_and_what_does_not(dsn, dm):
     """A routine's question wakes; so does every report of Tom's own work
-    and every kernel fault. A routine whose toml `wakes` (invoices) wakes
-    it with its result; any other routine's result is quiet."""
-    assert routines.wakes("invoices") and not routines.wakes("sentry") and not routines.wakes("no-such")
+    and every kernel fault. A routine's result is quiet."""
 
     async def go():
         made = {}
         asking = await routine_run(dsn)
         foreground = await new_task(dsn, max_effect_class="act")
-        invoices = await routine_run(dsn, name="invoices")
         quiet = await routine_run(dsn, name="verify")
         async with await db.connect(dsn) as conn:
             for name, reporter, kind in (
@@ -177,7 +174,6 @@ def test_what_wakes_the_session_and_what_does_not(dsn, dm):
                 ("credential", quiet, "credential"),
                 ("rollout", intake.UPDATES, "rollout"),
                 ("send in doubt", foreground, "send_in_doubt"),
-                ("invoices result", invoices, "ended"),
                 ("routine result", quiet, "ended"),
             ):
                 # The `updates` stream is shared by every test on this database: a key of its own.
@@ -273,18 +269,17 @@ class Gmail:
                 break
 
 
-def test_the_weekly_run_drafts_a_reminder_with_its_pdf_and_the_session_sends_it(
+def test_a_task_drafts_an_invoice_notice_with_its_pdf_and_the_session_sends_it(
     dsn, dm, tmp_path, monkeypatch
 ):
-    """The invoice reminders end to end: the `invoices` run drafts each
-    reminder with its PDF in its own workspace, reading Valor's Sent mail
-    only; its report wakes the operator session; the session's `email.send`
-    may attach that PDF, and the email performer delivers it to the mail
-    server with the PDF's bytes. A file in a task that does not report to
-    the session is refused."""
+    """An invoice notice end to end: a task drafts it with Mercury's PDF in
+    its own workspace and sends nothing; its report wakes the operator
+    session; the session's `email.send` may attach that PDF, and the email
+    performer delivers it to the mail server with the PDF's bytes. A file in
+    a task that does not report to the session is refused."""
     from bridges.email import smtp
     from bridges.email.config import Config
-    from tests.test_mercury_invoicing import NORTHWIND, NOW, TODAY, inv, mercury
+    from tests.test_mercury_invoicing import NORTHWIND, TODAY, inv, mercury
     from tests.test_mercury_invoicing import Mercury as FakeMercury
 
     cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
@@ -294,24 +289,18 @@ def test_the_weekly_run_drafts_a_reminder_with_its_pdf_and_the_session_sends_it(
         check=True, capture_output=True,
     )  # fmt: skip
     server = Gmail(cert, key)
-    monkeypatch.setattr(mercury, "call", FakeMercury(invoices=[inv("NEW")], customers=[NORTHWIND]))
-    gws = []
-
-    def sent_mail(argv, **kw):
-        gws.append(argv[1:5])
-        return subprocess.CompletedProcess(argv, 0, '{"messages": []}', "")
-
-    monkeypatch.setattr(mercury.subprocess, "run", sent_mail)
+    fake = FakeMercury(invoices=[inv("NEW")], customers=[NORTHWIND])
+    monkeypatch.setattr(mercury, "call", fake)
     workspace = tmp_path / "run"
-    ((effect,),) = [mercury.remind(TODAY, NOW, workspace / ".valor" / "invoices")["send"]]
+    effect = mercury.email(fake("GET", "/ar/invoices/i-NEW"), NORTHWIND, workspace / ".valor" / "invoices")
     stray = tmp_path / "stray" / "invoice_1.pdf"
     stray.parent.mkdir()
     stray.write_bytes(b"%PDF-1.4")
 
     async def go():
-        run_ = await routine_run(dsn, name="invoices", workspace=str(workspace))
+        run_ = await new_task(dsn, max_effect_class="act", workspace=str(workspace))
         await new_task(dsn, workspace=str(stray.parent))
-        await end(dsn, run_, f"Done: one reminder drafted.\n\n```json\n{json.dumps(effect)}\n```")
+        await end(dsn, run_, f"Done: one notice drafted.\n\n```json\n{json.dumps(effect)}\n```")
         hearer = await operator(dsn)
         send = next(
             d for d in declared_performers(str(tmp_path / "session"), hearer) if d.action_type == "email.send"
@@ -329,20 +318,17 @@ def test_the_weekly_run_drafts_a_reminder_with_its_pdf_and_the_session_sends_it(
     action, ok, no, rows_ = run(go())
     assert session.chat_waiting(rows_) and ok is None
     assert no == "files[0] is not a regular file in your workspace or a reporting task's"
-    assert gws and all(
-        call[:3] == ["gmail", "users", "messages"] and call[3] in ("list", "get") for call in gws
-    )
     cfg = Config(address="valor@yuda.me", since=TODAY, imap_host="", imap_port=0, smtp_host="127.0.0.1",
                  smtp_port=server.port, imap_user="", smtp_user="valor@yuda.me", imap_password="",
                  smtp_password="app-password", cafile=str(cert))  # fmt: skip
-    out = smtp.perform(cfg, action, "reminder-NEW")
+    out = smtp.perform(cfg, action, "notice-NEW")
     assert out["accepted"] == ["someone@client.example"]
     (raw,) = server.got
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     assert (msg["From"], msg["To"], msg["Subject"]) == (
         "valor@yuda.me",
         "someone@client.example",
-        "Reminder: Invoice NEW from Yudame",
+        "Invoice NEW from Yudame",
     )
     (pdf,) = list(msg.iter_attachments())
     pdf_path = pathlib.Path(effect["payload"]["files"][0]["path"])

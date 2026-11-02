@@ -80,17 +80,6 @@ class Routine:
     digest: str
     project: str | None = None
     branch: str | None = None
-    wakes: bool = False
-
-
-def wakes(name: str) -> bool:
-    """Whether the routine's results wake the session they report to
-    (`core/notices.py`): its toml's `wakes`, false for one the kernel
-    cannot load."""
-    try:
-        return load(name).wakes
-    except Refused:
-        return False
 
 
 def load(name: str, directory: str | Path | None = None) -> Routine:
@@ -137,8 +126,6 @@ def load(name: str, directory: str | Path | None = None) -> Routine:
     created = found["created"]
     if not isinstance(created, date) or isinstance(created, datetime):
         raise Refused(f"{path}: created is a date")
-    if not isinstance(found.get("wakes", False), bool):
-        raise Refused(f"{path}: wakes is true or false")
     need = found.get("need") or []
     if not isinstance(need, list) or not all(isinstance(n, str) for n in need):
         raise Refused(f"{path}: need is a list of text")
@@ -156,7 +143,6 @@ def load(name: str, directory: str | Path | None = None) -> Routine:
         digest=hashlib.sha256(raw).hexdigest(),
         project=found.get("project"),
         branch=found.get("branch"),
-        wakes=found.get("wakes", False),
     )
 
 
