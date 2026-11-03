@@ -9,6 +9,7 @@ dependencies = [
     "onnx-asr[cpu,hub]>=0.12",
     "playwright>=1.64.1",
     "popoto[postgres]==1.10.1",
+    "psutil>=7.2.2",
     "psycopg[binary]>=3.2",
     "sentry-sdk>=2.73.0",
     "slack-sdk>=3.45.0",

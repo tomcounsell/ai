@@ -1038,7 +1038,9 @@ class Kernel:
             return None  # a chat session waits for the chat or its tasks, not its own outcomes
         # A chat's report its own step wrote (a failed `meet.join`'s) is not seen until a turn takes it.
         waiting = bool(b.chat) and session.chat_waiting(rows)
-        if latest <= self.seen.get(task_id, 0) and not (router.retry_due(rows) or session.wake_due(rows) or waiting):
+        if latest <= self.seen.get(task_id, 0) and not (
+            router.retry_due(rows) or session.wake_due(rows) or waiting
+        ):
             return None
         if f.state in AT_ONCE:
             self._start(task_id, self._step(task_id, latest), latest)

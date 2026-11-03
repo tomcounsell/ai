@@ -622,3 +622,54 @@ def test_readbacks_go_to_toms_dm_whatever_name_he_joined_under(dsn, team, tmp_pa
     task, q, (_dm, (confirm,)) = run(go())
     assert confirm["confirm"] == [{"task_id": task, "question_id": q, "text": "Ship Friday."}]
     assert answers(dsn, task) == []
+
+
+# -- the profile's lock (the Captain, 2026-11-03) ------------------------------
+
+
+def _holder(profile, *, ignore_term=False):
+    """A stand-in for the Chrome Tom signed in from: a live process whose
+    command line names `profile`, and the lock Chrome leaves (`host-pid`)."""
+    import os
+    import subprocess
+    import sys
+
+    body = "import signal, time\n" + (
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else ""
+    )
+    proc = subprocess.Popen([sys.executable, "-c", body + "time.sleep(60)", f"--user-data-dir={profile}"])
+    profile.mkdir(parents=True, exist_ok=True)
+    os.symlink(f"a-mac.local-{proc.pid}", profile / "SingletonLock")
+    return proc
+
+
+@pytest.mark.parametrize("ignore_term", [False, True])
+def test_the_chrome_holding_the_call_profile_is_ended_before_the_call_opens(tmp_path, ignore_term):
+    from bridges.meet import free
+
+    profile = tmp_path / "Application Support" / "meet-chrome"
+    proc = _holder(profile, ignore_term=ignore_term)
+    try:
+        assert asyncio.run(free(f"{profile}/", grace_s=0.5)) == proc.pid
+        proc.wait(timeout=5)
+    finally:
+        proc.kill()
+
+
+def test_a_lock_on_another_profile_a_dead_pid_or_none_is_left_alone(tmp_path):
+    import os
+
+    from bridges.meet import free
+
+    other = _holder(tmp_path / "other profile")
+    profile = tmp_path / "Application Support" / "meet-chrome"
+    profile.mkdir(parents=True)
+    try:
+        assert asyncio.run(free(str(profile))) is None  # no lock
+        os.symlink(f"a-mac.local-{other.pid}", profile / "SingletonLock")
+        assert asyncio.run(free(str(profile))) is None and other.poll() is None
+        os.remove(profile / "SingletonLock")
+        os.symlink("a-mac.local-999999", profile / "SingletonLock")
+        assert asyncio.run(free(str(profile))) is None
+    finally:
+        other.kill()

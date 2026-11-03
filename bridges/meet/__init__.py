@@ -19,13 +19,17 @@ I/O only: what is heard, said and posted is decided in `core/call.py`.
 
 import asyncio
 import base64
+import contextlib
 import json
+import os
+import signal
 import struct
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import psutil
 from aiohttp import WSMsgType, web
 
 HERE = Path(__file__).resolve().parent
@@ -143,6 +147,39 @@ class Socket:
             self.people(said)
 
 
+def _on_profile(pid: int, profile: str) -> bool:
+    """Whether `pid` is a live process started on `profile`."""
+    try:
+        argv = psutil.Process(pid).cmdline()
+    except psutil.Error:
+        return False
+    paths = {os.path.abspath(profile).rstrip("/"), os.path.realpath(profile).rstrip("/")}
+    return any(a.rstrip("/") in {f"--user-data-dir={p}" for p in paths} for a in argv)
+
+
+async def free(profile: str, grace_s: float = 15) -> int | None:
+    """End the Chrome holding `profile` (its `SingletonLock` names
+    `host-pid`), which would stop the call's own from starting: only ever
+    the window Tom signed it in from (the Captain, 2026-11-03). SIGTERM,
+    then SIGKILL after `grace_s`. A lock whose pid is gone or on another
+    profile is left to Chrome. The pid it signalled, or None."""
+    profile = os.path.expanduser(profile)
+    try:
+        pid = int(os.readlink(Path(profile, "SingletonLock")).rsplit("-", 1)[1])
+    except OSError, IndexError, ValueError:
+        return None
+    if not _on_profile(pid, profile):
+        return None
+    for sig, wait in ((signal.SIGTERM, grace_s), (signal.SIGKILL, 5.0)):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, sig)
+        for _ in range(int(wait * 10)):
+            if not _on_profile(pid, profile):
+                return pid
+            await asyncio.sleep(0.1)
+    return pid
+
+
 class Page:
     """The call's Chrome window, one per call."""
 
@@ -153,6 +190,7 @@ class Page:
     async def open(self, url: str, port: int) -> None:
         from playwright.async_api import async_playwright
 
+        await free(self.profile)
         self._playwright = await async_playwright().start()
         self._context = await self._playwright.chromium.launch_persistent_context(
             self.profile,
