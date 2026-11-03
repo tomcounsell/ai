@@ -599,7 +599,8 @@ unchanged; a read-only Postgres role was not used, since it would need a
 password and the denied socket, and Postgres cannot scope rows by project.
 
 The reach is the project's chats as its spec lists them now: each chat
-session of a listed chat, each email thread session under the project, and
+session of a listed chat (a Slack DM its `slack:<team>/*` takes included,
+`Spec.takes`), each email thread session under the project, and
 the tasks under them or under no chat session; and every message received
 in a listed chat or bound to one of those tasks, with its binding and its
 reaction. A message in a listed chat bound to another project's task (the

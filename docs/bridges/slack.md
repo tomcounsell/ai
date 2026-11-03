@@ -183,7 +183,7 @@ the send decides (below).
   live only: gap fill reads listed chats, not `/*`. A Slack Connect
   user's DM carries their home team, so no `/*` entry takes it.
 
-A DM from anyone else, and a channel no project lists, is not received.
+Any other DM, and a channel no project lists, is not received.
 Valor's own posts (the event's `user` is the token's own id) are dropped,
 live and in gap fill; so are bot messages and Slackbot's (`USLACKBOT`,
 which carry no `bot_id`), and every subtype but none,
