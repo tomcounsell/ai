@@ -230,10 +230,16 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    once per Mac, at the Mac, as valor@yuda.me with the passkey: `open -na
    "Google Chrome" --args --user-data-dir="$HOME/Library/Application
    Support/Valor/meet-chrome" https://accounts.google.com/` (the Cowboy
-   on 2026-10-27, the Captain on 2026-11-03; the Pirate and the Bald not
-   yet). The window can stay open: a call ends the Chrome holding the
+   on 2026-10-27; the Captain's, signed in 2026-11-03, was signed out the
+   same day; the Pirate and the Bald not yet). The window can stay open: a call ends the Chrome holding the
    profile before it joins. Until then a call asked for on that Mac fails,
-   naming this step, and each night's update tells Tom once a week. A call needs the voice
+   naming this step, and each night's update tells Tom once a week.
+   Chrome on the call profile runs only in the Mac's own session (the
+   kernel's, or a `launchctl bootstrap gui/$(id -u)` job): over plain ssh
+   the login keychain is locked, Chrome cannot read the profile's cookies
+   and drops them, signing it out (the Captain's, 2026-11-03). Copying
+   Google's cookies in from another profile does not sign it in: Google
+   signed the copy out within a minute. A call needs the voice
    job with `/hear` (kickstart `com.valor.voice` once after this change),
    Smart Turn v3 (8 MB,
    which `tools.voice fetch` now fetches too) and `gws` signed in as Valor
