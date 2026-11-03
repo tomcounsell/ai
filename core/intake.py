@@ -675,8 +675,6 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
 def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
     """The spec listing the chat; for an email, the sender's address, else
     its domain (`email:@<domain>`); else `valor`."""
-    if p["channel"] != "email" and (taken := _taking(p["channel"], p["chat_id"])) is not None:
-        return taken[1]
     ident = p["sender_id"] if p["channel"] == "email" else p["chat_id"]
     found = dict(reversed(_project_chats(p["channel"])))
     if p["channel"] == "email" and ident not in found:

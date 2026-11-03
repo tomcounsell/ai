@@ -2,8 +2,8 @@
 
 Tom, valor team chat on Slack, 2026-11-03 09:14 UTC: "approve direct
 messages with anyone in Slack for teammate persona use ... for both
-workspaces", Yudame's to the yudame project on the Pirate and Pursue
-Mastery's to mastery on the Captain. No question was asked from this task;
+workspaces", Yudame's to the yudame project on the Pirate and the other
+workspace's to the Captain's project. No question was asked from this task;
 two answers reached it as steering from the chat session it reports to,
 in this task's first prompt, each quoting Tom in thread #see-issue-3680:
 09:19 UTC (`1793697574.590689`), "Good call on those exceptions ...
@@ -11,12 +11,12 @@ That's perfect", confirming the Brief's defaults (DMs already listed keep
 their project and role; everyone else's DM goes by workspace, teammate
 role, every message answered); and 09:21 UTC (`1793697665.793929`), "A DM
 from me in that workspace should just fall altogether with the catch-all
-of all DMs within Mastery". So the Brief's "Tom's own DM keeps its
-project" covers his Yudame DM only (listed in `valor.toml`); his Pursue
-Mastery DM is a teammate DM under mastery.
+of all DMs within [that workspace]". So the Brief's "Tom's own DM keeps its
+project" covers his Yudame DM only (listed in `valor.toml`); his DM in the other
+workspace is a teammate DM under the Captain's project.
 
 **Tom's ids, read from each Mac's launchd jobs (2026-11-03).** His
-Pursue Mastery id is `T06N9P4SVSA/U0C4A14EU13`, a member of that workspace
+id in the other workspace is his id in the other workspace (in the private specs' folder notes, not here), a member of that workspace
 (not Slack Connect: its team is the workspace's own, so `inbound.person`
 gives it, not his Yudame id). On the Captain it is in
 `VALOR_OPERATOR_SLACK_IDS` of `com.valor.kernel.slack` but not of
@@ -61,11 +61,11 @@ dropped on every Mac.
    (`C`/`G`, an mpim) is never caught.
 3. **Tom's own Slack DM is one a spec lists.** `_toms_own` for Slack:
    in `operator_slack_ids` and listed by id in some spec. Today, with the
-   Captain's kernel lacking his Mastery id, his DM there would already be
+   Captain's kernel lacking his id there, his DM there would already be
    no own chat; once the kernel carries it (rollout) it would be, and with
    no spec listing it `_project_for` would start an own session under
    `valor` on the Captain. This keeps Tom's 09:21 answer true whatever a
-   job's settings hold: his Mastery DM is a team chat under mastery, his
+   job's settings hold: his DM there is a team chat under the Captain's project, his
    messages `by: tom`.
 4. **The session's opening.** A DM session whose other person is Tom no
    longer says "not Tom".
@@ -87,22 +87,22 @@ a spec holding `slack:<team>/*` (the Slack pattern admits no `*`) and
    skill, the others over ssh with each kernel job's own launchctl
    environment, as earlier rollouts did. Confirm each kernel is on it and
    its bridges connected.
-2. Append `T06N9P4SVSA/U0C4A14EU13` to `VALOR_OPERATOR_SLACK_IDS` in the
+2. Append his id in the other workspace (in the private specs' folder notes, not here) to `VALOR_OPERATOR_SLACK_IDS` in the
    Captain's `com.valor.kernel` (and its Telegram and email jobs, as issue
    3680's step 4 said) and reload them.
 3. Edit the private specs directly (docs/plans/private-projects.md):
-   `yudame.toml` (Pirate) and `mastery.toml` (Captain) each get their
+   `yudame.toml` (Pirate) and the Captain's project spec each get their
    workspace's `slack:<team>/*` in `chats`, `chat_roles` `teammate`, not in
    `mentions`, and a `rooms` line: a 1:1 direct message with a teammate in
    that workspace; answer every message; no engineering or SDLC work
    starts here; engineering requests go to the project's Eng chat
-   (#yudame-dev / #mastery-dev), else Tom.
+   (#yudame-dev / the Captain's project's dev channel), else Tom.
 4. On each Mac, through a turn or the kernel's own environment (sshd cannot
    read `~/Desktop`), read `Spec.all()`: both specs load, and on the Pirate
    `valor.toml` loads too (it is what keeps Tom's Yudame DM off the
    Pirate). Diffs and results go in the delivery.
-5. Confirm live: Tom's Pursue Mastery DM ("hi", already sent, then his
-   next) gets a teammate reply from the Captain (a session under mastery,
+5. Confirm live: Tom's DM in the other workspace ("hi", already sent, then his
+   next) gets a teammate reply from the Captain (a session under the Captain's project,
    role teammate) and no other Mac records it. For Yudame, a DM from
    someone not listed is recorded only on the Pirate and answered there.
    This task posts nothing, so it cannot ask anyone to send one: if none
@@ -142,7 +142,7 @@ setting, so one mechanism (`chats`) keeps placing chats on Macs.
 - `wanted`: a `USLACKBOT` DM is neither caught nor recorded.
 - A DM listed only in a spec that is refused at load, or in a
   `*.toml.paused` file, is caught by the `/*` spec.
-- Tom's reaction on Valor's post in his caught Mastery DM binds as a
+- Tom's reaction on Valor's post in his caught other-workspace DM binds as a
   team-chat reaction does (to the DM's session), raises nothing and starts
   no task.
 - `session_for` on a caught DM starts it under the `/*` spec.
