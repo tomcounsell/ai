@@ -455,7 +455,15 @@ def test_slack_audio_is_transcribed_an_image_is_not(tmp_path, heard):
         "mimetype": "image/png",
         "url_private_download": "https://slack.com/i",
     }
-    run(b._receive("T0ABC/C0TEAM", "C0TEAM", slack_msg("1792000001.000100", clip, img), dm=False))
+    run(
+        b._receive(
+            "T0ABC/C0TEAM",
+            "C0TEAM",
+            slack_msg("1792000001.000100", clip, img),
+            dm=False,
+            wire=b.wires["T0ABC"],
+        )
+    )
     [inbound] = got
     a, i = inbound.attachments
     assert a["transcript"] == f"words of {hashlib.sha256(b'https://slack.com/a').hexdigest()[:8]}"
@@ -479,9 +487,9 @@ def test_slack_acks_a_slow_voice_note_once_it_is_recorded(tmp_path):
     event = {**slack_msg("1792000002.000200", clip), "channel_type": "channel"}
 
     async def go():
-        voice_task = asyncio.create_task(b.handle("E1", event))
+        voice_task = asyncio.create_task(b.handle("E1", event, wire))
         typed = {**slack_msg("1792000003.000300"), "text": "typed", "channel_type": "channel"}
-        await b.handle("E2", typed)
+        await b.handle("E2", typed, wire)
         assert wire.acked == ["E2"] and [m.text for m in got] == ["typed"]
         go_on.set()
         await voice_task
@@ -501,11 +509,15 @@ def test_slack_labels_valors_own_tag_in_a_message_and_its_thread(tmp_path):
     for n, text in enumerate(texts):
         run(
             b._receive(
-                "T0ABC/C0TEAM", "C0TEAM", {**slack_msg(f"179200001{n}.000100"), "text": text}, dm=False
+                "T0ABC/C0TEAM",
+                "C0TEAM",
+                {**slack_msg(f"179200001{n}.000100"), "text": text},
+                dm=False,
+                wire=b.wires["T0ABC"],
             )
         )
     reply = {**slack_msg("1792000020.000100"), "text": "and?", "thread_ts": "1792000019.000100"}
-    run(b._receive("T0ABC/C0TEAM", "C0TEAM", reply, dm=False))
+    run(b._receive("T0ABC/C0TEAM", "C0TEAM", reply, dm=False, wire=b.wires["T0ABC"]))
     assert [m.text for m in got] == [
         "<@UVALOR|valor> hi, ask <@UTOM>",
         "no tag here",

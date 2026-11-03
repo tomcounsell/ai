@@ -419,8 +419,8 @@ async def bridge_states(conn, done: dict[str, Any], after: datetime) -> dict[str
     update's `rollout.ended` row. `done` is what the update restarted and
     set up, from `after` on; a bridge among them is waited for, at most
     `BRIDGE_WAIT_S`, until it connects after `after` (its old process,
-    killed by the restart, may still be connected), else it is named not
-    connected."""
+    killed by the restart, may still be connected; for a bridge of
+    several parts, every part), else it is named not connected."""
     acted = [*(done.get("restarted") or {}), *(done.get("setup") or {}).get("fixed", [])]
     labels = {label: channel for channel, label in rollout.BRIDGES.items()}
     waiting = {labels[a.split(":")[0]] for a in acted if a.split(":")[0] in labels}
@@ -428,7 +428,12 @@ async def bridge_states(conn, done: dict[str, Any], after: datetime) -> dict[str
     while True:
         found = await rollout.services(conn)
         for s in found:
-            if s["name"] in waiting and s["since"] and s["since"] < after:
+            if s["name"] not in waiting:
+                continue
+            if s.get("parts"):  # every part reconnected since the restart
+                s["parts"] = {p: v if v and v >= after else None for p, v in s["parts"].items()}
+                s["since"] = min(s["parts"].values()) if all(s["parts"].values()) else None
+            elif s["since"] and s["since"] < after:
                 s["since"] = None
         down = {s["name"] for s in found if not s["since"]}
         if not (down & waiting) or time.monotonic() >= deadline:

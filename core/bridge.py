@@ -470,9 +470,10 @@ class Bridge(Protocol):
     # replaces the outbox's own serial reconcile at start and on each wake,
     # for a bridge that settles each effect as its own task.
     # A bridge may define `async def connected(self)`, whether its own
-    # connection to its service is up; the outbox names its listening
-    # connection by it (`Outbox.report`). A bridge without one is up while
-    # its outbox runs.
+    # connection to its service is up, or a mapping of part to whether
+    # each is (Slack's, one part per workspace); the outbox names its
+    # listening connection by it (`Outbox.report`). A bridge without one
+    # is up while its outbox runs.
     # A bridge may define `async def read(self, chat, q, limit, before)`,
     # a chat's messages newest first (`q` a text search, `before` a message
     # id to page back from); `serve` then answers it for turns (`reads`).
@@ -493,7 +494,9 @@ class Outbox:
     its listening connection is named `valor-<channel>-up@<epoch>`, the
     second it came up, while the bridge's own connection is up, and
     `valor-<channel>-listen` while it is down, which `rollout.services`
-    reads. The lock connection is held from start, before the bridge
+    reads. A bridge of several parts is named `valor-<channel>-up@<part>=
+    <epoch>,<part>=0` (0: that part is down) while any is up; one of one
+    part is named as one with none. The lock connection is held from start, before the bridge
     connects, so it says only that the process runs."""
 
     def __init__(
@@ -512,7 +515,8 @@ class Outbox:
         self.conn = conn
         self.perform_conn = perform_conn
         self.listener = listener
-        self.up_since: int | None = None
+        self.since: dict[str, int] = {}  # part ("" for none) -> the second it came up
+        self.parts: list[str] = [""]
         self.named = f"valor-{self.channel}-listen"
 
     def __aiter__(self) -> AsyncIterator[Release | ReactionDue]:
@@ -612,9 +616,11 @@ class Outbox:
         return due
 
     def listen_name(self) -> str:
-        if self.up_since is None:
+        if not self.since:
             return f"valor-{self.channel}-listen"
-        return f"valor-{self.channel}-up@{self.up_since}"
+        if len(self.parts) == 1:
+            return f"valor-{self.channel}-up@{self.since[self.parts[0]]}"
+        return f"valor-{self.channel}-up@" + ",".join(f"{p}={self.since.get(p, 0)}" for p in self.parts)
 
     async def report(self) -> None:
         """Name the listening connection by whether the bridge is connected
@@ -622,10 +628,15 @@ class Outbox:
         dead listener is left to `wait`, which names its new one."""
         connected = getattr(self.bridge, "connected", None)
         up = await connected() if connected is not None else True
-        if not up:
-            self.up_since = None
-        elif self.up_since is None:
-            self.up_since = int(time.time())
+        parts = up if isinstance(up, dict) else {"": up}
+        self.parts = sorted(parts)
+        for part, ok in parts.items():
+            if not ok:
+                self.since.pop(part, None)
+            elif part not in self.since:
+                self.since[part] = int(time.time())
+        for part in set(self.since) - set(parts):
+            del self.since[part]
         name = self.listen_name()
         if name == self.named:
             return

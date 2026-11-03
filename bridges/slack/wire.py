@@ -97,7 +97,9 @@ Handler = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 class SlackWire:
-    """One workspace over `app_token` (Socket Mode) and `user_token`.
+    """One workspace, `team` (its id in `slack-keys`), over `app_token`
+    (Socket Mode) and `user_token`. Every call before the first connect is
+    `NotConnected`.
 
     `base_url` and `hosts` are where the Web API and file downloads are;
     Slack's own when not given. `insecure` allows `http` downloads, for a
@@ -108,6 +110,7 @@ class SlackWire:
         app_token: str,
         user_token: str,
         *,
+        team: str = "",
         base_url: str | None = None,
         hosts: tuple[str, ...] = SLACK_HOSTS,
         insecure: bool = False,
@@ -117,8 +120,8 @@ class SlackWire:
         self._base = {"base_url": base_url} if base_url else {}
         self.hosts = hosts
         self.insecure = insecure
-        self.team_id = ""
-        self.user_id = ""
+        self.team_id = team.upper()
+        self.user_id = ""  # set by `auth.test` at connect
         self._ims: dict[str, str] = {}
         self._names: dict[str, str] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -207,9 +210,13 @@ class SlackWire:
     # -- calls -------------------------------------------------------------
 
     async def _read(self, method: str, **kw) -> dict[str, Any]:
+        if self._reads is None:
+            raise NotConnected(f"{self.team_id} is not connected yet")
         return await _call(getattr(self._reads, method), kw, write=False)
 
     async def _write(self, method: str, **kw) -> dict[str, Any]:
+        if self._writes is None:
+            raise NotConnected(f"{self.team_id} is not connected yet")
         return await _call(getattr(self._writes, method), kw, write=True)
 
     async def history(

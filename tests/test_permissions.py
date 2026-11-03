@@ -260,6 +260,21 @@ def test_the_update_enables_and_loads_a_slack_job_that_is_written_but_not_loaded
     assert (fixed, failed, reloaded) == ([f"{permissions.SLACK}: not loaded"], [], [permissions.SLACK])
 
 
+def test_the_update_reloads_the_slack_job_when_a_second_workspaces_keys_are_written(tmp_path):
+    """A second workspace's pair copied in (issue 3680) is new keys: the
+    running bridge is reloaded to connect to it."""
+    config, agents, _ = slack_mac(tmp_path)
+    (agents / f"{permissions.SLACK}.plist").write_bytes(plistlib.dumps({"Label": permissions.SLACK}))
+    run, _ = keys_said(
+        "T0ABC_SLACK_APP_TOKEN: kept\nT0ABC_SLACK_USER_TOKEN: kept\n"
+        "T0XYZ_SLACK_APP_TOKEN: written\nT0XYZ_SLACK_USER_TOKEN: written\n"
+    )
+    reloaded, fixed, failed = [], [], []
+    with config():
+        permissions.slack(agents, lambda *a: reloaded.append(a[0]), fixed, failed, run)
+    assert (fixed, failed, reloaded) == ([f"{permissions.SLACK}: new keys"], [], [permissions.SLACK])
+
+
 def test_the_update_starts_no_slack_job_without_a_slack_chat_or_its_own_keys(tmp_path):
     config, agents, _ = slack_mac(tmp_path / "none", chats='["telegram:-1001"]')
     run, calls = keys_said("")

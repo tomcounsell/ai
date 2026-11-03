@@ -78,41 +78,50 @@ def _entries(path: Path) -> dict[str, dict[str, str]]:
     return out
 
 
-def credentials() -> tuple[str, str]:
-    """The one workspace's app and user tokens; refuses none or two."""
+def credentials() -> dict[str, tuple[str, str]]:
+    """Each workspace's app and user tokens by team, every whole pair in
+    `slack-keys`; refuses none."""
     from bridges.slack.kernel import keyfile
 
     path = keyfile()
     teams = _entries(path) if path.exists() else {}
-    whole = {t: k for t, k in teams.items() if all(n in k for n in KEYS)}
+    whole = {
+        t: (k["SLACK_APP_TOKEN"], k["SLACK_USER_TOKEN"])
+        for t, k in teams.items()
+        if all(n in k for n in KEYS)
+    }
     if not whole:
         raise SystemExit(f"no workspace's tokens are in {path}; run `python -m bridges.slack keys`")
-    if len(teams) > 1:
-        raise SystemExit(f"{path} holds {len(teams)} workspaces; this bridge serves one")
-    (keys,) = whole.values()
-    return keys["SLACK_APP_TOKEN"], keys["SLACK_USER_TOKEN"]
+    return whole
 
 
-def vault_names(machine: str) -> dict[str, str]:
-    """Each key's name in the vault for `machine`: each Mac has its own app,
-    so one Socket Mode token never runs on two bridges (`SLACK_APP_TOKEN_
-    VALOR_THE_PIRATE`)."""
+def vault_names(machine: str, label: str = "") -> dict[str, str]:
+    """Each key's name in the vault for `machine`: each Mac has its own app
+    in each workspace, so one Socket Mode token never runs on two bridges
+    (`SLACK_APP_TOKEN_VALOR_THE_PIRATE`; a further workspace's pair
+    `SLACK_APP_TOKEN_VALOR_THE_PIRATE__<LABEL>`)."""
     suffix = re.sub(r"[^A-Z0-9]+", "_", machine.upper()).strip("_")
-    return {k: f"{k}_{suffix}" for k in KEYS}
+    return {k: f"{k}_{suffix}" + (f"__{label}" if label else "") for k in KEYS}
 
 
 def copy(vault_env: str | Path, path: Path, machine: str) -> dict[str, str]:
-    """Copy `machine`'s tokens from the vault into `slack-keys`, under the
-    team id the user token's `auth.test` names."""
-    from bridges.slack.wire import team_of
+    """Copy each of `machine`'s pairs from the vault into `slack-keys`,
+    under the team id each user token's `auth.test` names. The unlabelled
+    pair is required; each `__<LABEL>` pair is another workspace's."""
+    from bridges.slack import wire
     from core.credentials import _parse_env, copy_keys
 
-    names = vault_names(machine)
-    token = _parse_env(Path(vault_env).read_text()).get(names["SLACK_USER_TOKEN"])
-    if not token:
-        raise SystemExit(f"{names['SLACK_USER_TOKEN']} is missing from {vault_env}")
-    team = team_of(token)
-    return copy_keys(vault_env, path, [f"{team}_{k}" for k in KEYS], {f"{team}_{k}": names[k] for k in KEYS})
+    vault = _parse_env(Path(vault_env).read_text())
+    base = vault_names(machine)
+    if not vault.get(base["SLACK_USER_TOKEN"]):
+        raise SystemExit(f"{base['SLACK_USER_TOKEN']} is missing from {vault_env}")
+    prefix = base["SLACK_USER_TOKEN"] + "__"
+    labels = sorted(n.removeprefix(prefix) for n in vault if n.startswith(prefix) and vault[n])
+    sources: dict[str, str] = {}
+    for names in [base, *(vault_names(machine, label) for label in labels)]:
+        team = wire.team_of(vault[names["SLACK_USER_TOKEN"]])
+        sources |= {f"{team}_{k}": names[k] for k in KEYS}
+    return copy_keys(vault_env, path, list(sources), sources)
 
 
 def plist(*, python: str | None = None) -> bytes:
@@ -140,7 +149,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plist", action="store_true", help="print the launchd job")
     sub = parser.add_subparsers(dest="verb")
     sub.add_parser("run", help="run the bridge")
-    sub.add_parser("keys", help="copy this machine's app and user tokens from the vault into the key directory")
+    sub.add_parser(
+        "keys",
+        help="copy this machine's app and user tokens, a pair per workspace, from the vault into the key directory",
+    )
     sub.add_parser("manifest", help="print the app manifest for api.slack.com")
     args = parser.parse_args(argv)
 
@@ -166,9 +178,8 @@ def main(argv: list[str] | None = None) -> int:
 
         sentry.init("slack")
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-        app_token, user_token = credentials()
-        wire = SlackWire(app_token, user_token)
-        asyncio.run(bridge.serve(SlackBridge(wire, from_core(), seen=seen_path())))
+        wires = [SlackWire(app, user, team=team) for team, (app, user) in credentials().items()]
+        asyncio.run(bridge.serve(SlackBridge(wires, from_core(), seen=seen_path())))
         return 1  # serve returned: launchd restarts the job
     parser.print_help()
     return 2

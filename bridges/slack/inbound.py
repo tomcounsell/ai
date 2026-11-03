@@ -6,8 +6,8 @@ a `<team>/<user>` id the kernel compares, and a file is named by its
 sha256, never by anything the sender chose.
 
 One function, `person`, builds a person's id, live, in gap fill, and in
-send: the team is the message's `user_team`, else its `team`, else the
-connected workspace's. Slack sends `user_team` on some copies of a
+send: the team is the message's `user_team`, else its `team`, else that
+of the workspace it came from. Slack sends `user_team` on some copies of a
 message and not others, so the fallback makes both copies one person.
 """
 

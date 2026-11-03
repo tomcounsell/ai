@@ -203,7 +203,10 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `SLACK_APP_TOKEN_<MACHINE>` and `SLACK_USER_TOKEN_<MACHINE>`
    (`VALOR_THE_PIRATE`). The `com.valor.kernel.slack` job is not made by
    hand: every update copies the keys and installs and loads it
-   ([bridges/slack.md](bridges/slack.md), One app per Mac). When the
+   ([bridges/slack.md](bridges/slack.md), One app per Mac per workspace).
+   A Mac serving a further workspace has an app there too, made the same
+   way, its tokens `SLACK_APP_TOKEN_<MACHINE>__<LABEL>` and
+   `SLACK_USER_TOKEN_<MACHINE>__<LABEL>`. When the
    manifest gains a scope, update each app's (`apps.manifest.update`, or
    the app's OAuth page), and for a new user event its Event
    Subscriptions page, then reinstall it to Valor's account; the user

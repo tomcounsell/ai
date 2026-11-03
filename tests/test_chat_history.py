@@ -199,7 +199,7 @@ def test_a_chat_telethon_cannot_resolve_is_refused():
 
 
 class SlackFake:
-    user_id = "UVALOR"
+    team_id, user_id = "T0ABC", "UVALOR"
 
     def __init__(self, matches=(), refuse=None):
         self.calls = []

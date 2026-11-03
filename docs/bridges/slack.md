@@ -1,7 +1,7 @@
 # Slack bridge
 
-The Slack bridge connects Valor's own Slack user account to one workspace
-over Socket Mode, hands each message to `core/` as a record, and posts the
+The Slack bridge connects Valor's own Slack user account to each workspace
+whose tokens this Mac holds, over Socket Mode, hands each message to `core/` as a record, and posts the
 messages the broker releases. It conforms to the bridge port defined in
 [telegram.md](telegram.md#the-bridge-port): intake, performers, and the
 outbox. This doc covers what is particular to Slack.
@@ -14,6 +14,13 @@ Mac, each on that Mac's own app. The Cowboy's receives Tom's DM, #general
 (`C0VP3DHJKD9`, a mentions-only team chat for general Yudame business;
 Tom, 2026-10-23), and its projects' dev channels; each other Mac's, its
 own projects' dev channels.
+
+**Another workspace** (Tom, 2026-11-03: a client's workspace, served by
+the Mac that runs that client's project). A Mac's one bridge serves every
+workspace in its `slack-keys`, each on its own internal app (below). Once
+the app is installed and its pair is in the vault, a channel there is
+only an entry in that project's private spec, `slack:<team>/<channel>`,
+with its room, role and `mentions` as for any chat.
 
 **Dev channels** (Tom, 2026-10-25: "private dev channels for each
 project ... named like x-dev. They are equivalent to Eng: x telegram
@@ -79,9 +86,14 @@ Marketplace gets one request a minute on `conversations.history` and
 `conversations.replies`, and an internal app keeps Tier 3, which gap fill
 assumes.
 
-**One app per Mac.** A chat is answered only on the Mac its project
-names, and Slack splits one Socket Mode app's events between the
-connections open on its token, so one token runs on one bridge. Each Mac
+**One app per Mac per workspace.** A chat is answered only on the Mac its
+project names, and Slack splits one Socket Mode app's events between the
+connections open on its token, so one token runs on one bridge. An
+internal app installs only in the workspace it was made in (another one
+needs distribution, and its history limit), so a Mac serving a second
+workspace has a second app there, made from the same manifest and
+installed by Valor's own account in that workspace (the user token is
+the installer's; a workspace admin only approves it). Each Mac
 runs its own bridge on its own app: "Valor" (`A0C97117R5F`) on the
 Cowboy, "Valor Pirate" (`A0CBTPN2T4M`), "Valor Captain"
 (`A0CBYSURU8J`), "Valor Bald" (`A0CBTPN8BTP`). All four are Valor's
@@ -108,9 +120,12 @@ name upper-cased, each run of other characters `_`:
 `slack-keys` in the kernel key directory (mode 600), each under the team
 id `auth.test` names for the user token (`T0ABC_SLACK_APP_TOKEN`),
 printing each name with `written`, `kept`, or `missing` and never a value,
-and exits 1 when one is missing. It never reads another Mac's pair, and
-no Mac's is unsuffixed. `run` refuses to start with no workspace's tokens,
-or with more than one workspace in the file: the bridge serves one.
+and exits 1 when one is missing. A Mac's pair in a further workspace is
+`SLACK_APP_TOKEN_<MACHINE>__<LABEL>` and `SLACK_USER_TOKEN_<MACHINE>__<LABEL>`
+(any label; the double `_` keeps one Mac's names from being another's
+prefix), copied the same way under its own team id. It never reads another
+Mac's pair, and no Mac's is unsuffixed. `run` connects every whole pair in
+the file and refuses to start with none.
 
 **Every update makes sure of it** (Tom, 2026-10-25: "makes sure it's
 Slack comms is working, the same way it ensures Telegram is connected").
@@ -123,11 +138,17 @@ written but not loaded is enabled and loaded. The update then
 names each bridge `connected since` the second its own connection came
 up, or `not connected` ([telegram.md](telegram.md#the-outbox),
 Connected), in its `rollout.ended` row, its reply in the room and `core
-update --wait`.
+update --wait`. A bridge serving two workspaces is one `slack` line naming
+each: `connected since … (<team> connected since …, <team> not
+connected)`, connected only while both are, and after a restart the update
+waits for both; with one workspace the line is as before.
 
-**The connection.** `slack_sdk`'s aiohttp `SocketModeClient` for events
-and `AsyncWebClient` for the Web API, with no Bolt. `auth.test` at connect
-gives the team id and the token's own user id. The socket is kept up by
+**The connection.** Per workspace, `slack_sdk`'s aiohttp `SocketModeClient`
+for events and `AsyncWebClient` for the Web API, with no Bolt. `auth.test`
+at connect gives the team id and the token's own user id. The bridge
+starts sending once any workspace is connected; one whose connect fails
+(a revoked token, say) is logged and tried again each `serve_tick_s`
+while the others serve. The socket is kept up by
 `slack_sdk`'s own session monitor. Reads (history, replies, `users.info`,
 `files.info`, `conversations.open`) retry twice on a connection error, a
 429, or a 5xx. Writes (`chat.postMessage` and the file upload) are never
@@ -195,8 +216,9 @@ redelivers an envelope not acked within about 3 seconds; a redelivery whose
 receive, is acked once it commits, and is received itself if it fails. A
 receive that fails is not acked, so Slack retries it.
 
-**Gap fill.** On every new socket session and every tick, for each owned
-chat in the connected workspace, the bridge reads `conversations.history`
+**Gap fill.** On every tick for each connected workspace, and on each new
+socket session for its own workspace, for each owned chat there, the
+bridge reads `conversations.history`
 from the chat's seen `ts`, then `conversations.replies` from that `ts` for
 every thread with recent activity: a parent in the history whose
 `latest_reply` is newer, the roots of Valor's sends (and old notices) in the
@@ -212,7 +234,8 @@ index makes each replay land once.
   (`intake.lowest_ts`); with no rows either, its seen `ts` is set to its
   newest and nothing is recorded.
 - Reads are budgeted per method, 50 calls a minute each for history and
-  replies, shared across chats. A spent budget ends the pass, and the next
+  replies, shared across a workspace's chats (Slack's limit is per
+  workspace). A spent budget ends the pass, and the next
   tick resumes it where it stopped.
 - A pass's place in a chat (its page cursor, its newest `ts`, its thread
   list) moves only once the page it read is recorded. A failed ledger read
@@ -264,8 +287,10 @@ is a target, owned or not. Its payload:
 | `files` | Each a path in the task's workspace and its sha256; a voice reply is an `.mp3` from the present skill's `tts.py`, uploaded like any file, which Slack plays in the message |
 | `about` | `question:<id>` on a board session's post of an open question; stored, not read by the bridge, so the next board row knows the question's post (`core/board.py`) |
 
-A target in a workspace other than the connected one is `broker.Failed`
-("`<team>` is not a connected workspace"), and nothing is posted.
+A target in a workspace with no pair in `slack-keys` is `broker.Failed`
+("`<team>` is not a connected workspace"), and nothing is posted; so is one
+in a workspace not connected yet ("`<team>` is not connected yet"), so a
+revoked workspace's sends fail where the session sees them.
 
 **The board canvas.** `slack.write_canvas` is `act`, target
 `<team>/<channel>`, payload `{"markdown"}`. The bridge reads the
@@ -335,7 +360,7 @@ are the split text, then the files. For each part in order:
 All parts found is done. A found prefix means the rest are posted, then
 done. A part found after a missing one, or two candidates for one part, is
 `Unknown`. Nothing found is None, and the broker writes the send failed.
-`lookup` before the bridge has connected is `Unknown`, so the reconcile
+`lookup` before the target's workspace has connected is `Unknown`, so the reconcile
 `serve` runs before connecting leaves the send in flight for the next wake.
 There is no send state file.
 
@@ -426,8 +451,9 @@ file's name.
   rooted at someone's top-level message, with no reply in it recorded and
   no post of Valor's in it in the last 14 days, is missed by gap fill;
   live, the socket delivers it.
-- **One workspace.** `slack-keys` is keyed by team id, so a second
-  workspace is data; its connection is later work.
+- **Two workspaces a Mac.** A bridge's listening connection names each
+  workspace's up-since (`valor-slack-up@<team>=<epoch>,...`), and Postgres
+  keeps 63 bytes of a name: two fit, a third would be cut.
 - **Reactions while the bridge is down** are missed: gap fill reads
   history, and history carries no reaction events. Tom says it in the
   channel instead.

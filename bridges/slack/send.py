@@ -16,7 +16,7 @@ is the outcome.
 What a failure means, as the broker reads it:
 - the first post refused, rate limited, or never sent is `broker.Failed`
   (a rate limit names Slack's `Retry-After` seconds); so is a target in a
-  workspace other than the connected one;
+  workspace other than this wire's, or before it has connected;
 - a 429 on a later post is waited out for its seconds and the send goes
   on; a later post refused settles done with the posts made;
 - a post in doubt (the connection cut after the request was written, a
@@ -220,10 +220,10 @@ class Sender:
 
     async def lookup(self, action, key: str, since: str) -> dict[str, Any] | None:
         p = action.payload
-        if not self.wire.team_id:
+        if not self.wire.user_id:
             # `serve` reconciles before the bridge connects: nothing can be
             # read yet, so the effect stays in flight for the next wake.
-            raise self.kernel.Unknown("not connected to Slack yet")
+            raise self.kernel.Unknown(f"not connected to {self.wire.team_id} yet")
         try:
             target = self._target(action.target)
         except self.kernel.Failed:

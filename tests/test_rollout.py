@@ -770,6 +770,99 @@ def test_a_bridge_is_connected_only_while_its_own_connection_is_up(fresh, tmp_pa
     }
 
 
+def test_a_bridge_of_two_workspaces_is_one_row_with_each_parts_state(fresh, tmp_path, monkeypatch):
+    """Slack serving two workspaces is one `slack` row, its commit from the
+    lock connection, `parts` each workspace's since, and `since` None while
+    either is down; a bridge of one part keeps the plain name."""
+    from core import bridge as port
+    from core import permissions
+
+    monkeypatch.setattr(permissions, "AGENTS", tmp_path)
+    (tmp_path / f"{rollout.BRIDGES['slack']}.plist").write_bytes(b"")
+    slack = FakeBridge("slack")
+    up = {"T0AAA": False, "T0BBB": False}
+
+    async def connected():
+        return dict(up)
+
+    slack.connected = connected
+
+    async def go():
+        seen = []
+        lock = await db.connect(fresh, application_name="valor-slack@abc123")
+        listener = await db.connect(fresh, application_name="valor-slack-listen")
+        async with await db.connect(fresh) as conn:
+            outbox = port.Outbox(slack, {}, conn, conn, listener, fresh)
+
+            async def state():
+                await outbox.report()
+                (s,) = [s for s in await rollout.services(conn) if s["name"] == "slack"]
+                seen.append((outbox.named.partition("@")[2].count("="), s["commit"], s["since"] is not None))
+                return s
+
+            await state()
+            up["T0BBB"] = True
+            half = await state()
+            up["T0AAA"] = True
+            whole = await state()
+            up["T0BBB"] = False
+            await state()
+            up.pop("T0BBB")
+            one = await state()
+            await outbox.listener.close()
+        await lock.close()
+        return seen, half, whole, one
+
+    seen, half, whole, one = run(go())
+    assert seen == [(0, "abc123", False), (2, "abc123", False), (2, "abc123", True), (2, "abc123", False),
+                    (0, "abc123", True)]  # fmt: skip
+    assert half["parts"]["T0AAA"] is None and half["parts"]["T0BBB"] and half["since"] is None
+    assert whole["since"] == min(whole["parts"].values()) and "parts" not in one
+    a, b = (f"{whole['parts'][t]:%Y-%m-%d %H:%M:%S} UTC" for t in ("T0AAA", "T0BBB"))
+    assert rollout.states([whole, half]) == {
+        "slack": f"not connected (T0AAA not connected, T0BBB connected since {b})"
+    }
+    assert rollout.states([whole]) == {
+        "slack": f"connected since {min(a, b)} (T0AAA connected since {a}, T0BBB connected since {b})"
+    }
+
+
+def test_an_update_waits_for_every_workspace_of_a_restarted_slack_bridge(fresh, tmp_path, monkeypatch):
+    """The old process's name, both parts up before the restart, is not
+    taken for the new one; one part back is not enough; both are."""
+    import time
+    from datetime import UTC, datetime
+
+    from core import permissions
+
+    monkeypatch.setattr(permissions, "AGENTS", tmp_path)
+    (tmp_path / f"{rollout.BRIDGES['slack']}.plist").write_bytes(b"")
+    monkeypatch.setattr(serve, "BRIDGE_WAIT_S", 5.0)
+    done = {"restarted": {rollout.BRIDGES["slack"]: "restarted"}}
+
+    async def update(both: bool):
+        old = int(time.time()) - 3600
+        named = await db.connect(fresh, application_name=f"valor-slack-up@T0AAA={old},T0BBB={old}")
+        after = datetime.now(UTC).replace(microsecond=0)
+
+        async def comes():
+            await asyncio.sleep(1.1)
+            await named.close()
+            now = int(time.time())
+            return await db.connect(
+                fresh, application_name=f"valor-slack-up@T0AAA={now},T0BBB={now if both else 0}"
+            )
+
+        coming = asyncio.create_task(comes())
+        async with await db.connect(fresh) as conn:
+            states = await serve.bridge_states(conn, done, after)
+        await (await coming).close()
+        return states["bridges"]["slack"]
+
+    assert run(update(True)).startswith("connected since ")
+    assert run(update(False)).startswith("not connected (T0AAA connected since ")
+
+
 def test_an_update_reports_each_bridges_state_waiting_for_one_it_installed(fresh, tmp_path, monkeypatch):
     """The `rollout.ended` row names each installed bridge connected or
     not; a bridge the setup check just installed is waited for, and one

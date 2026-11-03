@@ -30,7 +30,8 @@ every Mac's schedule at its next update (the weekly `invoices`, Tom,
 
 It also makes sure Slack is served where this Mac's projects list a
 Slack chat (`slack`, Tom, 2026-10-25): `python -m bridges.slack keys`
-copies this Mac's own app's tokens from the vault (none: `slack: no keys`,
+copies this Mac's own app's tokens in each workspace from the vault (none:
+`slack: no keys`,
 and nothing is started), a missing `com.valor.kernel.slack` job is written
 from `python -m bridges.slack --plist` with the settings of this Mac's
 Telegram job, and loaded, and a job whose keys changed or that is not

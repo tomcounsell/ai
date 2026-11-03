@@ -146,7 +146,10 @@ refused release writes `effect.refused` once and is not yielded again. The bridg
 one is up while its outbox runs) and names its listening connection
 `valor-<channel>-up@<epoch>`, the second it came up, while it is up, and
 `valor-<channel>-listen` while it is down, a listener `wait` replaces
-included. The dashboard's Services row and every update's report read
+included. A bridge whose `connected()` is a mapping of parts (Slack's two
+workspaces) is named `valor-<channel>-up@<part>=<epoch>,<part>=0` while any
+part is up, 0 for a part that is down, and the services row carries each
+part's since; a mapping of one part is named as a bool. The dashboard's Services row and every update's report read
 that name (`rollout.services`): the lock connection exists from start,
 before the bridge connects, so it says only that the process runs.
 

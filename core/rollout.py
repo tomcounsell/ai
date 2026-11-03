@@ -459,7 +459,10 @@ async def services(conn) -> list[dict[str, Any]]:
     when it connected (None: not connected). A bridge's is the second its
     outbox named its listening connection `valor-<channel>-up@<epoch>`
     (`core.bridge.Outbox.report`): its own connection to its service is
-    up, not only its process. The kernel's is its lock connection's start."""
+    up, not only its process. The kernel's is its lock connection's start.
+    A bridge of several parts (`<part>=<epoch>,...`) also has `parts`,
+    `{part: since}`, and its `since` is its earliest part's, or None while
+    any part is down."""
     rows = await (
         await conn.execute(
             "SELECT application_name, backend_start FROM pg_stat_activity "
@@ -467,16 +470,26 @@ async def services(conn) -> list[dict[str, Any]]:
             "AND application_name LIKE 'valor-%%@%%'"
         )
     ).fetchall()
-    found, up = {}, {}
+    found, up, parts = {}, {}, {}
     for app, started in rows:
         name, _, at = app.removeprefix("valor-").partition("@")
         if name.endswith("-up"):
+            name = name.removesuffix("-up")
             if at.isdigit():
-                up[name.removesuffix("-up")] = datetime.fromtimestamp(int(at), UTC)
+                up[name] = datetime.fromtimestamp(int(at), UTC)
+            elif "=" in at:
+                each = dict(p.partition("=")[::2] for p in at.split(","))
+                parts[name] = {
+                    p: datetime.fromtimestamp(int(e), UTC) if e.isdigit() and int(e) else None
+                    for p, e in each.items()
+                }
+                up[name] = min(parts[name].values()) if all(parts[name].values()) else None
             continue
         found[name] = {"name": name, "commit": at or None, "since": started if name == "kernel" else None}
     for name, since in up.items():
         found.setdefault(name, {"name": name, "commit": None, "since": None})["since"] = since
+        if name in parts:
+            found[name]["parts"] = parts[name]
     installed = [c for c, label in BRIDGES.items() if (permissions.AGENTS / f"{label}.plist").exists()]
     return [
         found.get(name, {"name": name, "commit": None, "since": None})
@@ -486,9 +499,14 @@ async def services(conn) -> list[dict[str, Any]]:
 
 def states(services: list[dict[str, Any]]) -> dict[str, str]:
     """Each bridge's state in words, as an update reports it: `connected
-    since <UTC time>` or `not connected`."""
-    return {
-        s["name"]: f"connected since {s['since']:%Y-%m-%d %H:%M:%S} UTC" if s["since"] else "not connected"
-        for s in services
-        if s["name"] != "kernel"
-    }
+    since <UTC time>` or `not connected`, then, for a bridge of several
+    parts, each part's in brackets."""
+
+    def state(since) -> str:
+        return f"connected since {since:%Y-%m-%d %H:%M:%S} UTC" if since else "not connected"
+
+    def parts(s) -> str:
+        each = sorted((s.get("parts") or {}).items())
+        return " (" + ", ".join(f"{p} {state(v)}" for p, v in each) + ")" if each else ""
+
+    return {s["name"]: state(s["since"]) + parts(s) for s in services if s["name"] != "kernel"}
