@@ -552,6 +552,7 @@ PUBLISHED_PATH = [("Audio Generation", "running", ""), AUDIO_PAUSE, AUDIO_PAUSE,
 
 def finished_run(tmp, state="done"):
     d = Path(tmp)
+    d.mkdir(parents=True, exist_ok=True)
     (d / "question.txt").write_text("Is X better than Y? More words")
     (d / "report.md").write_text("# Is X better\n\n## Summary\n\nX is better.\n\n## Findings by topic\n\nlong")
     run.write_status(d, state=state, error="RuntimeError: boom" if state == "failed" else None)
@@ -622,8 +623,12 @@ def test_publish_waits_for_the_report_and_stops_on_a_failed_one(tmp_path):
     run.publish(d, "yudame-staff", None, {"RENDER_API_KEY": "k"}, run=cf.run, get=cf.get, popen=cf.popen,
                 sleep=sleep, clock=lambda: 0, read=lambda ref: None)
     assert sleeps and json.loads((d / "episode.json").read_text())["state"] == "published"
+    combined = finished_run(tmp_path / "combined", state="failed")
+    assert publish(combined, FakeCuttlefish(PUBLISHED_PATH))["state"] == "published", "a combined report.md is published"
     cf = FakeCuttlefish(PUBLISHED_PATH)
-    assert "the research failed: RuntimeError: boom" in failure(finished_run(tmp_path, state="failed"), cf)
+    lost = finished_run(tmp_path / "lost", state="failed")
+    (lost / "report.md").unlink()
+    assert "the research failed: RuntimeError: boom" in failure(lost, cf)
     assert not cf.calls
 
 

@@ -614,7 +614,9 @@ def publish(run_dir: Path, podcast: str, title: str | None, env: dict, run=subpr
     step("waiting for the report")
     while (status := json.loads((run_dir / "status.json").read_text()))["state"] == "running":
         wait("the research")
-    if status["state"] != "done":
+    # A report the researcher combined from narrower runs lands in a run whose own
+    # status failed; the episode reads only report.md, so its presence is what counts.
+    if status["state"] != "done" and not (run_dir / "report.md").exists():
         raise RuntimeError(f"the research failed: {status.get('error')}")
 
     step("loading Cuttlefish's production settings")
