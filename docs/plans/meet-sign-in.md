@@ -56,8 +56,8 @@ refusal is added.
    existing failure report carries that message to the chat.
 5. **Docs.** `docs/rollout.md` step 9 and `docs/bridges/meet.md` give the
    sign-in as that command, run at the Mac in Terminal, with ⌘Q or Ctrl-C
-   to give up. They also say never
-   to start Chrome on the profile over ssh, and why (2026-11-03).
+   to give up. They also say never to start Chrome on the profile over
+   ssh, and why (2026-11-03).
 
 **The Meet fixes task.** Task 26957dfe's lock release (`free`, which
 ends the Chrome holding the profile) and its weekly notice are not on main
