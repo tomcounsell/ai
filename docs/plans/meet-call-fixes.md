@@ -3,6 +3,7 @@ status: Planning
 type: bug
 owner: Valor
 created: 2026-11-03
+revision: 2 (critique of revision 1)
 tracking: docs/plans/meet.md
 ---
 
@@ -13,66 +14,78 @@ tracking: docs/plans/meet.md
 the first failure reached him the next morning. Asking for a call should
 just work.
 
-**What the record shows** (the Captain's ledger and `meet.log`).
+**What the record shows** (the Captain's ledger, `meet.log`, Slack).
 
-1. *Sign-in.* The call profile there was first made on 2026-11-03 06:26
+1. *Sign-in.* The Captain's call profile was first made 2026-11-03 06:26
    UTC, when Tom ran the sign-in. `docs/rollout.md` makes it a step Tom
-   does at each Mac, and nothing asked him to: only the Cowboy was done
-   (2026-10-27). The Pirate and the Bald have no call profile today.
+   does at each Mac and nothing asked him: only the Cowboy was done
+   (2026-10-27). The Pirate and the Bald have no call profile.
 2. *Lock.* 06:31 UTC: `launch_persistent_context` failed, "Failed to
-   create a ProcessSingleton": the sign-in Chrome (still running, pid
-   86970) held `SingletonLock`.
-3. *Delay, real: 15 h 41 min.* The ask landed 2026-11-02 04:19 UTC;
-   `meet.join` failed at 04:19:53 and wrote its `child.reported` to the
-   asking session inside that session's own step. `serve.Kernel._step`
-   marks every row the step wrote as seen, so `_ready` skipped the session
-   although `session.chat_waiting` was true. Only the 20:00 UTC update's
-   restart (which empties `seen`) woke it. The same swallowed today's
-   link report: the link was never posted; the turn at 06:31:49 was woken
-   by the call process's failure report, written by another writer.
+   create a ProcessSingleton": the sign-in Chrome (pid 86970, still
+   running) held `SingletonLock`.
+3. *Delay, real: 15 h 41 min.* The one call ask in that channel is Slack
+   message 1793593165.270199, sent 2026-11-02 04:19:25 UTC (11:19 in
+   UTC+7); Slack's own record and the ledger's `message.steered` agree, and
+   no message from Tom landed near 07:51 UTC, so the quoted "2:51 PM" is
+   not that message's time. Its turn ran at once; `meet.join` failed at
+   04:19:53 and wrote its `call` report to the asking session inside that
+   session's step. `serve.Kernel._step` marks every row the step wrote as
+   seen, so `_ready` skipped the session though `session.chat_waiting`
+   was true, until the 20:00 UTC update's restart emptied `seen`. Today the
+   same swallowed the link report (never posted); the 06:31:49 turn was
+   woken by the call process's failure report, another writer's row.
+   The only writers of a `child.reported` onto the session being stepped,
+   inside its step, are `meet.join`'s two (`tools/meet.py`, the failure;
+   `call.begin`, the link). The board digest and the kernel's notices are
+   written from the kernel's tick, outside any step, and already wake it.
 
 ## What is built
 
-1. **Wake on a step's own report** (`core/serve.py`, `_step`). For a chat
-   session, a `message.steered` or `child.reported` row the step wrote
-   itself (not quiet) stops the advance of `seen`, as a row from another
-   writer does, so the session is stepped again. Non-chat tasks unchanged.
+1. **A waiting chat is stepped** (`core/serve.py`, `_ready`). The `seen`
+   skip also yields when `session.chat_waiting(rows)` holds, beside
+   `retry_due` and `wake_due`: the one definition of a chat having
+   something to answer, so no second list of row types. It cannot loop: a
+   turn that reads the report moves `steer_since` past it at
+   `turn.collected`, and a step that cannot run (parked) is skipped before.
 2. **The joiner frees its profile** (`bridges/meet/__init__.py`,
-   `Page.open`). Before launching, read `SingletonLock` (`host-pid`); if
-   that pid is alive and its command line names this profile's
-   `--user-data-dir`, SIGTERM it and wait (up to 15 s) for it to exit,
-   then launch. A stale lock or a pid that is not Chrome on this profile
-   is left to Chrome. The profile is Valor's alone; a window on it is only
-   ever the sign-in window.
+   `Page.open`). Before launching, read `SingletonLock` (a symlink to
+   `host-pid`); if the pid is alive and `ps -o command=` contains
+   `--user-data-dir=<profile>` as a substring (both paths `expanduser`ed,
+   `realpath`ed, trailing slash dropped; the path has a space), SIGTERM it,
+   wait up to 15 s, SIGKILL if still alive, then launch. A dead pid or a
+   process not on this profile is left to Chrome. The profile is Valor's
+   alone; a window on it is only ever the sign-in window.
 3. **The sign-in, before a call.** The nightly update (`update_runner`),
-   when `call.profile_ready()` is false, tells Tom once a week per Mac
-   (`notices.request`, kind `rollout`, about_key
-   `meet-profile:<machine>:<ISO week>`, like the low-disk notice) that the
-   Mac's call profile is not signed in, with the one command (`SIGN_IN`).
-   `docs/rollout.md`: the sign-in is a named setup step, with which Macs
-   are done; the "quit that window with ⌘Q" instruction goes, since item 2
-   makes it unnecessary.
+   when `call.profile_ready()` is false, tells Tom once per Mac per ISO
+   week (`notices.request`, kind `rollout`, about_key
+   `meet-profile:<machine>:<ISO week>`, as the low-disk notice does) that
+   this Mac cannot take calls until its call profile is signed in, with
+   `SIGN_IN`. `docs/rollout.md`: the sign-in is a named setup step, with
+   which Macs are done; "quit that window with ⌘Q" goes (item 2).
 
-**Roll out and confirm.** Merge, update the Cowboy, Captain, Pirate and
-Bald, and on the Captain (sign-in Chrome still open) run
-`tests/test_live_meet.py` with `VALOR_LIVE=1 VALOR_MEET_LIVE=1`: Valor
-joins a new Meet as itself. Nothing is posted in any chat.
+**Roll out and confirm.** Merge; update the Cowboy, Captain, Pirate and
+Bald. On the Captain: make sure a Chrome is open on the call profile
+(`SIGN_IN`'s command on `about:blank` if none is), note its pid, run
+`tests/test_live_meet.py` (`VALOR_LIVE=1 VALOR_MEET_LIVE=1`), and show that
+pid gone (`ps`) and Valor joined. Nothing is posted in any chat.
 
-**Out of scope.** Signing in the Pirate and the Bald (needs Tom's passkey
-at each Mac; item 3 asks him); driving an open Chrome over CDP (a window
-Tom opens has no debugging port); Tom's quoted times (the record's are
-UTC above).
+**Out of scope.** Signing in the Pirate and the Bald (Tom's passkey at
+each Mac; item 3 tells him); driving an open Chrome over CDP (a window Tom
+opens has no debugging port).
 
 ## Tests
 
-- `tests/test_serve.py`: a chat session whose step writes a
-  `child.reported` (kind `call`) to itself is stepped again on the next
-  tick, once; a step writing only its turn rows is not; a non-chat task
-  writing a report to itself is not re-stepped.
-- `tests/test_meet.py`: a live process whose argv names the profile and
-  holds `SingletonLock` is terminated before launch; a lock naming a pid
-  that is not on this profile is left alive; a stale lock (dead pid) and no
-  lock open without error.
-- `tests/test_rollout.py`: the update reports an unsigned profile once a
-  week per Mac, and nothing when it is signed in.
+- `tests/test_serve.py`: a chat session whose step writes a `call`
+  report to itself is stepped on the next tick; that second step's turn
+  takes it, `chat_waiting` is then false, and further ticks step it no
+  third time; a step writing only its own turn rows is not re-stepped.
+- `tests/test_meet.py`: a live child whose argv names a profile under a
+  path with a space, holding `SingletonLock`, is ended before launch
+  (SIGTERM; one ignoring SIGTERM is SIGKILLed); a lock naming a live pid
+  not on this profile is left alive; a dead pid's lock and no lock leave
+  nothing to do.
+- `tests/test_rollout.py`, beside the disk notice's test: an unsigned
+  profile gives one notice whose about_key names the machine; a second run
+  that week gives none; another machine that week gets its own; a signed
+  profile gives none.
 - Full suite under 5 minutes; the live join on the Captain as above.
