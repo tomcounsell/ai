@@ -32,8 +32,10 @@ Done when Tom has had a report PDF and an episode he asked for from one topic (r
    replaces today's draft-only verb, and `--podcast` becomes required. It returns at
    once and runs a detached worker, the same pattern as the research worker, writing
    `<dir>/episode.json` (`state`, `step`, `slug`, `url`, `error`). The worker:
-   - waits for `<dir>/status.json` to reach `done`, so it can start alongside the
-     research; on `failed`, it records that and stops;
+   - waits while `<dir>/status.json` is `running`, so it can start alongside the
+     research; then goes on if `<dir>/report.md` exists (a report combined from
+     narrower runs can sit in a run whose own status failed), and otherwise records
+     the research's error and stops;
    - takes the production env from the Render API's `cuttlefish` env group, looked up
      by name, into the subprocess env only (never written to disk);
    - uses the managed checkout (`find_cuttlefish`), so `CUTTLEFISH_DIR` is no longer
