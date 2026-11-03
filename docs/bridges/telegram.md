@@ -461,7 +461,9 @@ project its `"project"` names, one its Brief's `Repos:` line lists, else
 the session's own; the child carries
 the session's chat as `project.chat`, the chat it reads, or with `"in"`
 the named chat of the project, under that chat's session, opened if it
-has none), or from a
+has none, and the `"context"` the session wrote for it: a few lines of
+where it came from and what its room allows and forbids, rendered as its
+Brief's `Context:` line on every turn), or from a
 message of Tom's that is not a reply and has no chat session to go to: an
 email, or a chat no project lists when there is no `valor` spec. Before
 its first turn, the request-underspecification classifier
