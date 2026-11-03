@@ -51,14 +51,23 @@ fill relies on Tier 3. So the client gets its own internal app from
    - A send or lookup for a workspace that hasn't connected yet is
      `Unknown`, as lookup before connecting is today, so the next wake
      settles it.
-3. **Per-workspace connection, `core/bridge.py`, `core/rollout.py`.**
+3. **Per-workspace connection, `core/bridge.py`, `core/rollout.py`,
+   `core/serve.py`.**
    - `connected()` may return `{part: bool}`. The outbox keeps one
      up-since per part and names its listening connection
-     `valor-slack-up@<team>=<epoch>,<team>=0`, where 0 means down. The
-     name is `-listen` when every part is down. A bridge whose
-     `connected()` returns a bool keeps today's name.
-   - `rollout.services` and `states` report each part as
-     `slack <team>: connected since …` or `not connected`.
+     `valor-slack-up@<team>=<epoch>,<team>=0`, where 0 means down, and
+     `-listen` when every part is down. A bool, or a mapping of one part
+     (every Yudame-only Mac), keeps today's name `valor-slack-up@<epoch>`,
+     so those Macs' report and tests are unchanged.
+   - `rollout.services` keeps one entry per bridge (`name`, `commit` from
+     the lock name, `since`) and adds `parts`, `{team: since}`, when there
+     are two. `since` is the earliest part's, or None when any part is
+     down, so `ui/app.py` (both uses) needs no change. `states` writes
+     `slack connected since …` as today, and with parts,
+     `slack connected since … (<team> since …, <team> not connected)`.
+   - `serve.bridge_states` applies its `since < after` check to each part
+     of a bridge it restarted, so the update waits until every part has
+     reconnected since the restart.
    - Postgres keeps 63 bytes of a connection name, which holds two
      workspaces. `slack.md` names a third workspace as a gap.
 4. **Docs.**
@@ -78,7 +87,14 @@ fill relies on Tier 3. So the client gets its own internal app from
    in `mentions`, as `chat_roles` `teammate`, and with a `rooms` line: team
    chat for the client's CRM team; answer whoever mentions you; engineering
    requests go to the project's Eng chat, else Tom.
-4. Tom's id in that workspace is added to `VALOR_OPERATOR_SLACK_IDS`.
+4. Tom's `<team>/<user>` id in that workspace is appended to
+   `VALOR_OPERATOR_SLACK_IDS` in the `EnvironmentVariables` of the Mac's
+   launchd jobs that carry it (`com.valor.kernel`, its Telegram, email
+   and Slack jobs, under `~/Library/LaunchAgents/`), and each job is
+   reloaded. This is intended: in the client's channels his messages and
+   👍 are Tom's, as in the dev channels, and `_toms_own` takes his DM
+   there as his own DM, which no spec on that Mac lists, so it stays
+   unreceived. Teammate replies to his mentions don't depend on it.
 5. The Mac is updated. The update shows both workspaces connected.
 6. Tom mentions Valor in the channel and gets an answer. The date is
    recorded.
@@ -98,11 +114,18 @@ fill relies on Tier 3. So the client gets its own internal app from
   connected is `Unknown`.
 - One workspace's connect failing in a loop still lets the other receive
   and send.
+- B's socket drops and reconnects while A keeps serving: A's sends and
+  receives go on, and B's `hello` starts a gap fill of B's chats only.
 - The outbox name and `states` for two parts cover up/up, up/down and
-  down/down. A bool bridge (Telegram) keeps today's name.
+  down/down. A bool bridge and a one-part Slack bridge keep today's name.
+- `rollout.services` with two parts keeps one `slack` row carrying the
+  commit from `valor-slack@<commit>` and both parts.
+- `bridge_states` after a Slack restart waits until both parts are up
+  since `after`, and names the bridge down at the deadline if one is not.
 - `permissions.slack` reloads the job when a second team's keys are
   `written`.
-- The existing one-workspace Slack tests pass unchanged.
+- The existing one-workspace Slack tests, `tests/test_rollout.py` and
+  `conftest`'s naming fixtures pass unchanged.
 
 ## Out of scope
 - A second bridge, poller, or Slack MCP intake.
