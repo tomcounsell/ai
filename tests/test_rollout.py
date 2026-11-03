@@ -6,10 +6,12 @@ the restart. Backup, sync, migrate and restart are stand-ins. No model call.
 """
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -670,7 +672,8 @@ def test_the_update_routine_prunes_uv_and_reports_low_disk_once_a_day(fresh, tmp
     uv = tmp_path / "uv"
     uv.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/argv\necho "Removed 3 files (1.0GiB)" >&2\n')
     uv.chmod(0o755)
-    monkeypatch.setattr(main, "settings", dataclasses.replace(settings, uv=str(uv)))
+    profile = signed(tmp_path / "meet-chrome")
+    monkeypatch.setattr(main, "settings", dataclasses.replace(settings, uv=str(uv), meet_profile=profile))
     monkeypatch.setattr(shutil, "disk_usage", lambda _: shutil._ntuple_diskusage(228e9, 220e9, 8e9))
 
     async def go():
@@ -685,6 +688,53 @@ def test_the_update_routine_prunes_uv_and_reports_low_disk_once_a_day(fresh, tmp
     ((_, notice),) = reports(fresh)
     assert notice["kind"] == "rollout" and notice["about_key"].startswith("disk:20")
     assert "8 GB of disk left" in notice["text"] and notice["child_id"] is None
+
+
+def signed(profile: Path, email: str | None = "valor@example.com") -> str:
+    """A call profile as Chrome leaves it, signed in to `email` (none: signed out)."""
+    (profile / "Default").mkdir(parents=True)
+    accounts = [{"email": email}] if email else []
+    (profile / "Default" / "Preferences").write_text(json.dumps({"account_info": accounts}))
+    return str(profile)
+
+
+def test_the_update_names_an_unsigned_call_profile_once_a_week_per_mac(fresh, tmp_path, monkeypatch):
+    """The Captain's call profile was first signed in when Tom was asked
+    mid-call (2026-11-02): each Mac's update tells him beforehand."""
+    import dataclasses
+    import shutil
+
+    import core.__main__ as main
+    from core import routines
+
+    uv = tmp_path / "uv"
+    uv.write_text("#!/bin/sh\n")
+    uv.chmod(0o755)
+    monkeypatch.setattr(shutil, "disk_usage", lambda _: shutil._ntuple_diskusage(228e9, 100e9, 128e9))
+    out = signed(tmp_path / "out", email=None)
+    inside = signed(tmp_path / "in")
+
+    async def update(machine, profile, day):
+        monkeypatch.setattr(main, "settings", dataclasses.replace(settings, uv=str(uv), machine=machine,
+                                                                    meet_profile=profile))  # fmt: skip
+        async with await db.connect(fresh) as conn:
+            ctx = routines.Context(conn, None, "update", datetime(2026, 11, day, 20, tzinfo=UTC), None)
+            await main.update_runner(ctx)
+
+    async def go():
+        await update("Valor the Pirate", out, 3)  # a Tuesday
+        await update("Valor the Pirate", out, 4)  # the same week: no second notice
+        await update("Valor the Bald", out, 4)  # another Mac that week: its own
+        await update("Valor the Cowboy", inside, 4)  # signed in: nothing
+        await update("Valor the Pirate", out, 10)  # the next week: again
+
+    run(go())
+    got = [n for _, n in reports(fresh)]
+    assert [n["about_key"] for n in got] == ["meet-profile:Valor the Pirate:2026-W45",
+                                             "meet-profile:Valor the Bald:2026-W45",
+                                             "meet-profile:Valor the Pirate:2026-W46"]  # fmt: skip
+    assert all(n["kind"] == "rollout" and "accounts.google.com" in n["text"] for n in got)
+    assert got[1]["text"].startswith("Valor the Bald cannot join a Google Meet call")
 
 
 def test_python_m_ui_plist_is_the_dashboards_job():

@@ -652,7 +652,9 @@ DISK_LOW_GB = 15
 async def update_runner(ctx: routines.Context) -> routines.Ran:
     """The overnight update: one request, which the resident kernel rolls;
     no task. It also prunes uv's shared cache (19.5 GiB on the Captain,
-    2026-10-22) and tells Tom, once a day, when this Mac's disk is low."""
+    2026-10-22), tells Tom once a day when this Mac's disk is low, and once
+    a week while its call profile is not signed in (the Captain was first
+    asked mid-call, 2026-11-02)."""
     request_id = await intake.request_update(ctx.conn, by="routine", via="routine")
     pruned = await asyncio.to_thread(
         subprocess.run, [settings.uv, "cache", "prune"], capture_output=True, text=True, check=False
@@ -667,6 +669,17 @@ async def update_runner(ctx: routines.Context) -> routines.Ran:
             about_key=f"disk:{ctx.now:%Y-%m-%d}",
             text=f"{settings.machine} has {free:.0f} GB of disk left after tonight's cleanup. "
             "Builds start failing when it fills; what should go?",
+        )
+    from core import call
+
+    if not call.profile_ready(settings.meet_profile):
+        await notices.request(
+            ctx.conn,
+            intake.UPDATES,
+            kind="rollout",
+            about_key=f"meet-profile:{settings.machine}:{ctx.now:%G-W%V}",
+            text=f"{settings.machine} cannot join a Google Meet call until its call profile is signed in to "
+            f"Google as Valor, once, at that Mac: {call.SIGN_IN}",
         )
     return routines.Ran(None, "started", f"update {request_id} requested; {said}; {free:.0f} GB free")
 

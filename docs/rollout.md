@@ -229,9 +229,11 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `~/Library/Application Support/Valor/meet-chrome`, which Tom signs in
    once per Mac, at the Mac, as valor@yuda.me with the passkey: `open -na
    "Google Chrome" --args --user-data-dir="$HOME/Library/Application
-   Support/Valor/meet-chrome" https://accounts.google.com/`, then quit
-   that window with ⌘Q (the Cowboy's on 2026-10-27). Until then a call
-   asked for on that Mac fails, naming this step. A call needs the voice
+   Support/Valor/meet-chrome" https://accounts.google.com/` (the Cowboy
+   on 2026-10-27, the Captain on 2026-11-03; the Pirate and the Bald not
+   yet). The window can stay open: a call ends the Chrome holding the
+   profile before it joins. Until then a call asked for on that Mac fails,
+   naming this step, and each night's update tells Tom once a week. A call needs the voice
    job with `/hear` (kickstart `com.valor.voice` once after this change),
    Smart Turn v3 (8 MB,
    which `tools.voice fetch` now fetches too) and `gws` signed in as Valor
