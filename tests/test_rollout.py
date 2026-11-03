@@ -798,8 +798,10 @@ def test_a_bridge_is_connected_only_while_its_own_connection_is_up(fresh, tmp_pa
             await state()
             up[0] = True
             since = await state()
+            # This database's only: another worker's bridge test is on the same server.
             await conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                               "WHERE application_name LIKE 'valor-slack-up@%%'")  # fmt: skip
+                               "WHERE datname = current_database() "
+                               "AND application_name LIKE 'valor-slack-up@%%'")  # fmt: skip
             with bridges.configure(serve_tick_s=0.05):
                 assert await outbox.wait() is False
             again = await state()
@@ -886,11 +888,10 @@ def test_an_update_waits_for_every_workspace_of_a_restarted_slack_bridge(fresh, 
 
     monkeypatch.setattr(permissions, "AGENTS", tmp_path)
     (tmp_path / f"{rollout.BRIDGES['slack']}.plist").write_bytes(b"")
+    monkeypatch.setattr(serve, "BRIDGE_WAIT_S", 5.0)
     done = {"restarted": {rollout.BRIDGES["slack"]: "restarted"}}
 
     async def update(both: bool):
-        # Both back returns at once; the margin is for a loaded suite.
-        monkeypatch.setattr(serve, "BRIDGE_WAIT_S", 30.0 if both else 5.0)
         old = int(time.time()) - 3600
         named = await db.connect(fresh, application_name=f"valor-slack-up@T0AAA={old},T0BBB={old}")
         after = datetime.now(UTC).replace(microsecond=0)
