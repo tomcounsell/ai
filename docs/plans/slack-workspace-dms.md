@@ -79,25 +79,42 @@ dropped on every Mac.
 7. **Docs.** `docs/bridges/slack.md` ("Who is received"), the `Spec`
    docstring, `projects/README.md`, `projects/example.toml`.
 
-**After merge (rollout).** Edit the private specs directly
-(docs/plans/private-projects.md): `yudame.toml` (Pirate) and
-`mastery.toml` (Captain) each get their workspace's `slack:<team>/*` in
-`chats`, `chat_roles` `teammate`, not in `mentions`, and a `rooms` line: a
-1:1 direct message with a teammate in that workspace; answer every
-message; no engineering or SDLC work starts here; engineering requests go
-to the project's Eng chat (#yudame-dev / #mastery-dev), else Tom. Load each
-with `Spec.load` and put the diffs in the delivery. Append
-`T06N9P4SVSA/U0C4A14EU13` to `VALOR_OPERATOR_SLACK_IDS` in the Captain's
-`com.valor.kernel` (and its Telegram and email jobs, as issue 3680's step
-4 said) and reload them. Update the Pirate and
-Captain over ssh with each kernel job's own launchctl environment, as
-earlier rollouts did; confirm each kernel is on the merged commit and its
-bridge connected. Confirm live: Tom's Pursue Mastery DM gets a teammate
-reply from the Captain (a session under mastery, role teammate) and no
-other Mac records it; on each Mac's ledger, a Yudame DM from someone not
-listed is recorded only on the Pirate. A Yudame DM from a person not yet
-listed needs someone other than Tom to send it; the delivery names who
-and whether it arrived.
+**After merge (rollout), in this order.** A Mac on pre-merge code refuses
+a spec holding `slack:<team>/*` (the Slack pattern admits no `*`) and
+`Spec.all` drops the whole spec, so the specs change last.
+1. Update every Mac that reads `~/Desktop/Valor/projects` (Cowboy,
+   Pirate, Captain, Bald) to the merged commit: this Mac with the update
+   skill, the others over ssh with each kernel job's own launchctl
+   environment, as earlier rollouts did. Confirm each kernel is on it and
+   its bridges connected.
+2. Append `T06N9P4SVSA/U0C4A14EU13` to `VALOR_OPERATOR_SLACK_IDS` in the
+   Captain's `com.valor.kernel` (and its Telegram and email jobs, as issue
+   3680's step 4 said) and reload them.
+3. Edit the private specs directly (docs/plans/private-projects.md):
+   `yudame.toml` (Pirate) and `mastery.toml` (Captain) each get their
+   workspace's `slack:<team>/*` in `chats`, `chat_roles` `teammate`, not in
+   `mentions`, and a `rooms` line: a 1:1 direct message with a teammate in
+   that workspace; answer every message; no engineering or SDLC work
+   starts here; engineering requests go to the project's Eng chat
+   (#yudame-dev / #mastery-dev), else Tom.
+4. On each Mac, through a turn or the kernel's own environment (sshd cannot
+   read `~/Desktop`), read `Spec.all()`: both specs load, and on the Pirate
+   `valor.toml` loads too (it is what keeps Tom's Yudame DM off the
+   Pirate). Diffs and results go in the delivery.
+5. Confirm live: Tom's Pursue Mastery DM ("hi", already sent, then his
+   next) gets a teammate reply from the Captain (a session under mastery,
+   role teammate) and no other Mac records it. For Yudame, a DM from
+   someone not listed is recorded only on the Pirate and answered there.
+   This task posts nothing, so it cannot ask anyone to send one: if none
+   arrives, the delivery reports the Yudame half of the done criterion as
+   not yet met, naming what is needed, not done on tests alone (rule 6).
+
+**The delivery** quotes Tom's 09:19 and 09:21 answers with their `ts` as
+the basis for item 3, and names one consequence of "a spec that does not
+load lists nothing": a Mac that momentarily cannot read `valor.toml` (an
+iCloud eviction, a bad edit) would catch Tom's Yudame DM as a yudame
+teammate DM on the Pirate while the Cowboy answers it as his own, so two
+Macs answer him until it reads again.
 
 **Not here.** No new check, gate or allowlist (this widens who is
 received). Slack Connect users from another org (their DM's id carries
@@ -125,6 +142,9 @@ setting, so one mechanism (`chats`) keeps placing chats on Macs.
 - `wanted`: a `USLACKBOT` DM is neither caught nor recorded.
 - A DM listed only in a spec that is refused at load, or in a
   `*.toml.paused` file, is caught by the `/*` spec.
+- Tom's reaction on Valor's post in his caught Mastery DM binds as a
+  team-chat reaction does (to the DM's session), raises nothing and starts
+  no task.
 - `session_for` on a caught DM starts it under the `/*` spec.
 - Bridge: a live DM on wire B from an unlisted user is recorded as
   `TB/U..`; with no `TB/*` spec it is acked and not recorded; gap fill
