@@ -39,7 +39,8 @@ against a new Meet with a second device of Valor's account
   and asks the worker (a fresh `call` turn in the session's checkout) what
   needs looking up. The person answered talking over Valor stops it.
 - **The page** (`bridges/meet/`): headless Chrome on the call profile
-  (first ending a Chrome already open on it, the sign-in window), muted,
+  (never ending another Chrome already open on it; the call ends naming
+  its pid instead), muted,
   with Attendee's payloads (vendored, ELv2) and `page.js`. Chrome
   runs with its local network checks off, since the payloads' socket to
   `127.0.0.1` is refused from Meet's page otherwise.
@@ -59,10 +60,11 @@ preferences and Google's session cookie in its cookies (`call.account`).
 Never start Chrome on the profile over ssh: the keychain is locked there,
 and Chrome drops the profile's sign-in (the Captain, 2026-11-03). A call
 whose profile another Chrome holds ends saying which one, and leaves it
-running: that Chrome is Tom mid-sign-in or another call. The voice job
-running with `/hear` (kickstart `com.valor.voice` once
-after this change); `gws` signed in as Valor; and Smart Turn v3
-fetched with the voice models (`python -m tools.voice fetch`).
+running: that Chrome is Tom mid-sign-in or another call.
+
+Also per Mac: the voice job running with `/hear` (kickstart
+`com.valor.voice` once after this change); `gws` signed in as Valor; and
+Smart Turn v3 fetched with the voice models (`python -m tools.voice fetch`).
 
 ## Not here
 
