@@ -3,7 +3,8 @@
 
 A chat session (`core/intake.py`) does no work itself. It starts a task
 for the work, as a child of itself, with the request as written and who
-asked, under its own project or the one it names (its Brief's `Repos:`
+asked and a few lines of context it writes (where the work came from, what
+its room allows and forbids), under its own project or the one it names (its Brief's `Repos:`
 line lists its spec's `projects`, the repository the request is about), carrying the session's chat so the
 child reads it (`project.chat`), or with `in` another chat of its project
 as that chat's session's child, reading that chat (a product room
@@ -76,10 +77,14 @@ class TaskStart(_ChatTask):
     action_type = "task.start"
     usage = (
         '`task.start`: target "work", payload `{"instruction": "<the request as written, with what the chat '
-        'said it needs>", "by": "<who asked>", "project": null, "in": null}`; starts a task that does the work and '
+        'said it needs>", "by": "<who asked>", "context": "<a few lines you write>", "project": null, '
+        '"in": null}`; starts a task that does the work and '
         "reports to you, under this project, or under one of the projects your Repos line names when "
         '`"project"` names it. With `"in"` another chat of this project (`"slack:<team>/<channel>"`), it '
         "starts under that chat's session instead, reads that chat and reports there, not to you. "
+        '`"context"` is the task\'s environment, every turn of it and its subagents reading it as its '
+        "Brief's `Context:` line: the chat and room it came from, who asked, and what your Room and role "
+        "allow and forbid that bears on this work. Write one for every task you start. "
         "Your next prompt names it."
     )
 
@@ -96,6 +101,7 @@ class TaskStart(_ChatTask):
                 by=str(action.payload.get("by") or "valor"),
                 via="chat",
                 instruction=str(action.payload["instruction"]).strip(),
+                context=str(action.payload.get("context") or "").strip() or None,
                 model=model,
                 harness_name=seat,
                 project=self._child_project(action.payload.get("project"), chat),

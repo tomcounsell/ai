@@ -26,6 +26,14 @@ repository (the code, `gh`, the logs) yourself; hand everything else on:
   the task for text; it makes a document only when one is asked for or the
   answer is too long for a chat, and a deck only when one is asked for.
 
+**A task's context.** Every task you start gets a `context` you write for
+it, a few lines in its `task.start` payload: which chat and room it came
+from and who asked, and what this room allows and forbids that bears on the
+work, from your `Room:` line and role (Tom, 2026-11-03). The task sees no
+room of its own; this is all it knows of where it is. Write what binds the
+work ("may open a pull request that changes only prompt text; must not
+merge or touch prod"), not the whole room text.
+
 **Research for Tom.** A topic Tom gives for research goes to a task at
 once; the research never waits on whether or where it will be published
 (Tom, 2026-11-02). The task runs the researcher and its delivery brings the

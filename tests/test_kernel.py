@@ -1701,6 +1701,48 @@ def test_a_chat_sessions_turn_plays_its_chats_role_and_toms_own_chat_none(dsn, t
         assert intake.role("telegram", bridges.OPERATOR, "flowers") is None
 
 
+def test_task_start_s_context_is_in_every_turn_of_the_task_it_starts(dsn, tmp_path):
+    """The lines a chat session writes as `task.start`'s `context` are the
+    child's `Context:`, under its instruction, in its working turns and a
+    fresh session's (review), and with `in` in a sibling chat's child; none,
+    or only whitespace, renders no line."""
+    from tools import chat_tasks
+
+    def chat():
+        return f"T0ABC/C{uuid.uuid4().int % 10**9}"
+
+    room = "From #product (slack), asked by Tom. May open a PR changing only prompt text; must not merge."
+
+    async def go(here, dev):
+        (pathlib.Path(settings.projects_dir) / "flowers.toml").write_text(
+            f'name = "flowers"\nrepo = "r"\nkind = "plain"\nsuite = "true"\nchats = ["slack:{here}", "slack:{dev}"]\n'
+        )
+        async with await db.connect(dsn) as conn:
+            session_id = await tasks.start(
+                conn,
+                tasks.Brief(instruction="chat", chat={"channel": "slack", "chat_id": here},
+                            project={"name": "flowers"}),
+            )  # fmt: skip
+            start = chat_tasks.performers(await tasks.brief(conn, session_id), dsn)[0]
+        made = []
+        for extra in ({"context": f"  {room}\n"}, {}, {"context": " \n "}, {"context": room, "in": f"slack:{dev}"}):
+            action = broker.Action("task.start", "work", {"instruction": "Reword the greeting", **extra})
+            made.append((await start.perform(action, f"cx-{uuid.uuid4()}"))["task_id"])
+        async with await db.connect(dsn) as conn:
+            briefs = [await tasks.brief(conn, c) for c in made]
+            texts = [(await tasks.dispatch(conn, c))["text"] for c in made]
+            review = (await tasks.dispatch(conn, made[0], fresh="review"))["text"]
+        return briefs, texts, review
+
+    with bridges.operator(tmp_path):
+        briefs, texts, review = run(go(chat(), chat()))
+    assert [b.context for b in briefs] == [room, None, None, room]
+    line = f"Instruction: Reword the greeting\nContext: {room}\nEffect ceiling:"
+    assert line in texts[0] and line in texts[3] and line in review
+    assert "\nContext: " not in texts[1] and "\nContext: " not in texts[2]
+    assert tasks.Brief.load({"instruction": "older"}).context is None
+
+
 def test_task_start_in_another_chat_starts_under_that_chats_session_and_reads_it(dsn, tmp_path):
     """`in` names a chat of the session's project: the child starts under
     that chat's open session, one opened when it has none, reads that chat

@@ -54,6 +54,11 @@ class Brief:
 
     `chat` (`{"channel", "chat_id"}`) makes the task that chat's chat
     session (`core/intake.py`, `core/session.py`).
+
+    `context` is the few lines a chat session wrote for a task it started
+    (`task.start`, `tools/chat_tasks.py`): where it came from and what that
+    room allows and forbids that bears on the work. Every turn of the task
+    renders it as `Context:`.
     """
 
     instruction: str
@@ -71,6 +76,7 @@ class Brief:
     parent_id: str | None = None
     routine: str | None = None
     chat: dict[str, str] | None = None
+    context: str | None = None
     id: str = field(default_factory=ledger.new_id)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -368,7 +374,8 @@ async def dispatch(
 ) -> dict[str, Any]:
     """The text a turn receives: the persona first (`persona/`, rendered
     now from the kernel's own checkout, never from the workspace), then the
-    Brief: the task's commitments plus every
+    Brief: the task's commitments (with the `Context:` its starting chat
+    session wrote, when it has one) plus every
     correction in force, rendered from the ledger now, then what memory
     recalls for it (`core.memory.recall`; none for a fresh session), and the
     memory index of each other chat session of its project (`core.record.memories`; none
@@ -398,6 +405,8 @@ async def dispatch(
     standing = await corrections.in_force(conn)
     rendered = persona.render(settings.persona_dir)
     head = f"# Brief\n\nTask: {b.id}\nInstruction: {b.instruction}"
+    if b.context:
+        head += f"\nContext: {b.context}"
     played = None
     if b.chat:
         from core import call  # call imports tasks

@@ -472,9 +472,9 @@ order:
 
 1. **Persona.** Identity, voice, conduct, the governance paragraphs. Read
    from `persona/`, which changes only by a reviewed diff in git.
-2. **Brief.** The task's commitments: task id, instruction,
-   effect ceiling, workspace (`core/tasks.py`,
-   `dispatch`).
+2. **Brief.** The task's commitments: task id, instruction, the
+   `Context:` its chat session wrote when it started the task (`task.start`'s
+   `context`), effect ceiling, workspace (`core/tasks.py`, `dispatch`).
 3. **Corrections from Tom.** Every correction in force, rendered from the
    ledger as the turn starts, numbered, each with its scope, source class,
    author, date, and channel (`core/corrections.py`). A correction recorded
