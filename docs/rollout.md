@@ -231,8 +231,8 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    "Google Chrome" --args --user-data-dir="$HOME/Library/Application
    Support/Valor/meet-chrome" https://accounts.google.com/` (the Cowboy
    on 2026-10-27; the Captain's, signed in 2026-11-03, was signed out the
-   same day; the Pirate and the Bald not yet). The window can stay open: a call ends the Chrome holding the
-   profile before it joins. Until then a call asked for on that Mac fails,
+   same day; the Pirate and the Bald not yet). The window can stay open: a call ends
+   the Chrome holding the profile before it joins. Until then a call asked for on that Mac fails,
    naming this step, and each night's update tells Tom once a week.
    Chrome on the call profile runs only in the Mac's own session (the
    kernel's, or a `launchctl bootstrap gui/$(id -u)` job): over plain ssh

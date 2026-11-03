@@ -129,7 +129,9 @@ The five routines the kernel holds:
   none of the last week's turns, and its run would delete their events.
 - **update** (03:00 daily, ceiling `act`): asks the resident kernel to roll
   this Mac to its branch's tip (`intake.request_update`, `by: routine`), as
-  `python -m core update` does, and starts no task. Having no run task, the
+  `python -m core update` does, and starts no task. It also prunes uv's
+  cache, and tells Tom once a day when the Mac's disk is low and once a
+  week while its call profile is not signed in. Having no run task, the
   expiry sweep lists it for Tom every ninety days.
 
 ## Metered spending and ceiling

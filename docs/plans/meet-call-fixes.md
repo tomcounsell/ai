@@ -23,8 +23,8 @@ just work.
 2. *Lock.* 06:31 UTC: `launch_persistent_context` failed, "Failed to
    create a ProcessSingleton": the sign-in Chrome (pid 86970, still
    running) held `SingletonLock`.
-3. *Delay, real: 15 h 41 min.* The one call ask in that channel is Slack
-   message, sent 2026-11-02 04:19:25 UTC (11:19 in
+3. *Delay, real: 15 h 41 min.* The one call ask in that channel is a Slack
+   message sent 2026-11-02 04:19:25 UTC (11:19 in
    UTC+7); Slack's own record and the ledger's `message.steered` agree, and
    no message from Tom landed near 07:51 UTC, so the quoted "2:51 PM" is
    not that message's time. Its turn ran at once; `meet.join` failed at
