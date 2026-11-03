@@ -169,11 +169,24 @@ the send decides (below).
   (`VALOR_OPERATOR_CHAT`, uppercased like every Slack id);
 - every member's message in a channel a project spec on this machine lists
   as `slack:<team>/<channel>`, and a DM a spec lists as
-  `slack:<team>/<user>`.
+  `slack:<team>/<user>`;
+- every other DM in a workspace whose `slack:<team>/*` a spec on this
+  machine lists (Tom, 2026-11-03: "direct messages with anyone in Slack
+  for teammate persona use", each workspace's to one project), with that
+  entry's `rooms`, `chat_roles` and `mentions`. A DM any spec on any Mac
+  lists by id is never caught by one, so Tom's DM listed in `valor.toml`
+  stays his own chat on the Cowboy; his DM in a workspace whose `/*` takes
+  it is a teammate DM like anyone's, his messages still `by: tom`. A spec
+  that does not load (or a `.paused` file) lists nothing, so its DMs fall
+  to the entry; while a Mac cannot read `valor.toml`, the Mac holding the
+  workspace entry answers Tom's listed DM too. A caught DM is received
+  live only: gap fill reads listed chats, not `/*`. A Slack Connect
+  user's DM carries their home team, so no `/*` entry takes it.
 
 A DM from anyone else, and a channel no project lists, is not received.
 Valor's own posts (the event's `user` is the token's own id) are dropped,
-live and in gap fill; so are bot messages, and every subtype but none,
+live and in gap fill; so are bot messages and Slackbot's (`USLACKBOT`,
+which carry no `bot_id`), and every subtype but none,
 `file_share`, `thread_broadcast`, and `me_message`.
 
 **Tom's reactions.** A `reaction_added` by one of

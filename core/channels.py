@@ -85,16 +85,17 @@ CHANNELS: dict[str, Channel] = {
         hint="",
     ),
     # A Slack id is `<team>/<channel>` for a channel and `<team>/<user>`
-    # for a DM, both as Slack writes them: capitals and digits.
+    # for a DM, both as Slack writes them: capitals and digits; a project
+    # lists `<team>/*` for every DM in the workspace no spec lists by id.
     "slack": Channel(
         name="slack",
         verified=True,
         replies=True,
         threaded=True,
         reacts=True,
-        chat=r"[A-Z0-9]+/[A-Z0-9]+",
+        chat=r"[A-Z0-9]+/(?:[A-Z0-9]+|\*)",
         case="upper",
-        hint="slack:<team id>/<channel or user id>",
+        hint="slack:<team id>/<channel or user id, or * for every DM>",
     ),
 }
 

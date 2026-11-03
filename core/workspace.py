@@ -101,8 +101,10 @@ class Spec:
 
     `chats` lists the chats whose messages start tasks under this project
     (`"telegram:<chat id>"`, `"email:<sender address>"`,
-    `"slack:<team id>/<channel or user id>"`; each id normalised as
-    `core/channels.py` says), and `machine` the
+    `"slack:<team id>/<channel or user id>"`, or `"slack:<team id>/*"`
+    for every DM in that workspace that no spec lists by id (`takes`;
+    Tom, 2026-11-03); each id normalised as `core/channels.py` says), and
+    `machine` the
     machine whose bridges receive them; none means
     `settings.default_machine`, so each chat has one owner. In a group
     chat it lists, anyone's message binds, not only Tom's
@@ -279,6 +281,17 @@ class Spec:
             client=client,
             calendar=calendar,
         )
+
+    def takes(self, chat: str) -> str | None:
+        """The `chats` entry that lists `chat` (`<channel>:<id>`, normalised):
+        the chat itself, else for a Slack DM (a person's id, `U` or `W`) its
+        workspace's `slack:<team>/*`; None when neither is listed."""
+        if chat in self.chats:
+            return chat
+        channel, _, ident = chat.partition(":")
+        team, _, person = ident.partition("/")
+        every = f"slack:{team}/*"
+        return every if channel == "slack" and person[:1] in ("U", "W") and every in self.chats else None
 
     @classmethod
     def all(cls) -> list[Spec]:

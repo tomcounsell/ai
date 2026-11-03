@@ -337,6 +337,32 @@ def _project_chats(channel: str) -> list[tuple[str, workspace.Spec]]:
     return found
 
 
+def _taking(channel: str, chat_id: str) -> tuple[str, workspace.Spec] | None:
+    """The spec of this machine that takes the chat, and the `chats` entry
+    it takes it by: one listing it, else one whose `slack:<team>/*` covers
+    a Slack DM that no spec on any Mac lists by id (`Spec.takes`). A spec
+    that does not load lists nothing. None when no spec here takes it."""
+    row = channels.get(channel)
+    key = f"{channel}:{row.normal(chat_id) if row is not None else chat_id}"
+    every = workspace.Spec.all()
+    here = [s for s in every if _spec_machine(s) == settings.machine]
+    for spec in here:
+        if key in spec.chats:
+            return key, spec
+    if any(key in s.chats for s in every):
+        return None
+    for spec in here:
+        if (found := spec.takes(key)) is not None:
+            return found, spec
+    return None
+
+
+def _caught(channel: str, chat_id: str) -> bool:
+    """Whether a workspace's `/*` entry takes the chat here, not its id."""
+    taken = _taking(channel, chat_id)
+    return taken is not None and taken[0].endswith("/*")
+
+
 # What Tom's own chat is for (his Telegram and Slack DMs, the local chat;
 # the operator group's own spec entry wins), and an email thread.
 TOMS_OWN_ROOM = "Running the business with Tom, Yudame first; engineering only when he starts it."
@@ -348,9 +374,9 @@ def room(channel: str, chat_id: str, project: str | None = None) -> str | None:
     owns, else Tom's own chat's, else for an email thread its `project`'s
     `rooms.email` or `EMAIL_ROOM`, else None (its session's opening names
     only its project and kind)."""
-    for chat, spec in _project_chats(channel):
-        if chat == chat_id and f"{channel}:{chat}" in spec.rooms:
-            return spec.rooms[f"{channel}:{chat}"]
+    taken = _taking(channel, chat_id)
+    if taken is not None and taken[0] in taken[1].rooms:
+        return taken[1].rooms[taken[0]]
     if _toms_own({"channel": channel, "chat_id": chat_id}):
         return TOMS_OWN_ROOM
     if channel != "email":
@@ -362,9 +388,9 @@ def role(channel: str, chat_id: str, project: str | None = None) -> str | None:
     """The role Valor plays in the chat (`skills/sdlc/roles/<role>.md`): its
     `chat_roles` entry in a spec this machine owns, else for an email thread
     its `project`'s `chat_roles.email`, else None, as in Tom's own chats."""
-    for chat, spec in _project_chats(channel):
-        if chat == chat_id and f"{channel}:{chat}" in spec.chat_roles:
-            return spec.chat_roles[f"{channel}:{chat}"]
+    taken = _taking(channel, chat_id)
+    if taken is not None and taken[0] in taken[1].chat_roles:
+        return taken[1].chat_roles[taken[0]]
     if channel != "email" or not project or _toms_own({"channel": channel, "chat_id": chat_id}):
         return None
     return workspace.Spec.load(project).chat_roles.get("email")
@@ -385,7 +411,7 @@ def owned(channel: str) -> list[str]:
     ):
         ids.append(settings.operator_chat)
     for ident, _ in _project_chats(channel):
-        if ident not in ids:
+        if ident not in ids and not ident.endswith("/*"):
             ids.append(ident)
     return ids
 
@@ -394,7 +420,11 @@ def owns(channel: str, id: str) -> bool:
     row = channels.get(channel)
     ident = row.normal(id) if row is not None else id
     ids = owned(channel)
-    return ident in ids or (channel == "email" and _domain(ident) in ids)
+    return (
+        ident in ids
+        or (channel == "email" and _domain(ident) in ids)
+        or (channel == "slack" and _taking(channel, ident) is not None)
+    )
 
 
 def _domain(address: str) -> str:
@@ -419,10 +449,8 @@ def team_spec(p: dict[str, Any]) -> workspace.Spec | None:
     chat. None for any other message."""
     if not p.get("verified") or p.get("chat_kind") not in ("group", "dm") or _toms_own(p):
         return None
-    for chat, spec in _project_chats(p["channel"]):
-        if chat == p["chat_id"]:
-            return spec
-    return None
+    taken = _taking(p["channel"], p["chat_id"])
+    return taken[1] if taken is not None else None
 
 
 # A message names Valor (the old system's mention triggers: "valor",
@@ -615,7 +643,9 @@ def _toms_own(p: dict[str, Any]) -> bool:
     if channel == "telegram":
         return settings.operator_telegram_id is not None and chat == settings.operator_telegram_id
     if channel == "slack":
-        return chat in settings.operator_slack_ids
+        # His DM in a workspace whose `/*` entry takes it is a teammate DM
+        # like anyone's (Tom, 2026-11-03).
+        return chat in settings.operator_slack_ids and not _caught(channel, chat)
     return channel == "local" and chat == LOCAL_CHAT
 
 
@@ -645,6 +675,8 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
 def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
     """The spec listing the chat; for an email, the sender's address, else
     its domain (`email:@<domain>`); else `valor`."""
+    if p["channel"] != "email" and (taken := _taking(p["channel"], p["chat_id"])) is not None:
+        return taken[1]
     ident = p["sender_id"] if p["channel"] == "email" else p["chat_id"]
     found = dict(reversed(_project_chats(p["channel"])))
     if p["channel"] == "email" and ident not in found:
@@ -775,8 +807,8 @@ async def _replying_to(conn, task_id: str | None, post: dict[str, Any] | None) -
 
 def _mentions_only(spec: workspace.Spec, p: dict[str, Any]) -> bool:
     row = channels.get(p["channel"])
-    chat = row.normal(p["chat_id"]) if row is not None else p["chat_id"]
-    return f"{p['channel']}:{chat}" in spec.mentions
+    chat = f"{p['channel']}:{row.normal(p['chat_id']) if row is not None else p['chat_id']}"
+    return (spec.takes(chat) or chat) in spec.mentions
 
 
 async def chat_session(conn, channel: str, chat_id: str) -> str | None:
@@ -838,7 +870,8 @@ async def session_for(conn, channel: str, chat_id: str, spec: workspace.Spec | N
         return found
     p = {"channel": channel, "chat_id": chat_id, "sender_id": chat_id}
     own = _toms_own(p)
-    spec = spec or dict(reversed(_project_chats(channel))).get(chat_id) or (_project_for(p) if own else None)
+    taken = _taking(channel, chat_id)
+    spec = spec or (taken[1] if taken else None) or (_project_for(p) if own else None)
     if spec is None:
         return None
     task_id, brief = await open_session(conn, channel, chat_id, spec, own=own)
@@ -894,8 +927,8 @@ async def _chat_start(
             f"chat; your work here is under the {spec.name} project. This session is the chat's: every "
             "message Tom sends in it comes to you here."
             if own
-            else f"You are in a direct message with {dm[0] or 'someone'} on {where} (chat id {chat_id}), "
-            f"not Tom; your work here is under the {spec.name} project. This session is the chat's: every "
+            else f"You are in a direct message with {dm[0] or 'someone'} on {where} (chat id {chat_id})"
+            f"{'' if chat_id in settings.operator_slack_ids else ', not Tom'}; your work here is under the {spec.name} project. This session is the chat's: every "
             "message they send in it comes to you here."
             if dm and channel != "email"
             else f"You are in the {spec.name} team chat on {where} (chat id {chat_id}). "

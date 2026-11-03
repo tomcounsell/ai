@@ -76,14 +76,13 @@ async def reach(conn, spec: workspace.Spec) -> dict[str, dict[str, Any]]:
     ).fetchall()
     bodies = {r[0]: {**r[1], "created_at": r[2]} for r in rows}
     asked = {r[0]: r[3] for r in rows if r[3]}
-    listed = set(spec.chats)
 
     def inside(task_id: str) -> bool:
         body = bodies[task_id]
         if task_id in asked:
-            return _key(asked[task_id]) in listed
+            return spec.takes(_key(asked[task_id])) is not None
         if body.get("chat"):
-            return body["chat"]["channel"] == "email" or _key(body["chat"]) in listed
+            return body["chat"]["channel"] == "email" or spec.takes(_key(body["chat"])) is not None
         parent = body.get("parent_id")
         return inside(parent) if parent in bodies else True
 
@@ -104,7 +103,10 @@ async def chats(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], qu
         if body.get("chat"):
             sessions.setdefault(_key(body["chat"]), []).append(task_id)
     found = [{"chat": c, "room": spec.rooms.get(c), "sessions": sessions.pop(c, [])} for c in spec.chats]
-    found += [{"chat": c, "room": spec.rooms.get("email"), "sessions": s} for c, s in sessions.items()]
+    found += [
+        {"chat": c, "room": spec.rooms.get(spec.takes(c) or "email"), "sessions": s}
+        for c, s in sessions.items()
+    ]
     return found
 
 

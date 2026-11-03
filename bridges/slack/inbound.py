@@ -26,6 +26,8 @@ log = logging.getLogger("valor.slack")
 # Message subtypes that are someone saying something. Edits, deletions,
 # joins and bot messages are not part of the port.
 SUBTYPES = {None, "file_share", "thread_broadcast", "me_message"}
+# Slackbot's user id: its DM posts (reminders, notices) carry no `bot_id`.
+SLACKBOT = "USLACKBOT"
 THREAD = 50  # the root and the replies before this one, at most
 
 
@@ -45,7 +47,7 @@ def wanted(msg: dict[str, Any], own: str) -> bool:
     return (
         msg.get("subtype") in SUBTYPES
         and bool(msg.get("user"))
-        and msg.get("user") != own
+        and msg.get("user") not in (own, SLACKBOT)
         and not msg.get("bot_id")
     )
 

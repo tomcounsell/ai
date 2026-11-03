@@ -12,12 +12,14 @@ suite = "uv run pytest -q -p no:cacheprovider --junitxml={junit}"
 lint = "uv run ruff check ."
 env = { DATABASE_URL = "postgres://app@127.0.0.1:{port}/app" }
 # Its Eng group, a team chat that waits to be mentioned, the client's
-# Slack dev channel, and every sender at the client's domain.
+# Slack dev channel, every sender at the client's domain, and every DM
+# in the client's Slack that no spec lists by id.
 chats = [
     "telegram:-1009000000010",
     "telegram:-1009000000011",
     "slack:T0EXAMPLE1/C0EXAMPLE2",
     "email:@example.com",
+    "slack:T0EXAMPLE1/*",
 ]
 mentions = ["telegram:-1009000000011"]
 board = "slack:T0EXAMPLE1/C0EXAMPLE2"
@@ -25,11 +27,13 @@ rooms."telegram:-1009000000010" = "Engineering on the example app."
 rooms."telegram:-1009000000011" = "The client's team chat."
 rooms."slack:T0EXAMPLE1/C0EXAMPLE2" = "Engineering on the example app."
 rooms.email = "Email with the client's team."
+rooms."slack:T0EXAMPLE1/*" = "A 1:1 direct message with a teammate in the client's Slack; answer every message. No engineering or SDLC work starts here; engineering requests go to the project's Eng chat, else Tom."
 # The role Valor plays in each chat (skills/sdlc/roles/<role>.md).
 chat_roles."telegram:-1009000000010" = "engineer"
 chat_roles."telegram:-1009000000011" = "teammate"
 chat_roles."slack:T0EXAMPLE1/C0EXAMPLE2" = "engineer"
 chat_roles.email = "teammate"
+chat_roles."slack:T0EXAMPLE1/*" = "teammate"
 machine = "Valor the Example"
 knowledge_base = "Example"
 # Valor's working time on this project, written daily by the `hours` routine
