@@ -227,19 +227,22 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    (yudame/studio-tools#2).
    Meet calls (docs/plans/meet.md) join from their own Chrome profile,
    `~/Library/Application Support/Valor/meet-chrome`, which Tom signs in
-   once per Mac, at the Mac, as valor@yuda.me with the passkey: `open -na
-   "Google Chrome" --args --user-data-dir="$HOME/Library/Application
-   Support/Valor/meet-chrome" https://accounts.google.com/` (the Cowboy
-   on 2026-10-27; the Captain's, signed in 2026-11-03, was signed out the
-   same day; the Pirate and the Bald not yet). The window can stay open: a call ends
-   the Chrome holding the profile before it joins. Until then a call asked for on that Mac fails,
-   naming this step, and each night's update tells Tom once a week.
+   once per Mac, at the Mac, in Terminal: `cd ~/src/ai && .venv/bin/python
+   -m core meet-sign-in`, then valor@yuda.me with the passkey in the
+   Chrome window it opens. It closes that window itself once signed in
+   and prints "signed in as valor@yuda.me" (⌘Q or Ctrl-C gives up; on a
+   Mac already signed in it says so and opens nothing). Signed in: the
+   Cowboy (2026-10-27); the Captain's, signed in 2026-11-03, was signed
+   out the same day; the Pirate and the Bald not yet. Until then a call
+   asked for on that Mac fails, naming this step, and each night's update
+   tells Tom once a week. A call never ends a Chrome holding the profile;
+   it says which one.
    Chrome on the call profile runs only in the Mac's own session (the
-   kernel's, or a `launchctl bootstrap gui/$(id -u)` job): over plain ssh
-   the login keychain is locked, Chrome cannot read the profile's cookies
-   and drops them, signing it out (the Captain's, 2026-11-03). Copying
-   Google's cookies in from another profile does not sign it in: Google
-   signed the copy out within a minute. A call needs the voice
+   kernel's, Terminal at the Mac, or a `launchctl bootstrap gui/$(id -u)`
+   job): over plain ssh the login keychain is locked, Chrome cannot read
+   the profile's cookies and drops them, signing it out (the Captain's,
+   2026-11-03). Copying Google's cookies in from another profile does not
+   sign it in: Google signed the copy out within a minute. A call needs the voice
    job with `/hear` (kickstart `com.valor.voice` once after this change),
    Smart Turn v3 (8 MB,
    which `tools.voice fetch` now fetches too) and `gws` signed in as Valor

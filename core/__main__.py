@@ -13,6 +13,8 @@ memory mark RECORD [--by] [--via]
                                Remembered label names it) a standard of
                                working, recalled for any client's task
 settings                     every setting, as shell assignments
+meet-sign-in                   sign this Mac's call profile in to Google, at the
+                               Mac: its Chrome closes itself once signed in
 start INSTRUCTION [--ceiling C] [--workspace DIR] [--parent ID]
       [--model SEAT_OR_ID] [--harness-config FILE] [--target-branch B]
       [--by B] [--role-played] [--harness {claude_code,pi}]
@@ -1060,6 +1062,10 @@ def _sync(args) -> bool:
         print(json.dumps(_secure_login()))
     elif args.command == "settings":
         print(settings.as_shell())
+    elif args.command == "meet-sign-in":
+        from core import call
+
+        raise SystemExit(call.sign_in())
     elif args.command == "judgement-keys":
         try:
             status = credentials.copy_keys(
@@ -1229,6 +1235,7 @@ def main() -> None:
     withdraw.add_argument("--via", default="the command line")
     sub.add_parser("corrections")
     sub.add_parser("secure-login")
+    sub.add_parser("meet-sign-in")
     memory_cmd = sub.add_parser("memory").add_subparsers(dest="memory_command", required=True)
     memory_cmd.add_parser("ingest")
     mark = memory_cmd.add_parser("mark")

@@ -112,7 +112,7 @@ class MeetJoin:
     async def _open(self, conn, action: broker.Action, key: str) -> tuple[str, str]:
         if not call.profile_ready():
             raise broker.Failed(
-                "this Mac's call profile is not signed in to Google; Tom signs it in once, as Valor, with: "
+                "this Mac's call profile is not signed in to Google; Tom signs it in once, as Valor, at the Mac in Terminal: "
                 + call.SIGN_IN
             )
         busy = await call.in_progress(conn)

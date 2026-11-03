@@ -6,7 +6,6 @@ the restart. Backup, sync, migrate and restart are stand-ins. No model call.
 """
 
 import asyncio
-import json
 import os
 import subprocess
 import sys
@@ -692,9 +691,9 @@ def test_the_update_routine_prunes_uv_and_reports_low_disk_once_a_day(fresh, tmp
 
 def signed(profile: Path, email: str | None = "valor@example.com") -> str:
     """A call profile as Chrome leaves it, signed in to `email` (none: signed out)."""
-    (profile / "Default").mkdir(parents=True)
-    accounts = [{"email": email}] if email else []
-    (profile / "Default" / "Preferences").write_text(json.dumps({"account_info": accounts}))
+    from tests.test_meet_sign_in import signed_in
+
+    signed_in(profile, email=email)
     return str(profile)
 
 
@@ -733,7 +732,7 @@ def test_the_update_names_an_unsigned_call_profile_once_a_week_per_mac(fresh, tm
     assert [n["about_key"] for n in got] == ["meet-profile:Valor the Pirate:2026-W45",
                                              "meet-profile:Valor the Bald:2026-W45",
                                              "meet-profile:Valor the Pirate:2026-W46"]  # fmt: skip
-    assert all(n["kind"] == "rollout" and "accounts.google.com" in n["text"] for n in got)
+    assert all(n["kind"] == "rollout" and "meet-sign-in" in n["text"] for n in got)
     assert got[1]["text"].startswith("Valor the Bald cannot join a Google Meet call")
 
 

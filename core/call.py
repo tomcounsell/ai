@@ -37,6 +37,10 @@ import asyncio
 import contextlib
 import json
 import re
+import shutil
+import sqlite3
+import subprocess
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -54,10 +58,8 @@ CHANNEL = "meet"
 # A call whose process never wrote `call.started` this long after it was
 # opened, with its lock free, never started.
 NEVER_STARTED_S = 90
-SIGN_IN = (
-    'open -na "Google Chrome" --args --user-data-dir="$HOME/Library/Application Support/Valor/meet-chrome" '
-    "https://accounts.google.com/"
-)
+SIGN_IN = "cd ~/src/ai && .venv/bin/python -m core meet-sign-in"
+CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 
 def is_call(brief: tasks.Brief) -> bool:
@@ -75,13 +77,77 @@ async def marker(conn, session_id: str) -> dict[str, Any] | None:
     return row[0] if row else None
 
 
+def account(profile: str | None = None) -> str | None:
+    """The Google account this Mac's call profile is signed in as: the one
+    its preferences name, with Google's session cookie (`SID`) in its
+    cookies. Preferences alone outlive a lost sign-in (the Captain,
+    2026-11-03). The cookies are read from a copy, with their side files,
+    since a running Chrome locks them and holds writes there."""
+    default = Path(profile or settings.meet_profile, "Default")
+    try:
+        prefs = json.loads((default / "Preferences").read_text())
+    except OSError, ValueError:
+        return None
+    email = next((a["email"] for a in prefs.get("account_info") or [] if a.get("email")), None)
+    if email is None:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        for side in ("", "-journal", "-wal"):
+            with contextlib.suppress(FileNotFoundError):
+                shutil.copyfile(default / f"Cookies{side}", Path(tmp, f"Cookies{side}"))
+        if not Path(tmp, "Cookies").exists():
+            return None
+        try:
+            with contextlib.closing(sqlite3.connect(Path(tmp, "Cookies"))) as db_:
+                row = db_.execute(
+                    "SELECT 1 FROM cookies WHERE host_key = '.google.com' AND name = 'SID' LIMIT 1"
+                ).fetchone()
+        except sqlite3.Error:
+            return None
+    return email if row else None
+
+
 def profile_ready(profile: str | None = None) -> bool:
     """Whether this Mac's call profile is signed in to a Google account."""
+    return account(profile) is not None
+
+
+def sign_in(profile: str | None = None, *, chrome: str = CHROME, poll_s: float = 2.0, say=print) -> int:
+    """`python -m core meet-sign-in`, by Tom at the Mac: Chrome on the call
+    profile at Google's sign-in, ended by this once the profile is signed
+    in, so no window is left holding it (the Captain, 2026-11-03). A
+    Chrome already holding it is named and left alone: it may be a call.
+    The answer is read from the profile whenever Chrome exits; 0 when
+    signed in."""
+    from bridges.meet import holder
+
+    profile = profile or settings.meet_profile
+    if email := account(profile):
+        say(f"already signed in as {email}; {settings.machine} can join calls")
+        return 0
+    if (pid := holder(profile)) is not None:
+        say(f"the call profile is open in another Chrome (pid {pid}); quit it with ⌘Q, then run this again")
+        return 1
+    Path(profile).mkdir(parents=True, exist_ok=True)
+    child = subprocess.Popen(
+        [chrome, f"--user-data-dir={profile}", "--no-first-run", "https://accounts.google.com/"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )  # fmt: skip
+    say("sign in as valor@yuda.me in the Chrome window; it closes itself (⌘Q or Ctrl-C to give up)")
     try:
-        prefs = json.loads(Path(profile or settings.meet_profile, "Default", "Preferences").read_text())
-    except OSError, ValueError:
-        return False
-    return any(a.get("email") for a in prefs.get("account_info") or [])
+        while child.poll() is None and not profile_ready(profile):
+            time.sleep(poll_s)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if child.poll() is None:
+            child.terminate()  # a clean exit, which saves the cookies
+        child.wait()
+    if email := account(profile):
+        say(f"signed in as {email}; {settings.machine} can join calls")
+        return 0
+    say(f"not signed in; run this again to sign in: {SIGN_IN}")
+    return 1
 
 
 async def in_progress(conn) -> dict[str, Any] | None:

@@ -19,6 +19,7 @@ from core.settings import settings
 from tests import bridges
 from tests.test_board import ask
 from tests.test_kernel import at
+from tests.test_meet_sign_in import signed_in
 from tools import chat_tasks, meet
 
 pytestmark = pytest.mark.spend(usd=0)
@@ -33,10 +34,7 @@ def team(tmp_path):
     profile signed in."""
     chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
     profile = tmp_path / "meet-chrome"
-    (profile / "Default").mkdir(parents=True)
-    (profile / "Default" / "Preferences").write_text(
-        json.dumps({"account_info": [{"email": "valor@example.com"}]})
-    )
+    signed_in(profile)
     here = f"m-{uuid.uuid4().hex[:6]}"  # one call at a time per Mac: each test a Mac of its own
     with (
         bridges.operator(tmp_path, meet_profile=str(profile), operator_name=TOM),
@@ -210,7 +208,7 @@ def test_a_join_with_the_profile_signed_out_names_the_sign_in(dsn, team):
         return await join(dsn, brief, [])
 
     out = run(go())
-    assert out.kind == "failed" and "meet-chrome" in out.error and "accounts.google.com" in out.error
+    assert out.kind == "failed" and "not signed in" in out.error and call.SIGN_IN in out.error
 
 
 def test_meet_join_refuses_a_target_that_is_no_meet(dsn, team):
@@ -627,49 +625,46 @@ def test_readbacks_go_to_toms_dm_whatever_name_he_joined_under(dsn, team, tmp_pa
 # -- the profile's lock (the Captain, 2026-11-03) ------------------------------
 
 
-def _holder(profile, *, ignore_term=False):
+def _holder(profile):
     """A stand-in for the Chrome Tom signed in from: a live process whose
     command line names `profile`, and the lock Chrome leaves (`host-pid`)."""
     import os
     import subprocess
     import sys
 
-    body = "import signal, time\n" + (
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else ""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", f"--user-data-dir={profile}"]
     )
-    proc = subprocess.Popen([sys.executable, "-c", body + "time.sleep(60)", f"--user-data-dir={profile}"])
     profile.mkdir(parents=True, exist_ok=True)
     os.symlink(f"a-mac.local-{proc.pid}", profile / "SingletonLock")
     return proc
 
 
-@pytest.mark.parametrize("ignore_term", [False, True])
-def test_the_chrome_holding_the_call_profile_is_ended_before_the_call_opens(tmp_path, ignore_term):
-    from bridges.meet import free
+def test_the_chrome_holding_the_call_profile_is_named_on_a_spaced_path_and_left_running(tmp_path):
+    from bridges.meet import holder
 
     profile = tmp_path / "Application Support" / "meet-chrome"
-    proc = _holder(profile, ignore_term=ignore_term)
+    proc = _holder(profile)
     try:
-        assert asyncio.run(free(f"{profile}/", grace_s=0.5)) == proc.pid
-        proc.wait(timeout=5)
+        assert holder(f"{profile}/") == proc.pid and proc.poll() is None
     finally:
         proc.kill()
 
 
-def test_a_lock_on_another_profile_a_dead_pid_or_none_is_left_alone(tmp_path):
+def test_a_lock_on_another_profile_a_dead_pid_or_none_names_no_holder(tmp_path):
     import os
 
-    from bridges.meet import free
+    from bridges.meet import holder
 
     other = _holder(tmp_path / "other profile")
     profile = tmp_path / "Application Support" / "meet-chrome"
     profile.mkdir(parents=True)
     try:
-        assert asyncio.run(free(str(profile))) is None  # no lock
+        assert holder(str(profile)) is None  # no lock
         os.symlink(f"a-mac.local-{other.pid}", profile / "SingletonLock")
-        assert asyncio.run(free(str(profile))) is None and other.poll() is None
+        assert holder(str(profile)) is None and other.poll() is None
         os.remove(profile / "SingletonLock")
         os.symlink("a-mac.local-999999", profile / "SingletonLock")
-        assert asyncio.run(free(str(profile))) is None
+        assert holder(str(profile)) is None
     finally:
         other.kill()

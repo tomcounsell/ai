@@ -19,10 +19,8 @@ I/O only: what is heard, said and posted is decided in `core/call.py`.
 
 import asyncio
 import base64
-import contextlib
 import json
 import os
-import signal
 import struct
 from collections.abc import Callable
 from pathlib import Path
@@ -147,37 +145,18 @@ class Socket:
             self.people(said)
 
 
-def _on_profile(pid: int, profile: str) -> bool:
-    """Whether `pid` is a live process started on `profile`."""
-    try:
-        argv = psutil.Process(pid).cmdline()
-    except psutil.Error:
-        return False
-    paths = {os.path.abspath(profile).rstrip("/"), os.path.realpath(profile).rstrip("/")}
-    return any(a.rstrip("/") in {f"--user-data-dir={p}" for p in paths} for a in argv)
-
-
-async def free(profile: str, grace_s: float = 15) -> int | None:
-    """End the Chrome holding `profile` (its `SingletonLock` names
-    `host-pid`), which would stop the call's own from starting: only ever
-    the window Tom signed it in from (the Captain, 2026-11-03). SIGTERM,
-    then SIGKILL after `grace_s`. A lock whose pid is gone or on another
-    profile is left to Chrome. The pid it signalled, or None."""
+def holder(profile: str) -> int | None:
+    """The live Chrome holding `profile`: the pid its `SingletonLock`
+    (`host-pid`) names, when that process was started on this profile. A
+    stale lock, or a pid now another process, is None."""
     profile = os.path.expanduser(profile)
     try:
         pid = int(os.readlink(Path(profile, "SingletonLock")).rsplit("-", 1)[1])
-    except OSError, IndexError, ValueError:
+        argv = psutil.Process(pid).cmdline()
+    except OSError, IndexError, ValueError, psutil.Error:
         return None
-    if not _on_profile(pid, profile):
-        return None
-    for sig, wait in ((signal.SIGTERM, grace_s), (signal.SIGKILL, 5.0)):
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, sig)
-        for _ in range(int(wait * 10)):
-            if not _on_profile(pid, profile):
-                return pid
-            await asyncio.sleep(0.1)
-    return pid
+    paths = {os.path.abspath(profile).rstrip("/"), os.path.realpath(profile).rstrip("/")}
+    return pid if any(a.rstrip("/") in {f"--user-data-dir={p}" for p in paths} for a in argv) else None
 
 
 class Page:
@@ -190,16 +169,24 @@ class Page:
     async def open(self, url: str, port: int) -> None:
         from playwright.async_api import async_playwright
 
-        await free(self.profile)
         self._playwright = await async_playwright().start()
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            self.profile,
-            channel="chrome",
-            headless=self.headless,
-            ignore_default_args=["--enable-automation", "--use-mock-keychain"],
-            args=list(CHROME_ARGS),
-            permissions=["microphone", "camera"],
-        )
+        try:
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                self.profile,
+                channel="chrome",
+                headless=self.headless,
+                ignore_default_args=["--enable-automation", "--use-mock-keychain"],
+                args=list(CHROME_ARGS),
+                permissions=["microphone", "camera"],
+            )
+        except Exception:
+            # Never ended here: it is Tom mid-sign-in or another call (the Captain, 2026-11-03).
+            pid = holder(self.profile)
+            if pid is None:
+                raise
+            raise RuntimeError(
+                f"this Mac's call profile is open in another Chrome (pid {pid}); quit it with ⌘Q and ask again"
+            ) from None
         await self._context.add_init_script(script(port))
         self.page = self._context.pages[0] if self._context.pages else await self._context.new_page()
         await self.page.goto(url, wait_until="domcontentloaded")

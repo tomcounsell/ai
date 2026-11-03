@@ -49,9 +49,18 @@ against a new Meet with a second device of Valor's account
 
 ## Setup per Mac
 
-The call profile signed in once, at the Mac ([rollout.md](../rollout.md),
-step 9; the nightly update tells Tom once a week until it is); the voice
-job running with `/hear` (kickstart `com.valor.voice` once
+The call profile signed in once, by Tom at the Mac, in Terminal:
+`cd ~/src/ai && .venv/bin/python -m core meet-sign-in` opens Chrome on it at
+Google's sign-in, closes that Chrome itself once valor@yuda.me is signed in,
+and says so (⌘Q or Ctrl-C gives up; a profile already signed in is left
+alone) ([rollout.md](../rollout.md), step 9; the nightly update tells Tom
+once a week until it is). Signed in means the account in the profile's
+preferences and Google's session cookie in its cookies (`call.account`).
+Never start Chrome on the profile over ssh: the keychain is locked there,
+and Chrome drops the profile's sign-in (the Captain, 2026-11-03). A call
+whose profile another Chrome holds ends saying which one, and leaves it
+running: that Chrome is Tom mid-sign-in or another call. The voice job
+running with `/hear` (kickstart `com.valor.voice` once
 after this change); `gws` signed in as Valor; and Smart Turn v3
 fetched with the voice models (`python -m tools.voice fetch`).
 
