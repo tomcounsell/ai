@@ -366,6 +366,41 @@ def test_a_listening_chat_session_is_started_when_its_wake_falls_due_and_not_bef
     assert (before, after, now) == (1, 2, State.CLARIFY)
 
 
+def test_a_report_a_chat_sessions_own_step_wrote_steps_it_once_more(fresh, op):
+    """The Captain, 2026-11-02: a failed `meet.join` reported to the asking
+    session inside that session's step, and the report waited 15 hours for
+    a restart. The next tick steps it; once a turn has taken it, no more."""
+    calls = []
+
+    async def turn(ctx):
+        calls.append(ctx.task_id)
+        turn_id = ledger.new_id()
+        async with await db.connect(ctx.dsn) as conn:
+            await ledger.append(conn, ctx.task_id, "turn.started", {"turn_id": turn_id, "state": "clarify"})
+            await ledger.append(conn, ctx.task_id, "turn.ended", {"turn_id": turn_id, "outcome": "done",
+                                "result": {}})  # fmt: skip
+            if len(calls) == 1:  # the turn's effect reports to its own session
+                await ledger.append(conn, ctx.task_id, "child.reported", {"kind": "call", "about_key": "call:k:failed",
+                                    "child_id": None, "text": "The call did not open"})  # fmt: skip
+            await ledger.append(conn, ctx.task_id, "turn.collected", {"turn_id": turn_id, "state": "clarify",
+                                "verdict": "idle", "effects": [], "errors": [], "woke": [], "wake": None})  # fmt: skip
+        return {"status": "listening"}
+
+    async def go():
+        task = await new_task(fresh, chat={"channel": "slack", "chat_id": "T1/C1"})
+        await scripted.run_judge(fresh, task, "precise")
+        kernel = only(serve.Kernel(None, {State.CLARIFY: turn}, None, fresh), task)
+        async with await db.connect(fresh) as conn:
+            await ledger.append(conn, task, "message.steered", {"message_id": "1", "text": "valor, a call?"})
+        await ticks(kernel, fresh, 1)
+        after_report = session.chat_waiting(await rows(fresh, task))
+        await ticks(kernel, fresh, 3)
+        return after_report, len(calls), session.chat_waiting(await rows(fresh, task))
+
+    after_report, stepped, still = run(go())
+    assert after_report and stepped == 2 and not still
+
+
 def test_ready_work_runs_foreground_first_then_in_start_order_moved_by_placements(fresh, op, monkeypatch):
     calls = []
 
