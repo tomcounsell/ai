@@ -41,19 +41,16 @@ just work.
 
 ## What is built
 
-1. **A waiting chat is stepped** (`core/serve.py`, `_ready`). The `seen`
-   skip also yields when `session.chat_waiting(rows)` holds, beside
-   `retry_due` and `wake_due`: the one definition of a chat having
-   something to answer, so no second list of row types. It cannot loop: a
-   turn that reads the report moves `steer_since` past it at
-   `turn.collected`, and a step that cannot run (parked) is skipped before.
-2. **The joiner frees its profile** (`bridges/meet/__init__.py`,
-   `Page.open`). Before launching, read `SingletonLock` (a symlink to
-   `host-pid`); if the pid is alive and `ps -o command=` contains
-   `--user-data-dir=<profile>` as a substring (both paths `expanduser`ed,
-   `realpath`ed, trailing slash dropped; the path has a space), SIGTERM it,
-   wait up to 15 s, SIGKILL if still alive, then launch. A dead pid or a
-   process not on this profile is left to Chrome. The profile is Valor's
+1. **A chat's own report wakes it** (`core/serve.py`, `_step`). For a
+   chat session, `seen` stops before a `child.reported` the step wrote
+   itself, as at a row from another writer, so the next tick steps it once;
+   a failed step keeps its backoff (`router.retry_due`).
+2. **The joiner frees its profile** (`bridges/meet/__init__.py`, `free`,
+   from `Page.open`). It reads `SingletonLock` (`host-pid`); a live pid
+   with an argument equal to `--user-data-dir=<profile>` (as given or
+   realpath'd, read with `psutil`, since a turn's sandbox cannot run `ps`)
+   gets SIGTERM, then SIGKILL after 15 s, then the launch. A dead pid or a
+   process on another profile is left to Chrome. The profile is Valor's
    alone; a window on it is only ever the sign-in window.
 3. **The sign-in, before a call.** The nightly update (`update_runner`),
    when `call.profile_ready()` is false, tells Tom once per Mac per ISO
@@ -76,9 +73,8 @@ opens has no debugging port).
 ## Tests
 
 - `tests/test_serve.py`: a chat session whose step writes a `call`
-  report to itself is stepped on the next tick; that second step's turn
-  takes it, `chat_waiting` is then false, and further ticks step it no
-  third time; a step writing only its own turn rows is not re-stepped.
+  report to itself is stepped on the next tick, and no third time; a chat
+  session whose turn fails is stepped once in six ticks, its backoff kept.
 - `tests/test_meet.py`: a live child whose argv names a profile under a
   path with a space, holding `SingletonLock`, is ended before launch
   (SIGTERM; one ignoring SIGTERM is SIGKILLed); a lock naming a live pid

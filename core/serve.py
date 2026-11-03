@@ -1036,11 +1036,7 @@ class Kernel:
             return None
         if not router.has_step(rows, f, b.chat):
             return None  # a chat session waits for the chat or its tasks, not its own outcomes
-        # A chat's report its own step wrote (a failed `meet.join`'s) is not seen until a turn takes it.
-        waiting = bool(b.chat) and session.chat_waiting(rows)
-        if latest <= self.seen.get(task_id, 0) and not (
-            router.retry_due(rows) or session.wake_due(rows) or waiting
-        ):
+        if latest <= self.seen.get(task_id, 0) and not (router.retry_due(rows) or session.wake_due(rows)):
             return None
         if f.state in AT_ONCE:
             self._start(task_id, self._step(task_id, latest), latest)
@@ -1157,6 +1153,7 @@ class Kernel:
             ledger.WRITTEN.reset(collecting)
         async with await db.connect(self.dsn) as conn:
             rows = await ledger.read(conn, task_id)
+            chat = bool((await tasks.brief(conn, task_id)).chat)
         self.seen[task_id] = latest
         (self.idle.add if out.get("status") == "idle" else self.idle.discard)(task_id)
         if out.get("status") == "parked":
@@ -1170,7 +1167,9 @@ class Kernel:
             for r in rows:
                 if r["id"] <= latest or ledger.quiet(r):
                     continue
-                if r["id"] not in written:
+                # A chat's report its own step wrote (a failed `meet.join`'s) waits
+                # for a turn, as another writer's would.
+                if r["id"] not in written or (chat and r["type"] == "child.reported"):
                     break
                 self.seen[task_id] = r["id"]
         state = machine.fold(rows).state

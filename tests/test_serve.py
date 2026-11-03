@@ -401,6 +401,31 @@ def test_a_report_a_chat_sessions_own_step_wrote_steps_it_once_more(fresh, op):
     assert after_report and stepped == 2 and not still
 
 
+def test_a_chat_session_whose_turn_fails_waits_for_its_backoff(fresh, op):
+    """A chat's message its turns have not taken does not step it again
+    past a failed step's backoff: an outage does not end the session."""
+    calls = []
+
+    async def failing(ctx):
+        calls.append(ctx.task_id)
+        return {"status": "failed"}
+
+    async def go():
+        task = await new_task(fresh, chat={"channel": "slack", "chat_id": "T1/C1"})
+        await scripted.run_judge(fresh, task, "precise")
+        kernel = only(serve.Kernel(None, {State.CLARIFY: failing}, None, fresh), task)
+        async with await db.connect(fresh) as conn:
+            await ledger.append(
+                conn, task, "message.steered", {"message_id": "1", "text": "valor, a question?"}
+            )
+        await ticks(kernel, fresh, 6)
+        return await rows(fresh, task)
+
+    written = run(go())
+    assert len(calls) == 1 and len(typed(written, "step.failed")) == 1
+    assert not typed(written, "task.ended")
+
+
 def test_ready_work_runs_foreground_first_then_in_start_order_moved_by_placements(fresh, op, monkeypatch):
     calls = []
 
