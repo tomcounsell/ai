@@ -148,6 +148,10 @@ def test_the_mac_app_agent_alone_reads_bamas_skills():
     assert len(vendored) == 21 and named == vendored
     assert (bama / "specs" / "window-snapper.md").is_file()
     assert (bama / "LICENSE").read_text().startswith("MIT License\n\nCopyright (c) 2026 Dave Ebbelaar")
+    # docs/plans/bama-recopy.md: one pin, named alike in the prompt and the Imports entry.
+    readme = (Path(VALOR_PLUGIN).parent / "README.md").read_text()
+    pin = re.findall(r"vendored at commit ([0-9a-f]{40})", prompt)
+    assert len(pin) == 1 and f"copied verbatim at commit {pin[0]}" in readme
     # By content, not name: the yudame plugin's `research` skill shares a name
     # with BAMA's `plan/research` and is not BAMA's.
     texts = {p.read_text() for p in bama.glob("skills/*/*/SKILL.md")}
