@@ -45,9 +45,9 @@ fill relies on Tier 3. So the client gets its own internal app from
    - A team that isn't in the map is `broker.Failed` ("not a connected
      workspace"), as today.
    - Each wire has its own connect loop and its own `gap.Budget`, since
-     Slack's limits are per workspace. `run` doesn't wait for every
-     workspace before consuming the outbox, so a revoked client token
-     can't stop Yudame.
+     Slack's limits are per workspace. `run` waits only for every
+     workspace's first try, then one connected, before consuming the
+     outbox, so a revoked client token can't stop Yudame.
    - A send or lookup for a workspace that hasn't connected yet is
      `Unknown`, as lookup before connecting is today, so the next wake
      settles it.
