@@ -292,3 +292,32 @@ def test_one_workspace_failing_to_connect_lets_the_other_receive_and_send(tmp_pa
     run(asyncio.wait_for(b.run(Outbox()), 5))
     assert a.calls.count("connect") >= 2 and not a.user_id
     assert w.posted == [("C0B", "hello")] and [m.chat_id for m in got] == ["T0BBB/C0B"]
+
+
+def test_the_outbox_first_sees_every_workspace_after_its_first_try(tmp_path):
+    """The Captain's first update after the second workspace came in named
+    it not connected for a whole tick (2026-11-03): consuming began once the
+    first workspace was up, before the second's connect returned. Now the
+    first round waits for each workspace's first try; a refused one does
+    not hold it."""
+
+    class Slow(Wire):
+        async def connect(self, on_message, on_hello):
+            await asyncio.sleep(0.05)
+            await super().connect(on_message, on_hello)
+
+    seen = []
+    a, slow, refused = Wire("T0AAA"), Slow("T0BBB"), Wire("T0CCC", fails=slack_wire.Refused("invalid_auth"))
+    b = SlackBridge([a, slow, refused], kernel(), seen=tmp_path / "seen.json")
+
+    class Outbox:
+        def __aiter__(self):
+            return self._items()
+
+        async def _items(self):
+            seen.append(await b.connected())
+            return
+            yield
+
+    run(asyncio.wait_for(b.run(Outbox()), 5))
+    assert seen == [{"T0AAA": True, "T0BBB": True, "T0CCC": False}]

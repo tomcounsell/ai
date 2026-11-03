@@ -147,7 +147,8 @@ waits for both; with one workspace the line is as before.
 **The connection.** Per workspace, `slack_sdk`'s aiohttp `SocketModeClient`
 for events and `AsyncWebClient` for the Web API, with no Bolt. `auth.test`
 at connect gives the team id and the token's own user id. The bridge
-starts sending once any workspace is connected; one whose connect fails
+starts sending once every workspace has had its first try and one is
+connected, so its first report names each; one whose connect fails
 (a revoked token, say) is logged and tried again each `serve_tick_s`
 while the others serve. The socket is kept up by
 `slack_sdk`'s own session monitor. Reads (history, replies, `users.info`,

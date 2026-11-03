@@ -161,9 +161,14 @@ class SlackBridge:
     # -- the loop ----------------------------------------------------------
 
     async def run(self, outbox) -> None:
+        # The outbox's first report names each workspace up or down, so it
+        # waits for every workspace's first try, then for one to be up.
         up = asyncio.Event()
-        for w in self.wires.values():
-            self._spawn(self.connect(w, up))
+        tried = {t: asyncio.Event() for t in self.wires}
+        for t, w in self.wires.items():
+            self._spawn(self.connect(w, up, tried[t]))
+        for e in tried.values():
+            await e.wait()
         await up.wait()
         stop = asyncio.Event()
         loop = asyncio.get_running_loop()
@@ -213,9 +218,10 @@ class SlackBridge:
             if await w.connected():
                 await self.fill(t)
 
-    async def connect(self, wire: SlackWire, up: asyncio.Event) -> None:
+    async def connect(self, wire: SlackWire, up: asyncio.Event, tried: asyncio.Event | None = None) -> None:
         """`auth.test` and the socket of one workspace, setting `up` once
-        it connects; after a failure each try waits one `serve_tick_s`.
+        it connects and `tried` after its first try, whatever its end;
+        after a failure each try waits one `serve_tick_s`.
         Each socket session's `hello` starts a gap fill of its workspace."""
         team = wire.team_id
 
@@ -227,11 +233,15 @@ class SlackBridge:
                 await wire.connect(on_message, lambda: self._spawn(self.fill(team)))
                 log.info("connected to %s as %s", wire.team_id, wire.user_id)
                 up.set()
+                if tried is not None:
+                    tried.set()
                 return
             except WireError as e:
                 log.warning("connect to %s failed (%s); next try in %s s", team, e, self.kernel.serve_tick_s)
             except Exception:
                 log.exception("connect to %s failed; next try in %s s", team, self.kernel.serve_tick_s)
+            if tried is not None:
+                tried.set()
             await asyncio.sleep(self.kernel.serve_tick_s)
 
     def _spawn(self, coro) -> None:
