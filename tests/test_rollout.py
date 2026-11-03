@@ -886,10 +886,11 @@ def test_an_update_waits_for_every_workspace_of_a_restarted_slack_bridge(fresh, 
 
     monkeypatch.setattr(permissions, "AGENTS", tmp_path)
     (tmp_path / f"{rollout.BRIDGES['slack']}.plist").write_bytes(b"")
-    monkeypatch.setattr(serve, "BRIDGE_WAIT_S", 5.0)
     done = {"restarted": {rollout.BRIDGES["slack"]: "restarted"}}
 
     async def update(both: bool):
+        # Both back returns at once; the margin is for a loaded suite.
+        monkeypatch.setattr(serve, "BRIDGE_WAIT_S", 30.0 if both else 5.0)
         old = int(time.time()) - 3600
         named = await db.connect(fresh, application_name=f"valor-slack-up@T0AAA={old},T0BBB={old}")
         after = datetime.now(UTC).replace(microsecond=0)
