@@ -475,15 +475,16 @@ async def services(conn) -> list[dict[str, Any]]:
         name, _, at = app.removeprefix("valor-").partition("@")
         if name.endswith("-up"):
             name = name.removesuffix("-up")
+            # A process killed by a restart may still be listed beside its
+            # successor: each part's newest stamp is the bridge's.
             if at.isdigit():
-                up[name] = datetime.fromtimestamp(int(at), UTC)
+                up[name] = max(filter(None, (up.get(name), datetime.fromtimestamp(int(at), UTC))))
             elif "=" in at:
-                each = dict(p.partition("=")[::2] for p in at.split(","))
-                parts[name] = {
-                    p: datetime.fromtimestamp(int(e), UTC) if e.isdigit() and int(e) else None
-                    for p, e in each.items()
-                }
-                up[name] = min(parts[name].values()) if all(parts[name].values()) else None
+                mine = parts.setdefault(name, {})
+                for p, e in (q.partition("=")[::2] for q in at.split(",")):
+                    t = datetime.fromtimestamp(int(e), UTC) if e.isdigit() and int(e) else None
+                    mine[p] = max(filter(None, (mine.get(p), t)), default=None)
+                up[name] = min(mine.values()) if all(mine.values()) else None
             continue
         found[name] = {"name": name, "commit": at or None, "since": started if name == "kernel" else None}
     for name, since in up.items():

@@ -914,6 +914,36 @@ def test_an_update_waits_for_every_workspace_of_a_restarted_slack_bridge(fresh, 
     assert run(update(False)).startswith("not connected (T0AAA connected since ")
 
 
+def test_a_killed_bridge_still_listed_beside_its_successor_does_not_hide_it(fresh, tmp_path, monkeypatch):
+    """Each part's newest stamp is the bridge's, whichever row Postgres lists last."""
+    import time
+    from datetime import UTC, datetime
+
+    from core import permissions
+
+    monkeypatch.setattr(permissions, "AGENTS", tmp_path)
+    old, now = int(time.time()) - 3600, int(time.time())
+
+    async def go():
+        held = [
+            await db.connect(fresh, application_name=f"valor-slack-up@T0AAA={old},T0BBB={old}"),
+            await db.connect(fresh, application_name=f"valor-slack-up@T0AAA={now},T0BBB={now}"),
+            await db.connect(fresh, application_name=f"valor-telegram-up@{now}"),
+            await db.connect(fresh, application_name=f"valor-telegram-up@{old}"),
+        ]
+        try:
+            async with await db.connect(fresh) as conn:
+                return {s["name"]: s for s in await rollout.services(conn)}
+        finally:
+            for c in held:
+                await c.close()
+
+    found = run(go())
+    stamp = datetime.fromtimestamp(now, UTC)
+    assert found["slack"]["since"] == stamp and set(found["slack"]["parts"].values()) == {stamp}
+    assert found["telegram"]["since"] == stamp
+
+
 def test_an_update_reports_each_bridges_state_waiting_for_one_it_installed(fresh, tmp_path, monkeypatch):
     """The `rollout.ended` row names each installed bridge connected or
     not; a bridge the setup check just installed is waited for, and one
