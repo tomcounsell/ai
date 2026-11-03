@@ -9,8 +9,9 @@ outbox. This doc covers what is particular to Slack.
 **Status.** Built in `bridges/slack/`. `python -m bridges.slack run` runs
 it under `bridge.serve`; `keys` copies its tokens, `manifest` prints the
 app manifest, and `--plist` prints its launchd job. The last section lists
-the modules. It serves the Yudame workspace (`T0D654H7PPX`), one bridge per
-Mac, each on that Mac's own app. The Cowboy's receives Tom's DM, #general
+the modules. It serves the Yudame workspace (`T0D654H7PPX`), and any other
+workspace whose pair a Mac holds, one bridge per Mac, each on that Mac's own
+app in each workspace. The Cowboy's receives Tom's DM, #general
 (`C0VP3DHJKD9`, a mentions-only team chat for general Yudame business;
 Tom, 2026-10-23), and its projects' dev channels; each other Mac's, its
 own projects' dev channels.
@@ -191,7 +192,7 @@ and one on someone else's post, is acked and dropped.
 | `chat_id` | `<team>/<channel>`; for a DM, the other person's `sender_id` |
 | `chat_kind` | `dm` for an IM, `group` otherwise |
 | `message_id` | The message's `ts` |
-| `sender_id` | `<team>/<user>`, the team being the message's `user_team`, else its `team`, else the connected workspace's, uppercased. One function builds it, live, in gap fill, and in send, so a live event and its history copy are one person |
+| `sender_id` | `<team>/<user>`, the team being the message's `user_team`, else its `team`, else that of the workspace it came from, uppercased. One function builds it, live, in gap fill, and in send, so a live event and its history copy are one person |
 | `sender_name` | `users.info`'s real name, cached in memory |
 | `text` | Slack's `text` as stored (entities and wrapped links included), except that a mention of Valor's own user, `<@U..>`, is written `<@U..|valor>`, so the kernel's mention rule sees it in a mentions-only chat (the thread's texts likewise) |
 | `reply_to`, `topic_id` | The thread root (`thread_ts`) of a reply; none for a top-level message |
