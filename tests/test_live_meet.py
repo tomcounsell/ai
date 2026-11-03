@@ -171,7 +171,10 @@ async def ready() -> bool:
 async def second_device(url: str, kokoro, other: Path, seen: dict) -> None:
     """Valor's account on another device: joins, asks aloud, then in the
     chat, and measures when Valor's voice first reaches it."""
-    shutil.copytree(settings.meet_profile, other / "p", ignore=shutil.ignore_patterns("Singleton*"))
+    # Links as links: Chrome 156 leaves `RunningChromeVersion` dangling (the Captain, 2026-11-03).
+    shutil.copytree(
+        settings.meet_profile, other / "p", symlinks=True, ignore=shutil.ignore_patterns("Singleton*")
+    )
 
     def hear(who, samples, rate):
         if float(np.abs(samples).mean()) > 0.003:
