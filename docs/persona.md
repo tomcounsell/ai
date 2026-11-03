@@ -46,7 +46,7 @@ in the third person, Valor still answers as itself.
 
 Each chat Valor is in has one long-lived session, and it is the one voice
 there: every team chat a project lists, and Tom's own chat (his Telegram
-DM, his Slack DMs, the operator chat, the local chat page), where it is a
+DM, his Slack DMs a spec lists, the operator chat, the local chat page), where it is a
 1:1 with the CEO. Every message in the chat is the session's, a reply
 under an older task's post included, which shows the session the post and
 lets it answer or steer that task (`core/intake.py`). An email

@@ -16,7 +16,7 @@ project" covers his Yudame DM only (listed in `valor.toml`); his DM in the other
 workspace is a teammate DM under the Captain's project.
 
 **Tom's ids, read from each Mac's launchd jobs (2026-11-03).** His
-id in the other workspace is his id in the other workspace (in the private specs' folder notes, not here), a member of that workspace
+id in the other workspace (kept out of this repo) is a member of that workspace
 (not Slack Connect: its team is the workspace's own, so `inbound.person`
 gives it, not his Yudame id). On the Captain it is in
 `VALOR_OPERATOR_SLACK_IDS` of `com.valor.kernel.slack` but not of
@@ -87,7 +87,7 @@ a spec holding `slack:<team>/*` (the Slack pattern admits no `*`) and
    skill, the others over ssh with each kernel job's own launchctl
    environment, as earlier rollouts did. Confirm each kernel is on it and
    its bridges connected.
-2. Append his id in the other workspace (in the private specs' folder notes, not here) to `VALOR_OPERATOR_SLACK_IDS` in the
+2. Append his id in the other workspace to `VALOR_OPERATOR_SLACK_IDS` in the
    Captain's `com.valor.kernel` (and its Telegram and email jobs, as issue
    3680's step 4 said) and reload them.
 3. Edit the private specs directly (docs/plans/private-projects.md):
