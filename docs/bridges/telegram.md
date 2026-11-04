@@ -207,7 +207,9 @@ on the first reaction) is sent as `ReactionEmoji`; any other (🔍 🧐 📤 �
 📊 📅 ✅ 🚀 ⏳ 📝) as `ReactionCustomEmoji`, the first custom emoji
 Telegram's search gives for the glyph (`SearchCustomEmojiRequest`, logged
 and kept), which needs the account's Premium (logged on connect). Setting
-the account's list replaces its earlier reaction, so the message shows one.
+the account's list replaces its earlier reaction, so the message shows one;
+a done that repeats its handling's emoji (Telegram's `MESSAGE_NOT_MODIFIED`)
+is placed, not refused.
 A reaction is not an effect: no approval, no report. The
 session reads the reaction beside each message (`intake.chat_line`), and
 what set it.
