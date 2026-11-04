@@ -256,7 +256,12 @@ class TelethonWire:
         peer = await self._call(self.client.get_input_entity(chat_id))
         reaction = await self._reaction(emoji)
         # Sends no message, so a failure is definite and a repeat sets the same list.
-        await self._call(self.client(SendReactionRequest(peer, msg_id, reaction=[reaction])))
+        try:
+            await self._call(self.client(SendReactionRequest(peer, msg_id, reaction=[reaction])))
+        except Refused as e:
+            # Telegram's answer when the message already carries this reaction.
+            if not str(e).startswith("MessageNotModifiedError"):
+                raise
 
     async def _reaction(self, emoji: str):
         """`ReactionEmoji` for an emoji on Telegram's reaction list (logged

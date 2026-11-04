@@ -707,6 +707,7 @@ class Client:
 
     def __init__(self):
         self.sent = []
+        self.on = {}  # (peer, msg_id) -> the reaction on it
 
     def is_connected(self):
         return True
@@ -733,6 +734,11 @@ class Client:
                 document_id=[5368324170671202286] if request.emoticon == "\U0001f50d" else []
             )
         assert isinstance(request, SendReactionRequest)
+        if self.on.get((request.peer, request.msg_id)) == request.reaction[0]:
+            from telethon.errors import MessageNotModifiedError
+
+            raise MessageNotModifiedError(request)
+        self.on[request.peer, request.msg_id] = request.reaction[0]
         self.sent.append(("react", request.reaction[0]))
 
 
@@ -744,8 +750,8 @@ def test_telegram_sends_a_listed_emoji_as_itself_and_another_as_premium_custom_e
     async def go():
         wire = TelethonWire(tmp_path / "s", 1, "h")
         wire.client = Client()
-        for emoji in (EYES, "\U0001f50d", "\U0001f50d", "\U0001f4a9"):
-            await wire.react(1, 2, emoji)
+        for n, emoji in enumerate((EYES, "\U0001f50d", "\U0001f50d", "\U0001f4a9")):
+            await wire.react(1, n, emoji)
         return wire.client.sent
 
     sent = run(go())
@@ -757,6 +763,23 @@ def test_telegram_sends_a_listed_emoji_as_itself_and_another_as_premium_custom_e
         ("search", "\U0001f4a9"),
         ("react", ReactionEmoji("\U0001f4a9")),
     ]
+
+
+def test_telegram_takes_a_reaction_already_on_the_message_as_placed(tmp_path):
+    """A done that picks the handling's emoji again is not refused, so it
+    is not replaced by noted. The chat is a basic group (`-<id>`)."""
+    from telethon.tl.types import ReactionEmoji
+
+    from bridges.telegram.wire import TelethonWire
+
+    async def go():
+        wire = TelethonWire(tmp_path / "s", 1, "h")
+        wire.client = Client()
+        await wire.react(-4000000001, 7, EYES)
+        await wire.react(-4000000001, 7, EYES)
+        return wire.client.sent
+
+    assert run(go()) == [("react", ReactionEmoji(EYES))]
 
 
 # -- what the session reads --------------------------------------------------------
