@@ -131,7 +131,9 @@ def test_valor_researcher_runs_its_own_runner_with_keys_from_valors_vault():
         "PERPLEXITY_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
         "GROK_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY",
     }  # fmt: skip
-    assert all(ref.startswith("op://m-valor/") for ref in refs.values())
+    # Valor's vault, but Gemini's paid key, which Tom keeps in Yudame Secrets (2026-11-05).
+    assert all(ref.startswith("op://m-valor/") for k, ref in refs.items() if k != "GEMINI_API_KEY")
+    assert refs["GEMINI_API_KEY"] == settings.google_key_ref
 
 
 def test_the_mac_app_agent_alone_reads_bamas_skills():
