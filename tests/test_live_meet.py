@@ -231,15 +231,15 @@ class Device:
 
     async def ask(self, kokoro, text: str, *, wait: bool = True) -> float:
         """The seconds from the end of `text` to Valor's first sound here."""
-        heard = len(self.voice)
+        await self.quiet()
         end = await self.say(kokoro, text)
         if not wait:
             return 0.0
         for _ in range(120):
             await asyncio.sleep(0.25)
-            if len(self.voice) > heard and time.time() > end:
+            if self.voice and self.voice[-1] > end:
                 break
-        later = [t for t in self.voice[heard:]]
+        later = [t for t in self.voice if t > end]
         await self.quiet()
         return (later[0] - end) if later else float("inf")
 
@@ -261,11 +261,11 @@ class Device:
     async def cut_in(self, kokoro, ask: str, over: str, *, by=None) -> dict:
         """Ask for a long answer, and 1.5 s into it say `over` (from `by`);
         when `over` began, for the say it cut, if any."""
-        heard = len(self.voice)
-        await self.say(kokoro, ask)
+        await self.quiet()
+        end = await self.say(kokoro, ask)
         for _ in range(120):
             await asyncio.sleep(0.25)
-            if len(self.voice) > heard:
+            if self.voice and self.voice[-1] > end:
                 break
         await asyncio.sleep(1.5)
         start = time.time()

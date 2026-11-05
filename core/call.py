@@ -760,7 +760,6 @@ SOCKET_S = 30  # without the page's audio, or out of the call
 WORKER_WAIT_S = 120  # for questions still with the worker after leaving
 RECONNECTS = 2  # failed reconnects to Live before the call leaves
 STATE_S = 2.0
-WORDLESS_S = 0.6  # of a turn's audio held for its transcript before it is said anyway
 # Live's transcript marks silence and pauses, "<no speech>{pause}" (2026-11-05).
 MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
 BARGE_S = 0.2  # this much speech by the person Valor answers cuts him off
@@ -794,6 +793,7 @@ class Reply:
     seconds: float = 0.0  # of audio received
     posted: bool = False
     silent: bool = False  # Live chose silence
+    voiced: bool = False  # its audio has speech in it
     started: float | None = None  # on the recording's clock
     generated: bool = False
     over: asyncio.Future | None = None
@@ -888,7 +888,7 @@ class Call:
         self.last_who: str | None = None
         self.unanswered: tuple[str, str] | None = None  # the last stretch heard, until Valor speaks
         self.barge = 0.0
-        self.typed_next = False
+        self.typed = False  # a typed line is being answered: replies are posted, until someone speaks
         self.metered: str | None = None  # the open `gateway.opened` call of the current turn
         self.playing_until = 0.0
         self.posts: asyncio.Queue = asyncio.Queue()
@@ -999,6 +999,7 @@ class Call:
         whoever spoke most in it. "Valor, leave" from Tom leaves."""
         text, at = self.heard.strip(), self.heard_at
         self.heard, self.heard_at, self.close_at = "", None, None
+        self.typed = self.typed and not text
         if energy is self.energy:
             self.energy = {}
         if not text:
@@ -1024,7 +1025,7 @@ class Call:
         await self._heard(who, name, text, "typed")
         if self.leaving.is_set() or self.session is None:
             return
-        self.typed_next, self.unanswered = True, None
+        self.typed, self.unanswered = True, None
         await self.session.send_client_content(
             turns={"role": "user", "parts": [{"text": f"[typed by {name}] {text}"}]}, turn_complete=True
         )
@@ -1089,7 +1090,7 @@ class Call:
             if self.heard:
                 await self._close_stretch(self.energy)
             self.answering = self.last_who or self.speaking
-            self.reply, self.typed_next = Reply(ledger.new_id(), self.typed_next), False
+            self.reply = Reply(ledger.new_id(), self.typed)
             self.replies[self.reply.id] = self.reply
             await self._open(self.reply.id)
         return self.reply
@@ -1138,16 +1139,22 @@ class Call:
         )  # fmt: skip
 
     async def _audio(self, reply: Reply, data: bytes) -> None:
-        """A chunk of Live's speech: once Live's transcript of the turn
-        shows words (Live sends silence as "<no speech>", 2026-11-05) or
-        `WORDLESS_S` of it came without any, the turn requests its
-        `meet.say`; each chunk is held until that is released, and dropped
-        when it is refused or when the turn answers a typed line."""
+        """A chunk of Live's speech: once the turn shows speech, in Live's
+        transcript of it or in its sound, it requests its `meet.say`. Live
+        answers what it keeps out of with a turn of near-silent audio, its
+        transcript "<no speech>{pause}", "..." or none (the live tests,
+        2026-11-05), which is held and never said. Each chunk is held until
+        the say is released, and dropped when it is refused or when the
+        turn answers a typed line."""
         if reply.typed or reply.dropped:
             return
         reply.seconds += len(data) / 2 / OUT_RATE
-        if reply.said is None and not reply.text.strip() and reply.seconds < WORDLESS_S:
-            reply.held.append(data)
+        if data and not reply.voiced:
+            pcm = np.frombuffer(data, "<i2").astype(np.float32) / 32768
+            reply.voiced = float(np.sqrt(np.mean(pcm**2))) >= SPEAKING
+        if reply.said is None and wordless(reply.text) and not reply.voiced:
+            if data:
+                reply.held.append(data)
             return
         if reply.said is None:
             reply.over = asyncio.get_running_loop().create_future()
@@ -1550,7 +1557,7 @@ class Call:
             "transcript.md": transcript_md(title, segments),
             "summary.json": json.dumps(summary),
             "notes.md": notes_md(title, summary),
-            f"call-{code}.md": notes["markdown"].rstrip() + "\n",
+            f"call-{code}.md": _unescaped(notes["markdown"]).rstrip() + "\n",
         }
         for name, text in files.items():
             (staging / name).write_text(text)
@@ -1602,6 +1609,12 @@ class Call:
         async with await db.connect(self.dsn) as conn:
             await end(conn, self.id, self.reason, late=self.late, unanswered=unanswered, summary=summary)
         return self.reason
+
+
+def _unescaped(markdown: str) -> str:
+    """The document as Markdown: Gemini sent one with its newlines escaped
+    inside the JSON string, `\\n` throughout (the live test, 2026-11-05)."""
+    return markdown.replace("\\n", "\n") if "\n" not in markdown else markdown
 
 
 def _zone() -> str:

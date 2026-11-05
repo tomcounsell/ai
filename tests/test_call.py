@@ -327,6 +327,7 @@ def test_lives_no_speech_turn_is_silence_and_its_markup_is_never_in_what_was_sai
         await settle(c.the)
         quiet = list(c.page.streams)
         await push(c.session, said("..."), audio(0.7), done())
+        await push(c.session, audio(0.9), done())  # near silence, no transcript at all
         await settle(c.the)
         quiet += list(c.page.streams)
         await push(c.session, said("Sure,"), audio(0.3), said(" {pause} Monday."), done())
@@ -522,6 +523,39 @@ def test_a_typed_line_asks_for_a_reply_answered_in_the_chat_never_aloud(dsn, tea
     assert copy["payload"] == {"text": "It is in the ledger.", "reply_to": at(1)}
     (response,) = [kw for k, kw in c.session.sent if k == "tool"]
     assert response["function_responses"][0].response == {"result": "posted"}
+
+
+def test_a_typed_line_is_answered_in_the_chat_past_a_tool_call_until_someone_speaks(dsn, team, quick):
+    """Live asked the worker for a typed question, then said the rest of
+    its answer aloud, in a turn of its own (the live test, 2026-11-05)."""
+
+    async def go():
+        c = await in_call(dsn, team, worker=_answers("Monday."))
+        c.the.chat(LOGAN, "Valor, when is the launch?")
+        await asyncio.sleep(0.1)
+        await push(c.session, tool("ask", question="When is the launch?"), done())
+        await push(c.session, audio(), said("I will check."), done())
+        await settle(c.the)
+        typed_streams = list(c.page.streams)
+        await talk(c.the, LOGAN, 0.4)
+        await push(c.session, heard("Thanks, Valor."))
+        await asyncio.sleep(call.QUIET_S + 0.2)
+        await push(c.session, audio(), said("You're welcome."), done())
+        await settle(c.the)
+        await finish(c)
+        return c, typed_streams, await effects(dsn, c.the.id)
+
+    c, typed_streams, done_ = run(go())
+    assert typed_streams == []
+    assert "I will check." in c.page.posts and 'On "When is the launch?": Monday.' in c.page.posts
+    assert [e["result"]["spoken_text"] for e in done_ if e["type"] == "meet.say"] == ["You're welcome."]
+
+
+def _answers(text):
+    async def worker(question):
+        return text
+
+    return worker
 
 
 def test_a_failed_post_gets_no_copy(dsn, team, quick):
@@ -1105,3 +1139,9 @@ def test_the_page_plays_chunks_back_to_back_and_a_stop_clears_them_saying_what_p
     )
     assert 0.2 <= played <= 0.5  # played up to the stop, not the 0.6 s queued
     assert fresh == pytest.approx(0.2, abs=0.05)  # the stop emptied the queue
+
+
+def test_a_summary_sent_with_its_newlines_escaped_is_written_as_markdown():
+    """Gemini Flash sent the document as one line of `\\n`s (the live test, 2026-11-05)."""
+    assert call._unescaped("# Notes\\n\\n- Ship Monday.") == "# Notes\n\n- Ship Monday."
+    assert call._unescaped("# Notes\n\nA path C:\\new") == "# Notes\n\nA path C:\\new"
