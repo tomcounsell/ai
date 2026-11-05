@@ -363,11 +363,10 @@ def op_read(ref: str, vault_env: str | Path) -> str | None:
     when the environment lacks it); None when it cannot be read."""
     env = dict(os.environ)
     if not env.get("OP_SERVICE_ACCOUNT_TOKEN"):
-        token = (
-            _parse_env(Path(vault_env).read_text()).get("OP_SERVICE_ACCOUNT_TOKEN")
-            if Path(vault_env).exists()
-            else None
-        )
+        try:
+            token = _parse_env(Path(vault_env).read_text()).get("OP_SERVICE_ACCOUNT_TOKEN")
+        except OSError:  # missing, or the Desktop not readable over ssh (the Captain, 2026-11-05)
+            token = None
         if token:
             env["OP_SERVICE_ACCOUNT_TOKEN"] = token
     try:

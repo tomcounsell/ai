@@ -1340,3 +1340,19 @@ def test_a_live_session_that_hears_nothing_of_speech_is_resumed(dsn, team, quick
     c, done_ = run(go())
     assert c.gemini.configs[1].session_resumption.handle == "h9" and call.LOST_LINE not in c.page.posts
     assert [e["result"]["spoken_text"] for e in done_ if e["type"] == "meet.say"] == ["Yes."]
+
+
+def test_google_key_over_ssh_without_the_vault_says_missing_rather_than_failing(tmp_path, monkeypatch):
+    """Over ssh the Desktop's vault `.env` is not readable, and `google-key`
+    failed with PermissionError (the Captain, Pirate and Bald, 2026-11-05)."""
+    from core import credentials
+
+    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))  # no op either
+    vault = tmp_path / ".env"
+    vault.write_text("OP_SERVICE_ACCOUNT_TOKEN=x\n")
+    vault.chmod(0)
+    try:
+        assert credentials.op_read("op://Yudame Secrets/k1/credential", vault) is None
+    finally:
+        vault.chmod(0o600)
