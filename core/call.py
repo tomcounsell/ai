@@ -1441,6 +1441,20 @@ class Call:
             self.reason, self.hard = reason, hard
             self.leaving.set()
 
+    def _lane(self, coro) -> asyncio.Task:
+        """One of the call's lanes. A lane that fails ends the call, saying
+        why: the mixer stopping went unseen, and Valor heard nothing for the
+        rest of a call (the live test, 2026-11-05)."""
+        lane = asyncio.create_task(coro)
+
+        def ended(task: asyncio.Task) -> None:
+            if not task.cancelled() and (exc := task.exception()) is not None:
+                _log(f"call {self.id}: {''.join(traceback.format_exception(exc)).rstrip()}")
+                self.leave(f"Valor's call process failed: {exc!r}")
+
+        lane.add_done_callback(ended)
+        return lane
+
     def _spawn(self, coro) -> None:
         job = asyncio.create_task(coro)
         self.jobs.add(job)
@@ -1617,7 +1631,7 @@ class Call:
         """The call, from joining to its end; the reason it ended."""
         lanes = []
         try:
-            lanes = [asyncio.create_task(c) for c in (self.orders(), self.posts_lane(), self.work())]
+            lanes = [self._lane(c) for c in (self.orders(), self.posts_lane(), self.work())]
             await self.page.open(self.info["url"], self.socket.port if self.socket else 0)
             why = await self.joined()
             if why is not None:
@@ -1629,7 +1643,7 @@ class Call:
                 self.recording = Recording(self.staging / "call.wav")
                 self.started_at, self.t0 = datetime.now(UTC), self.clock()
                 self.posts.put_nowait(Post("join", JOIN_LINE, False))
-                lanes += [asyncio.create_task(c) for c in (self.live(), self.mix(), self.watch())]
+                lanes += [self._lane(c) for c in (self.live(), self.mix(), self.watch())]
                 await self.leaving.wait()
         except Exception as exc:  # noqa: BLE001  the call ends, saying why
             _log(f"call {self.id}: {''.join(traceback.format_exception(exc)).rstrip()}")

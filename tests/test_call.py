@@ -1301,3 +1301,21 @@ def test_side_talk_said_with_others_there_is_not_answered_once_they_leave(dsn, t
         return [t for t, _ in c.session.contents() if "said to you" in t or "spoke to you" in t]
 
     assert run(go()) == []
+
+
+def test_a_lane_that_fails_ends_the_call_saying_why(dsn, team, quick, monkeypatch, capsys):
+    """The mixer stopped mid-call and Valor heard nothing more, with
+    nothing in the log (the live test, 2026-11-05)."""
+
+    async def broken(self, due):
+        raise ValueError("the mix broke")
+
+    monkeypatch.setattr(call.Call, "_tick", broken)
+
+    async def go():
+        c = await in_call(dsn, team)
+        return await asyncio.wait_for(c.running, 15)
+
+    reason = run(go())
+    assert reason == "Valor's call process failed: ValueError('the mix broke')"
+    assert "the mix broke" in capsys.readouterr().out
