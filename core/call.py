@@ -557,14 +557,20 @@ TOOLS = [
 ]  # fmt: skip
 
 
+# Live's end of a turn: 500 ms of silence answered in about 1.1 s, against
+# about 1.4 s at its default, and 300 ms gained little more (probes,
+# 2026-11-05); shorter would end a turn on a pause mid-sentence.
+END_SILENCE_MS = 500
+
+
 def live_config(project: str, prep: str, handle: str | None) -> Any:
     """The Live session's settings: Valor's voice, transcripts both ways,
     proactive audio (it may stay silent), no cutting Valor off (Live's own
     barge-in stopped him for side talk, 2026-11-05: the call cuts him off
     only for the person he answers), compression that bounds what each
-    turn bills, and resumption from `handle`. Live's own sensitivity to
-    speech is kept: at its lowest it missed a short "Hello." (the live
-    tests, 2026-11-05)."""
+    turn bills, and resumption from `handle`. Live's own sensitivity to the
+    start of speech is kept: at its lowest it missed a short "Hello." (the
+    live tests, 2026-11-05); its end of a turn is `END_SILENCE_MS`."""
     from google.genai import types
 
     return types.LiveConnectConfig(
@@ -580,7 +586,11 @@ def live_config(project: str, prep: str, handle: str | None) -> Any:
         output_audio_transcription=types.AudioTranscriptionConfig(),
         proactivity=types.ProactivityConfig(proactive_audio=True),
         realtime_input_config=types.RealtimeInputConfig(
-            activity_handling=types.ActivityHandling.NO_INTERRUPTION
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                silence_duration_ms=END_SILENCE_MS,
+            ),
+            activity_handling=types.ActivityHandling.NO_INTERRUPTION,
         ),
         context_window_compression=types.ContextWindowCompressionConfig(
             trigger_tokens=CALL_CONTEXT, sliding_window=types.SlidingWindow(target_tokens=CALL_CONTEXT // 2)
@@ -1572,8 +1582,10 @@ class Call:
                                       {"model": settings.summary_model, "usage": usage})  # fmt: skip
         except Exception as exc:  # noqa: BLE001  the report says the summary failed
             _log(f"call {self.id}: the summary failed: {''.join(traceback.format_exception(exc)).rstrip()}")
-            keep(staging, self.store, folder_name(self._title(), self.started_at) + " (no summary)")
-            return {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+            # Kept beside the store, not in it: the app reads only the folders it can.
+            return {
+                "error": f"{type(exc).__name__}: {str(exc)[:300]}; the call's files are kept in {staging}"
+            }
         title, code = self._title(), self.info["code"]
         segments = sorted(self.segments, key=lambda s: s["start"])
         summary = {"summary": notes["summary"], "decisions": list(notes["decisions"]),

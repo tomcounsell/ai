@@ -673,9 +673,10 @@ def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
     assert config.proactivity.proactive_audio is True
     assert config.realtime_input_config.activity_handling == types.ActivityHandling.NO_INTERRUPTION
     assert config.context_window_compression.trigger_tokens == call.CALL_CONTEXT
-    assert (
-        config.realtime_input_config.automatic_activity_detection is None
-    )  # Live's own; LOW missed "Hello."
+    detect = config.realtime_input_config.automatic_activity_detection
+    assert detect.start_of_speech_sensitivity is None  # Live's own: LOW missed "Hello."
+    assert detect.end_of_speech_sensitivity == types.EndSensitivity.END_SENSITIVITY_HIGH
+    assert detect.silence_duration_ms == call.END_SILENCE_MS
     assert [f.name for f in config.tools[0].function_declarations] == [
         "ask",
         "post",
@@ -880,7 +881,7 @@ def test_a_failed_summary_is_named_in_the_report_and_no_other_is_written(dsn, te
         for r in rows
         if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended")
     ]
-    assert "Gemini could not summarise it (RuntimeError: quota)" in ended["text"]
+    assert "Gemini could not summarise it (RuntimeError: quota; the call's files are kept in" in ended["text"]
     assert "write no summary of your own" in ended["text"]
 
 
@@ -1211,12 +1212,15 @@ def test_a_failed_conversion_keeps_the_calls_recording(dsn, team, quick, monkeyp
         return c, await bridges.rows(dsn, c.brief.id)
 
     c, rows = run(go())
-    (folder,) = c.the.store.iterdir()
-    assert folder.name.endswith("(no summary)") and (folder / "call.wav").stat().st_size > 44
+    assert not c.the.store.exists() or not list(
+        c.the.store.iterdir()
+    )  # the app's store holds only what it reads
+    (folder,) = [p for p in c.the.store.parent.iterdir() if p.name.startswith(".valor-call-")]
+    assert (folder / "call.wav").stat().st_size > 44
     assert not c.gemini.summarised
     (ended,) = [
         r["payload"]
         for r in rows
         if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended")
     ]
-    assert "afconvert exited 1" in ended["text"]
+    assert "afconvert exited 1" in ended["text"] and str(folder) in ended["text"]
