@@ -974,7 +974,7 @@ class Call:
             await self._cut_off(self.out)
         for who, v in voiced.items():
             self.energy[who] = self.energy.get(who, 0.0) + v * seconds
-        self.voiced_s += seconds if voiced else 0.0
+        self.voiced_s += seconds if voiced and self.out is None else 0.0
         if voiced:
             self.last_voice = now
             top = max(voiced, key=voiced.get)
@@ -998,7 +998,9 @@ class Call:
         elif not self.heard and self.voiced_s >= CHANGE_S and now - self.last_voice >= QUIET_S + LAG_S:
             # Speech Live gave no transcript of (a short "Hello." it missed, 2026-11-05).
             who = max(self.energy, key=self.energy.get) if self.energy else self.speaking
-            self.unanswered, self.energy, self.voiced_s = (self.names.get(who, "someone"), "", now), {}, 0.0
+            if self.present == {who}:
+                self.unanswered = (self.names.get(who, "someone"), "", now)
+            self.energy, self.voiced_s = {}, 0.0
 
     async def _close_stretch(self, energy: dict[str, float]) -> None:
         """One `call.heard` row: what Live heard since the last, said by
@@ -1443,11 +1445,15 @@ class Call:
                 break
             others = [p for p in state["people"] if not p["me"]]
             self.present = {p["id"] for p in others}
+            mine = next((p["name"] for p in state["people"] if p["me"]), None)
             for p in state["people"]:
                 if p["me"]:
                     self.me = p["id"]
                     continue
-                self.names[p["id"]] = p["name"] or "someone"
+                # Another device of Valor's own account (the live tests) is not Valor.
+                self.names[p["id"]] = (p["name"] or "someone") + (
+                    " (another device)" if p["name"] == mine else ""
+                )
                 if p["id"] not in seen:
                     seen.add(p["id"])
                     async with await db.connect(self.dsn) as conn:

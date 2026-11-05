@@ -446,7 +446,7 @@ def test_who_is_here_is_a_note_and_with_one_other_person_all_they_say_is_to_valo
         page.people = page.people[:1] + page.people[2:]  # only Tom
         c = await in_call(dsn, team, page)
         await until(lambda: any("Only" in t for t, _ in c.session.contents()))
-        page.people = Page().people
+        page.people = [*Page().people, {"id": "devices/7", "name": "Valor Engels", "me": False}]
         await until(lambda: any("In the call with you" in t for t, _ in c.session.contents()))
         await finish(c)
         return c.session.contents()
@@ -456,7 +456,7 @@ def test_who_is_here_is_a_note_and_with_one_other_person_all_they_say_is_to_valo
         f"[note] Only {TOM} is here with you: everything they say is to you, so answer it.",
         False,
     ) in notes
-    assert (f"[note] In the call with you: Logan, {TOM}.", False) in notes
+    assert (f"[note] In the call with you: Logan, {TOM}, Valor Engels (another device).", False) in notes
     assert all(not complete for text, complete in notes if text.startswith("[note]"))
 
 
