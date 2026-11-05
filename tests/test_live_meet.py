@@ -85,13 +85,11 @@ def test_valor_joins_a_new_meet_hears_a_question_answers_aloud_and_in_the_chat(d
             front_url = os.environ.get("ANTHROPIC_BASE_URL") or gateway.issue(session, "front")
             folder = Path(settings.tts_model_dir).expanduser()
             kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
-            home = tmp_path / "front"
-            home.mkdir()
             the = call.Call(
                 session, info, Page(profile), call.Ears.load(transcribe), dsn=dsn,
                 voice=lambda text: kokoro.create(text, voice=settings.tts_voice, lang="en-us"),
                 judge=rule, front=call.Front.claude(front_url, model="claude-haiku-5-5",
-                                                    project="acme", prep=info["prep"], home=str(home)),
+                                                    project="acme", prep=info["prep"]),
                 worker=worker, worker_ready=ready, project="acme",
             )  # fmt: skip
 
@@ -243,9 +241,7 @@ def test_the_front_model_follows_the_others_avoids_pricing_and_lets_only_tom_set
         url = os.environ.get("ANTHROPIC_BASE_URL") or gateway.issue(task, "front")
         out = {}
         for name, (news, said) in cases.items():
-            home = tmp_path / name
-            home.mkdir()
-            front = call.Front.claude(url, model="claude-haiku-5-5", project="northwind", home=str(home),
+            front = call.Front.claude(url, model="claude-haiku-5-5", project="northwind",
                                       prep="The Northwind import and its launch.")  # fmt: skip
             await front.start()
             actions: list = []

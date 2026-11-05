@@ -11,6 +11,8 @@ report; a stop leaves at once and "Valor, leave" from Tom leaves too."""
 
 import asyncio
 import json
+import os
+import shutil
 import sys
 from types import SimpleNamespace
 
@@ -491,7 +493,7 @@ def test_the_front_model_streams_sentences_keeps_directives_unsaid_and_a_dropped
 
     async def go():
         front = call.Front(["sh", "-c", f'{sys.executable} -c "$0" "$1" 2>{errors}', FAKE_CLAUDE, json.dumps(replies)],
-                           {}, str(tmp_path))  # fmt: skip
+                           {})  # fmt: skip
         await front.start()
         actions = []
         got = [s async for s in front.draft("news one", "Tom said: what is open?", actions)]
@@ -513,11 +515,54 @@ def test_the_front_model_streams_sentences_keeps_directives_unsaid_and_a_dropped
 
 def test_the_front_models_instructions_carry_the_notes_before_the_call():
     front = call.Front.claude("http://127.0.0.1:1/t/x", model="claude-haiku-5-5", project="acme",
-                              prep="The launch: two decisions open.", home="/tmp/front")  # fmt: skip
+                              prep="The launch: two decisions open.")  # fmt: skip
     system = front.argv[front.argv.index("--system-prompt") + 1]
     assert "The launch: two decisions open." in system and "acme" in system
     assert front.argv[front.argv.index("--tools") + 1] == "" and "--include-partial-messages" in front.argv
     assert front.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/t/x"
+
+
+def test_the_front_model_runs_in_a_home_of_its_own_which_outlives_the_sessions_task_directory(tmp_path):
+    """The Captain, 2026-11-05: the front's home was `<work_dir>/<session>/front`,
+    and the kernel, provisioning that session, removed its task directory
+    before the front started: `FileNotFoundError`. Its home is its own now,
+    one per front, gone when it closes."""
+    task_dir = tmp_path / "c9ab8cc8f378"
+    task_dir.mkdir()
+    show = 'pwd -P; printf "%s\\n" "$HOME" "$CLAUDE_CONFIG_DIR"; cat'
+
+    async def go():
+        fronts = [call.Front(["/bin/sh", "-c", show], {"PATH": "/usr/bin:/bin"}) for _ in range(2)]
+        shutil.rmtree(task_dir)  # as `serve._provision` removes a task directory it finds
+        seen = []
+        for front in fronts:
+            await front.start()
+            seen.append([(await front.proc.stdout.readline()).decode().strip() for _ in range(3)])
+        homes = [front.home for front in fronts]
+        for front in fronts:
+            await front.close()
+        return seen, homes
+
+    seen, homes = run(go())
+    for (cwd, home, config), made in zip(seen, homes, strict=True):
+        assert cwd == os.path.realpath(made) and home == config == made
+        assert not made.startswith(str(tmp_path)) and not os.path.exists(made)
+    assert homes[0] != homes[1]
+
+
+def test_a_call_that_fails_logs_its_traceback_with_the_missing_files_path(dsn, team, capsys):
+    class Missing(Page):
+        async def open(self, url, port):
+            raise FileNotFoundError(2, "No such file or directory", "/gone/front")
+
+    async def go():
+        _, the = await a_call_of(dsn, team, Missing(), Front([]), judged())
+        return await asyncio.wait_for(the.run(), 10)
+
+    reason = run(go())
+    out = capsys.readouterr().out
+    assert reason.startswith("Valor's call process failed: FileNotFoundError")
+    assert "Traceback" in out and "/gone/front" in out and "in run" in out
 
 
 # -- the call's life -----------------------------------------------------------

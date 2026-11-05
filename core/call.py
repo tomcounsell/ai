@@ -42,6 +42,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -635,28 +636,34 @@ class Front:
     the call's own gateway, so it answers within a second or so of a turn
     while `meet.speak` decides whether Valor says it. It has no tools: it
     asks the worker and records a decision by a line of its reply
-    (`directive`), which acts only once the draft is taken."""
+    (`directive`), which acts only once the draft is taken. Its Claude
+    Code home (cwd, `HOME`, `CLAUDE_CONFIG_DIR`) is a temporary directory of
+    its own, made at start and removed at close: one inside the call
+    session's task directory was removed under it when the kernel
+    provisioned that session (the Captain, 2026-11-05)."""
 
-    def __init__(self, argv: list[str], env: dict[str, str], cwd: str):
-        self.argv, self.env, self.cwd = argv, env, cwd
+    def __init__(self, argv: list[str], env: dict[str, str]):
+        self.argv, self.env = argv, env
+        self.home: str | None = None
         self.proc: asyncio.subprocess.Process | None = None
         self.lock = asyncio.Lock()
 
     @classmethod
-    def claude(cls, base_url: str, *, model: str, project: str, prep: str, home: str) -> Front:
+    def claude(cls, base_url: str, *, model: str, project: str, prep: str) -> Front:
         from core.gateway import TURN_TOKEN
 
         system = GUIDANCE.format(project=project, prep=prep.strip() or "(no notes)")
         argv = [settings.claude, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                 "--verbose", "--include-partial-messages", "--model", model, "--system-prompt", system,
                 "--tools", "", "--setting-sources", "", "--strict-mcp-config"]  # fmt: skip
-        env = {"PATH": "/usr/bin:/bin", "HOME": home, "ANTHROPIC_BASE_URL": base_url,
-               "CLAUDE_CONFIG_DIR": home, "CLAUDE_CODE_OAUTH_TOKEN": TURN_TOKEN}  # fmt: skip
-        return cls(argv, env, home)
+        env = {"PATH": "/usr/bin:/bin", "ANTHROPIC_BASE_URL": base_url, "CLAUDE_CODE_OAUTH_TOKEN": TURN_TOKEN}
+        return cls(argv, env)
 
     async def start(self) -> None:
+        self.home = tempfile.mkdtemp(prefix="valor-front-")
+        env = {**self.env, "HOME": self.home, "CLAUDE_CONFIG_DIR": self.home}
         self.proc = await asyncio.create_subprocess_exec(
-            *self.argv, env=self.env, cwd=self.cwd, stdin=asyncio.subprocess.PIPE,
+            *self.argv, env=env, cwd=self.home, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024,
         )  # fmt: skip
 
@@ -666,6 +673,8 @@ class Front:
             with contextlib.suppress(ProcessLookupError):
                 self.proc.terminate()
             await self.proc.wait()
+        if self.home is not None:
+            shutil.rmtree(self.home, ignore_errors=True)
 
     async def draft(self, news: str, said: str, actions: list[tuple[str, dict[str, Any]]]):
         """The answer to `said`, sentence by sentence as it streams; its
@@ -1282,7 +1291,7 @@ class Call:
                 lanes += [asyncio.create_task(self.listen()), asyncio.create_task(self.watch())]
                 await self.leaving.wait()
         except Exception as exc:  # noqa: BLE001  the call ends, saying why
-            _log(f"call {self.id}: {exc!r}")
+            _log(f"call {self.id}: {''.join(traceback.format_exception(exc)).rstrip()}")
             self.leave(f"Valor's call process failed: {exc!r}")
         self.left = True
         with contextlib.suppress(Exception):
