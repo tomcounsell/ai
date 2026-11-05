@@ -252,11 +252,45 @@ def test_which_live_bridges_are_stale(tmp_path):
         assert rollout.stale(co, running, [("telegram", sha)]) == ({"telegram"} if stale else set()), sha
 
 
+def test_the_voice_job_is_stale_when_a_diff_since_reaches_what_it_imports(tmp_path):
+    co, base = layout(tmp_path)
+    voice = commit(co, "tools/voice.py", "from core import intake\n", "voice")
+    elsewhere = commit(co, "core/serve.py", "x = 2\n", "kernel only")
+    shared = commit(co, "core/channels.py", "C = 3\n", "shared")
+    assert not rollout.voice_stale(co, elsewhere, [voice])
+    assert rollout.voice_stale(co, shared, [elsewhere])  # what voice imports, transitively
+    assert rollout.voice_stale(co, voice, [base]) and rollout.voice_stale(co, shared, ["f" * 40])
+    assert not rollout.voice_stale(co, shared, [])
+
+
+def test_a_rollouts_end_restarts_the_voice_job_when_it_reaches_it(fresh, tmp_path):
+    """The voice job ran without `/hear` on every Mac for days after the
+    change that added it (2026-11-05): the rollout that reaches it kicks it,
+    before the dashboard."""
+    co, base = layout(tmp_path)
+    voice = commit(co, "tools/voice.py", "import json\n", "voice")
+    running = commit(co, "core/serve.py", "x = 2\n", "kernel only")
+
+    async def go(since):
+        task, effect = await new_task(fresh), uuid.uuid4().hex
+        kicked = []
+        async with await db.connect(fresh) as conn:
+            await ledger.append(
+                conn, task, "rollout.restarting", {"effect_id": effect, "sha": running, "from": since}
+            )
+            await serve.recover(conn, checkout=co, running=running, kick=lambda label: kicked.append(label))
+        return kicked
+
+    assert run(go(base)) == [rollout.VOICE, rollout.UI]
+    assert run(go(voice)) == [rollout.UI]
+
+
 def test_a_kick_is_launchctl_kickstart_and_its_failure_a_reason(monkeypatch):
     import core.bridge
 
     for name, label in rollout.BRIDGES.items():
         assert __import__(f"bridges.{name}.__main__", fromlist=["LABEL"]).LABEL == label
+    assert __import__("tools.voice", fromlist=["LABEL"]).LABEL == rollout.VOICE
     assert core.bridge.NO_HEAD == rollout.NO_HEAD
     monkeypatch.setattr(rollout.binaries, "require", lambda p: str(p))
     assert rollout.kick_argv("com.x") == ["/bin/launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.x"]
@@ -734,6 +768,7 @@ def test_the_update_names_an_unsigned_call_profile_once_a_week_per_mac(fresh, tm
                                              "meet-profile:Valor the Pirate:2026-W46"]  # fmt: skip
     assert all(n["kind"] == "rollout" and "meet-sign-in" in n["text"] for n in got)
     assert got[1]["text"].startswith("Valor the Bald cannot join a Google Meet call")
+    assert got[1]["text"].endswith("The Chrome window may be left open; the next call quits it.")
 
 
 def test_python_m_ui_plist_is_the_dashboards_job():

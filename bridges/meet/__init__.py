@@ -19,8 +19,10 @@ I/O only: what is heard, said and posted is decided in `core/call.py`.
 
 import asyncio
 import base64
+import contextlib
 import json
 import os
+import signal
 import struct
 from collections.abc import Callable
 from pathlib import Path
@@ -44,6 +46,8 @@ CHROME_ARGS = (
 # Meet's join buttons, the first shown wins. Never "Switch here", which
 # would take the call from another device of Valor's account.
 JOIN = ("Join now", "Ask to join", "Ask to join anyway", "Join anyway", "Join the call now", "Join here too")
+# Navigations under one `Page.evaluate` waited out before it fails.
+NAVIGATIONS = 3
 # A shown button whose words end with one of `labels` (an icon's name comes
 # first), clicked; else "Other ways to join" opened, for the next try.
 CLICK_JOIN = """(labels) => {
@@ -159,6 +163,33 @@ def holder(profile: str) -> int | None:
     return pid if any(a.rstrip("/") in {f"--user-data-dir={p}" for p in paths} for a in argv) else None
 
 
+def a_call(pid: int) -> bool:
+    """Whether the Chrome `pid` is a call's: Playwright starts it with
+    `--remote-debugging-pipe`, which Chrome opened by hand never has."""
+    try:
+        return "--remote-debugging-pipe" in psutil.Process(pid).cmdline()
+    except psutil.Error:
+        return False
+
+
+async def quit_holder(profile: str, wait_s: float = 15) -> None:
+    """Quit a plain Chrome left open on `profile`, the window Tom signed it
+    in from (all three Macs, 2026-11-05): SIGTERM, Chrome's clean quit,
+    which saves its cookies, then up to `wait_s` for it to let the profile
+    go. Another call's Chrome is refused."""
+    pid = holder(profile)
+    if pid is None:
+        return
+    if a_call(pid):
+        raise RuntimeError(f"this Mac's call profile is in use by another call's Chrome (pid {pid})")
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+    for _ in range(int(wait_s * 10)):
+        if holder(profile) is None:
+            return
+        await asyncio.sleep(0.1)
+
+
 class Page:
     """The call's Chrome window, one per call."""
 
@@ -169,6 +200,7 @@ class Page:
     async def open(self, url: str, port: int) -> None:
         from playwright.async_api import async_playwright
 
+        await quit_holder(self.profile)
         self._playwright = await async_playwright().start()
         try:
             self._context = await self._playwright.chromium.launch_persistent_context(
@@ -180,7 +212,7 @@ class Page:
                 permissions=["microphone", "camera"],
             )
         except Exception:
-            # Never ended here: it is Tom mid-sign-in or another call (the Captain, 2026-11-03).
+            # A Chrome that would not quit, or started since.
             pid = holder(self.profile)
             if pid is None:
                 raise
@@ -191,6 +223,22 @@ class Page:
         self.page = self._context.pages[0] if self._context.pages else await self._context.new_page()
         await self.page.goto(url, wait_until="domcontentloaded")
 
+    async def evaluate(self, expression: str, arg: Any = None) -> Any:
+        """`page.evaluate`, run again on the new document when Meet
+        navigated under it: a rejoin of a call Valor had left ended its
+        call process with "Execution context was destroyed" (2026-11-05).
+        The payloads are init scripts, so the new document has them."""
+        from playwright.async_api import Error
+
+        for _ in range(NAVIGATIONS):
+            try:
+                return await self.page.evaluate(expression, arg)
+            except Error as exc:
+                if "Execution context was destroyed" not in str(exc):
+                    raise
+                await self.page.wait_for_load_state("domcontentloaded")
+        return await self.page.evaluate(expression, arg)
+
     async def join(self, timeout_s: float = 60) -> str:
         """Camera off, then the join button, whichever Meet shows; the
         button's label."""
@@ -198,7 +246,7 @@ class Page:
         if await camera.count() and await camera.first.is_visible():
             await camera.first.click()
         for _ in range(int(timeout_s * 2)):
-            clicked = await self.page.evaluate(CLICK_JOIN, list(JOIN))
+            clicked = await self.evaluate(CLICK_JOIN, list(JOIN))
             if clicked:
                 return clicked
             await asyncio.sleep(0.5)
@@ -206,24 +254,24 @@ class Page:
 
     async def ready(self) -> None:
         """Once in the call: the payloads start reading it and open the chat."""
-        await self.page.evaluate("window.ws.enableMediaSending()")
+        await self.evaluate("window.ws.enableMediaSending()")
 
     async def state(self) -> dict[str, Any]:
-        return await self.page.evaluate("window.valorState()")
+        return await self.evaluate("window.valorState()")
 
     async def post(self, text: str) -> bool:
-        return bool(await self.page.evaluate("(t) => window.sendChatMessage(t)", text))
+        return bool(await self.evaluate("(t) => window.sendChatMessage(t)", text))
 
     async def play(self, pcm: np.ndarray, rate: int) -> dict[str, Any]:
         """Speak `pcm` (float32 mono at `rate`); returns `played`, `total`
         (seconds) and `cut`, once it played out or `stop` cut it."""
         ints = (np.clip(pcm, -1, 1) * 32767).astype("<i2").tobytes()
-        return await self.page.evaluate(
+        return await self.evaluate(
             "([b, r]) => window.valorPlay(b, r)", [base64.b64encode(ints).decode(), rate]
         )
 
     async def stop(self) -> None:
-        await self.page.evaluate("window.valorStop()")
+        await self.evaluate("window.valorStop()")
 
     async def leave(self) -> None:
         button = self.page.locator('button[aria-label="Leave call"]')

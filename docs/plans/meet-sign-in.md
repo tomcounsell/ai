@@ -130,6 +130,16 @@ quitting the window.
    `docs/rollout.md` step 9 and `docs/bridges/meet.md` say the window may
    be left open; drop "a call never ends a Chrome holding the profile".
 
+**Added while building** (Valor's steering, the same done bar; each
+happened on call pwt-uucv-hvd, 2026-11-05):
+4. The voice job ran without `/hear` until kicked by hand: a rollout whose
+   diff from the commit it rolled from reaches `tools/voice.py`'s imports
+   kicks `com.valor.voice` with the bridges (`rollout.voice_stale`).
+5. Tom's typed "Hello" alone with Valor was judged `nothing`: with one
+   other person in the call, `meet.speak` is not asked; it is to Valor.
+6. A rejoin crashed the call ("Execution context was destroyed"):
+   `Page.evaluate` runs again on the new document, up to 3 navigations.
+
 **Out.** Driving the already-open Chrome (no CDP port on it); any change to
 `profile_ready` or the sign-in polling.
 

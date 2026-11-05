@@ -381,7 +381,17 @@ async def recover(
         acting = datetime.now(UTC).replace(microsecond=0)
         if ending and kick is not None:
             try:
-                kicked = await restart_bridges(conn, checkout, running, kick)
+                since = [
+                    r[0]
+                    for r in await (
+                        await conn.execute(
+                            "SELECT DISTINCT payload->>'from' FROM events WHERE type = 'rollout.restarting' "
+                            "AND payload->>'effect_id' = ANY(%s) AND payload->>'from' IS NOT NULL",
+                            ([p["effect_id"] for _, p in ending],),
+                        )
+                    ).fetchall()
+                ]
+                kicked = await restart_bridges(conn, checkout, running, kick, since)
             except Exception as exc:  # noqa: BLE001  the bridges' restart never stops the kernel's start
                 _log(f"the bridges were not restarted: {exc!r}")
                 sentry_sdk.capture_exception(exc)
@@ -448,13 +458,15 @@ def said(bridges: dict[str, str]) -> str:
 
 
 async def restart_bridges(
-    conn, checkout: Path, running: str, kick: Callable[[str], str | None]
+    conn, checkout: Path, running: str, kick: Callable[[str], str | None], since: list[str] = ()
 ) -> dict[str, dict]:
     """Restart each bridge holding its lock, `bridge:<channel>:<machine>`,
     in this database, whose start commit differs from `running` in code it
-    runs (`rollout.stale`), one at a time, off the loop, then the
-    dashboard's job (`rollout.UI`), which holds no connection to read, so
-    it is kicked every time. Returns `restarted`, each label with the stamp
+    runs (`rollout.stale`), one at a time, off the loop, then the voice job
+    when the diff from a commit in `since` (what the rollouts rolled from)
+    reaches it (`rollout.voice_stale`), then the dashboard's job
+    (`rollout.UI`), which holds no connection to read, so it is kicked
+    every time. Returns `restarted`, each label with the stamp
     it replaced (None when unstamped), and `restart_failed`, each label
     with why; empty ones left out."""
     live: list[tuple[str, str | None]] = []
@@ -469,6 +481,8 @@ async def restart_bridges(
     restarted: dict[str, str | None] = {}
     failed: dict[str, str] = {}
     kicks = [(rollout.BRIDGES[channel], stamp) for channel, stamp in live if channel in due]
+    if since and await git.threaded(rollout.voice_stale, checkout, running, list(since)):
+        kicks.append((rollout.VOICE, None))
     for label, stamp in [*kicks, (rollout.UI, None)]:
         why = await git.threaded(kick, label)
         if why is None:

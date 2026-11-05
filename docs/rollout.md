@@ -231,19 +231,19 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    -m core meet-sign-in`, then valor@yuda.me with the passkey in the
    Chrome window it opens. It closes that window itself once signed in
    and prints "signed in as valor@yuda.me" (⌘Q or Ctrl-C gives up; on a
-   Mac already signed in it says so and opens nothing). Signed in: the
-   Cowboy (2026-10-27); the Captain's, signed in 2026-11-03, was signed
-   out the same day; the Pirate and the Bald not yet. Until then a call
-   asked for on that Mac fails, naming this step, and each night's update
-   tells Tom once a week. A call never ends a Chrome holding the profile;
-   it says which one.
+   Mac already signed in it says so and opens nothing). The window may be
+   left open, however it was opened: a call quits a plain Chrome on the
+   profile before starting its own. Tom signed in
+   every Mac's on 2026-11-05. A call asked for on a Mac not signed in fails, naming this step, and each night's update
+   tells Tom once a week. A call refuses only when another call's Chrome holds the
+   profile, and says so.
    Chrome on the call profile runs only in the Mac's own session (the
    kernel's, Terminal at the Mac, or a `launchctl bootstrap gui/$(id -u)`
    job): over plain ssh the login keychain is locked, Chrome cannot read
    the profile's cookies and drops them, signing it out (the Captain's,
    2026-11-03). Copying Google's cookies in from another profile does not
    sign it in: Google signed the copy out within a minute. A call needs the voice
-   job with `/hear` (kickstart `com.valor.voice` once after this change),
+   job with `/hear` (a rollout restarts it when the change reaches it),
    Smart Turn v3 (8 MB,
    which `tools.voice fetch` now fetches too) and `gws` signed in as Valor
    for a new Meet.

@@ -747,3 +747,28 @@ def test_a_calls_worker_takes_no_turn_slot(dsn, tmp_path, monkeypatch):
             await gateway.close()
 
     assert run(go())["outcome"] == "done"
+
+
+def test_with_only_one_other_person_in_the_call_whatever_they_say_is_to_valor(dsn, team):
+    """Tom's typed "Hello" in a call with only him, judged `nothing`, got no
+    answer (2026-11-05): with one other person present `meet.speak` is not
+    asked; with two it is."""
+
+    async def go():
+        page = Page()
+        judge = judged("nothing")
+        _, the = await a_call_of(dsn, team, page, Front([["Hello Tom."], ["Unheard."]]), judge)
+        running = lanes(the)
+        the.present = {TOMS}
+        the.chat(TOMS, "Hello")
+        await settle(the)
+        the.present = {TOMS, LOGAN}
+        the.chat(TOMS, "Logan, are you there?")
+        await settle(the)
+        for job in running:
+            job.cancel()
+        return page, judge
+
+    page, judge = run(go())
+    assert page.posts == ["Hello Tom."]
+    assert [a["said"] for a in judge.asked] == [f"{TOM} typed: Logan, are you there?"]

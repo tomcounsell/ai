@@ -115,25 +115,32 @@ def profile_ready(profile: str | None = None) -> bool:
 def sign_in(profile: str | None = None, *, chrome: str = CHROME, poll_s: float = 2.0, say=print) -> int:
     """`python -m core meet-sign-in`, by Tom at the Mac: Chrome on the call
     profile at Google's sign-in, ended by this once the profile is signed
-    in, so no window is left holding it (the Captain, 2026-11-03). A
-    Chrome already holding it is named and left alone: it may be a call.
-    The answer is read from the profile whenever Chrome exits; 0 when
-    signed in."""
-    from bridges.meet import holder
+    in (the Captain, 2026-11-03). A Chrome already holding it is left
+    alone: a call's is named, any other is the window to sign in from,
+    which may be left open, since the next call quits it. The answer is
+    read from the profile whenever Chrome exits; 0 when signed in."""
+    from bridges.meet import a_call, holder
 
     profile = profile or settings.meet_profile
     if email := account(profile):
         say(f"already signed in as {email}; {settings.machine} can join calls")
         return 0
     if (pid := holder(profile)) is not None:
-        say(f"the call profile is open in another Chrome (pid {pid}); quit it with ⌘Q, then run this again")
+        if a_call(pid):
+            say(f"the call profile is in use by a call's Chrome (pid {pid}); run this again after the call")
+        else:
+            say(f"the call profile is already open in Chrome (pid {pid}): sign in as valor@yuda.me there; "
+                "the window may be left open, the next call quits it")  # fmt: skip
         return 1
     Path(profile).mkdir(parents=True, exist_ok=True)
     child = subprocess.Popen(
         [chrome, f"--user-data-dir={profile}", "--no-first-run", "https://accounts.google.com/"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )  # fmt: skip
-    say("sign in as valor@yuda.me in the Chrome window; it closes itself (⌘Q or Ctrl-C to give up)")
+    say(
+        "sign in as valor@yuda.me in the Chrome window; it closes itself once signed in, and if it is left "
+        "open the next call quits it (⌘Q or Ctrl-C to give up)"
+    )
     try:
         while child.poll() is None and not profile_ready(profile):
             time.sleep(poll_s)
@@ -860,6 +867,7 @@ class Call:
         )
         self.speakers: dict[str, Speaker] = {}
         self.names: dict[str, str] = {}
+        self.present: set[str] = set()  # who else is in the call now
         self.me: str | None = None
         self.lines: list[str] = []  # the call so far, as the front model reads it
         self.told = 0  # how many of `lines` the front model has read
@@ -1000,7 +1008,11 @@ class Call:
             sentences.put_nowait(None)
 
     async def _decide(self, turn: Turn) -> str | None:
-        """`meet.speak`'s label; None (silence) on abstain, failure or stop."""
+        """`meet.speak`'s label; None (silence) on abstain, failure or stop.
+        With only one other person in the call, whatever they say is to
+        Valor (Tom's "Hello", judged `nothing`, 2026-11-05)."""
+        if self.present == {turn.who}:
+            return "asked_valor"
         inputs = {
             "said": f"{turn.name} {turn.via}: {turn.text}",
             "recent": "\n".join(self.lines[-RECENT:-1]) or "(nothing before it)",
@@ -1181,6 +1193,7 @@ class Call:
                 self.leave("Valor was no longer in the call")
                 break
             others = [p for p in state["people"] if not p["me"]]
+            self.present = {p["id"] for p in others}
             for p in state["people"]:
                 if p["me"]:
                     self.me = p["id"]

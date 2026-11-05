@@ -106,6 +106,9 @@ BRIDGES = {
 NO_HEAD = "none"
 # The dashboard's launchd job (`python -m ui --plist`), kicked with the bridges.
 UI = "com.valor.ui"
+# The voice job (`tools/voice.py` `LABEL`), which holds no lock to stamp:
+# kicked when a rollout's diff from the commit it rolled from reaches it.
+VOICE = "com.valor.voice"
 KICK_TIMEOUT_S = 10.0
 # Read per turn (`persona/`, `skills/`) or never read by the kernel.
 QUIET_DIRS = ("persona/", "skills/", "docs/", "tests/")
@@ -176,7 +179,12 @@ def closure(checkout: Path, name: str) -> set[str]:
     the `__init__.py` of each package on its path, transitively. Paths are
     relative to the checkout."""
     todo = [p.relative_to(checkout).as_posix() for p in sorted((checkout / "bridges" / name).rglob("*.py"))]
-    todo.append("bridges/__init__.py")
+    return _imported(checkout, [*todo, "bridges/__init__.py"])
+
+
+def _imported(checkout: Path, todo: list[str]) -> set[str]:
+    """The files `todo` and every `core/` or `bridges/` module they import,
+    transitively (`closure`)."""
     files: set[str] = set()
     while todo:
         path = todo.pop()
@@ -240,6 +248,22 @@ def stale(checkout: Path, running: str, live: list[tuple[str, str | None]]) -> s
         if reaches(paths, closure(checkout, channel), channel):
             out.add(channel)
     return out
+
+
+def voice_stale(checkout: Path, running: str, since: list[str]) -> bool:
+    """Whether the voice job runs code `running` changed: a diff from any
+    commit in `since` that reaches `tools/voice.py`'s imports, or one git
+    cannot read (the voice job kept `/hear` out of every call until it was
+    kicked by hand, 2026-11-05)."""
+    files = _imported(checkout, ["tools/voice.py"])
+    for sha in since:
+        try:
+            paths = git.diff_paths(checkout, sha, running)
+        except git.GitError:
+            return True
+        if reaches(paths, files, "voice"):
+            return True
+    return False
 
 
 def kick_argv(label: str) -> list[str]:

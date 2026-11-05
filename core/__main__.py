@@ -681,7 +681,8 @@ async def update_runner(ctx: routines.Context) -> routines.Ran:
             kind="rollout",
             about_key=f"meet-profile:{settings.machine}:{ctx.now:%G-W%V}",
             text=f"{settings.machine} cannot join a Google Meet call until its call profile is signed in to "
-            f"Google as Valor, once, at that Mac: {call.SIGN_IN}",
+            f"Google as Valor, once, at that Mac: {call.SIGN_IN}. The Chrome window may be left open; "
+            "the next call quits it.",
         )
     return routines.Ran(None, "started", f"update {request_id} requested; {said}; {free:.0f} GB free")
 

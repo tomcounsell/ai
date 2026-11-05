@@ -1,7 +1,8 @@
 """Signing in a Mac's call profile (docs/plans/meet-sign-in.md): the
 profile counts as signed in only with an account and Google's session
 cookie; `meet-sign-in` closes its own Chrome and answers from the
-profile; a Chrome holding the profile is named, never ended."""
+profile; a call quits a sign-in window left open on the profile and
+refuses only when another call's Chrome holds it."""
 
 import asyncio
 import contextlib
@@ -11,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import textwrap
+from typing import ClassVar
 
 import pytest
 
@@ -73,13 +75,19 @@ def sign_in(profile, path):
 
 
 @contextlib.contextmanager
-def held(profile, on=None):
+def held(profile, on=None, *, call_=False, stubborn=False):
     """A live process started on `on` (default `profile`) whose pid
-    `profile`'s `SingletonLock` names, as a Chrome holding it."""
+    `profile`'s `SingletonLock` names, as a Chrome holding it: a call's
+    (`--remote-debugging-pipe`) with `call_`; one that ignores SIGTERM with
+    `stubborn`."""
     profile.mkdir(parents=True, exist_ok=True)
+    code = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print(flush=True); time.sleep(60)"
     proc = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(60)", f"--user-data-dir={on or profile}"]
-    )
+        [sys.executable, "-c", code if stubborn else "print(flush=True); import time; time.sleep(60)",
+         f"--user-data-dir={on or profile}", *(["--remote-debugging-pipe"] if call_ else [])],
+        stdout=subprocess.PIPE,
+    )  # fmt: skip
+    proc.stdout.readline()  # its handlers are set
     os.symlink(f"Mac.local-{proc.pid}", profile / "SingletonLock")
     try:
         yield proc.pid
@@ -151,13 +159,24 @@ def test_a_profile_already_signed_in_starts_no_chrome(tmp_path):
     assert not (tmp_path / "p" / "argv").exists()
 
 
-def test_a_profile_another_chrome_holds_is_named_and_left_running(tmp_path):
+def test_a_profile_open_in_a_sign_in_window_says_sign_in_there_and_leaves_it(tmp_path):
     profile = tmp_path / "p"
     with held(profile) as pid:
         code, said = sign_in(profile, chrome(tmp_path, "signs"))
-        assert code == 1 and f"pid {pid}" in said[0] and len(said) == 1
+        assert code == 1 and len(said) == 1 and f"pid {pid}" in said[0]
+        assert "sign in as valor@yuda.me there" in said[0] and "may be left open" in said[0]
         assert not (profile / "argv").exists()
         os.kill(pid, 0)  # still running
+
+
+def test_a_profile_a_call_holds_is_named_and_left_running(tmp_path):
+    profile = tmp_path / "p"
+    with held(profile, call_=True) as pid:
+        code, said = sign_in(profile, chrome(tmp_path, "signs"))
+        assert code == 1 and said == [
+            f"the call profile is in use by a call's Chrome (pid {pid}); run this again after the call"
+        ]
+        os.kill(pid, 0)
 
 
 @pytest.mark.parametrize("lock", ["stale", "another profile"])
@@ -179,7 +198,10 @@ def test_a_lock_no_chrome_on_this_profile_holds_lets_sign_in_go_ahead(tmp_path, 
 
 
 class Launch:
-    """Playwright whose Chrome fails to start, as on a held profile."""
+    """Playwright whose Chrome starts unless the profile is held, as Chrome
+    refuses a held one; each launch's profile in `launched`."""
+
+    launched: ClassVar[list[str]] = []
 
     def __init__(self):
         self.chromium = self
@@ -190,25 +212,122 @@ class Launch:
     async def stop(self):
         pass
 
-    async def launch_persistent_context(self, *_a, **_kw):
-        raise RuntimeError("Failed to create a ProcessSingleton for your profile directory")
+    async def launch_persistent_context(self, profile, **_kw):
+        if meet.holder(profile) is not None:
+            raise RuntimeError("Failed to create a ProcessSingleton for your profile directory")
+        Launch.launched.append(profile)
+        raise LookupError("launched")  # the stand-in ends here: no page to drive
 
 
 @pytest.fixture
-def failing_launch(monkeypatch):
+def launch(monkeypatch):
     import playwright.async_api
 
     monkeypatch.setattr(playwright.async_api, "async_playwright", Launch)
+    monkeypatch.setattr(Launch, "launched", [])
+    return Launch.launched
 
 
-def test_a_call_on_a_held_profile_names_the_chrome_and_leaves_it(tmp_path, failing_launch):
-    with held(tmp_path) as pid:
-        page = meet.Page(str(tmp_path))
-        with pytest.raises(RuntimeError, match=rf"open in another Chrome \(pid {pid}\); quit it"):
-            asyncio.run(page.open("https://meet.google.com/abc-defg-hij", 0))
+URL = "https://meet.google.com/abc-defg-hij"
+
+
+def test_a_call_quits_a_sign_in_window_left_open_and_launches(tmp_path, launch):
+    profile = tmp_path / "Application Support" / "meet-chrome"
+    with held(profile) as pid:
+        with pytest.raises(LookupError, match="launched"):
+            asyncio.run(meet.Page(str(profile)).open(URL, 0))
+        _, status = os.waitpid(pid, 0)
+        assert os.WTERMSIG(status) == 15  # quit by SIGTERM, Chrome's clean quit
+    assert launch == [str(profile)]
+
+
+def test_a_call_on_a_profile_another_call_holds_is_refused_and_leaves_it(tmp_path, launch):
+    with held(tmp_path, call_=True) as pid:
+        with pytest.raises(RuntimeError, match=rf"in use by another call's Chrome \(pid {pid}\)"):
+            asyncio.run(meet.Page(str(tmp_path)).open(URL, 0))
         os.kill(pid, 0)  # still running
+    assert launch == []
 
 
-def test_a_call_whose_chrome_fails_with_no_holder_gives_playwrights_error(tmp_path, failing_launch):
-    with pytest.raises(RuntimeError, match="ProcessSingleton"):
-        asyncio.run(meet.Page(str(tmp_path)).open("https://meet.google.com/abc-defg-hij", 0))
+def test_a_chrome_that_will_not_quit_is_named(tmp_path, launch, monkeypatch):
+    monkeypatch.setattr(meet.quit_holder, "__defaults__", (0.3,))
+    with held(tmp_path, stubborn=True) as pid:
+        with pytest.raises(RuntimeError, match=rf"open in another Chrome \(pid {pid}\); quit it"):
+            asyncio.run(meet.Page(str(tmp_path)).open(URL, 0))
+        os.kill(pid, 0)
+    assert launch == []
+
+
+@pytest.mark.parametrize("lock", ["none", "stale", "another profile"])
+def test_a_lock_no_chrome_on_this_profile_holds_signals_nothing_and_launches(tmp_path, launch, lock):
+    profile = tmp_path / "p"
+    profile.mkdir()
+    with contextlib.ExitStack() as stack:
+        if lock == "stale":
+            dead = subprocess.Popen([sys.executable, "-c", "pass"])
+            dead.wait()
+            os.symlink(f"Mac.local-{dead.pid}", profile / "SingletonLock")
+        elif lock == "another profile":
+            other = tmp_path / "other"
+            pid = stack.enter_context(held(other))
+            os.symlink(f"Mac.local-{pid}", profile / "SingletonLock")
+        with pytest.raises(LookupError, match="launched"):
+            asyncio.run(meet.Page(str(profile)).open(URL, 0))
+        if lock == "another profile":
+            os.kill(pid, 0)  # left running
+    assert launch == [str(profile)]
+
+
+# -- a navigation under the call's page (a rejoin, 2026-11-05) ----------------------
+
+
+class Navigating:
+    """A Playwright page whose document is replaced under the first
+    `navigations` evaluations, as Meet did on a rejoin."""
+
+    def __init__(
+        self,
+        navigations,
+        error="Page.evaluate: Execution context was destroyed, most likely because of a navigation",
+    ):
+        self.navigations, self.error, self.loads, self.ran = navigations, error, 0, []
+
+    async def evaluate(self, expression, arg=None):
+        from playwright.async_api import Error
+
+        if self.navigations:
+            self.navigations -= 1
+            raise Error(self.error)
+        self.ran.append(expression)
+        return {"status": "in", "people": []} if expression == "window.valorState()" else "Join now"
+
+    def locator(self, _selector):
+        return self  # no camera button
+
+    async def count(self):
+        return 0
+
+    async def wait_for_load_state(self, state):
+        assert state == "domcontentloaded"
+        self.loads += 1
+
+
+def test_the_join_and_the_reads_after_it_survive_meet_navigating():
+    page = meet.Page("unused")
+    page.page = Navigating(2)
+    assert asyncio.run(page.join()) == "Join now" and page.page.loads == 2
+    page.page = Navigating(1)
+    assert asyncio.run(page.state())["status"] == "in" and page.page.ran == ["window.valorState()"]
+
+
+def test_a_page_that_keeps_navigating_or_fails_otherwise_still_fails():
+    from playwright.async_api import Error
+
+    page = meet.Page("unused")
+    page.page = Navigating(meet.NAVIGATIONS + 1)
+    with pytest.raises(Error, match="Execution context was destroyed"):
+        asyncio.run(page.state())
+    page.page = Navigating(1, error="Page.evaluate: TypeError: window.valorState is not a function")
+    with pytest.raises(Error, match="TypeError"):
+        asyncio.run(page.state())
+    assert page.page.loads == 0
