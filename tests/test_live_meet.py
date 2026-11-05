@@ -41,6 +41,7 @@ pytestmark = [
     ),
 ]
 REPLY_GAP_MOST_S = 10.0
+CALL_OUTLIVES_S = 240  # past 3 min 35 s, when Tom's call went silent (the Captain, 2026-11-05)
 
 
 def test_valor_joins_a_new_meet_hears_a_question_answers_aloud_and_in_the_chat(dsn, tmp_path):
@@ -135,16 +136,35 @@ def test_valor_joins_a_new_meet_hears_a_question_answers_aloud_and_in_the_chat(d
     assert copies and all(c["payload"]["reply_to"] == "1790000000.000100" for c in copies)
 
 
-def test_the_kernels_call_process_joins_hears_and_answers_while_its_session_is_provisioned(dsn, tmp_path):
+def test_the_kernels_call_process_joins_hears_and_answers_while_its_session_is_provisioned(
+    dsn, tmp_path, monkeypatch
+):
     """The call as the kernel runs it (`python -m core call`'s `_call`):
     its own gateway, judge, Kokoro and front model, the call profile, and
     the session's task directory removed under it as the kernel's
     provisioning removes it (the Captain, 2026-11-05). A second device asks
-    aloud and hears Valor answer; a stop ends the call."""
+    aloud and hears Valor answer. Then the worker's turn runs to its end
+    through `runs.run_turn` on the call's gateway (its harness a stub), and
+    past `CALL_OUTLIVES_S` Valor still answers aloud: a worker turn's end
+    retired the front model's token, and Valor went silent 3 min 35 s into
+    Tom's call (the Captain, 2026-11-05). A stop ends the call."""
+    import sys
+
     from kokoro_onnx import Kokoro
 
+    from core import __main__ as kernel
+    from core import ledger, runs
     from core.__main__ import _call
     from tools import voice
+
+    def turn_for(prompt, resume, b):
+        def build(url, brief, turn_id):
+            return runs.TurnCommand(argv=[sys.executable, "-c", "pass"], env={}, cwd=b.workspace, harness="stub",
+                                    parse=lambda out: {"text": "The launch is on Monday, 9 a.m."})  # fmt: skip
+
+        return build
+
+    monkeypatch.setattr(kernel, "_turn_for", turn_for)
 
     chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
     seen: dict = {"valor_roster": [], "audio_at": None, "frames": 0, "chat": []}
@@ -180,11 +200,33 @@ def test_the_kernels_call_process_joins_hears_and_answers_while_its_session_is_p
             calling = asyncio.create_task(_call(session))
             await asyncio.sleep(1)
             shutil.rmtree(task_dir)  # as `serve._provision` removes a task directory it finds
+            started = time.time()
+            work = tmp_path / "worker-copy"
+            work.mkdir()
+            async with await db.connect(dsn) as conn:
+                await ledger.append(
+                    conn, session, "workspace.provisioned", {"fields": {"workspace": str(work)}}
+                )
+
+            async def after_a_worker_turn(page):
+                asked = await ask_aloud(page, kokoro, "Valor, ask your worker to check the code: when is the launch?",
+                                        seen)  # fmt: skip
+                for _ in range(120):
+                    async with await db.connect(dsn) as conn:
+                        if any(r["type"] == "turn.ended" for r in await ledger.read(conn, session)):
+                            break
+                    await asyncio.sleep(1)
+                else:
+                    raise AssertionError(f"no worker turn ended (Valor's reply came after {asked:.1f} s)")
+                await asyncio.sleep(max(0.0, CALL_OUTLIVES_S - (time.time() - started)))
+                seen["gap_after"] = await ask_aloud(page, kokoro, "Valor, are you still there?", seen)
+                await asyncio.sleep(8)
+
             folder = Path(settings.tts_model_dir).expanduser()
             kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
             other = Path(tempfile.mkdtemp(prefix="meet-other-"))
             try:
-                await second_device(url, kokoro, other, seen)
+                await second_device(url, kokoro, other, seen, then=after_a_worker_turn)
                 async with await db.connect(dsn) as conn:
                     await tasks.stop(conn, session, reason="the live check is over")
                 reason = await asyncio.wait_for(calling, 120)
@@ -196,9 +238,14 @@ def test_the_kernels_call_process_joins_hears_and_answers_while_its_session_is_p
     session, reason = asyncio.run(go())
     rows = asyncio.run(bridges.rows(dsn, session))
     print(
-        f"live: reply gap {seen['gap']:.2f} s; Valor's frames at the other device {seen['frames']}; {reason}"
+        f"live: reply gap {seen['gap']:.2f} s, after the worker's turn {seen['gap_after']:.2f} s; "
+        f"Valor's frames at the other device {seen['frames']}; {reason}"
     )
     assert reason == "the call was stopped"
+    ended = next(r["id"] for r in rows if r["type"] == "turn.ended")
+    assert any(r["id"] > ended and r["type"] == "effect.outcome" and r["payload"]["result"].get("spoken_text")
+               for r in rows)  # fmt: skip
+    assert seen["gap_after"] < REPLY_GAP_MOST_S
     assert any(
         r["type"] == "effect.outcome" and r["payload"]["result"].get("posted") == call.JOIN_LINE for r in rows
     )
@@ -236,9 +283,10 @@ async def ready() -> bool:
     return True
 
 
-async def second_device(url: str, kokoro, other: Path, seen: dict) -> None:
-    """Valor's account on another device: joins, asks aloud, then in the
-    chat, and measures when Valor's voice first reaches it."""
+async def second_device(url: str, kokoro, other: Path, seen: dict, then=None) -> None:
+    """Valor's account on another device: joins, asks aloud, then (after
+    `then(page)`, when given) in the chat, and measures when Valor's voice
+    first reaches it."""
     # Links as links: Chrome 156 leaves `RunningChromeVersion` dangling (the Captain, 2026-11-03).
     shutil.copytree(
         settings.meet_profile, other / "p", symlinks=True, ignore=shutil.ignore_patterns("Singleton*")
@@ -262,17 +310,12 @@ async def second_device(url: str, kokoro, other: Path, seen: dict) -> None:
             await asyncio.sleep(1)
         await page.ready()
         await asyncio.sleep(5)
-        question, rate = kokoro.create("Valor, what shipped this week, and when is the launch?", voice="af_heart",
-                                       lang="en-us")  # fmt: skip
-        seen["audio_at"] = None
-        await page.play(question, rate)
-        asked = time.time()
-        for _ in range(60):
-            await asyncio.sleep(0.5)
-            if seen["audio_at"]:
-                break
-        seen["gap"] = (seen["audio_at"] or float("inf")) - asked
+        seen["gap"] = await ask_aloud(
+            page, kokoro, "Valor, what shipped this week, and when is the launch?", seen
+        )
         await asyncio.sleep(12)
+        if then is not None:
+            await then(page)
         before = len(seen["chat"])
         await page.post("Valor, can you post the launch date here?")
         for _ in range(40):
@@ -284,6 +327,19 @@ async def second_device(url: str, kokoro, other: Path, seen: dict) -> None:
     finally:
         await page.close()
         await socket.close()
+
+
+async def ask_aloud(page, kokoro, text: str, seen: dict) -> float:
+    """Say `text` into the call; the seconds until Valor's voice reaches this device."""
+    question, rate = kokoro.create(text, voice="af_heart", lang="en-us")
+    seen["audio_at"] = None
+    await page.play(question, rate)
+    asked = time.time()
+    for _ in range(60):
+        await asyncio.sleep(0.5)
+        if seen["audio_at"]:
+            break
+    return (seen["audio_at"] or float("inf")) - asked
 
 
 def test_the_front_model_follows_the_others_avoids_pricing_and_lets_only_tom_settle_a_decision(dsn, tmp_path):

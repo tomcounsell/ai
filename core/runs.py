@@ -246,7 +246,7 @@ async def _run_turn(
                     },
                 )
         except BaseException:
-            gateway.retire(task_id)
+            gateway.retire(task_id, turn_id)
             raise
         if command.tmpdir:
             tmpdirs.append(command.tmpdir)
@@ -303,10 +303,10 @@ async def _run_turn(
                     stopped.cancel()
                 else:
                     stopped.cancel()
-                    gateway.retire(task_id)
-                    gateway.cut(task_id)  # its process has exited: no client is left
+                    gateway.retire(task_id, turn_id)
+                    gateway.cut(task_id, turn_id)  # its process has exited: no client is left
                     outcome = "done" if proc.returncode == 0 else "failed"
-                await gateway.drain(task_id)
+                await gateway.drain(task_id, turn_id)
                 reaped = await asyncio.to_thread(reap, turn_id, proc.pid)
                 # Every process of the turn has ended, so both pipes are at EOF.
                 await pumped
@@ -426,8 +426,8 @@ async def _cut_short(gateway, task_id, turn_id, dsn, proc, pumped, waiters, exc:
     rows is noted on `exc`, which the caller raises."""
     if proc is not None and proc.returncode is None:
         _kill_group(proc.pid)
-    gateway.retire(task_id)
-    gateway.cut(task_id)
+    gateway.retire(task_id, turn_id)
+    gateway.cut(task_id, turn_id)
     for waiter in waiters:
         waiter.cancel()
     reaped = await asyncio.to_thread(reap, turn_id, proc.pid if proc is not None else None)
@@ -438,7 +438,7 @@ async def _cut_short(gateway, task_id, turn_id, dsn, proc, pumped, waiters, exc:
     out_path, err_path = output_paths(task_id, turn_id)
     why = "cancelled" if isinstance(exc, asyncio.CancelledError) else f"{type(exc).__name__}: {exc}"
     try:
-        await gateway.drain(task_id)
+        await gateway.drain(task_id, turn_id)
         async with await db.connect(dsn) as conn:
             metered = await spending.turn_spent(conn, task_id, turn_id)
             async with conn.transaction():

@@ -237,7 +237,7 @@ class OpenAIKey:
             return value
 
 
-@dataclass
+@dataclass(frozen=True)
 class Grant:
     task_id: str
     turn_id: str
@@ -384,8 +384,9 @@ class Gateway:
         self.openai_upstream = (openai_upstream or settings.openai_upstream).rstrip("/")
         self.grants: dict[str, Grant] = {}
         self.revoked: set[str] = set()
-        self.calls: dict[str, set[asyncio.Task]] = {}
-        self.upstream_calls: dict[str, set[asyncio.Task]] = {}
+        # Each grant's calls, so a turn's end touches only its own.
+        self.calls: dict[Grant, set[asyncio.Task]] = {}
+        self.upstream_calls: dict[Grant, set[asyncio.Task]] = {}
         # Calls whose client left before they were sent: they are not sent.
         self.abandoned: set[asyncio.Task] = set()
         self.url: str | None = None
@@ -423,9 +424,17 @@ class Gateway:
         self.grants[token] = Grant(task_id, turn_id)
         return f"{self.url}/t/{token}"
 
-    def retire(self, task_id: str) -> None:
-        """Forget every token of the task. Later calls on them are refused."""
-        for token in [t for t, g in self.grants.items() if g.task_id == task_id]:
+    def _of(self, grants, task_id: str, turn_id: str | None) -> list[Grant]:
+        return [g for g in grants if g.task_id == task_id and turn_id in (None, g.turn_id)]
+
+    def retire(self, task_id: str, turn_id: str | None = None) -> None:
+        """Forget the turn's tokens, or with no turn every token of the task.
+        Later calls on them are refused. A turn's end retires only its own:
+        a call's front model shares its task with the worker's turns, and
+        the worker's first turn ending retired the front's token (the
+        Captain, 2026-11-05: Valor went silent mid-call)."""
+        mine = self._of(self.grants.values(), task_id, turn_id)
+        for token in [t for t, g in self.grants.items() if g in mine]:
             del self.grants[token]
 
     def revoke(self, task_id: str) -> None:
@@ -435,17 +444,18 @@ class Gateway:
         self.retire(task_id)
         self.cut(task_id)
 
-    def cut(self, task_id: str) -> None:
-        """Cut the task's calls that are waiting on or streaming from the
-        provider; each is still charged. A turn's exit cuts its calls, since
-        no client is left to read them."""
-        for call in list(self.upstream_calls.get(task_id, ())):
-            call.cancel()
+    def cut(self, task_id: str, turn_id: str | None = None) -> None:
+        """Cut the turn's (or with no turn, the task's) calls that are
+        waiting on or streaming from the provider; each is still charged. A
+        turn's exit cuts its calls, since no client is left to read them."""
+        for grant in self._of(list(self.upstream_calls), task_id, turn_id):
+            for call in list(self.upstream_calls[grant]):
+                call.cancel()
 
-    async def drain(self, task_id: str) -> None:
-        """Wait until every call of the task has been charged."""
-        while self.calls.get(task_id):
-            await asyncio.wait(list(self.calls[task_id]))
+    async def drain(self, task_id: str, turn_id: str | None = None) -> None:
+        """Wait until every call of the turn (or the task) has been charged."""
+        while pending := [c for g in self._of(list(self.calls), task_id, turn_id) for c in self.calls[g]]:
+            await asyncio.wait(pending)
 
     # -- the project's record --------------------------------------------------
 
@@ -500,12 +510,12 @@ class Gateway:
         provider is cut; one not yet sent is never sent; one being charged
         is left to finish. Either way its charge lands before this returns."""
         call = asyncio.create_task(coro)
-        self.calls.setdefault(grant.task_id, set()).add(call)
-        call.add_done_callback(self.calls[grant.task_id].discard)
+        self.calls.setdefault(grant, set()).add(call)
+        call.add_done_callback(self.calls[grant].discard)
         try:
             return await asyncio.shield(call)
         except asyncio.CancelledError:
-            if call in self.upstream_calls.get(grant.task_id, ()):
+            if call in self.upstream_calls.get(grant, ()):
                 call.cancel()
             elif not call.done():
                 self.abandoned.add(call)
@@ -659,7 +669,7 @@ class Gateway:
         response = None
         failed = None
         me = asyncio.current_task()
-        upstream = self.upstream_calls.setdefault(grant.task_id, set())
+        upstream = self.upstream_calls.setdefault(grant, set())
         upstream.add(me)
         # From here `cut`, `revoke`, and a leaving client cancel this call.
         # One whose client already left, or whose token was retired while it
