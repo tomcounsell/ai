@@ -545,6 +545,13 @@ class Settings:
     call_model: str = field(default_factory=lambda: _env("VALOR_CALL_MODEL", "gemini-3.8-live"))
     call_voice: str = field(default_factory=lambda: _env("VALOR_CALL_VOICE", "Charon"))
     summary_model: str = field(default_factory=lambda: _env("VALOR_SUMMARY_MODEL", "gemini-3.1-pro-preview"))
+    # The paid Gemini key, "Gemini API Key Yudame Tools" in 1Password's
+    # Yudame Secrets (Tom, 2026-11-05: m-valor's GOOGLE_API_KEY ran out of credit).
+    google_key_ref: str = field(
+        default_factory=lambda: _env(
+            "VALOR_GOOGLE_KEY_REF", "op://Yudame Secrets/kqait3v3v2cetorscsbf3wwcti/credential"
+        )
+    )
     meetings_store: str = field(
         default_factory=lambda: _env(
             "VALOR_MEETINGS_STORE",
@@ -602,7 +609,7 @@ class Settings:
     def google_keyfile(self) -> str:
         """The Gemini API key (`GOOGLE_API_KEY=`) a call speaks and is
         summarised with, in the kernel key directory, written by `python -m
-        core google-key`."""
+        core google-key` from `google_key_ref`."""
         return str(Path(self.pg_passfile).parent / "google-key")
 
     @property

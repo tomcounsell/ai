@@ -26,6 +26,7 @@ import os
 import secrets
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import psycopg
@@ -352,15 +353,45 @@ def copy_keys(
     whether a value changed is decided by SHA-256 digest, and no value or
     part of one is returned."""
     sources = sources or {}
-    keyfile = Path(keyfile)
     vault = _parse_env(Path(vault_env).read_text())
+    return store_keys(keyfile, {name: vault.get(sources.get(name, name)) for name in names})
+
+
+def op_read(ref: str, vault_env: str | Path) -> str | None:
+    """A secret from 1Password by its `op://` reference, read with `op` on
+    the service account (`OP_SERVICE_ACCOUNT_TOKEN`, from the vault `.env`
+    when the environment lacks it); None when it cannot be read."""
+    env = dict(os.environ)
+    if not env.get("OP_SERVICE_ACCOUNT_TOKEN"):
+        token = (
+            _parse_env(Path(vault_env).read_text()).get("OP_SERVICE_ACCOUNT_TOKEN")
+            if Path(vault_env).exists()
+            else None
+        )
+        if token:
+            env["OP_SERVICE_ACCOUNT_TOKEN"] = token
+    try:
+        got = subprocess.run(
+            ["op", "read", ref], env=env, capture_output=True, text=True, timeout=60, check=False
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return None
+    return (got.stdout.strip() or None) if got.returncode == 0 else None
+
+
+def store_keys(keyfile: str | Path, values: dict[str, str | None]) -> dict[str, str]:
+    """Store each of `values` in the key file (mode 600, its directory
+    700), atomically, replacing any value it had; a None value is
+    `missing` and leaves the file's. Returns each name's `written`, `kept`,
+    or `missing`, decided by SHA-256 digest; no value or part of one is
+    returned."""
+    keyfile = Path(keyfile)
     keyfile.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     with os.fdopen(os.open(f"{keyfile}.lock", os.O_CREAT | os.O_WRONLY, 0o600), "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         current = _parse_env(keyfile.read_text()) if keyfile.exists() else {}
         status: dict[str, str] = {}
-        for name in names:
-            new = vault.get(sources.get(name, name))
+        for name, new in values.items():
             if not new:
                 status[name] = "missing"
                 continue

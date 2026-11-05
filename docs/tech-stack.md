@@ -473,8 +473,8 @@ is metered like any other task.
 the sandbox profile denies: the kernel databases' passwords in a libpq
 password file, the judgement keys in `judgement-keys`, the OpenAI key in `openai-key` and
 the Gemini key a Meet call uses in `google-key` beside it, copied from the
-vault `.env` by `python -m core judgement-keys`, `python -m core openai-key`
-and `python -m core google-key` ([machine.md](machine.md),
+vault `.env` by `python -m core judgement-keys` and `python -m core
+openai-key`, and read from 1Password by `python -m core google-key` ([machine.md](machine.md),
 Keychain, for why not the Keychain). Status: **in use**. The GitHub push
 token sits there as `github-keys`, from `python -m core github-key`; it
 belongs to Valor's own account, `valorengels`, a collaborator only on the

@@ -470,7 +470,8 @@ class Gateway:
             return web.json_response({"error": "the record is read with GET"}, status=405)
         try:
             found = await asyncio.to_thread(
-                asyncio.run, record.answer(self.dsn, grant.task_id, request.match_info["verb"], dict(request.query))
+                asyncio.run,
+                record.answer(self.dsn, grant.task_id, request.match_info["verb"], dict(request.query)),
             )
         except record.NotFound as exc:
             return web.json_response({"error": str(exc)}, status=404)

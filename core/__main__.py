@@ -60,8 +60,11 @@ openai-key [--name NAME]       copy the vault's NAME (default OPENAI_API_KEY)
                                into the kernel's OpenAI key file (mode 600),
                                replacing the key there; prints written,
                                kept, or missing, never a value
-google-key [--name NAME]       the same for the Gemini key a Meet call speaks
-                               and is summarised with (default GOOGLE_API_KEY)
+google-key [--ref OP_REF]      read the Gemini key a Meet call speaks and is
+                               summarised with from 1Password (default
+                               settings.google_key_ref) into the kernel's
+                               key file (mode 600); prints written, kept, or
+                               missing, never a value
 github-key                     copy GITHUB_PUSH_TOKEN from the vault .env into
                                the kernel's github-keys file (mode 600), the
                                same way
@@ -1078,13 +1081,9 @@ def _sync(args) -> bool:
     elif args.command == "google-key":
         from core.call import GOOGLE_KEY
 
-        try:
-            status = credentials.copy_keys(
-                settings.vault_env, settings.google_keyfile, [GOOGLE_KEY], {GOOGLE_KEY: args.name}
-            )
-        except FileNotFoundError:
-            raise SystemExit(f"no vault .env at {settings.vault_env}") from None
-        print(f"{GOOGLE_KEY} (from {args.name}): {status[GOOGLE_KEY]}")
+        key = credentials.op_read(args.ref, settings.vault_env)
+        status = credentials.store_keys(settings.google_keyfile, {GOOGLE_KEY: key})
+        print(f"{GOOGLE_KEY} (from {args.ref}): {status[GOOGLE_KEY]}")
     elif args.command == "github-key":
         try:
             status = credentials.copy_keys(
@@ -1246,7 +1245,7 @@ def main() -> None:
     sub.add_parser("settings")
     sub.add_parser("judgement-keys")
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")
-    sub.add_parser("google-key").add_argument("--name", default="GOOGLE_API_KEY")
+    sub.add_parser("google-key").add_argument("--ref", default=settings.google_key_ref)
     sub.add_parser("github-key")
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("cases")

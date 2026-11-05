@@ -18,11 +18,11 @@ amends: docs/plans/meet.md (items 4, 5, 7)
 - The Gemini API key, not Vertex.
 - Reconnect, otherwise leave; this covers all calls.
 
-**Premise.** The vault `.env`'s `GOOGLE_API_KEY` (1Password `m-valor`) is paid tier on Valor's AI Studio project, and it reaches `gemini-3.8-live`, `gemini-2.5-flash-native-audio-*` and `gemini-3.1-pro-preview`. Today a reply takes 4 to 10 s.
+**Premise.** The vault `.env`'s `GOOGLE_API_KEY` (1Password `m-valor`) was paid tier on Valor's AI Studio project, and it reaches `gemini-3.8-live`, `gemini-2.5-flash-native-audio-*` and `gemini-3.1-pro-preview`. Today a reply takes 4 to 10 s.
 
 ## Built
 
-1. **Key.** `python -m core google-key` copies it with `credentials.copy_keys` into the kernel key directory, read with `read_key`. This is the `openai-key` path, recorded in `docs/machine.md`.
+1. **Key.** `python -m core google-key` stores it into the kernel key directory (amended 2026-11-05: that key ran out of credit, and Tom put a paid one, "Gemini API Key Yudame Tools", in `Yudame Secrets`; `google-key` reads it with `op read` from `settings.google_key_ref`), read with `read_key`. This is the `openai-key` path, recorded in `docs/machine.md`.
 2. **Session** (google-genai, `settings.call_model` = `gemini-3.8-live`).
    - The voice is Charon. Transcription in and out, resumption and compression are on.
    - The tracks are mixed to 16 kHz mono and sent with `send_realtime_input`. Valor's own audio is not sent.

@@ -921,14 +921,40 @@ def test_a_missing_google_key_is_named_and_its_value_never_printed(tmp_path):
     with pytest.raises(credentials.MissingKey, match="GOOGLE_API_KEY") as got:
         credentials.read_key(tmp_path / "google-key", call.GOOGLE_KEY, "google-key")
     assert "google-key" in str(got.value)
-    vault = tmp_path / ".env"
-    vault.write_text("GOOGLE_API_KEY=AIza-secret-value\n")
-    status = credentials.copy_keys(vault, tmp_path / "keys" / "google-key", [call.GOOGLE_KEY])
-    assert status == {"GOOGLE_API_KEY": "written"} and "secret" not in json.dumps(status)
-    assert (
-        credentials.read_key(tmp_path / "keys" / "google-key", call.GOOGLE_KEY, "google-key")
-        == "AIza-secret-value"
+
+
+def test_google_key_reads_the_key_from_1password_into_the_key_file(tmp_path, monkeypatch, capsys):
+    """`python -m core google-key` reads `settings.google_key_ref` with
+    `op`, on the vault `.env`'s service-account token when the environment
+    has none, and prints only whether it wrote it."""
+    from core import __main__ as kernel
+    from tests import bridges as b
+
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "op").write_text(
+        '#!/bin/sh\n[ "$1 $2" = "read op://Yudame Secrets/k1/credential" ] && [ "$OP_SERVICE_ACCOUNT_TOKEN" = ops_t ] '
+        "&& echo AQ.secret-value && exit 0\nexit 1\n"
     )
+    (bin_ / "op").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_}:/usr/bin:/bin")
+    monkeypatch.delenv("OP_SERVICE_ACCOUNT_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("OP_SERVICE_ACCOUNT_TOKEN=ops_t\n")
+    keyfile = tmp_path / "keys" / "google-key"
+    monkeypatch.setattr(type(kernel.settings), "google_keyfile", property(lambda _: str(keyfile)))
+    with b.configure(vault_env=str(tmp_path / ".env"), google_key_ref="op://Yudame Secrets/k1/credential"):
+        for argv in (["google-key"], ["google-key", "--ref", "op://Yudame Secrets/gone/credential"]):
+            monkeypatch.setattr(sys, "argv", ["python -m core", *argv])
+            kernel.main()
+    out = capsys.readouterr().out
+    assert out.splitlines() == [
+        "GOOGLE_API_KEY (from op://Yudame Secrets/k1/credential): written",
+        "GOOGLE_API_KEY (from op://Yudame Secrets/gone/credential): missing",
+    ]
+    assert "secret" not in out and oct(keyfile.stat().st_mode & 0o777) == "0o600"
+    from core import credentials
+
+    assert credentials.read_key(keyfile, call.GOOGLE_KEY, "google-key") == "AQ.secret-value"
 
 
 # -- the call's life -----------------------------------------------------------

@@ -244,8 +244,8 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    2026-11-03). Copying Google's cookies in from another profile does not
    sign it in: Google signed the copy out within a minute. A call speaks
    through Gemini Live (docs/plans/gemini-live.md): it needs `google-key`
-   (step 5, or `$PY -m core google-key`, which copies the vault `.env`'s
-   `GOOGLE_API_KEY`, the paid key from 1Password's `m-valor`), the
+   (step 5, or `$PY -m core google-key`, which reads the paid "Gemini API
+   Key Yudame Tools" from 1Password's `Yudame Secrets` with `op read`), the
    dependencies (`uv sync`, for `google-genai`), and `gws` signed in as
    Valor for a new Meet. Its recording, transcript and notes go into Yudame
    Tools' meetings (`~/Library/Application Support/YudameTools/Meetings`),
