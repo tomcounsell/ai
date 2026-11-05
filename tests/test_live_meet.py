@@ -122,8 +122,8 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                     await asyncio.sleep(1)
                 seen["looked_up"] = any(LOOKED_UP in t for t in seen["chat"])
                 await asyncio.sleep(4)
-                seen["barge_at"] = await a.cut_in(kokoro, "Valor, tell me in five or six sentences everything you "
-                                                  "know about this launch.", "Valor, stop. Wait a moment.")  # fmt: skip
+                seen["barge_at"] = await a.cut_in(kokoro, "Valor, tell me a story of five or six sentences about a "
+                                                  "launch party.", "Valor, stop. Wait a moment.")  # fmt: skip
                 await asyncio.sleep(6)
                 await b.join(url)
                 await asyncio.sleep(8)

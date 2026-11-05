@@ -763,6 +763,7 @@ STATE_S = 2.0
 # Live's transcript marks silence and pauses, "<no speech>{pause}" (2026-11-05).
 MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
 BARGE_S = 0.2  # this much speech by the person Valor answers cuts him off
+UNANSWERED_S = 2.0  # with one other person, this long with no answer to them asks for one
 
 
 def wordless(text: str) -> bool:
@@ -792,7 +793,6 @@ class Reply:
     text: str = ""
     seconds: float = 0.0  # of audio received
     posted: bool = False
-    silent: bool = False  # Live chose silence
     voiced: bool = False  # its audio has speech in it
     started: float | None = None  # on the recording's clock
     generated: bool = False
@@ -886,7 +886,7 @@ class Call:
         self.out: Reply | None = None  # the turn whose audio is playing
         self.answering: str | None = None  # whose stretch the current reply answers
         self.last_who: str | None = None
-        self.unanswered: tuple[str, str] | None = None  # the last stretch heard, until Valor speaks
+        self.unanswered: tuple[str, str, float] | None = None  # the last stretch heard, until Valor speaks
         self.barge = 0.0
         self.typed = False  # a typed line is being answered: replies are posted, until someone speaks
         self.metered: str | None = None  # the open `gateway.opened` call of the current turn
@@ -989,6 +989,8 @@ class Call:
                         self.close_at, self.energy = (now + LAG_S, self.energy), {}
                     self.speaking, self.rival = top, (None, 0.0)
                     await self._note(f"{self.names.get(top, 'someone')} is speaking.")
+        if not voiced:
+            await self._answer_alone(UNANSWERED_S)
         if self.close_at is not None and now >= self.close_at[0]:
             await self._close_stretch(self.close_at[1])
         elif self.heard and now - self.last_voice >= QUIET_S:
@@ -1008,7 +1010,7 @@ class Call:
         self.last_who = who
         name = self.names.get(who, "someone") if who else "someone"
         await self._heard(who or "", name, text, "spoke")
-        self.unanswered = (name, text)
+        self.unanswered = (name, text, self.now())
         self.segments.append({"speaker": name, "start": round(at or 0.0, 2), "end": round(self.now(), 2),
                               "text": text, "channel": "call"})  # fmt: skip
 
@@ -1104,7 +1106,7 @@ class Call:
             reply = await self._begin()
             reply.text += sc.output_transcription.text
             if wordless(reply.text):
-                reply.dropped, reply.held, reply.silent = True, [], True  # a turn of silence
+                reply.dropped, reply.held = True, []  # a turn of silence
             else:
                 self.unanswered = None
                 if reply.held and reply.said is None:
@@ -1119,18 +1121,25 @@ class Call:
             text = MARKUP_PART.sub("", reply.text).strip()
             if reply.typed and not reply.posted and not wordless(text):
                 self.posts.put_nowait(Post(reply.id, text, True))
-            if reply.silent and len(self.present) == 1 and self.unanswered and self.session is not None:
-                await self._answer(*self.unanswered)
+            if reply.said is None:
+                await self._answer_alone(0.0)
             if reply.said is None:
                 await self._finish(reply, cut=False)
             elif reply.released:
                 self._spawn(self._played_out(reply))
 
-    async def _answer(self, name: str, text: str) -> None:
+    async def _answer_alone(self, after_s: float) -> None:
         """With one other person in the call, all they say is to Valor
         (Tom's "Hello", unanswered, 2026-11-05; Live kept silent on "Hello."
-        with only one person there in the live test, 2026-11-05): a
-        silence after their words asks for the answer, once."""
+        with only one person there in the live tests, 2026-11-05): a turn
+        of silence after their words, or `after_s` with no turn, asks for
+        the answer, once."""
+        if (
+            len(self.present) != 1 or self.unanswered is None or self.session is None
+            or self.reply is not None or self.out is not None or self.now() - self.unanswered[2] < after_s
+        ):  # fmt: skip
+            return
+        name, text, _ = self.unanswered
         self.unanswered = None
         await self.session.send_client_content(
             turns={"role": "user", "parts": [{"text": f'[note] {name}, the only one here, said to you: "{text}". '

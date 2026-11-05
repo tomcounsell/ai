@@ -40,8 +40,12 @@ against a new Meet with a second device of Valor's account
   checkout, on the call's gateway), post, read the open decisions and
   record Tom's read-backs. Each Live turn is one `meet.say`, its audio
   held until released and settled with Live's transcript of what played;
-  a typed line is answered in the chat, never aloud. Speech over Valor
-  cuts him off. Each turn's usage is charged by modality. A Live session
+  a typed line is answered in the chat, never aloud, until someone
+  speaks. A Live turn of silence ("<no speech>", "...", or near-silent
+  audio) is never said. Live itself never cuts Valor off; the call does,
+  when the person he answers speaks over him, and side talk does not. With
+  one other person in the call, a silence after their words asks Live for
+  the answer. Each turn's usage is charged by modality. A Live session
   that goes away is resumed; two failed reconnects post one line and
   leave. "Valor, leave" from Tom is matched in Live's transcript. A call
   that fails writes its traceback to `meet.log`.

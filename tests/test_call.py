@@ -486,6 +486,25 @@ def test_with_one_other_person_a_silence_after_their_words_asks_for_the_answer(d
     )
 
 
+def test_with_one_other_person_no_turn_at_all_after_their_words_asks_for_the_answer(
+    dsn, team, quick, monkeypatch
+):
+    monkeypatch.setattr(call, "UNANSWERED_S", 0.3)
+
+    async def go():
+        page = Page()
+        page.people = page.people[:1] + page.people[2:]  # only Tom
+        c = await in_call(dsn, team, page)
+        await until(lambda: c.the.present)
+        await talk(c.the, TOMS, 0.4)
+        await push(c.session, heard("Hello."))
+        await until(lambda: any("said to you" in t for t, _ in c.session.contents()), s=call.QUIET_S + 2)
+        await finish(c)
+        return [t for t, _ in c.session.contents() if "said to you" in t]
+
+    assert len(run(go())) == 1
+
+
 # -- the chat, the worker, decisions -------------------------------------------------
 
 
