@@ -44,15 +44,16 @@ only, though product rooms exist (`docs/bridges/slack.md`). The repo is public
      the call chat, and the summary goes to the thread. `bridges/meet/`,
      `skills/sdlc/call.md`.
    - *Research and podcasts*: a deep-research run returns a sourced report
-     PDF; on Tom's word it becomes an episode on the Yudame Research or Staff
-     podcast. `skills/valor/skills/deep-research/`, `docs/plans/research-podcast.md`.
-   - *Business operations*: Mercury invoices with a pay link, created after
-     Tom's OK, and the unpaid list; no reminders. Email drafts in the asker's
-     voice, handed back as text; a send only on the asker's word.
-     `skills/valor/skills/mercury-invoicing/SKILL.md`, `skills/sdlc/converse.md`,
-     `persona/voice.md`.
+     PDF; on Tom's word it becomes an episode on the public Yudame Research
+     podcast or, for private topics, an internal one (not named).
+     `skills/valor/skills/deep-research/`, `docs/plans/research-podcast.md`.
+   - *Business operations*: invoices in the company's bank account (the bank
+     not named) with a pay link, created after Tom's OK, and the unpaid list;
+     no reminders. Email drafts in the asker's voice, handed back as text; a
+     send only on the asker's word. `skills/sdlc/converse.md`, `persona/voice.md`.
    Each claim is checked against its source file at build time; anything the
-   file does not support is cut. No counts, no client names, no "soon".
+   file does not support is cut. No counts, no client names, no bank, no
+   "soon".
 5. **`chat.html` Rooms**: a third column for product rooms.
 6. **Sitemap** adds `product.html`.
 7. De-slop pass over the new and changed copy.
@@ -65,7 +66,8 @@ pages beyond nav and footer.
 `tests/test_site.py` already covers what this touches: every link and anchor
 lands (the new nav on every page, the new page's anchors), every source link
 names a real file (each new source line), the sitemap matches the pages
-(`product.html`), and the privacy patterns. Beyond it, by hand: grep the site
+(`product.html`), and the privacy patterns, which now also refuse the
+bank's name. Beyond it, by hand: grep the site
 for "engineer at yudame" and "software engineer" (none left outside history);
 grep for every client and channel name in `~/Desktop/Valor/projects/` (none);
 full suite green and under 5 minutes. Screenshots at 1440 and 390 wide of
