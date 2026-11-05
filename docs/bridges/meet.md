@@ -35,10 +35,13 @@ against a new Meet with a second device of Valor's account
   v3, Parakeet through the voice process's `/hear`), asks `meet.speak`
   whether to answer each turn (with one other person in the call, it
   answers every turn unasked), drafts with the front model (a Claude Code
-  session on the light seat, streaming, no tools: `ASK:` and `DECIDED:`
-  lines ask the worker and record Tom's decision), voices with Kokoro,
+  session on the light seat, streaming, no tools, in a temporary home of
+  its own, never the call session's task directory, which the kernel's
+  provisioning removes: `ASK:` and `DECIDED:` lines ask the worker and
+  record Tom's decision), voices with Kokoro,
   and asks the worker (a fresh `call` turn in the session's checkout) what
   needs looking up. The person answered talking over Valor stops it.
+  A call that fails writes its traceback to `meet.log`.
 - **The page** (`bridges/meet/`): headless Chrome on the call profile
   (a plain Chrome left open on it is quit first; another call's ends this
   one, naming its pid), muted,
