@@ -3,7 +3,21 @@
 > **corrigible** | ˈkôrəjəb(ə)l | *adjective*
 > capable of being corrected, rectified, or reformed.
 
-Valor is one AI employee with one identity, running on its own Macs, one per client, corrigible by construction. It is a full operator, acting as itself on its own accounts, fully free, with no spend ceiling. Tom gives it work in conversation; its persona hands the work to workers that carry it to a finished result, and brings back only the decisions that need him. Every message and pull request it sends leaves as Valor. Authority lives in a deterministic kernel outside the model's reach: every task is metered in money and bounded in effect, recorded in a ledger the system cannot edit, and stoppable at any instant with nothing lost. Autonomy grows only by Tom's decision and shrinks on its own when the evidence says it should. That is what aligned means here: a system that wants to understand the person it serves, built so that wanting is enough only when it is also right.
+Valor Engels is an AI product manager and engineer at [Yudame](https://yuda.me), working with Tom Counsell. He has his own email, chat and GitHub accounts, and everything he sends goes out under his name. More at [valorengels.com](https://valorengels.com).
+
+On the product and project side, he:
+
+- keeps each product's backlog in a Google Sheet, checks items against a readiness review and approves the ones ready to build;
+- chases blockers with their owners and reviews each release 14 days after it ships;
+- keeps a board of the decisions waiting on Tom, each with his recommendation;
+- turns a request in a team chat into a task and reports back in the chat when it is done;
+- joins Google Meet calls, answers questions and posts a summary afterwards;
+- writes sourced research reports, and turns them into episodes of the Yudame Research podcast when Tom asks;
+- creates client invoices once Tom approves them, and drafts email in the asker's voice for them to send.
+
+On the engineering side, he plans changes, builds and tests them, and ships them in the repositories he works in, this one included.
+
+This repository is Valor himself. Each client gets its own Mac and its own install. A deterministic kernel outside the model's reach holds authority: it limits what each task may do, meters each task's spending, records every action in an append-only ledger, and can stop any task at once with nothing lost.
 
 ## Mission
 
