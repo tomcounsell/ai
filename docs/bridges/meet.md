@@ -33,7 +33,8 @@ against a new Meet with a second device of Valor's account
   `run:<session>`; its gateway meters the front model and the worker on
   the call session. It hears each person apart (Silero VAD, Smart Turn
   v3, Parakeet through the voice process's `/hear`), asks `meet.speak`
-  whether to answer each turn, drafts with the front model (a Claude Code
+  whether to answer each turn (with one other person in the call, it
+  answers every turn unasked), drafts with the front model (a Claude Code
   session on the light seat, streaming, no tools: `ASK:` and `DECIDED:`
   lines ask the worker and record Tom's decision), voices with Kokoro,
   and asks the worker (a fresh `call` turn in the session's checkout) what

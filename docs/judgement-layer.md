@@ -412,7 +412,9 @@ Notes per shape:
     completed question says that no text sent means agreement. Rows are
     quiet (`ledger.QUIET_SITES`).
 14. Asked by a call's own process (`core/call.py`) at the end of each turn
-    heard or typed in the call, while the front model drafts, and metered
+    heard or typed in the call, while the front model drafts (not asked
+    when one other person is in the call: then every turn is
+    `asked_valor`), and metered
     on the call's session under its run. It reads the turn, the call's last
     turns and who is there. `asked_valor` has Valor answer (aloud, or in
     the call's chat to a typed turn), `useful_post` has it post; the

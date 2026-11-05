@@ -219,7 +219,10 @@ scheduler, supervisor, or watchdog on the machine.
   for every bridge; not `core/serve.py`, `core/rollout.py` or
   `core/router.py`), `uv.lock` or `pyproject.toml`. A bridge with no
   commit in its name (started before the stamp) is restarted; one at
-  `@none` is not. The `rollout.ended` row names the bridges restarted and
+  `@none` is not. The voice job (`com.valor.voice`) holds no lock: it is
+  restarted when the diff from the commit the rollout rolled from reaches
+  `tools/voice.py` or a `core/` or `bridges/` file it imports
+  (`rollout.voice_stale`). The `rollout.ended` row names the bridges restarted and
   any that failed, and a failed one is tried again only at the next start
   that ends a rollout. A merge of only `docs/`, `tests/`, `persona/`,
   `skills/` or top-level `*.md` restarts nothing. Every update's

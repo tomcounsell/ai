@@ -192,8 +192,8 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `core routine` plists print it (`routines.launchd_path`: the system
    directories, then those of `claude`, `git`, Postgres and `uv`), and the
    `tools.voice` plist adds ffmpeg's; add it by hand to the others. A
-   rollout restarts the bridges but not `com.valor.voice`: when
-   `tools/voice.py` changed, `launchctl kickstart -k $D/com.valor.voice`. A plist edited on disk takes effect only after
+   rollout restarts the bridges, and `com.valor.voice` when its diff
+   reaches `tools/voice.py` or the `core/` it imports. A plist edited on disk takes effect only after
    `launchctl bootout $D/<label>` and a fresh `bootstrap`. A Mac whose
    projects list a Slack chat has its own Slack app in the Yudame
    workspace, "Valor <name>" (the Pirate's is "Valor Pirate"), made at
