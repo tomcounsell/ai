@@ -100,3 +100,51 @@ not landed, nothing ends a holder, and that task's rebase meets this.
   file, the database held open by a writer.
 - Done: Tom runs the command at the Captain, then has a real call from a
   chat the Captain serves.
+
+## Patch, 2026-11-05: a call joins with the sign-in window open
+
+A bug fix (rule 9): no critique or review round; no check, gate or refusal
+added (the refusal for a profile held by another call already exists).
+
+**Incident.** Tom signed in each Mac with `open -na "Google Chrome" --args
+--user-data-dir=…meet-chrome` (the line a task report gave him; it is in
+the Cowboy's shell history) and left the window open. His call on
+2026-11-05 02:28 UTC (yyf-hbfc-myn) failed on the Cowboy: "open in another
+Chrome (pid 38785); quit it with ⌘Q". The 2026-11-03 sign-in loss blamed
+on the earlier `free()` came from Chrome restarted over ssh, not from
+quitting the window.
+
+**Build.**
+1. `Page.open`, before launching: if `holder(profile)` names a pid whose
+   command line has `--remote-debugging-pipe` (how Playwright starts the
+   call's Chrome; a sign-in window never has it), raise "this Mac's call
+   profile is in use by another call's Chrome (pid N)". Otherwise SIGTERM
+   it (Chrome's clean quit, which saves cookies) and wait up to 15 s for
+   `holder()` to be None, then launch. No SIGKILL: a Chrome that will not
+   quit leaves the launch to fail with the existing held-profile message.
+2. `call.sign_in`: a plain Chrome already holding the profile is the
+   sign-in window: say "sign in as valor@yuda.me in that window; it may be
+   left open, the next call quits it", exit 1 as now. The prompt line says
+   the window closes itself or may be left open.
+3. Text: the weekly unsigned-profile notice (`core/__main__.py`),
+   `docs/rollout.md` step 9 and `docs/bridges/meet.md` say the window may
+   be left open; drop "a call never ends a Chrome holding the profile".
+
+**Out.** Driving the already-open Chrome (no CDP port on it); any change to
+`profile_ready` or the sign-in polling.
+
+**Tests** (in `tests/test_meet.py`, with `_holder`):
+- A plain holder on a spaced profile path: `open` ends it (it has exited),
+  then launches (Playwright stubbed to record the call).
+- A holder whose argv has `--remote-debugging-pipe`: the "another call"
+  RuntimeError, no launch, the holder still running.
+- A holder that ignores SIGTERM: after the wait, the launch is tried and its
+  failure gives the held-profile message (wait shortened in the test).
+- No lock, a stale lock, a lock on another profile: no signal sent, launch.
+- `sign_in` with a plain holder: names the window, says it may be left
+  open, starts no child, holder left running.
+- The weekly notice text says the window may be left open.
+
+**Ship.** Full suite; merge; update the four Macs over ssh with the kernel
+job's launchctl environment (never start Chrome on the call profile over
+ssh). Done: Tom asks for a call with a sign-in window open and Valor joins.
