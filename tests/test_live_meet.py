@@ -3,9 +3,9 @@ the live checks).
 
 Runs only when `VALOR_LIVE=1` and `VALOR_MEET_LIVE=1`, on a Mac whose call
 profile is signed in as Valor, with `gws` signed in as Valor (it makes a
-new Meet), Kokoro's files fetched (the other devices' voices), and the vault
-`.env` holding the Gemini key (`VALOR_LIVE_GOOGLE_KEY`, default
-`GOOGLE_API_KEY`). The call runs as the kernel runs it (`python -m core
+new Meet), Kokoro's files fetched (the other devices' voices), and `op`
+able to read the Gemini key (`settings.google_key_ref`, as `python -m core
+google-key` reads it). The call runs as the kernel runs it (`python -m core
 call`'s `_call`). Two other devices of Valor's own account, from copies of
 the profile, join it: one asks aloud and in the chat, the other talks over
 the call as a third person would. The gap from the end of each spoken
@@ -59,10 +59,8 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
 
     monkeypatch.setattr(kernel, "_turn_for", turn_for)
     keyfile = tmp_path / "keys" / "google-key"
-    name = os.environ.get("VALOR_LIVE_GOOGLE_KEY", "GOOGLE_API_KEY")
-    assert credentials.copy_keys(settings.vault_env, keyfile, [call.GOOGLE_KEY], {call.GOOGLE_KEY: name})[
-        call.GOOGLE_KEY
-    ] in ("written", "kept")
+    key = credentials.op_read(settings.google_key_ref, settings.vault_env)
+    assert credentials.store_keys(keyfile, {call.GOOGLE_KEY: key})[call.GOOGLE_KEY] in ("written", "kept")
     monkeypatch.setattr(type(settings), "google_keyfile", property(lambda _: str(keyfile)))
     chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
     folder = Path(settings.tts_model_dir).expanduser()
