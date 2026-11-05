@@ -326,6 +326,9 @@ def test_lives_no_speech_turn_is_silence_and_its_markup_is_never_in_what_was_sai
                    audio(0.5), done())  # fmt: skip
         await settle(c.the)
         quiet = list(c.page.streams)
+        await push(c.session, said("..."), audio(0.7), done())
+        await settle(c.the)
+        quiet += list(c.page.streams)
         await push(c.session, said("Sure,"), audio(0.3), said(" {pause} Monday."), done())
         await until(lambda: not c.the.replies)
         await settle(c.the)
@@ -362,41 +365,36 @@ def test_a_refused_say_drops_its_audio(dsn, team, quick, monkeypatch):
     assert [r["reason"] for r in refused] == ["not now"]
 
 
-def test_live_cutting_valor_off_settles_the_say_with_the_words_played(dsn, team, quick):
+def test_the_person_answered_speaking_over_valor_cuts_him_off_and_side_talk_does_not(dsn, team, quick):
+    """Live's own barge-in cut Valor off for side talk (the live test,
+    2026-11-05); the call cuts him off only for the person he answers."""
+
     async def go():
         page = Page()
-        page.played = 1.0
+        page.ahead, page.played = 30.0, 1.0
         c = await in_call(dsn, team, page)
-        await push(c.session, audio(1.0), audio(1.0), said("one two three four five six"))
-        await push(c.session, sc(interrupted=True), done())
+        await talk(c.the, LOGAN, 0.5)
+        await push(c.session, heard("Valor, tell me about the launch."))
+        await push(c.session, audio(1.0), said("one two three four five six"), audio(1.0), done())
+        await talk(c.the, TOMS, 0.6)  # side talk
+        side = c.page.stops
+        await talk(c.the, LOGAN, 0.4)  # the person answered
         await settle(c.the)
         await finish(c)
-        return c, await effects(dsn, c.the.id)
+        return c, side, await effects(dsn, c.the.id)
 
-    c, done_ = run(go())
+    c, side, done_ = run(go())
+    assert side == 0 and c.page.stops == 1
     (say,) = [e for e in done_ if e["type"] == "meet.say"]
     assert say["result"] == {"spoken_text": "one two three", "cut": True, "played_s": 1.0}
-    assert c.page.stops == 1
+    assert ("[note] Logan cut you off; they heard only: one two three", False) in c.session.contents()
 
 
-def test_speech_over_the_last_of_a_reply_still_playing_stops_it(dsn, team, quick):
-    """Live had finished the turn, so it sends no `interrupted`; the page
-    still had seconds queued when someone spoke."""
-
-    async def go():
-        page = Page()
-        page.ahead, page.played = 30.0, 0.5
-        c = await in_call(dsn, team, page)
-        await push(c.session, audio(1.0), said("a b c d"), done())
-        await asyncio.sleep(0.2)
-        await push(c.session, heard("Wait, Valor"))
-        await settle(c.the)
-        await finish(c)
-        return c, await effects(dsn, c.the.id)
-
-    c, done_ = run(go())
-    (say,) = [e for e in done_ if e["type"] == "meet.say"]
-    assert say["result"]["cut"] and say["result"]["spoken_text"] == "a b" and c.page.stops == 1
+async def talk(the, who, seconds):
+    """`who` speaking for `seconds`, as Meet sends it."""
+    for _ in range(round(seconds / 0.05)):
+        the.hear(who, loud(0.05), 48_000)
+        await asyncio.sleep(0.05)
 
 
 def test_valors_own_audio_is_not_sent_and_silence_is(dsn, team, quick):
@@ -459,6 +457,32 @@ def test_who_is_here_is_a_note_and_with_one_other_person_all_they_say_is_to_valo
     ) in notes
     assert (f"[note] In the call with you: Logan, {TOM}.", False) in notes
     assert all(not complete for text, complete in notes if text.startswith("[note]"))
+
+
+@pytest.mark.parametrize("alone", [True, False])
+def test_with_one_other_person_a_silence_after_their_words_asks_for_the_answer(dsn, team, quick, alone):
+    """Live kept silent on "Hello." with only one person in the call (the
+    live test, 2026-11-05), as Tom's "Hello" went unanswered that day."""
+
+    async def go():
+        page = Page()
+        if alone:
+            page.people = page.people[:1] + page.people[2:]  # only Tom
+        c = await in_call(dsn, team, page)
+        await until(lambda: c.the.present)
+        await talk(c.the, TOMS, 0.4)
+        await push(c.session, heard("Hello."))
+        await asyncio.sleep(call.QUIET_S + 0.2)
+        await push(c.session, said("..."), audio(0.5), done())
+        await push(c.session, said("..."), audio(0.5), done())  # asked once only
+        await settle(c.the)
+        await finish(c)
+        return [(t, done_) for t, done_ in c.session.contents() if "said to you" in t]
+
+    asked = run(go())
+    assert asked == (
+        [(f'[note] {TOM}, the only one here, said to you: "Hello.". Answer it.', True)] if alone else []
+    )
 
 
 # -- the chat, the worker, decisions -------------------------------------------------
@@ -567,6 +591,7 @@ def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
     config = call.live_config("acme", "Logan wants the launch date.", None)
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Charon"
     assert config.proactivity.proactive_audio is True
+    assert config.realtime_input_config.activity_handling == types.ActivityHandling.NO_INTERRUPTION
     assert config.context_window_compression.trigger_tokens == call.CALL_CONTEXT
     detect = config.realtime_input_config.automatic_activity_detection
     assert detect.start_of_speech_sensitivity == types.StartSensitivity.START_SENSITIVITY_LOW

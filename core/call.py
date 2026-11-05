@@ -559,8 +559,10 @@ TOOLS = [
 def live_config(project: str, prep: str, handle: str | None) -> Any:
     """The Live session's settings: Valor's voice, transcripts both ways,
     proactive audio (it may stay silent), a slow start to what counts as
-    someone speaking, so a cough does not cut Valor off, compression that
-    bounds what each turn bills, and resumption from `handle`."""
+    someone speaking, no cutting Valor off (Live's own barge-in stopped
+    him for side talk, 2026-11-05: the call cuts him off only for the
+    person he answers), compression that bounds what each turn bills, and
+    resumption from `handle`."""
     from google.genai import types
 
     return types.LiveConnectConfig(
@@ -579,7 +581,8 @@ def live_config(project: str, prep: str, handle: str | None) -> Any:
             automatic_activity_detection=types.AutomaticActivityDetection(
                 start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
                 prefix_padding_ms=300,
-            )
+            ),
+            activity_handling=types.ActivityHandling.NO_INTERRUPTION,
         ),
         context_window_compression=types.ContextWindowCompressionConfig(
             trigger_tokens=CALL_CONTEXT, sliding_window=types.SlidingWindow(target_tokens=CALL_CONTEXT // 2)
@@ -760,7 +763,13 @@ STATE_S = 2.0
 WORDLESS_S = 0.6  # of a turn's audio held for its transcript before it is said anyway
 # Live's transcript marks silence and pauses, "<no speech>{pause}" (2026-11-05).
 MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
-MARKUP = re.compile(r"\s*(?:(?:<[^>]*>|\{[^}]*\})\s*)+")
+BARGE_S = 0.2  # this much speech by the person Valor answers cuts him off
+
+
+def wordless(text: str) -> bool:
+    """A transcript of no words: "<no speech>{pause}" or "..." (Live's
+    turns of silence, 2026-11-05)."""
+    return not re.search(r"\w", MARKUP_PART.sub("", text))
 
 
 @dataclass
@@ -784,6 +793,7 @@ class Reply:
     text: str = ""
     seconds: float = 0.0  # of audio received
     posted: bool = False
+    silent: bool = False  # Live chose silence
     started: float | None = None  # on the recording's clock
     generated: bool = False
     over: asyncio.Future | None = None
@@ -874,6 +884,10 @@ class Call:
         self.reply: Reply | None = None  # the turn Live is generating
         self.replies: dict[str, Reply] = {}  # each turn whose `meet.say` is not settled
         self.out: Reply | None = None  # the turn whose audio is playing
+        self.answering: str | None = None  # whose stretch the current reply answers
+        self.last_who: str | None = None
+        self.unanswered: tuple[str, str] | None = None  # the last stretch heard, until Valor speaks
+        self.barge = 0.0
         self.typed_next = False
         self.metered: str | None = None  # the open `gateway.opened` call of the current turn
         self.playing_until = 0.0
@@ -956,6 +970,9 @@ class Call:
         transcript of it has caught up), or after a quiet."""
         voiced = {w: v for w, v in loud.items() if v >= SPEAKING}
         now = self.now()
+        self.barge = self.barge + seconds if self.out is not None and self.answering in voiced else 0.0
+        if self.barge >= BARGE_S:
+            await self._cut_off(self.out)
         for who, v in voiced.items():
             self.energy[who] = self.energy.get(who, 0.0) + v * seconds
         if voiced:
@@ -987,8 +1004,10 @@ class Call:
         if not text:
             return
         who = max(energy, key=energy.get) if energy else self.speaking
+        self.last_who = who
         name = self.names.get(who, "someone") if who else "someone"
         await self._heard(who or "", name, text, "spoke")
+        self.unanswered = (name, text)
         self.segments.append({"speaker": name, "start": round(at or 0.0, 2), "end": round(self.now(), 2),
                               "text": text, "channel": "call"})  # fmt: skip
 
@@ -1005,7 +1024,7 @@ class Call:
         await self._heard(who, name, text, "typed")
         if self.leaving.is_set() or self.session is None:
             return
-        self.typed_next = True
+        self.typed_next, self.unanswered = True, None
         await self.session.send_client_content(
             turns={"role": "user", "parts": [{"text": f"[typed by {name}] {text}"}]}, turn_complete=True
         )
@@ -1039,6 +1058,7 @@ class Call:
                 self.session = None
                 if self.reply is not None:
                     await self._finish(self.reply, cut=True)
+                    self.reply = None
             if failed >= RECONNECTS:
                 self.posts.put_nowait(Post(None, LOST_LINE, False))
                 self.leave("Valor lost its voice connection")
@@ -1068,6 +1088,7 @@ class Call:
                 await self._close_stretch(self.close_at[1])
             if self.heard:
                 await self._close_stretch(self.energy)
+            self.answering = self.last_who or self.speaking
             self.reply, self.typed_next = Reply(ledger.new_id(), self.typed_next), False
             self.replies[self.reply.id] = self.reply
             await self._open(self.reply.id)
@@ -1078,31 +1099,43 @@ class Call:
             if not self.heard:
                 self.heard_at = self.now()
             self.heard += sc.input_transcription.text
-            if self.out is not None and self.out.generated:
-                await self._finish(self.out, cut=True)  # someone spoke over what was still playing
         if sc.output_transcription and sc.output_transcription.text:
             reply = await self._begin()
             reply.text += sc.output_transcription.text
-            if MARKUP.fullmatch(reply.text):
-                reply.dropped, reply.held = True, []  # Live's "<no speech>": a turn of silence
-            elif reply.held and reply.said is None:
-                await self._audio(reply, b"")
+            if wordless(reply.text):
+                reply.dropped, reply.held, reply.silent = True, [], True  # a turn of silence
+            else:
+                self.unanswered = None
+                if reply.held and reply.said is None:
+                    await self._audio(reply, b"")
         if sc.model_turn:
             for part in sc.model_turn.parts or []:
                 if part.inline_data and part.inline_data.data:
                     await self._audio(await self._begin(), part.inline_data.data)
-        if sc.interrupted and self.reply is not None:
-            await self._finish(self.reply, cut=True)
         if sc.turn_complete and self.reply is not None:
             reply, self.reply = self.reply, None
             reply.generated = True
             text = MARKUP_PART.sub("", reply.text).strip()
-            if reply.typed and not reply.posted and text:
+            if reply.typed and not reply.posted and not wordless(text):
                 self.posts.put_nowait(Post(reply.id, text, True))
+            if reply.silent and len(self.present) == 1 and self.unanswered and self.session is not None:
+                await self._answer(*self.unanswered)
             if reply.said is None:
                 await self._finish(reply, cut=False)
             elif reply.released:
                 self._spawn(self._played_out(reply))
+
+    async def _answer(self, name: str, text: str) -> None:
+        """With one other person in the call, all they say is to Valor
+        (Tom's "Hello", unanswered, 2026-11-05; Live kept silent on "Hello."
+        with only one person there in the live test, 2026-11-05): a
+        silence after their words asks for the answer, once."""
+        self.unanswered = None
+        await self.session.send_client_content(
+            turns={"role": "user", "parts": [{"text": f'[note] {name}, the only one here, said to you: "{text}". '
+                                              "Answer it."}]},
+            turn_complete=True,
+        )  # fmt: skip
 
     async def _audio(self, reply: Reply, data: bytes) -> None:
         """A chunk of Live's speech: once Live's transcript of the turn
@@ -1145,11 +1178,9 @@ class Call:
         await self._finish(reply, cut=False)
 
     async def _finish(self, reply: Reply, *, cut: bool) -> None:
-        """The reply is over: played out, or cut (Live's `interrupted`,
-        someone speaking over its last words, or the session lost). Its
-        `meet.say` settles with what was said."""
-        if self.reply is reply:
-            self.reply = None
+        """The reply is over: played out, or cut (the person answered spoke
+        over it, or the session was lost). Its `meet.say` settles with what
+        was said."""
         self.replies.pop(reply.id, None)
         if self.out is reply:
             self.out = None
@@ -1169,6 +1200,16 @@ class Call:
             self.lines.append(f"[{_clock(self.now())}] Valor (spoke): {spoken}")
             self.segments.append({"speaker": "Valor Engels", "start": round(reply.started or 0.0, 2),
                                   "end": round(self.now(), 2), "text": spoken, "channel": "mic"})  # fmt: skip
+
+    async def _cut_off(self, reply: Reply) -> None:
+        """The person Valor answers spoke over him: he stops, the rest of
+        the turn Live is still sending is dropped, and the session is told
+        what was heard of it."""
+        reply.dropped, reply.held, self.barge = True, [], 0.0
+        await self._finish(reply, cut=True)
+        name = self.names.get(self.answering, "someone") if self.answering else "someone"
+        said = reply.over.result().get("spoken_text") if reply.over and reply.over.done() else ""
+        await self._note(f"{name} cut you off; they heard only: {said or '(nothing)'}")
 
     async def _say(self, payload: dict[str, Any]) -> dict[str, Any]:
         """`meet.say`, released: the turn's held audio plays, and the say
