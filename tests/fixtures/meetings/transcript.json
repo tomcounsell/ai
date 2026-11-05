@@ -1,0 +1,30 @@
+[
+  {
+    "channel" : "call",
+    "end" : 2,
+    "speaker" : "Logan",
+    "start" : 0.5,
+    "text" : "Valor, when do we ship?"
+  },
+  {
+    "channel" : "mic",
+    "end" : 4.2,
+    "speaker" : "Valor Engels",
+    "start" : 3.1,
+    "text" : "We ship Monday."
+  },
+  {
+    "channel" : "mic",
+    "end" : 5,
+    "speaker" : "Valor Engels",
+    "start" : 4.3,
+    "text" : "After QA."
+  },
+  {
+    "channel" : "call",
+    "end" : 3610.5,
+    "speaker" : "Logan",
+    "start" : 3605,
+    "text" : "Great *thanks*"
+  }
+]

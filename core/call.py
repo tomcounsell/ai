@@ -976,9 +976,7 @@ class Call:
             await self._cut_off(self.out)
         for who, v in voiced.items():
             self.energy[who] = self.energy.get(who, 0.0) + v * seconds
-        self.voiced_s += (
-            seconds if voiced and self.out is None and now >= self.cut_at + CUT_S else 0.0
-        )
+        self.voiced_s += seconds if voiced and self.out is None and now >= self.cut_at + CUT_S else 0.0
         if voiced:
             self.last_voice = now
             top = max(voiced, key=voiced.get)
@@ -1553,8 +1551,10 @@ class Call:
 
         audio = staging / "audio.m4a"
         try:
-            await (await asyncio.create_subprocess_exec(
+            code = await (await asyncio.create_subprocess_exec(
                 "afconvert", "-f", "m4af", "-d", "aac", str(wav), str(audio))).wait()  # fmt: skip
+            if code != 0:
+                raise RuntimeError(f"afconvert exited {code}; the recording is kept as {wav.name}")
             wav.unlink()
             transcript = "\n".join(self.lines)
             price = spending.gemini_price(settings.summary_model)

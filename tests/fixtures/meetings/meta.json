@@ -1,0 +1,45 @@
+{
+  "app" : "Google Meet",
+  "audioDeleted" : false,
+  "end" : "2026-11-05T10:12:30Z",
+  "links" : [
+
+  ],
+  "mode" : "call",
+  "notesChanged" : false,
+  "recording" : false,
+  "recordingLost" : false,
+  "soundChecked" : true,
+  "speakers" : [
+    "Logan",
+    "Valor Engels"
+  ],
+  "speakersPending" : false,
+  "start" : "2026-11-05T10:00:00Z",
+  "summaryPending" : false,
+  "timeZone" : "GMT",
+  "title" : "Valor call abc-defg-hij",
+  "transcribeTried" : true,
+  "transcriptPending" : false,
+  "typedNotes" : "",
+  "uploads" : [
+    "recording",
+    {
+      "pending" : {
+
+      }
+    },
+    "notes",
+    {
+      "pending" : {
+
+      }
+    },
+    "transcript",
+    {
+      "pending" : {
+
+      }
+    }
+  ]
+}

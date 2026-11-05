@@ -1192,3 +1192,31 @@ def test_a_summary_sent_with_its_newlines_escaped_is_written_as_markdown():
     """Gemini Flash sent the document as one line of `\\n`s (the live test, 2026-11-05)."""
     assert call._unescaped("# Notes\\n\\n- Ship Monday.") == "# Notes\n\n- Ship Monday."
     assert call._unescaped("# Notes\n\nA path C:\\new") == "# Notes\n\nA path C:\\new"
+
+
+def test_a_failed_conversion_keeps_the_calls_recording(dsn, team, quick, monkeypatch):
+    real = asyncio.create_subprocess_exec
+
+    async def failing(*argv, **kw):
+        if argv[0] == "afconvert":
+            return await real(sys.executable, "-c", "raise SystemExit(1)")
+        return await real(*argv, **kw)
+
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, heard("Hello?"), done())
+        await settle(c.the)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", failing)
+        await finish(c)
+        return c, await bridges.rows(dsn, c.brief.id)
+
+    c, rows = run(go())
+    (folder,) = c.the.store.iterdir()
+    assert folder.name.endswith("(no summary)") and (folder / "call.wav").stat().st_size > 44
+    assert not c.gemini.summarised
+    (ended,) = [
+        r["payload"]
+        for r in rows
+        if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended")
+    ]
+    assert "afconvert exited 1" in ended["text"]
