@@ -93,7 +93,7 @@ amends: docs/plans/meet.md (items 4, 5, 7)
 
 **Page harness.** Chunks play gaplessly; stop clears and returns the seconds played.
 
-**Live** (`VALOR_LIVE=1`, Valor's second device, never Tom). The same clips run on `main` and on this branch. The gap is timed from the clip's end (its track below -45 dBFS for 300 ms) to Valor's first frame, with a median target of 2 s or less. The steps:
+**Live** (`VALOR_LIVE=1`, Valor's second device, never Tom). The same clips run on `main` and on this branch. The gap is timed from the clip's end (its track below -45 dBFS for 300 ms) to Valor's first frame, reported per question with its median. The 2 s median target is dropped: Tom, Slack #lets-see-fixed, 2026-11-05 14:44 UTC, "sure. you're targeting your own arbitrary plan" (measured 2.06 to 2.08 s, against about 5 s on `main`). The steps:
 - a direct question;
 - "Hello" one to one;
 - side talk, which gets silence;

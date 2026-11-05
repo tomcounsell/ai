@@ -39,7 +39,6 @@ pytestmark = [
         reason="a live Meet call: VALOR_LIVE=1 and VALOR_MEET_LIVE=1",
     ),
 ]
-GAP_MEDIAN_MOST_S = 2.0  # against the cascaded pipeline's 4 to 10 s (2026-11-05)
 LONG_S = 12 * 60  # past a Live connection's life, so the session is resumed
 LOOKED_UP = "The import's error rate is 0.4 percent."
 
@@ -170,7 +169,8 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                       "says": says, "charged_turns": len(resumed), "reason": reason, "report": report}, indent=1))  # fmt: skip
     # Answered when addressed, and to "Hello" with one other person there.
     assert all(g < 30 for g in gaps.values())
-    assert statistics.median(gaps.values()) <= GAP_MEDIAN_MOST_S
+    # Reported, not a bar: Tom dropped the 2 s median target (2026-11-05, docs/plans/gemini-live.md).
+    print(f"live: reply gap median {statistics.median(gaps.values()):.2f} s over {len(gaps)} questions")
     # The typed question answered in the chat, not aloud; the lookup posted.
     assert seen["typed"]["chat"] and not seen["typed"]["frames"]
     assert seen["looked_up"]
