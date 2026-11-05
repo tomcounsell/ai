@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Product and projects · Valor Engels</title>
-<meta name="description" content="How Valor runs product and project work at Yudame: backlog Sheets and readiness reviews, a decision board per project, calls, research reports and podcasts, invoices and email drafts.">
+<meta name="description" content="How Valor runs product and project work at Yudame: backlogs, approvals, decisions, calls, research, invoices and email drafts.">
 <link rel="canonical" href="https://valorengels.com/product.html">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Valor Engels">
 <meta property="og:title" content="Product and projects · Valor Engels">
-<meta property="og:description" content="How Valor runs product and project work at Yudame: backlog Sheets and readiness reviews, a decision board per project, calls, research reports and podcasts, invoices and email drafts.">
+<meta property="og:description" content="How Valor runs product and project work at Yudame: backlogs, approvals, decisions, calls, research, invoices and email drafts.">
 <meta property="og:url" content="https://valorengels.com/product.html">
 <meta property="og:image" content="https://valorengels.com/assets/og-image.png">
 <meta property="og:image:width" content="1200">
@@ -39,7 +39,7 @@
 
 <nav class="subnav sections" aria-label="Product and projects">
   <a href="#rooms" aria-current="location">Product rooms</a>
-  <a href="#readiness">Readiness</a>
+  <a href="#readiness">Approval</a>
   <a href="#decisions">Decisions</a>
   <a href="#dispatch">Running the work</a>
   <a href="#calls">Calls</a>
@@ -48,66 +48,65 @@
 </nav>
 
 <h1>Product and projects</h1>
-<p class="lede">Valor is a product owner and a project manager at Yudame as well as an engineer. He keeps each product's backlog, decides when an item is ready to build, keeps the decisions open for Tom in one place per project, and handles research, invoices and email drafts.</p>
+<p class="lede">At Yudame, Valor runs product and project work as well as engineering. He keeps each product's backlog, decides what is ready to build, and tracks the decisions waiting on Tom.</p>
 
 <section id="rooms">
   <p class="sec-label">Product rooms</p>
-  <h2>A backlog Sheet for each product</h2>
-  <p>A product room is a chat where Valor acts as the product owner. Each room has a Google Sheet that Valor keeps:</p>
+  <h2>A backlog for each product</h2>
+  <p>In a product room, a group chat for one product, Valor is the product owner. He keeps the product's backlog in a Google Sheet:</p>
   <ul class="tight">
-    <li><b>A goal on top</b>, with its outcome metric. The people who own the product set them; Valor proposes and asks.</li>
-    <li><b>Two lanes</b>: mandatory work and bets. Value is high, medium or low, and appetite is a cap of one, three or six weeks. There are no scores.</li>
-    <li><b>A rank for ready items only.</b> The rest wait in order of how far they are shaped.</li>
-    <li><b>Blockers listed apart</b>, each with an owner and a date to chase. Valor chases once, then takes it to Tom.</li>
-    <li><b>A review after each ship</b>, 14 days on by default: keep, iterate or revert, with the reason.</li>
+    <li><b>A goal on top</b>, with the metric that measures it. The product's owners set both.</li>
+    <li><b>Two lists</b>: work that must be done, and bets worth trying. Each item has a value (high, medium or low) and a time limit of one, three or six weeks.</li>
+    <li><b>A rank</b> for items that are ready to build.</li>
+    <li><b>Blockers</b>, each with an owner and a date to follow up. If a second follow-up is needed, it goes to Tom.</li>
+    <li><b>A review</b> 14 days after each release: keep the change, adjust it or undo it.</li>
   </ul>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/skills/valor/skills/product-sheet/SKILL.md">skills/valor/skills/product-sheet/SKILL.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/roles/product.md">skills/sdlc/roles/product.md</a></p>
 </section>
 
 <section id="readiness">
-  <p class="sec-label">Readiness</p>
-  <h2>Valor approves what goes to build</h2>
-  <p>People give the input: the goal, the appetite, the job to be done, and the answers only they know. Valor runs the readiness review and sends what passes to engineering himself (Tom, 2026-11-01).</p>
-  <p>The review has twelve checks, including these:</p>
+  <p class="sec-label">Approval</p>
+  <h2>Deciding what is ready to build</h2>
+  <p>The product's owners set the goal and the time limit, and answer what only they can. Valor checks each item against twelve points and approves the ones that pass. Among the checks:</p>
   <ul class="tight">
-    <li>the item serves the goal and stays inside its job;</li>
-    <li>the problem has observed or reported evidence, not only an assumption;</li>
-    <li>the solution fits the appetite and names code that exists;</li>
-    <li>acceptance is written as statements a reviewer can test;</li>
-    <li>each question an engineer would ask is answered, and a question only a person can answer is put to them while the item waits.</li>
+    <li>the item serves the goal;</li>
+    <li>there is evidence for the problem;</li>
+    <li>the solution fits the time limit and the existing code;</li>
+    <li>a reviewer can test what done means;</li>
+    <li>an engineer's questions are answered, and any that only a person can answer wait for that person.</li>
   </ul>
-  <p>An item that passes is posted in the project's dev chat, where engineering starts it.</p>
+  <p>Approved items go to the project's engineering chat, where the building starts.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/skills/valor/skills/product-sheet/SKILL.md">skills/valor/skills/product-sheet/SKILL.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/roles/product.md">skills/sdlc/roles/product.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/bridges/slack.md">docs/bridges/slack.md</a></p>
 </section>
 
 <section id="decisions">
   <p class="sec-label">Decisions</p>
   <h2>A decision board per project</h2>
-  <p>Each project's Slack channel can hold a canvas listing the decisions open for Tom on that project, with Valor's recommendation on each, and those decided recently. Clients never share a board.</p>
-  <p>Tom answers in the chat, with a reaction, or on a call; he does no work on the board itself. The ledger holds each question and answer, and the canvas is rebuilt from it when they change.</p>
+  <p>A project's Slack channel can hold a shared page listing the decisions waiting on Tom, each with Valor's recommendation.</p>
+  <p>Tom answers in the chat, with an emoji reaction or on a call. Valor updates the board from his answers.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/core/board.py">core/board.py</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/plans/decision-board.md">docs/plans/decision-board.md</a></p>
 </section>
 
 <section id="dispatch">
   <p class="sec-label">Running the work</p>
-  <h2>From a message to a report</h2>
-  <p>In each chat, Valor's session reads what came before and decides what a message needs: an answer, or a task. A task carries the work, asks its questions in one batch with a stated default for each, and reports back to the session, which tells the chat in plain words.</p>
-  <p>A team chat is Tom and the people he works with, and any of them can ask Valor for work. Valor answers the person who asked, and only what only Tom holds goes to Tom.</p>
+  <h2>How Valor handles a request</h2>
+  <p>In each chat, Valor reads the message and what came before it, then answers or starts a task. Valor asks a task's questions in one batch, each with the answer he will assume. When the task is done, he reports back in the chat.</p>
+  <p>Anyone in a team chat can ask Valor for work. He answers whoever asked, and brings Tom only what Tom alone can decide.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/converse.md">skills/sdlc/converse.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/persona/conduct.md">persona/conduct.md</a> · <a href="chat.html">In the chat</a></p>
 </section>
 
 <section id="calls">
   <p class="sec-label">Calls</p>
   <h2>Google Meet calls</h2>
-  <p>Asked for a call in a group chat, Valor reads up on the topic, posts a Meet link in the thread and joins as himself. In the call he answers when addressed: aloud to what was said, in the call's chat to what was typed. A call about a project can go through that project's open decisions. When the call ends, its summary goes to the thread it was asked in.</p>
+  <p>Asked for a call in a group chat, Valor reads up on the topic, posts a Meet link and joins. He answers spoken questions aloud and typed ones in the call's chat. Valor can use a call to go through a project's open decisions. Afterwards, a summary goes to the chat.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/converse.md">skills/sdlc/converse.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/call.md">skills/sdlc/call.md</a> · <a href="https://github.com/tomcounsell/ai/tree/main/bridges/meet/">bridges/meet/</a></p>
 </section>
 
 <section id="research">
   <p class="sec-label">Research</p>
   <h2>Reports and podcasts</h2>
-  <p>A topic for research goes to a deep-research run: several research services, claims checked against each other, and a long report with sources and a confidence on each claim, returned as a PDF. A run takes 25 to 45 minutes.</p>
-  <p>On Tom's word, the report becomes an episode on the public Yudame Research podcast, or on Yudame Staff for private topics. Publishing never holds up the report.</p>
+  <p>Give Valor a topic and he returns a PDF report in 25 to 45 minutes. It draws on several research services, cross-checks their claims, and gives a source and a confidence rating for each.</p>
+  <p>If Tom asks, Valor turns the report into a podcast episode, on the public Yudame Research podcast or, for private topics, on Yudame Staff.</p>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/skills/valor/skills/deep-research/SKILL.md">skills/valor/skills/deep-research/SKILL.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/docs/plans/research-podcast.md">docs/plans/research-podcast.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/converse.md">skills/sdlc/converse.md</a></p>
 </section>
 
@@ -115,8 +114,8 @@
   <p class="sec-label">Operations</p>
   <h2>Invoices and email</h2>
   <div class="cols-2">
-    <div><h3>Invoices</h3><p>Valor creates Yudame's client invoices in the company's Mercury account, each with a pay link, once Tom has approved it, and sends its notice from valor@yuda.me to the client. He lists who hasn't paid when Tom asks. He sends no payment reminders.</p></div>
-    <div><h3>Email drafts</h3><p>Asked for a draft, Valor writes it in the asker's voice and hands it back as text for them to send. A send to anyone outside the chat goes only when the asker says send, or on a standing say-so from Tom.</p></div>
+    <div><h3>Invoices</h3><p>Once Tom approves an invoice, Valor creates it in Yudame's Mercury account with a pay link and emails it to the client. He can also list who hasn't paid.</p></div>
+    <div><h3>Email drafts</h3><p>Asked for a draft, Valor writes it in the asker's voice and hands it back for them to send. He sends nothing unless told to.</p></div>
   </div>
   <p class="src">Source: <a href="https://github.com/tomcounsell/ai/blob/main/skills/valor/skills/mercury-invoicing/SKILL.md">skills/valor/skills/mercury-invoicing/SKILL.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/skills/sdlc/converse.md">skills/sdlc/converse.md</a> · <a href="https://github.com/tomcounsell/ai/blob/main/persona/voice.md">persona/voice.md</a></p>
 </section>
