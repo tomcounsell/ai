@@ -45,6 +45,12 @@ should be the approver"), with a new thread in the dev channel and a
 `task.start` with `"in"` the dev channel, so the task reads and reports
 there (`tools/chat_tasks.py`).
 
+**Business channels** (Tom, 2026-11-05: "a coworker, like a PM or
+engineer, but for business paperwork and things"). Each is private, Tom
+and Valor, its own project on the work vault with `chat_roles` `business`
+(`skills/sdlc/roles/business.md`), not mentions-only; which channels, and
+what each may open in the vault, is in their private specs.
+
 **Decision boards** (Tom, 2026-10-27: "more like a todo board that can be
 reorganized and evolve"; "I won't do work on the board. I'll chat with
 you or call you, or leave emoji reactions"). Each dev channel of a project

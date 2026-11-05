@@ -29,6 +29,9 @@ session's `converse.md`:
 - `product`: a product room; a product owner keeping the project's
   product Sheet (the `product-sheet` skill), who approves each item that
   passes its readiness review into the sibling dev room.
+- `business`: a business room (legal, services); a coworker owning that
+  area's paperwork, whose documents start here as tasks and live in the
+  business's knowledge base folder.
 
 Tom's own chats carry none: there Valor is his deputy, as the persona
 says. A role is what Tom calls a **hat**: one person wearing many hats,

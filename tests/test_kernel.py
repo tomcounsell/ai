@@ -1664,7 +1664,7 @@ def test_a_chat_roles_entry_matches_its_chat_as_chats_normalises_it():
 def test_each_role_file_renders_and_the_example_spec_names_only_roles_that_exist():
     example = workspace.Spec.from_dict(tomllib.loads((REPO / "projects" / "example.toml").read_text()))
     names = {p.stem for p in (pathlib.Path(settings.stages_dir) / "roles").glob("*.md")}
-    assert names == {"engineer", "teammate", "customer-service", "product"}
+    assert names == {"engineer", "teammate", "customer-service", "product", "business"}
     assert set(example.chat_roles.values()) <= names
     for name in names:
         assert tasks.role_text(name).startswith("# Your role here: ")

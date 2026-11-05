@@ -60,7 +60,7 @@ it (they come from settings), and loading a spec names the folder.
   ([telegram.md](../docs/bridges/telegram.md)).
 - `chat_roles` maps chats to the role Valor plays there, "the hat"
   (`chat_roles."slack:<team>/<channel>" = "product"`, and `chat_roles.email`):
-  `engineer`, `teammate`, `customer-service` or `product`, each a file in
+  `engineer`, `teammate`, `customer-service`, `product` or `business`, each a file in
   `skills/sdlc/roles/` rendered after the chat session's `converse.md`
   ([ONTOLOGIES.md](../ONTOLOGIES.md)). Tom's own chats have none. A role
   named with no file fails that chat's turns, so after editing it render a
