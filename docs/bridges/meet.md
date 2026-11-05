@@ -40,11 +40,14 @@ against a new Meet with a second device of Valor's account
   and asks the worker (a fresh `call` turn in the session's checkout) what
   needs looking up. The person answered talking over Valor stops it.
 - **The page** (`bridges/meet/`): headless Chrome on the call profile
-  (never ending another Chrome already open on it; the call ends naming
-  its pid instead), muted,
+  (a plain Chrome left open on it is quit first; another call's ends this
+  one, naming its pid), muted,
   with Attendee's payloads (vendored, ELv2) and `page.js`. Chrome
   runs with its local network checks off, since the payloads' socket to
-  `127.0.0.1` is refused from Meet's page otherwise.
+  `127.0.0.1` is refused from Meet's page otherwise. Each of Meet's media
+  connections writes its state to `meet.log` ("media connection 2:
+  connected"): audio, the call's chat and who sends which stream come
+  over them; who is in the call does not.
 - **After the call**, `valor-record call <code>` reads its transcript a
   page at a time; the asking session writes `call-<code>.md` and sends it
   in the thread with at most two lines beside it.

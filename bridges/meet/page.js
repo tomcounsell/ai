@@ -10,6 +10,21 @@
         window.ws.sendJson({ type: "ValorHello", top: window.top === window });
     });
 
+    // Each media connection's state, for the call's log: a call that joined
+    // and saw who was in it but never heard anyone (the Cowboy, 2026-11-05)
+    // got none of what Meet sends over these.
+    const Made = window.RTCPeerConnection;
+    let made = 0;
+    window.RTCPeerConnection = function (...args) {
+        const pc = new Made(...args);
+        const n = ++made;
+        pc.addEventListener("connectionstatechange", () => {
+            window.ws.sendJson({ type: "ValorMedia", connection: n, state: pc.connectionState });
+        });
+        return pc;
+    };
+    window.RTCPeerConnection.prototype = Made.prototype;
+
     let playing = null;
 
     // Int16 PCM, base64, at `rate`: resolves once it played out or was

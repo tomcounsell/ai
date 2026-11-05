@@ -24,6 +24,7 @@ import json
 import os
 import signal
 import struct
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -147,6 +148,10 @@ class Socket:
             self.chat(str(said.get("participant_uuid") or ""), str(said.get("text") or ""))
         elif kind == "UsersUpdate":
             self.people(said)
+        elif kind == "ValorMedia":
+            print(
+                f"media connection {said.get('connection')}: {said.get('state')}", file=sys.stderr, flush=True
+            )
 
 
 def holder(profile: str) -> int | None:

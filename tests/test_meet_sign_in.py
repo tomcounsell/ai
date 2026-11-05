@@ -331,3 +331,11 @@ def test_a_page_that_keeps_navigating_or_fails_otherwise_still_fails():
     with pytest.raises(Error, match="TypeError"):
         asyncio.run(page.state())
     assert page.page.loads == 0
+
+
+def test_a_media_connections_state_from_the_page_is_written_to_the_calls_log(capsys):
+    """A call that saw who was in it but heard no one (2026-11-05) left no
+    trace of Meet's media connection: the page reports each state change."""
+    socket = meet.Socket(lambda *a: None, lambda *a: None, lambda *a: None)
+    socket.read({"type": "ValorMedia", "connection": 2, "state": "failed"})
+    assert capsys.readouterr().err == "media connection 2: failed\n"
