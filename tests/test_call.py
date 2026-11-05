@@ -673,10 +673,7 @@ def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
     assert config.proactivity.proactive_audio is True
     assert config.realtime_input_config.activity_handling == types.ActivityHandling.NO_INTERRUPTION
     assert config.context_window_compression.trigger_tokens == call.CALL_CONTEXT
-    detect = config.realtime_input_config.automatic_activity_detection
-    assert detect.start_of_speech_sensitivity is None  # Live's own: LOW missed "Hello."
-    assert detect.end_of_speech_sensitivity == types.EndSensitivity.END_SENSITIVITY_HIGH
-    assert detect.silence_duration_ms == call.END_SILENCE_MS
+    assert config.realtime_input_config.automatic_activity_detection is None  # Live's own
     assert [f.name for f in config.tools[0].function_declarations] == [
         "ask",
         "post",

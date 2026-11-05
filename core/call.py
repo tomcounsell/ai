@@ -557,20 +557,15 @@ TOOLS = [
 ]  # fmt: skip
 
 
-# Live's end of a turn: 500 ms of silence answered in about 1.1 s, against
-# about 1.4 s at its default, and 300 ms gained little more (probes,
-# 2026-11-05); shorter would end a turn on a pause mid-sentence.
-END_SILENCE_MS = 500
-
-
 def live_config(project: str, prep: str, handle: str | None) -> Any:
     """The Live session's settings: Valor's voice, transcripts both ways,
     proactive audio (it may stay silent), no cutting Valor off (Live's own
     barge-in stopped him for side talk, 2026-11-05: the call cuts him off
     only for the person he answers), compression that bounds what each
     turn bills, and resumption from `handle`. Live's own sensitivity to the
-    start of speech is kept: at its lowest it missed a short "Hello." (the
-    live tests, 2026-11-05); its end of a turn is `END_SILENCE_MS`."""
+    start and end of speech is kept: at its lowest it missed a short
+    "Hello.", and 500 ms to end a turn gained nothing measurable in a live
+    call (the live tests, 2026-11-05)."""
     from google.genai import types
 
     return types.LiveConnectConfig(
@@ -586,11 +581,7 @@ def live_config(project: str, prep: str, handle: str | None) -> Any:
         output_audio_transcription=types.AudioTranscriptionConfig(),
         proactivity=types.ProactivityConfig(proactive_audio=True),
         realtime_input_config=types.RealtimeInputConfig(
-            automatic_activity_detection=types.AutomaticActivityDetection(
-                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
-                silence_duration_ms=END_SILENCE_MS,
-            ),
-            activity_handling=types.ActivityHandling.NO_INTERRUPTION,
+            activity_handling=types.ActivityHandling.NO_INTERRUPTION
         ),
         context_window_compression=types.ContextWindowCompressionConfig(
             trigger_tokens=CALL_CONTEXT, sliding_window=types.SlidingWindow(target_tokens=CALL_CONTEXT // 2)
