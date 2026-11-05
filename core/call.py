@@ -762,6 +762,7 @@ STATE_S = 2.0
 MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
 BARGE_S = 0.2  # this much speech by the person Valor answers cuts him off
 UNANSWERED_S = 2.0  # with one other person, this long with no answer to them asks for one
+CUT_S = 3.0  # the rest of what cut Valor off ("Valor, stop. Wait a moment.") asks nothing
 
 
 def wordless(text: str) -> bool:
@@ -885,7 +886,8 @@ class Call:
         self.last_who: str | None = None
         self.unanswered: tuple[str, str, float] | None = None  # the last stretch heard, until Valor speaks
         self.barge = 0.0
-        self.voiced_s = 0.0  # speech in the stretch being heard
+        self.voiced_s = 0.0  # speech in the stretch being heard, less what cut Valor off
+        self.cut_at = -1e9
         self.typed = False  # a typed line is being answered: replies are posted, until someone speaks
         self.typed_posted = False  # and Live posted its answer
         self.metered: str | None = None  # the open `gateway.opened` call of the current turn
@@ -974,7 +976,9 @@ class Call:
             await self._cut_off(self.out)
         for who, v in voiced.items():
             self.energy[who] = self.energy.get(who, 0.0) + v * seconds
-        self.voiced_s += seconds if voiced and self.out is None else 0.0
+        self.voiced_s += (
+            seconds if voiced and self.out is None and now >= self.cut_at + CUT_S else 0.0
+        )
         if voiced:
             self.last_voice = now
             top = max(voiced, key=voiced.get)
@@ -1231,7 +1235,7 @@ class Call:
         """The person Valor answers spoke over him: he stops, the rest of
         the turn Live is still sending is dropped, and the session is told
         what was heard of it."""
-        reply.dropped, reply.held, self.barge = True, [], 0.0
+        reply.dropped, reply.held, self.barge, self.cut_at = True, [], 0.0, self.now()
         await self._finish(reply, cut=True)
         name = self.names.get(self.answering, "someone") if self.answering else "someone"
         said = reply.over.result().get("spoken_text") if reply.over and reply.over.done() else ""
