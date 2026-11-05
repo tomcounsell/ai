@@ -1319,3 +1319,24 @@ def test_a_lane_that_fails_ends_the_call_saying_why(dsn, team, quick, monkeypatc
     reason = run(go())
     assert reason == "Valor's call process failed: ValueError('the mix broke')"
     assert "the mix broke" in capsys.readouterr().out
+
+
+def test_a_live_session_that_hears_nothing_of_speech_is_resumed(dsn, team, quick, monkeypatch):
+    """Live stopped sending anything, transcripts included, after a typed
+    answer, and Valor was deaf for the rest of the call (the live tests on
+    the paid key, 2026-11-05)."""
+    monkeypatch.setattr(call, "STALL_S", 0.3)
+
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, resume("h9"))
+        await talk(c.the, LOGAN, 0.5)  # nothing comes back
+        assert await until(lambda: len(c.gemini.sessions) == 2 and c.the.session is c.gemini.sessions[1])
+        await push(c.gemini.sessions[1], heard("Valor, are you there?"), audio(), said("Yes."), done())
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id)
+
+    c, done_ = run(go())
+    assert c.gemini.configs[1].session_resumption.handle == "h9" and call.LOST_LINE not in c.page.posts
+    assert [e["result"]["spoken_text"] for e in done_ if e["type"] == "meet.say"] == ["Yes."]

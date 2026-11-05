@@ -763,6 +763,7 @@ STATE_S = 2.0
 MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
 BARGE_S = 0.2  # this much speech by the person Valor answers cuts him off
 UNANSWERED_S = 2.0  # with one other person, this long with no answer to them asks for one
+STALL_S = 6.0  # this much speech with nothing back from Live resumes the session
 CUT_S = 3.0  # the rest of what cut Valor off ("Valor, stop. Wait a moment.") asks nothing
 
 
@@ -888,6 +889,8 @@ class Call:
         self.unanswered: tuple[str, str, float] | None = None  # the last stretch heard, until Valor speaks
         self.barge = 0.0
         self.voiced_s = 0.0  # speech in the stretch being heard, less what cut Valor off
+        self.unheard = 0.0  # speech sent since Live last sent anything
+        self.stalled: asyncio.Event | None = None
         self.cut_at = -1e9
         self.typed = False  # a typed line is being answered: replies are posted, until someone speaks
         self.typed_posted = False  # and Live posted its answer
@@ -981,6 +984,11 @@ class Call:
         for who, v in voiced.items():
             self.energy[who] = self.energy.get(who, 0.0) + v * seconds
         self.voiced_s += seconds if voiced and self.out is None and now >= self.cut_at + CUT_S else 0.0
+        # Live once stopped answering anything, transcripts included, for the
+        # rest of a call (the live tests on the paid key, 2026-11-05).
+        self.unheard += seconds if voiced and self.session is not None else 0.0
+        if self.unheard >= STALL_S and self.stalled is not None:
+            self.stalled.set()
         if voiced:
             self.last_voice = now
             top = max(voiced, key=voiced.get)
@@ -1064,8 +1072,19 @@ class Call:
             try:
                 async with self.gemini.connect(config) as session:
                     self.session, failed, opened = session, 0, True
+                    self.unheard, self.stalled = 0.0, asyncio.Event()
                     _log(f"call {self.id}: the Live session is open{' (resumed)' if self.handle else ''}")
-                    await self._receive(session)
+                    receiving = asyncio.create_task(self._receive(session))
+                    stall = asyncio.create_task(self.stalled.wait())
+                    try:
+                        await asyncio.wait({receiving, stall}, return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        stall.cancel()
+                        if not receiving.done():
+                            receiving.cancel()
+                            _log(f"call {self.id}: Live heard nothing of {STALL_S:.0f} s of speech; resuming")
+                    if receiving.done() and not receiving.cancelled() and receiving.exception() is not None:
+                        raise receiving.exception()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001  a lost session is resumed, or the call leaves
@@ -1085,6 +1104,7 @@ class Call:
     async def _receive(self, session) -> None:
         while not self.leaving.is_set():
             async for m in session.receive():
+                self.unheard = 0.0
                 if m.session_resumption_update and m.session_resumption_update.resumable:
                     self.handle = m.session_resumption_update.new_handle or self.handle
                 if m.go_away is not None:
