@@ -225,7 +225,9 @@ input is estimated at two bytes per token (`settings.bytes_per_token`) for the w
 Token counting and model lists pass unmetered; any other path, and on the
 OpenAI route any method a listed path does not take, is a 403. `revoke` retires the task's tokens and
 cancels its in-flight calls at once; the stop path calls it before killing
-the turn's process group.
+the turn's process group. A turn's normal end retires, cuts and drains only
+its own token's calls, so another grant of the same task (a call's front
+model) keeps working.
 
 The worst-case estimate (the charge when usage goes unreported) comes from each request body's
 `max_tokens`. Valor sets no output limit of its own on a workspace turn; a project spec's
