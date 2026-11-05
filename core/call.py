@@ -896,6 +896,9 @@ class Call:
         self.posts: asyncio.Queue = asyncio.Queue()
         self.questions: asyncio.Queue = asyncio.Queue()
         self.asking: list[str] = []
+        self.asked: dict[
+            str, str | None
+        ] = {}  # each question asked of the worker, by its words, and its answer
         self.late: list[dict[str, str]] = []
         self.dropped: list[str] = []
         self.left = False
@@ -1019,7 +1022,9 @@ class Call:
         self.last_who = who
         name = self.names.get(who, "someone") if who else "someone"
         await self._heard(who or "", name, text, "spoke")
-        self.unanswered = (name, text, self.now())
+        # Owed an answer only when said with no one else there: side talk
+        # with Sam, answered once Sam had left (the live test, 2026-11-05), was not.
+        self.unanswered = (name, text, self.now()) if who is not None and self.present == {who} else None
         self.segments.append({"speaker": name, "start": round(at or 0.0, 2), "end": round(self.now(), 2),
                               "text": text, "channel": "call"})  # fmt: skip
 
@@ -1266,8 +1271,17 @@ class Call:
             args = dict(fc.args or {})
             reply = await self._begin()
             if fc.name == "ask" and str(args.get("question") or "").strip():
-                self.questions.put_nowait(str(args["question"]).strip())
-                result = "asked: the answer will be posted in the chat and noted to you"
+                question = str(args["question"]).strip()
+                key = " ".join(re.findall(r"\w+", question.lower()))
+                if key in self.asked:
+                    # Live asked again in the turn after its tool response
+                    # (the live test, 2026-11-05): one worker turn, one post.
+                    answer = self.asked[key]
+                    result = f"already asked; {f'the answer, posted in the chat: {answer}' if answer else 'the answer is coming'}"
+                else:
+                    self.asked[key] = None
+                    self.questions.put_nowait(question)
+                    result = "asked: the answer will be posted in the chat and noted to you"
                 if not await self.worker_ready():
                     result += (
                         "; your worker's copy of the project is still being set up, so say it needs a moment"
@@ -1412,9 +1426,11 @@ class Call:
                 self.asking.remove(question)
             if not answer:
                 self.dropped.append(question)
+                self.asked.pop(" ".join(re.findall(r"\w+", question.lower())), None)  # may be asked again
             elif self.left:
                 self.late.append({"question": question, "answer": answer})
             else:
+                self.asked[" ".join(re.findall(r"\w+", question.lower()))] = answer
                 self.posts.put_nowait(Post(None, f'On "{question}": {answer}', True))
                 await self._note(f'Your worker answered "{question}" (posted in the chat): {answer}')
 

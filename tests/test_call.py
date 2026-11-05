@@ -1221,3 +1221,57 @@ def test_a_failed_conversion_keeps_the_calls_recording(dsn, team, quick, monkeyp
         if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended")
     ]
     assert "afconvert exited 1" in ended["text"] and str(folder) in ended["text"]
+
+
+def test_a_question_live_asks_twice_is_one_worker_turn_and_one_post(dsn, team, quick):
+    """Live asked "When is the launch?" in two turns a moment apart, and
+    the answer was posted twice (the live test, 2026-11-05)."""
+
+    async def go():
+        asked = []
+
+        async def worker(question):
+            asked.append(question)
+            return "Monday."
+
+        c = await in_call(dsn, team, worker=worker)
+        await push(c.session, tool("ask", question="When is the launch?"), done())
+        await push(c.session, tool("ask", question="when is the launch"), done())
+        await settle(c.the)
+        await push(c.session, tool("ask", question="When is the launch?"), done())
+        await settle(c.the)
+        await finish(c)
+        responses = [
+            kw["function_responses"][0].response["result"] for k, kw in c.session.sent if k == "tool"
+        ]
+        return asked, c.page.posts, responses
+
+    asked, posts, responses = run(go())
+    assert asked == ["When is the launch?"]
+    assert posts.count('On "When is the launch?": Monday.') == 1
+    assert (
+        responses[1].startswith("already asked")
+        and responses[2] == "already asked; the answer, posted in the chat: Monday."
+    )
+
+
+def test_side_talk_said_with_others_there_is_not_answered_once_they_leave(dsn, team, quick, monkeypatch):
+    """Sam's "could you grab me a coffee?", said with Tom there, was
+    answered once Tom left and Sam was alone with Valor (the live test,
+    2026-11-05)."""
+    monkeypatch.setattr(call, "UNANSWERED_S", 0.3)
+
+    async def go():
+        page = Page()
+        c = await in_call(dsn, team, page)
+        await until(lambda: len(c.the.present) == 2)
+        await talk(c.the, LOGAN, 0.4)
+        await push(c.session, heard("Tom, could you grab me a coffee?"))
+        await asyncio.sleep(call.QUIET_S + 0.2)
+        page.people = page.people[:2]  # Tom leaves
+        await until(lambda: c.the.present == {LOGAN})
+        await asyncio.sleep(1.0)
+        await finish(c)
+        return [t for t, _ in c.session.contents() if "said to you" in t or "spoke to you" in t]
+
+    assert run(go()) == []
