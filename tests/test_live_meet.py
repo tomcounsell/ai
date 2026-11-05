@@ -135,6 +135,76 @@ def test_valor_joins_a_new_meet_hears_a_question_answers_aloud_and_in_the_chat(d
     assert copies and all(c["payload"]["reply_to"] == "1790000000.000100" for c in copies)
 
 
+def test_the_kernels_call_process_joins_hears_and_answers_while_its_session_is_provisioned(dsn, tmp_path):
+    """The call as the kernel runs it (`python -m core call`'s `_call`):
+    its own gateway, judge, Kokoro and front model, the call profile, and
+    the session's task directory removed under it as the kernel's
+    provisioning removes it (the Captain, 2026-11-05). A second device asks
+    aloud and hears Valor answer; a stop ends the call."""
+    from kokoro_onnx import Kokoro
+
+    from core.__main__ import _call
+    from tools import voice
+
+    chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
+    seen: dict = {"valor_roster": [], "audio_at": None, "frames": 0, "chat": []}
+
+    async def go():
+        vapp = web.AppRunner(voice.app())
+        await vapp.setup()
+        vsite = web.TCPSite(vapp, "127.0.0.1", 0)
+        await vsite.start()
+        port = vsite._server.sockets[0].getsockname()[1]
+        # `_call` connects by `settings.dsn()`: the test database here.
+        with bridges.operator(tmp_path, meet_profile=settings.meet_profile, voice_port=port,
+                              database=settings.test_database):  # fmt: skip
+            (tmp_path / "projects" / "acme.toml").write_text(
+                f'name = "acme"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\nchats = ["slack:{chat}"]\n'
+            )
+            async with await db.connect(dsn) as conn:
+                await intake.receive(conn, intake.Inbound(
+                    channel="slack", chat_id=chat, chat_kind="group", message_id="1790000000.000100",
+                    sender_id="T0ABC/ULOGAN", sender_name="Logan", sent_at="2026-10-31T02:00:00Z",
+                    text="Can we hop on a call about the launch?"))  # fmt: skip
+                await intake.bind(conn)
+                asking = await tasks.brief(conn, await intake.chat_session(conn, "slack", chat))
+            url, code = await meet_space()
+            async with await db.connect(dsn) as conn, conn.transaction():
+                session = await call.begin(
+                    conn, asking, url=url, code=code, reply_to="1790000000.000100", topic_id=None,
+                    prep="Logan wants to talk about the launch: the import shipped Tuesday, the launch is Monday.",
+                    effect_key=uuid.uuid4().hex,
+                )  # fmt: skip
+            task_dir = Path(settings.work_dir) / session
+            task_dir.mkdir(parents=True)
+            calling = asyncio.create_task(_call(session))
+            await asyncio.sleep(1)
+            shutil.rmtree(task_dir)  # as `serve._provision` removes a task directory it finds
+            folder = Path(settings.tts_model_dir).expanduser()
+            kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
+            other = Path(tempfile.mkdtemp(prefix="meet-other-"))
+            try:
+                await second_device(url, kokoro, other, seen)
+                async with await db.connect(dsn) as conn:
+                    await tasks.stop(conn, session, reason="the live check is over")
+                reason = await asyncio.wait_for(calling, 120)
+            finally:
+                shutil.rmtree(other, ignore_errors=True)
+                await vapp.cleanup()
+            return session, reason
+
+    session, reason = asyncio.run(go())
+    rows = asyncio.run(bridges.rows(dsn, session))
+    print(
+        f"live: reply gap {seen['gap']:.2f} s; Valor's frames at the other device {seen['frames']}; {reason}"
+    )
+    assert reason == "the call was stopped"
+    assert any(
+        r["type"] == "effect.outcome" and r["payload"]["result"].get("posted") == call.JOIN_LINE for r in rows
+    )
+    assert seen["frames"] > 0 and seen["gap"] < REPLY_GAP_MOST_S
+
+
 async def meet_space() -> tuple[str, str]:
     proc = await asyncio.create_subprocess_exec(
         "gws", "meet", "spaces", "create", "--json", json.dumps({"config": {"accessType": "OPEN"}}),
