@@ -356,7 +356,7 @@ holds or redirects work. Status says where each stands.
 | 11 | Response shape | What activity will Valor's response to this message mainly take? | `reply`, `task`, `code`, `web_search`, `lookup`, `document`, `present`, `issue`, `schedule`, `send` (a `pick`) | no | Mission 6 | Retired 2026-10-17: it guessed on arrival and got plain questions wrong; until 2026-10-26 the reaction came from what a turn did, and shape 13 now picks it |
 | 13 | Reaction | Which emoji shows Valor understood this message (`reaction.handling`), and which shows what came of it once a turn handled it (`reaction.completed`)? | the palette's labels, about forty (`reactions.PICKS`; a `pick`, floor 0.08) | no | Mission 6 | Built 2026-10-26 (Tom: "the classifier should choose reactions for both handling and completed in all cases"), uncalibrated; an abstain or a failure gives 📝 |
 | 12 | Ask overlap | Does an open task on the ask's project already do what it asks, or touch the same work? Which listed task, and should the ask run before or after it? | `decision`: `covered`, `supersedes`, `overlaps`, `split`, `distinct`; `task`: `1` to `8` (the numbered open tasks, the 8 most recently active) or `none`; `placement`: `before`, `after`, `none` (each a `pick`) | no, in shadow | Mission 6, 1 | Built (`intake.overlap`), uncalibrated: asked in the `judge` step before the judge, recorded as `reconcile.decided` (an abstain or both legs failing is `distinct` with a note), and holds nothing; its placement proposes a queue place when the writer gives none. Holding an ask for the writer waits for its calibration record and Tom's grant ([docs/plans/ask-reconciliation.md](plans/ask-reconciliation.md)) |
-| 14 | Call turn | Someone in a Meet call just finished a turn: should Valor answer it now (`meet.speak`)? | `asked_valor`, `useful_post`, `someone_else`, `nothing` (a `pick`, floor 0.60) | no | Mission 4, 6 | Built 2026-10-31 for Valor in Google Meet ([docs/plans/meet.md](plans/meet.md)), uncalibrated; an abstain or a failure is silence |
+| 14 | Call turn | Someone in a Meet call just finished a turn: should Valor answer it now (`meet.speak`)? | `asked_valor`, `useful_post`, `someone_else`, `nothing` (a `pick`, floor 0.60) | no | Mission 4, 6 | Built 2026-10-31 for Valor in Google Meet ([docs/plans/meet.md](plans/meet.md)), uncalibrated; retired 2026-11-05, when Gemini Live took on when to speak ([docs/plans/gemini-live.md](plans/gemini-live.md)); its rows stay quiet in the ledger |
 
 Notes per shape:
 
@@ -411,7 +411,8 @@ Notes per shape:
     emoji's rubric says it fits only work done or plainly asked for, and the
     completed question says that no text sent means agreement. Rows are
     quiet (`ledger.QUIET_SITES`).
-14. Asked by a call's own process (`core/call.py`) at the end of each turn
+14. Retired 2026-11-05: Gemini Live decides when Valor speaks
+    (docs/plans/gemini-live.md). Until then it was asked by a call's own process (`core/call.py`) at the end of each turn
     heard or typed in the call, while the front model drafts (not asked
     when one other person is in the call: then every turn is
     `asked_valor`), and metered

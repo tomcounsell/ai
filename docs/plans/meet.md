@@ -10,6 +10,10 @@ revision: 13 (critique of revision 12; revision 9 critiqued ready 2026-10-27)
 
 # Valor in Google Meet
 
+Items 4, 5 and 7's hearing, answering and summary are replaced by
+[gemini-live.md](gemini-live.md) (2026-11-05): Gemini Live hears, decides
+and speaks, and Gemini summarises the recording.
+
 **Ask.** Tom (2026-10-26, 27, 31): Valor joins Meet like any user from a
 group chat's ask, with that chat's access, and answers when addressed; the
 link goes in that thread; written answers go to the Meet chat with a copy

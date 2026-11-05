@@ -1,26 +1,34 @@
 """Valor in a Meet call, its own process (`core/call.py`), driven without
-Meet: a page that records what it was asked to play and post, ears that
-hear loud frames as speech, and a scripted `meet.speak`, front model and
-worker. What is said aloud is a `meet.say` and what is written a
-`meet.send_message`, each one effect per request id; a written answer is
-copied to the thread the call was asked in once its post is done; speech
-never holds up a post; a newer turn of the person answered makes the
-rest of the answer stale; that person talking over Valor stops him, others
-do not; the worker's answers are posted, or after leaving go in the
-report; a stop leaves at once and "Valor, leave" from Tom leaves too."""
+Meet or Google: a page that records what it streams and posts, and a fake
+Gemini whose Live sessions record every call and flag sent to them and
+answer with scripted server messages (google-genai's own types).
+
+What is said aloud is one `meet.say` per Live turn, requested at its first
+audio chunk, its audio held until it is released and dropped when it is
+refused, settled with what was said (cut where it was cut); a written
+answer is a `meet.send_message`, copied to the thread once done. Notes
+(who is speaking, who is here, the worker's answers) ask for no reply; a
+typed line does, and is answered in the chat, never aloud. Each turn's
+usage is charged by modality. A Live session that goes away is resumed
+with its handle; one that cannot be is one line in the chat and a leave.
+After the call Gemini summarises the recording, kept whole in Yudame
+Tools' meeting store."""
 
 import asyncio
+import base64
+import contextlib
+import dataclasses
 import json
-import os
-import shutil
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from aiohttp import web
+from google.genai import types
 
-from core import call, db, ledger, tasks
+from core import bridge, broker, call, db, ledger, spending, tasks
 from tests import bridges, test_meet
 from tests.test_kernel import at
 from tests.test_meet import CODE, TOM, a_call
@@ -29,21 +37,23 @@ pytestmark = pytest.mark.spend(usd=0)
 team = test_meet.team  # the project and its signed-in call profile, a fixture
 run = asyncio.run
 LOGAN, TOMS = "devices/2", "devices/1"
+FIXTURES = Path(__file__).parent / "fixtures" / "meetings"
 
 
 class Page:
-    """Meet's page as the call drives it. With `hold`, a play waits until
-    `stop` (cut at half) or `finish`."""
+    """Meet's page as the call drives it: what it streamed (each chunk's
+    bytes and whether it began a turn) and posted. `ahead` is the seconds
+    a stream reports still queued; a stop reports `played` seconds."""
 
-    def __init__(self, *, hold=False):
-        self.hold, self.status = hold, "in"
+    def __init__(self):
+        self.status = "in"
         self.people = [{"id": "devices/9", "name": "Valor Engels", "me": True},
                        {"id": LOGAN, "name": "Logan", "me": False}, {"id": TOMS, "name": TOM, "me": False}]  # fmt: skip
         self.posts: list[str] = []
-        self.plays: list[float] = []
+        self.streams: list[tuple[int, bool]] = []
         self.stops = 0
+        self.ahead, self.played = 0.0, 0.0
         self.post_ok = True
-        self.playing: asyncio.Future | None = None
         self.left = False
 
     async def open(self, url, port):
@@ -62,22 +72,14 @@ class Page:
         self.posts.append(text)
         return self.post_ok
 
-    async def play(self, pcm, rate):
-        total = len(pcm) / rate
-        self.plays.append(total)
-        if not self.hold:
-            return {"played": total, "total": total, "cut": False}
-        self.playing = asyncio.get_running_loop().create_future()
-        cut = await self.playing
-        return {"played": total / 2 if cut else total, "total": total, "cut": cut}
+    async def stream(self, pcm, rate, fresh):
+        assert rate == call.OUT_RATE
+        self.streams.append((len(pcm), fresh))
+        return self.ahead
 
     async def stop(self):
         self.stops += 1
-        if self.playing is not None and not self.playing.done():
-            self.playing.set_result(True)
-
-    def finish(self):
-        self.playing.set_result(False)
+        return self.played
 
     async def leave(self):
         self.left = True
@@ -86,100 +88,174 @@ class Page:
         pass
 
 
-class Ears(call.Ears):
-    """A loud frame is speech; every pause ends the turn; the words are
-    the next of `said`."""
+class Session:
+    """A Live session: what was sent to it, and an inbox of server
+    messages `receive` yields a turn at a time, as the SDK's does."""
 
-    def __init__(self, said=()):
-        self.said = list(said)
+    def __init__(self):
+        self.sent: list[tuple[str, dict]] = []
+        self.inbox: asyncio.Queue = asyncio.Queue()
 
-    def voiced(self, speaker, frame):
-        return 1.0 if float(np.abs(frame).mean()) > 0.05 else 0.0
+    async def send_realtime_input(self, **kw):
+        self.sent.append(("realtime", kw))
 
-    def ended(self, audio):
-        return 1.0
+    async def send_client_content(self, **kw):
+        self.sent.append(("content", kw))
 
-    async def transcribe(self, audio):
-        return self.said.pop(0) if self.said else ""
+    async def send_tool_response(self, **kw):
+        self.sent.append(("tool", kw))
 
+    async def receive(self):
+        while True:
+            m = await self.inbox.get()
+            if isinstance(m, Exception):
+                raise m
+            yield m
+            if m.server_content and m.server_content.turn_complete:
+                return
 
-class Front:
-    """The front model: each draft says `answers[i]`, sentence by sentence,
-    after calling each tool `tools[i]` names."""
+    def contents(self) -> list[tuple[str, bool]]:
+        """Each text sent as content, with its `turn_complete`."""
+        return [
+            (kw["turns"]["parts"][0]["text"], kw["turn_complete"]) for k, kw in self.sent if k == "content"
+        ]
 
-    def __init__(self, answers, tools=None, *, gate=None):
-        self.answers, self.tools, self.gate, self.drafts = list(answers), list(tools or []), gate, []
-
-    async def start(self):
-        pass
-
-    async def close(self):
-        pass
-
-    async def draft(self, news, said, actions):
-        self.drafts.append((news, said))
-        actions += self.tools.pop(0) if self.tools else []
-        for sentence in self.answers.pop(0) if self.answers else []:
-            if self.gate is not None:
-                await self.gate.wait()
-            yield sentence
+    def audio_bytes(self) -> int:
+        return sum(len(kw["audio"].data) for k, kw in self.sent if k == "realtime")
 
 
-def judged(*labels):
-    """`meet.speak` picking each label in turn; None is an abstain."""
-    labels = list(labels)
-    asked = []
+class Gemini:
+    """Gemini as the call uses it: each `connect` a new `Session` (or, while
+    `fail` is above 0, a refusal); `summarise` records what it was given."""
 
-    async def judge(inputs, turn):
-        asked.append(inputs)
-        label = labels.pop(0) if labels else None
-        return SimpleNamespace(
-            answered=label is not None, payload={"picked": {"turn": label}} if label else {}
-        )
+    def __init__(self, notes=None):
+        self.sessions: list[Session] = []
+        self.configs: list = []
+        self.fail = 0
+        self.notes = notes or {"summary": "Shipping is Monday.", "decisions": ["Ship Monday"],
+                               "actions": [{"task": "Book QA", "owner": "Logan"}], "markdown": "# The call\n\nShip."}  # fmt: skip
+        self.summarised: list[tuple[Path, str, bytes]] = []
 
-    judge.asked = asked
-    return judge
+    @contextlib.asynccontextmanager
+    async def connect(self, config):
+        self.configs.append(config)
+        if self.fail:
+            self.fail -= 1
+            raise ConnectionError("refused")
+        session = Session()
+        self.sessions.append(session)
+        yield session
+
+    async def summarise(self, audio, transcript):
+        self.summarised.append((audio, transcript, audio.read_bytes()[:12]))
+        if isinstance(self.notes, Exception):
+            raise self.notes
+        return self.notes, {"prompt_token_count": 1000, "response_token_count": 200,
+                            "prompt_tokens_details": [{"modality": "AUDIO", "token_count": 800},
+                                                      {"modality": "TEXT", "token_count": 200}]}  # fmt: skip
 
 
-def a_call_of(dsn, team, page, front, judge, *, worker=None, said=(), ready=True):
+def sc(**kw) -> types.LiveServerMessage:
+    return types.LiveServerMessage(server_content=types.LiveServerContent(**kw))
+
+
+def audio(seconds=0.5) -> types.LiveServerMessage:
+    data = b"\x01\x00" * int(seconds * call.OUT_RATE)
+    return sc(
+        model_turn=types.Content(parts=[types.Part(inline_data=types.Blob(data=data, mime_type="audio/pcm"))])
+    )
+
+
+def said(text):
+    return sc(output_transcription=types.Transcription(text=text))
+
+
+def heard(text):
+    return sc(input_transcription=types.Transcription(text=text))
+
+
+USAGE = {"prompt_token_count": 600, "response_token_count": 60, "thoughts_token_count": 40,
+         "prompt_tokens_details": [{"modality": "TEXT", "token_count": 350}, {"modality": "AUDIO", "token_count": 220}],
+         "response_tokens_details": [{"modality": "AUDIO", "token_count": 60}]}  # fmt: skip
+
+
+def done(usage=USAGE):
+    m = sc(turn_complete=True)
+    if usage is not None:
+        m.usage_metadata = types.UsageMetadata.model_validate(usage)
+    return m
+
+
+def tool(name, **args):
+    return types.LiveServerMessage(tool_call=types.LiveServerToolCall(
+        function_calls=[types.FunctionCall(id=f"fc-{name}", name=name, args=args)]))  # fmt: skip
+
+
+def resume(handle):
+    return types.LiveServerMessage(
+        session_resumption_update=types.LiveServerSessionResumptionUpdate(new_handle=handle, resumable=True)
+    )
+
+
+def go_away():
+    return types.LiveServerMessage(go_away=types.LiveServerGoAway(time_left="5s"))
+
+
+@pytest.fixture
+def quick(monkeypatch):
+    monkeypatch.setattr(call, "STATE_S", 0.05)
+    monkeypatch.setattr(call, "MIX_S", 0.02)
+
+
+async def until(check, s=5.0):
+    for _ in range(int(s / 0.02)):
+        if check():
+            return True
+        await asyncio.sleep(0.02)
+    return False
+
+
+async def a_call_of(dsn, team, page, gemini, *, worker=None, ready=True):
     async def ready_now():
         return ready
 
     async def no_worker(question):
         raise AssertionError("no worker in this test")
 
-    async def make():
-        brief, session_id = await a_call(dsn, team)
-        async with await db.connect(dsn) as conn:
-            info = await call.marker(conn, session_id)
-        the = call.Call(session_id, info, page, Ears(said), dsn=dsn,
-                        voice=lambda text: (np.zeros(240 * len(text.split()), np.float32), 24000),
-                        judge=judge, front=front, worker=worker or no_worker, worker_ready=ready_now,
-                        project=team.project)  # fmt: skip
-        the.names.update({LOGAN: "Logan", TOMS: TOM})
-        return brief, the
-
-    return make()
+    brief, session_id = await a_call(dsn, team)
+    async with await db.connect(dsn) as conn:
+        info = await call.marker(conn, session_id)
+    the = call.Call(session_id, info, page, dsn=dsn, gemini=gemini, worker=worker or no_worker,
+                    worker_ready=ready_now, project=team.project, store=str(team.profile.parent / "store" / "Meetings"))  # fmt: skip
+    return brief, the
 
 
-def lanes(the):
-    return [asyncio.create_task(c) for c in (the.says_lane(), the.posts_lane(), the.work())]
+async def in_call(dsn, team, page=None, gemini=None, **kw):
+    """A call joined, with its Live session open."""
+    page, gemini = page or Page(), gemini or Gemini()
+    brief, the = await a_call_of(dsn, team, page, gemini, **kw)
+    running = asyncio.create_task(the.run())
+    assert await until(lambda: gemini.sessions and the.session is not None)
+    assert await until(lambda: call.JOIN_LINE in page.posts)
+    return SimpleNamespace(brief=brief, the=the, page=page, gemini=gemini, running=running,
+                           session=gemini.sessions[-1])  # fmt: skip
 
 
-async def settle(the, *jobs, rounds=200):
-    """Until every turn and lane is idle: a sentence or post taken off its
-    queue counts as busy until its effect is written."""
-    for _ in range(rounds):
-        await asyncio.sleep(0.01)
-        try:
-            await asyncio.wait_for(asyncio.gather(the.says.join(), the.posts.join()), 0.5)
-        except TimeoutError:
-            continue
-        if not the.jobs and the.says.empty() and the.posts.empty() and not the.asking:
+async def settle(the, s=3.0):
+    """Until every post and job is idle."""
+    for _ in range(int(s / 0.02)):
+        await asyncio.sleep(0.02)
+        if the.posts.empty() and not [j for j in the.jobs if not j.done()] and not the.asking:
             await asyncio.sleep(0.05)
-            if not the.jobs and the.says.empty() and the.posts.empty() and not the.asking:
+            if the.posts.empty() and not the.jobs:
                 return
     raise AssertionError("the call never settled")
+
+
+async def push(session, *messages):
+    for m in messages:
+        session.inbox.put_nowait(m)
+    await asyncio.sleep(0.1)
 
 
 async def effects(dsn, session_id) -> list[dict]:
@@ -197,357 +273,561 @@ async def effects(dsn, session_id) -> list[dict]:
     ]  # fmt: skip
 
 
-def turn(who, text, via="spoke"):
-    return call.Turn(ledger.new_id(), who, {LOGAN: "Logan", TOMS: TOM}[who], text, via)
+async def finish(c, reason="done"):
+    c.the.leave(reason)
+    return await asyncio.wait_for(c.running, 15)
 
 
-def test_a_spoken_question_is_answered_aloud_a_sentence_at_a_time_and_heard_in_the_transcript(dsn, team):
+def loud(seconds=0.5):
+    return np.full(int(seconds * 48_000), 0.2, np.float32)
+
+
+# -- speaking -------------------------------------------------------------------
+
+
+def test_a_reply_is_one_say_its_audio_held_until_released_and_settled_with_what_was_said(dsn, team, quick):
     async def go():
-        page = Page()
-        _, the = await a_call_of(dsn, team, page, Front([["We ship Monday.", "The import is done."]]),
-                                     judged("asked_valor"))  # fmt: skip
-        running = lanes(the)
-        await the._turn(turn(LOGAN, "Valor, when do we ship?"))
-        await settle(the)
-        for job in running:
-            job.cancel()
-        return the, page, await effects(dsn, the.id), await bridges.rows(dsn, the.id)
+        c = await in_call(dsn, team)
+        c.the.hear(LOGAN, loud(), 48_000)
+        await until(lambda: c.the.energy.get(LOGAN))  # mixed, as Live's transcript lags the audio
+        await push(c.session, heard("Valor, when do we ship?"))
+        await push(c.session, audio(), audio(), said("We ship Monday."), audio(), done())
+        await until(lambda: c.the.out is None and not c.the.replies)
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id), await bridges.rows(dsn, c.the.id)
 
-    the, page, done, rows = run(go())
-    assert [e["type"] for e in done] == ["meet.say", "meet.say"] and len(page.plays) == 2
-    assert [e["result"]["spoken_text"] for e in done] == ["We ship Monday.", "The import is done."]
-    assert [e["request_id"].split("/")[2:] for e in done] == [["0", "say"], ["1", "say"]]
-    assert page.posts == []  # speech is not copied
-    (heard,) = [r["payload"] for r in rows if r["type"] == "call.heard"]
-    assert heard["name"] == "Logan" and heard["text"] == "Valor, when do we ship?" and heard["via"] == "spoke"
-    assert the.lines[-1] == "Valor (spoke): The import is done."
-
-
-def test_a_typed_question_is_answered_in_the_chat_and_copied_to_the_thread_after_its_post(dsn, team):
-    """The copy is a Slack send to the chat that asked, in its thread, its
-    request after the post's; the post's outcome is done first."""
-
-    async def go():
-        page = Page()
-        _, the = await a_call_of(dsn, team, page, Front([["It is in the ledger.", "Row 12."]]),
-                                     judged("asked_valor"))  # fmt: skip
-        running = lanes(the)
-        the.chat(LOGAN, "Valor, where is the invoice?")
-        await settle(the)
-        for job in running:
-            job.cancel()
-        return the, page, await effects(dsn, the.id)
-
-    _the, page, done = run(go())
-    assert page.posts == ["It is in the ledger. Row 12."]
-    post, copy = done
-    assert post["type"] == "meet.send_message" and post["kind"] == "done"
-    assert copy["type"] == "slack.send_message" and copy["kind"] == "released" and copy["target"] == team.chat
-    assert copy["payload"] == {"text": "It is in the ledger. Row 12.", "reply_to": at(1)}
+    c, done_, rows = run(go())
+    (say,) = [e for e in done_ if e["type"] == "meet.say"]
     assert (
-        copy["request_id"].endswith("/copy")
-        and copy["request_id"].split("/")[1] == post["request_id"].split("/")[1]
+        say["kind"] == "done"
+        and say["result"]["spoken_text"] == "We ship Monday."
+        and not say["result"]["cut"]
+    )
+    assert say["payload"] == {"turn": say["request_id"].split("/")[1]} and say["request_id"].endswith("/say")
+    # Held until released, then played as one fresh chunk; the rest after it, never fresh.
+    assert c.page.streams[0][1] is True and all(not fresh for _, fresh in c.page.streams[1:])
+    assert sum(n for n, _ in c.page.streams) == 3 * 2 * int(0.5 * call.OUT_RATE)
+    (heard_,) = [r["payload"] for r in rows if r["type"] == "call.heard"]
+    assert (
+        heard_["name"] == "Logan" and heard_["text"] == "Valor, when do we ship?" and heard_["via"] == "spoke"
+    )
+    assert not [e for e in done_ if e["type"] == "slack.send_message"]  # speech is not copied
+
+
+def test_lives_no_speech_turn_is_silence_and_its_markup_is_never_in_what_was_said(dsn, team, quick):
+    """Live answers side talk it keeps out of with a turn whose transcript
+    is "<no speech>{pause}" and some audio (the live test, 2026-11-05)."""
+
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, sc(model_turn=audio(0.3).server_content.model_turn,
+                                 output_transcription=types.Transcription(text="<no speech>{pause}")),
+                   audio(0.5), done())  # fmt: skip
+        await settle(c.the)
+        quiet = list(c.page.streams)
+        await push(c.session, said("Sure,"), audio(0.3), said(" {pause} Monday."), done())
+        await until(lambda: not c.the.replies)
+        await settle(c.the)
+        await finish(c)
+        return quiet, await effects(dsn, c.the.id)
+
+    quiet, done_ = run(go())
+    assert quiet == []
+    assert [e["result"]["spoken_text"] for e in done_ if e["type"] == "meet.say"] == ["Sure, Monday."]
+
+
+def test_a_refused_say_drops_its_audio(dsn, team, quick, monkeypatch):
+    async def refuse(conn, action):
+        return "not now"
+
+    monkeypatch.setitem(
+        bridge.DECLARED, "meet.say", dataclasses.replace(bridge.DECLARED["meet.say"], check=refuse)
     )
 
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, audio(), said("Something."), audio(), done())
+        await settle(c.the)
+        await finish(c)
+        return c, await bridges.rows(dsn, c.the.id)
 
-def test_a_failed_post_gets_no_copy_and_a_copy_never_holds_up_the_next_post(dsn, team):
+    c, rows = run(go())
+    assert c.page.streams == []
+    refused = [
+        r["payload"]
+        for r in rows
+        if r["type"] == "effect.refused" and r["payload"]["action_type"] == "meet.say"
+    ]
+    assert [r["reason"] for r in refused] == ["not now"]
+
+
+def test_live_cutting_valor_off_settles_the_say_with_the_words_played(dsn, team, quick):
     async def go():
         page = Page()
-        page.post_ok = False
-        _, the = await a_call_of(dsn, team, page, Front([["First."], ["Second."], ["Third."]]),
-                                     judged("asked_valor", "asked_valor", "asked_valor"))  # fmt: skip
-        running = lanes(the)
-        await the._turn(turn(LOGAN, "Valor, one?", "typed"))
-        await settle(the)
-        page.post_ok = True
-        await the._turn(turn(LOGAN, "Valor, two?", "typed"))
-        await the._turn(turn(TOMS, "Valor, three?", "typed"))
-        await settle(the)
-        for job in running:
-            job.cancel()
-        return await effects(dsn, the.id)
+        page.played = 1.0
+        c = await in_call(dsn, team, page)
+        await push(c.session, audio(1.0), audio(1.0), said("one two three four five six"))
+        await push(c.session, sc(interrupted=True), done())
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id)
 
-    done = run(go())
-    kinds = [(e["type"], e["kind"]) for e in done]
-    assert kinds[0] == ("meet.send_message", "failed") and kinds[1][0] == "meet.send_message"
-    # The second's copy is still with Slack's bridge when the third posts.
-    assert [k for k in kinds if k[0] == "slack.send_message"] == [("slack.send_message", "released")] * 2
-    assert sum(1 for k in kinds if k == ("meet.send_message", "done")) == 2
+    c, done_ = run(go())
+    (say,) = [e for e in done_ if e["type"] == "meet.say"]
+    assert say["result"] == {"spoken_text": "one two three", "cut": True, "played_s": 1.0}
+    assert c.page.stops == 1
 
 
-def test_a_post_lands_while_a_long_say_plays_and_one_request_id_is_one_effect(dsn, team):
-    async def go():
-        page = Page(hold=True)
-        _, the = await a_call_of(dsn, team, page, Front([["A long answer."], ["Noted."]]),
-                                     judged("asked_valor", "useful_post"))  # fmt: skip
-        running = lanes(the)
-        await the._turn(turn(LOGAN, "Valor, explain the import?"))
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            if page.playing is not None:
-                break
-        await the._turn(turn(TOMS, "The figure is in the deck.", "typed"))
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            if page.posts:
-                break
-        posted_while_playing = list(page.posts) and not page.playing.done()
-        page.finish()
-        await settle(the)
-        (post,) = [e for e in await effects(dsn, the.id) if e["type"] == "meet.send_message"]
-        again = await the._effect("meet.send_message", {"text": "Noted."}, post["request_id"])
-        for job in running:
-            job.cancel()
-        return posted_while_playing, again, await effects(dsn, the.id)
-
-    posted_while_playing, again, done = run(go())
-    assert posted_while_playing
-    assert again.kind == "done" and sum(1 for e in done if e["type"] == "meet.send_message") == 1
-
-
-def test_the_person_answered_talking_over_valor_stops_him_and_side_talk_does_not(dsn, team):
-    """Barge-in by the addressed speaker cuts the say, which is done with
-    what was spoken; the rest of the answer is stale and never played."""
-    loud = np.full(9600, 0.5, np.float32)
-
-    async def go():
-        page = Page(hold=True)
-        _, the = await a_call_of(dsn, team, page, Front([["One two three four.", "Five six."]]),
-                                     judged("asked_valor"))  # fmt: skip
-        running = lanes(the)
-        await the._turn(turn(LOGAN, "Valor, count for me?"))
-        for _ in range(100):
-            await asyncio.sleep(0.01)
-            if page.playing is not None:
-                break
-        the.hear(TOMS, loud, 48000)  # side talk
-        await asyncio.sleep(0.05)
-        side = page.stops
-        the.hear(LOGAN, loud, 48000)  # the person answered
-        await settle(the)
-        for job in running:
-            job.cancel()
-        return side, page, await effects(dsn, the.id)
-
-    side, page, done = run(go())
-    assert side == 0 and page.stops == 1 and len(page.plays) == 1
-    (say,) = [e for e in done if e["type"] == "meet.say" and e["kind"] == "done"]
-    assert say["result"] == {**say["result"], "cut": True, "spoken_text": "One two"}
-    assert not [e for e in done if e["payload"]["text"] == "Five six." and e["kind"] == "done"]
-
-
-def test_a_newer_turn_of_the_person_answered_drops_the_rest_and_silence_says_nothing(dsn, team):
-    """The answer to a turn its speaker went on from is never played; a turn
-    `meet.speak` abstains on, or calls someone else's, gets nothing, and
-    its draft's tools do nothing."""
-    gate = asyncio.Event
+def test_speech_over_the_last_of_a_reply_still_playing_stops_it(dsn, team, quick):
+    """Live had finished the turn, so it sends no `interrupted`; the page
+    still had seconds queued when someone spoke."""
 
     async def go():
         page = Page()
-        the_gate = gate()
-        front = Front([["Stale one.", "Stale two."], ["Asked about the worker."]],
-                      tools=[[], [("ask_worker", {"question": "What broke?"})]], gate=the_gate)  # fmt: skip
-        _, the = await a_call_of(dsn, team, page, front, judged("asked_valor", None, "someone_else"))
-        running = lanes(the)
-        first = asyncio.create_task(the._turn(turn(LOGAN, "Valor, what about the build?")))
+        page.ahead, page.played = 30.0, 0.5
+        c = await in_call(dsn, team, page)
+        await push(c.session, audio(1.0), said("a b c d"), done())
+        await asyncio.sleep(0.2)
+        await push(c.session, heard("Wait, Valor"))
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id)
+
+    c, done_ = run(go())
+    (say,) = [e for e in done_ if e["type"] == "meet.say"]
+    assert say["result"]["cut"] and say["result"]["spoken_text"] == "a b" and c.page.stops == 1
+
+
+def test_valors_own_audio_is_not_sent_and_silence_is(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        c.the.hear("devices/9", loud(), 48_000)  # Valor's own track
+        await asyncio.sleep(0.3)
+        quiet = c.session.audio_bytes()
+        mixed = [kw["audio"] for k, kw in c.session.sent if k == "realtime"]
+        await finish(c)
+        return quiet, mixed
+
+    quiet, mixed = run(go())
+    assert quiet > 0 and all(b.mime_type == "audio/pcm;rate=16000" for b in mixed)
+    assert all(not any(b.data) for b in mixed)
+
+
+def test_each_stretch_heard_is_credited_to_whoever_was_loudest_and_a_change_of_speaker_is_a_note(
+    dsn, team, quick
+):
+    async def go():
+        c = await in_call(dsn, team)
+        for _ in range(10):
+            c.the.hear(LOGAN, loud(0.05), 48_000)
+            await asyncio.sleep(0.05)
+        await push(c.session, heard("I think Monday."))
+        for _ in range(12):
+            c.the.hear(TOMS, loud(0.05), 48_000)
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(call.LAG_S + 0.2)
+        await push(c.session, heard("Tuesday is better."))
+        await asyncio.sleep(call.QUIET_S + 0.3)
+        await finish(c)
+        return c, await bridges.rows(dsn, c.the.id)
+
+    c, rows = run(go())
+    stretches = [(r["payload"]["name"], r["payload"]["text"]) for r in rows if r["type"] == "call.heard"]
+    assert stretches == [("Logan", "I think Monday."), (TOM, "Tuesday is better.")]
+    notes = c.session.contents()
+    assert ("[note] Logan is speaking.", False) in notes and (f"[note] {TOM} is speaking.", False) in notes
+
+
+def test_who_is_here_is_a_note_and_with_one_other_person_all_they_say_is_to_valor(dsn, team, quick):
+    """Tom's "Hello" in a call with only him got no answer (2026-11-05)."""
+
+    async def go():
+        page = Page()
+        page.people = page.people[:1] + page.people[2:]  # only Tom
+        c = await in_call(dsn, team, page)
+        await until(lambda: any("Only" in t for t, _ in c.session.contents()))
+        page.people = Page().people
+        await until(lambda: any("In the call with you" in t for t, _ in c.session.contents()))
+        await finish(c)
+        return c.session.contents()
+
+    notes = run(go())
+    assert (
+        f"[note] Only {TOM} is here with you: everything they say is to you, so answer it.",
+        False,
+    ) in notes
+    assert (f"[note] In the call with you: Logan, {TOM}.", False) in notes
+    assert all(not complete for text, complete in notes if text.startswith("[note]"))
+
+
+# -- the chat, the worker, decisions -------------------------------------------------
+
+
+def test_a_typed_line_asks_for_a_reply_answered_in_the_chat_never_aloud(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        c.the.chat(LOGAN, "Valor, where is the invoice?")
         await asyncio.sleep(0.1)
-        await the._turn(turn(LOGAN, "Actually never mind."))
-        the_gate.set()
-        await first
-        await the._turn(turn(TOMS, "Logan, what broke?"))
-        await settle(the)
-        for job in running:
-            job.cancel()
-        return the, page, await effects(dsn, the.id)
-
-    the, page, done = run(go())
-    assert page.plays == [] and [e for e in done if e["kind"] == "done"] == []
-    assert the.questions.empty() and the.asking == []
-
-
-def test_valors_own_audio_and_chat_are_not_heard(dsn, team):
-    async def go():
-        page = Page()
-        judge = judged()
-        _, the = await a_call_of(dsn, team, page, Front([]), judge)
-        the.me = "devices/9"
-        the.hear("devices/9", np.full(4800, 0.5, np.float32), 48000)
-        the.chat("devices/9", "Valor here, keeping a transcript for notes.")
+        await push(
+            c.session,
+            audio(),
+            tool("post", text="It is in the ledger."),
+            said("It is in the ledger."),
+            done(),
+        )
+        await settle(c.the)
+        c.the.chat(TOMS, "And the deck?")
         await asyncio.sleep(0.1)
-        return the, judge
+        await push(c.session, audio(), said("In Drive."), done())  # answered aloud: posted instead
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id)
 
-    the, judge = run(go())
-    assert the.speakers == {} and judge.asked == []
+    c, done_ = run(go())
+    assert ("[typed by Logan] Valor, where is the invoice?", True) in c.session.contents()
+    assert c.page.streams == [] and not [e for e in done_ if e["type"] == "meet.say"]
+    assert c.page.posts[1:] == ["It is in the ledger.", "In Drive."]
+    post = next(
+        e
+        for e in done_
+        if e["type"] == "meet.send_message" and e["payload"]["text"] == "It is in the ledger."
+    )
+    copy = next(e for e in done_ if e["type"] == "slack.send_message")
+    assert post["kind"] == "done" and copy["target"] == team.chat
+    assert copy["payload"] == {"text": "It is in the ledger.", "reply_to": at(1)}
+    (response,) = [kw for k, kw in c.session.sent if k == "tool"]
+    assert response["function_responses"][0].response == {"result": "posted"}
 
 
-def test_each_persons_turn_is_heard_apart_though_their_audio_shares_the_frames(dsn, team):
-    """Three people talking in turn over interleaved frames: three turns,
-    each transcribed once its pause ends it."""
-    loud = np.full(480, 0.5, np.float32)
-    quiet = np.zeros(480, np.float32)
-
+def test_a_failed_post_gets_no_copy(dsn, team, quick):
     async def go():
-        page = Page()
-        clock = [0.0]
-        _, the = await a_call_of(dsn, team, page, Front([]), judged(), said=["one", "two", "three"])
-        the.clock = lambda: clock[0]
-        for who in (LOGAN, TOMS, "devices/3"):
-            for _ in range(120):  # past `SHORT_S`, so Smart Turn ends it
-                clock[0] += 0.01
-                the.hear(who, loud, 48000)
-                the.hear("devices/4", quiet, 48000)
-            clock[0] += call.PAUSE_S + 0.01
-            for speaker in list(the.speakers.values()):
-                audio = speaker.pause(the.ears, clock[0])
-                if audio is not None:
-                    await the._spoke(speaker.id, audio)
-        rows = await bridges.rows(dsn, the.id)
-        return [(r["payload"]["who"], r["payload"]["text"]) for r in rows if r["type"] == "call.heard"]
+        c = await in_call(dsn, team)
+        c.page.post_ok = False
+        await push(c.session, tool("post", text="First."), done())
+        await settle(c.the)
+        await finish(c)
+        return await effects(dsn, c.the.id)
 
-    assert run(go()) == [(LOGAN, "one"), (TOMS, "two"), ("devices/3", "three")]
+    done_ = run(go())
+    assert [e["kind"] for e in done_ if e["payload"].get("text") == "First."] == ["failed"]
+    assert not [e for e in done_ if e["type"] == "slack.send_message"]
 
 
-def test_down_to_16k_keeps_a_tone_across_frames():
-    down = call.Down()
-    t = np.arange(48000) / 48000
-    tone = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-    out = np.concatenate([down(tone[i : i + 480], 48000) for i in range(0, 48000, 480)])
-    assert abs(len(out) - 16000) <= 1
-    want = np.sin(2 * np.pi * 440 * (np.arange(len(out)) * 3 - 24) / 48000)
-    assert np.abs(out[100:] - want[100:]).max() < 0.05
-
-
-def test_the_workers_answer_is_posted_naming_its_question_and_copied(dsn, team):
+def test_an_ask_returns_at_once_and_its_answer_after_a_resumption_is_posted_and_noted(dsn, team, quick):
     async def go():
-        page = Page()
-        front = Front([["Let me check."]], tools=[[("ask_worker", {"question": "What did we ship?"})]])
+        gate = asyncio.Event()
 
         async def worker(question):
+            await gate.wait()
             return "The import, on Tuesday."
 
-        _, the = await a_call_of(dsn, team, page, front, judged("asked_valor"), worker=worker)
-        running = lanes(the)
-        await the._turn(turn(TOMS, "Valor, what did we ship?"))
-        await settle(the)
-        for job in running:
-            job.cancel()
-        return page, await effects(dsn, the.id)
+        c = await in_call(dsn, team, worker=worker)
+        await push(c.session, resume("h1"), tool("ask", question="What did we ship?"), done())
+        (response,) = [kw for k, kw in c.session.sent if k == "tool"]
+        await push(c.session, go_away())
+        assert await until(lambda: len(c.gemini.sessions) == 2 and c.the.session is c.gemini.sessions[1])
+        gate.set()
+        await settle(c.the)
+        await finish(c)
+        return c, response, await effects(dsn, c.the.id)
 
-    page, done = run(go())
-    assert page.posts == ['On "What did we ship?": The import, on Tuesday.']
-    kinds = [e["type"] for e in done]  # the answer may come before or after Valor's "let me check"
-    assert sorted(kinds) == ["meet.say", "meet.send_message", "slack.send_message"]
-    assert kinds.index("slack.send_message") > kinds.index("meet.send_message")
+    c, response, done_ = run(go())
+    assert response["function_responses"][0].response["result"].startswith("asked")
+    assert c.gemini.configs[1].session_resumption.handle == "h1"
+    assert 'On "What did we ship?": The import, on Tuesday.' in c.page.posts
+    noted = c.gemini.sessions[1].contents()
+    assert (
+        '[note] Your worker answered "What did we ship?" (posted in the chat): The import, on Tuesday.',
+        False,
+    ) in noted
+    assert [e["type"] for e in done_ if e["type"] != "meet.send_message"] == ["slack.send_message"]
 
 
-def test_a_readback_posts_with_its_settles_and_is_copied(dsn, team):
-    settles = [{"task_id": "t1", "question_id": "q1"}, {"task_id": "t2", "question_id": "q2"}]
-
+def test_a_settle_posts_the_readback_with_its_settles_and_copies_it(dsn, team, quick):
     async def go():
-        page = Page()
-        front = Front([["Got it."]], tools=[[("record_decision", {"readback": "Ship Monday; drop IE.",
-                                                                    "settles": settles})]])  # fmt: skip
-        _, the = await a_call_of(dsn, team, page, front, judged("asked_valor"))
-        running = lanes(the)
-        await the._turn(turn(TOMS, "Ship Monday and drop IE."))
-        await settle(the)
-        for job in running:
-            job.cancel()
-        return await effects(dsn, the.id)
+        c = await in_call(dsn, team)
+        await push(
+            c.session, tool("settle", ids=["t1/q1", "t2/q2"], readback="Ship Monday; drop IE."), done()
+        )
+        await settle(c.the)
+        await finish(c)
+        return await effects(dsn, c.the.id)
 
-    done = run(go())
-    (post,) = [e for e in done if e["type"] == "meet.send_message"]
-    assert post["payload"] == {"text": "Ship Monday; drop IE.", "settles": settles} and post["kind"] == "done"
+    done_ = run(go())
+    (post,) = [e for e in done_ if e["type"] == "meet.send_message" and e["payload"].get("settles")]
+    assert post["payload"] == {"text": "Ship Monday; drop IE.", "settles": [
+        {"task_id": "t1", "question_id": "q1"}, {"task_id": "t2", "question_id": "q2"}]}  # fmt: skip
     assert any(
-        e["type"] == "slack.send_message" and e["payload"]["text"] == "Ship Monday; drop IE." for e in done
+        e["type"] == "slack.send_message" and e["payload"]["text"] == "Ship Monday; drop IE." for e in done_
     )
 
 
-FAKE_CLAUDE = r"""
-import json, sys
-replies = json.loads(sys.argv[1])
-for line in sys.stdin:
-    asked = json.loads(line)["message"]["content"]
-    sys.stderr.write(asked + "\n---\n")
-    reply = replies.pop(0)
-    for chunk in reply:
-        print(json.dumps({"type": "stream_event", "event": {"type": "content_block_delta",
-                          "delta": {"type": "text_delta", "text": chunk}}}), flush=True)
-    print(json.dumps({"type": "result", "result": "".join(reply)}), flush=True)
-"""
+def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
+    config = call.live_config("acme", "Logan wants the launch date.", None)
+    assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Charon"
+    assert config.proactivity.proactive_audio is True
+    assert config.context_window_compression.trigger_tokens == call.CALL_CONTEXT
+    detect = config.realtime_input_config.automatic_activity_detection
+    assert detect.start_of_speech_sensitivity == types.StartSensitivity.START_SENSITIVITY_LOW
+    assert [f.name for f in config.tools[0].function_declarations] == [
+        "ask",
+        "post",
+        "open_decisions",
+        "settle",
+        "leave",
+    ]
+    assert (
+        "Logan wants the launch date." in config.system_instruction
+        and "[typed by NAME]" in config.system_instruction
+    )
 
 
-def test_the_front_model_streams_sentences_keeps_directives_unsaid_and_a_dropped_draft_never_skews_the_next(
-    tmp_path,
+# -- metering ---------------------------------------------------------------------
+
+
+def test_each_turn_is_opened_then_charged_by_modality(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, audio(), said("Hi."), done())
+        await push(c.session, done())  # a turn of silence is billed too
+        await settle(c.the)
+        await finish(c)
+        return await bridges.rows(dsn, c.the.id)
+
+    rows = run(go())
+    opened = [
+        r["payload"] for r in rows if r["type"] == "gateway.opened" and r["payload"]["route"] == "gemini-live"
+    ]
+    charged = [
+        r["payload"]
+        for r in rows
+        if r["type"] == "gateway.charged" and r["payload"].get("model") == "gemini-3.8-live"
+    ]
+    price = spending.gemini_price("gemini-3.8-live")
+    assert len(opened) == len(charged) == 2 and {o["call_id"] for o in opened} == {
+        c["call_id"] for c in charged
+    }
+    assert all(c["usd_micros"] == spending.gemini_cost(USAGE, price) for c in charged)
+    assert opened[0]["holder"] is None or opened[0]["holder"].startswith("run:")
+    assert opened[0]["estimate_usd_micros"] == spending.gemini_worst_case(price)
+
+
+def test_gemini_prices_each_modality_and_the_worst_case_covers_a_full_context():
+    price = spending.gemini_price("gemini-3.8-live")
+    # 350 text and 220 audio in, 30 unlisted (at the audio rate); 60 audio out; 40 thinking, as text.
+    assert spending.gemini_cost(USAGE, price) == -(
+        -(350 * 750_000 + 250 * 3_000_000 + 60 * 12_000_000 + 40 * 4_500_000) // 1_000_000
+    )
+    full = {"prompt_token_count": call.CALL_CONTEXT, "response_token_count": call.CALL_OUTPUT_MOST,
+            "prompt_tokens_details": [{"modality": "AUDIO", "token_count": call.CALL_CONTEXT}],
+            "response_tokens_details": [{"modality": "AUDIO", "token_count": call.CALL_OUTPUT_MOST}]}  # fmt: skip
+    assert spending.gemini_cost(full, price) <= spending.gemini_worst_case(price)
+    assert spending.gemini_price("gemini-9-unknown")["unpriced"] is True
+
+
+def test_a_stopped_task_refuses_a_turn_and_the_call_leaves(dsn, team):
+    async def go():
+        _, the = await a_call_of(dsn, team, Page(), Gemini())
+        async with await db.connect(dsn) as conn:
+            await tasks.stop(conn, the.id, reason="enough", by="tom", via="chat")
+        await the._open("turn")
+        return the
+
+    the = run(go())
+    assert the.leaving.is_set() and the.hard and the.metered is None
+
+
+# -- when Live fails ----------------------------------------------------------------
+
+
+def test_two_failed_reconnects_post_one_line_and_leave(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        c.gemini.fail = 5
+        await push(c.session, ConnectionError("dropped"))
+        reason = await asyncio.wait_for(c.running, 15)
+        return c, reason
+
+    c, reason = run(go())
+    assert reason == "Valor lost its voice connection"
+    assert c.page.posts.count(call.LOST_LINE) == 1 and len(c.gemini.configs) == 3
+
+
+def test_a_dropped_session_that_reconnects_carries_on(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, resume("h7"), ConnectionError("dropped"))
+        assert await until(lambda: len(c.gemini.sessions) == 2 and c.the.session is c.gemini.sessions[1])
+        await push(c.gemini.sessions[1], audio(), said("Still here."), done())
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id)
+
+    c, done_ = run(go())
+    assert c.gemini.configs[1].session_resumption.handle == "h7" and call.LOST_LINE not in c.page.posts
+    assert [e["result"]["spoken_text"] for e in done_ if e["type"] == "meet.say"] == ["Still here."]
+
+
+# -- the say and the post, as the bridge checks them ------------------------------------
+
+
+def test_a_say_names_its_turn_and_a_post_keeps_its_text_limits():
+    async def check(action_type, payload):
+        return await bridge.DECLARED[action_type].check(None, broker.Action(action_type, CODE, payload))
+
+    assert run(check("meet.say", {"turn": "t1"})) is None
+    assert run(check("meet.say", {"text": "Hello."})) is not None
+    assert run(check("meet.send_message", {"text": "Hello."})) is None
+    assert "empty" in run(check("meet.send_message", {"text": "  "}))
+    assert "over a call's" in run(check("meet.send_message", {"text": "x" * 501}))
+
+
+# -- after the call ------------------------------------------------------------------
+
+
+def test_the_store_files_are_what_yudame_tools_writes():
+    """Fixtures written by Yudame Tools' own encoders (MeetingStore.save,
+    the transcript and summary encoders, NoteFormat and TranscriptMerge)."""
+    title = "Valor call abc-defg-hij"
+    segments = [
+        {"speaker": "Logan", "start": 0.5, "end": 2.0, "text": "Valor, when do we ship?", "channel": "call"},
+        {"speaker": "Valor Engels", "start": 3.1, "end": 4.2, "text": "We ship Monday.", "channel": "mic"},
+        {"speaker": "Valor Engels", "start": 4.3, "end": 5.0, "text": "After QA.", "channel": "mic"},
+        {"speaker": "Logan", "start": 3605.0, "end": 3610.5, "text": "Great *thanks*", "channel": "call"},
+    ]
+    summary = {"summary": "Shipping is Monday.", "decisions": ["Ship *Monday*"],
+               "actions": [{"task": "Send the [notes]", "owner": "Logan"}, {"task": "Book QA"}]}  # fmt: skip
+    start, end = datetime(2026, 11, 5, 10, tzinfo=UTC), datetime(2026, 11, 5, 10, 12, 30, tzinfo=UTC)
+    meta = json.loads(call.meta_json(title, start, end, "GMT", segments))
+    want = json.loads((FIXTURES / "meta.json").read_text())
+    pairs = lambda u: {(u[i], json.dumps(u[i + 1])) for i in range(0, len(u), 2)}
+    assert pairs(meta.pop("uploads")) == pairs(want.pop("uploads")) and meta == want
+    assert json.loads(json.dumps(segments)) == json.loads((FIXTURES / "transcript.json").read_text())
+    assert call.transcript_md(title, segments) == (FIXTURES / "transcript.md").read_text()
+    assert call.notes_md(title, summary) == (FIXTURES / "notes.md").read_text()
+    assert summary == json.loads((FIXTURES / "summary.json").read_text())
+
+
+def test_after_the_call_gemini_summarises_the_recording_and_the_folder_appears_in_the_store_whole(
+    dsn, team, quick
 ):
-    """A Claude Code session reading and writing stream-json (here a fake
-    one): each sentence as soon as it is whole, an `ASK:` or `DECIDED:`
-    line an action and never said, and a draft abandoned midway read to its
-    end before the next is asked, so the next answer is its own."""
-    replies = [
-        ["Let me", " check that. Two", " are open.\nASK: What shipped", " this week?\n", "DECIDED: t1/q1, t2/q2 | Ship Monday."],
-        ["This one", " is dropped.", " Still dropped."],
-        ["Second answer."],
-    ]  # fmt: skip
-    errors = tmp_path / "asked.txt"
-
     async def go():
-        front = call.Front(["sh", "-c", f'{sys.executable} -c "$0" "$1" 2>{errors}', FAKE_CLAUDE, json.dumps(replies)],
-                           {})  # fmt: skip
-        await front.start()
-        actions = []
-        got = [s async for s in front.draft("news one", "Tom said: what is open?", actions)]
-        dropped = front.draft("", "Logan said: hm", [])
-        first = await dropped.__anext__()
-        await dropped.aclose()
-        second = [s async for s in front.draft("", "Tom said: and then?", [])]
-        await front.close()
-        return got, actions, first, second
+        c = await in_call(dsn, team)
+        c.the.hear(LOGAN, loud(), 48_000)
+        await until(lambda: c.the.energy.get(LOGAN))  # mixed, as Live's transcript lags the audio
+        await push(c.session, heard("Valor, when do we ship?"), audio(), said("Monday."), done())
+        await settle(c.the)
+        await asyncio.sleep(call.QUIET_S)
+        store = c.the.store
+        during = list(store.iterdir()) if store.exists() else []
+        await finish(c)
+        rows = await bridges.rows(dsn, c.brief.id)
+        return c, during, store, rows, await bridges.rows(dsn, c.the.id)
 
-    got, actions, first, second = run(go())
-    assert got == ["Let me check that.", "Two are open."]
-    assert actions == [("ask_worker", {"question": "What shipped this week?"}),
-                       ("record_decision", {"readback": "Ship Monday.", "settles": [
-                           {"task_id": "t1", "question_id": "q1"}, {"task_id": "t2", "question_id": "q2"}]})]  # fmt: skip
-    assert first == "This one is dropped." and second == ["Second answer."]
-    assert errors.read_text().startswith("news one\n\nNow: Tom said: what is open?")
+    c, during, store, rows, call_rows = run(go())
+    assert during == []
+    (folder,) = store.iterdir()
+    assert sorted(p.name for p in folder.iterdir()) == sorted(
+        [
+            "audio.m4a",
+            "meta.json",
+            "transcript.json",
+            "transcript.md",
+            "summary.json",
+            "notes.md",
+            f"call-{CODE}.md",
+        ]
+    )
+    assert not [p for p in store.parent.iterdir() if p.name.startswith(".valor-call-")]
+    meta = json.loads((folder / "meta.json").read_text())
+    assert meta["recording"] is False and meta["soundChecked"] and not meta["summaryPending"]
+    assert meta["speakers"] == ["Logan", "Valor Engels"]
+    (got,) = c.gemini.summarised
+    _, transcript, head = got
+    assert head[4:8] == b"ftyp"  # an m4a
+    assert "Logan (spoke): Valor, when do we ship?" in transcript and "Valor (spoke): Monday." in transcript
+    assert (folder / f"call-{CODE}.md").read_text() == "# The call\n\nShip.\n"
+    (ended,) = [
+        r["payload"]
+        for r in rows
+        if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended")
+    ]
+    assert str(folder / f"call-{CODE}.md") in ended["text"] and "unchanged" in ended["text"]
+    assert any(
+        r["type"] == "gateway.charged" and r["payload"].get("model") == "gemini-3.1-pro-preview"
+        for r in call_rows
+    )
 
 
-def test_the_front_models_instructions_carry_the_notes_before_the_call():
-    front = call.Front.claude("http://127.0.0.1:1/t/x", model="claude-haiku-5-5", project="acme",
-                              prep="The launch: two decisions open.")  # fmt: skip
-    system = front.argv[front.argv.index("--system-prompt") + 1]
-    assert "The launch: two decisions open." in system and "acme" in system
-    assert front.argv[front.argv.index("--tools") + 1] == "" and "--include-partial-messages" in front.argv
-    assert front.env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:1/t/x"
-
-
-def test_the_front_model_runs_in_a_home_of_its_own_which_outlives_the_sessions_task_directory(tmp_path):
-    """The Captain, 2026-11-05: the front's home was `<work_dir>/<session>/front`,
-    and the kernel, provisioning that session, removed its task directory
-    before the front started: `FileNotFoundError`. Its home is its own now,
-    one per front, gone when it closes."""
-    task_dir = tmp_path / "c9ab8cc8f378"
-    task_dir.mkdir()
-    show = 'pwd -P; printf "%s\\n" "$HOME" "$CLAUDE_CONFIG_DIR"; cat'
-
+def test_a_failed_summary_is_named_in_the_report_and_no_other_is_written(dsn, team, quick):
     async def go():
-        fronts = [call.Front(["/bin/sh", "-c", show], {"PATH": "/usr/bin:/bin"}) for _ in range(2)]
-        shutil.rmtree(task_dir)  # as `serve._provision` removes a task directory it finds
-        seen = []
-        for front in fronts:
-            await front.start()
-            seen.append([(await front.proc.stdout.readline()).decode().strip() for _ in range(3)])
-        homes = [front.home for front in fronts]
-        for front in fronts:
-            await front.close()
-        return seen, homes
+        c = await in_call(dsn, team, gemini=Gemini(notes=RuntimeError("quota")))
+        await push(c.session, heard("Hello?"), done())
+        await settle(c.the)
+        await finish(c)
+        return await bridges.rows(dsn, c.brief.id)
 
-    seen, homes = run(go())
-    for (cwd, home, config), made in zip(seen, homes, strict=True):
-        assert cwd == os.path.realpath(made) and home == config == made
-        assert not made.startswith(str(tmp_path)) and not os.path.exists(made)
-    assert homes[0] != homes[1]
+    rows = run(go())
+    (ended,) = [
+        r["payload"]
+        for r in rows
+        if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended")
+    ]
+    assert "Gemini could not summarise it (RuntimeError: quota)" in ended["text"]
+    assert "write no summary of your own" in ended["text"]
+
+
+def test_the_summary_uploads_the_recording_and_sends_it_with_the_transcript(tmp_path):
+    class Files:
+        def __init__(self):
+            self.deleted = []
+
+        async def upload(self, file, config):
+            self.file = file
+            return SimpleNamespace(name="files/1", state=SimpleNamespace(name="ACTIVE"))
+
+        async def get(self, name):
+            raise AssertionError("not processing")
+
+        async def delete(self, name):
+            self.deleted.append(name)
+
+    class Models:
+        async def generate_content(self, model, contents, config):
+            self.model, self.contents = model, contents
+            return SimpleNamespace(text=json.dumps({"summary": "s", "decisions": [], "actions": [], "markdown": "m"}),
+                                   usage_metadata=types.UsageMetadata(prompt_token_count=10))  # fmt: skip
+
+    files, models = Files(), Models()
+    gemini = call.Gemini.__new__(call.Gemini)
+    gemini.client = SimpleNamespace(aio=SimpleNamespace(files=files, models=models))
+    audio_file = tmp_path / "audio.m4a"
+    audio_file.write_bytes(b"x")
+    notes, usage = run(gemini.summarise(audio_file, "[0:01] Logan (spoke): hi"))
+    assert files.file == str(audio_file) and files.deleted == ["files/1"]
+    assert models.model == "gemini-3.1-pro-preview" and models.contents[0].name == "files/1"
+    assert models.contents[1].endswith("[0:01] Logan (spoke): hi")
+    assert notes["markdown"] == "m" and usage == {"prompt_token_count": 10}
+
+
+def test_a_missing_google_key_is_named_and_its_value_never_printed(tmp_path):
+    from core import credentials
+
+    with pytest.raises(credentials.MissingKey, match="GOOGLE_API_KEY") as got:
+        credentials.read_key(tmp_path / "google-key", call.GOOGLE_KEY, "google-key")
+    assert "google-key" in str(got.value)
+    vault = tmp_path / ".env"
+    vault.write_text("GOOGLE_API_KEY=AIza-secret-value\n")
+    status = credentials.copy_keys(vault, tmp_path / "keys" / "google-key", [call.GOOGLE_KEY])
+    assert status == {"GOOGLE_API_KEY": "written"} and "secret" not in json.dumps(status)
+    assert (
+        credentials.read_key(tmp_path / "keys" / "google-key", call.GOOGLE_KEY, "google-key")
+        == "AIza-secret-value"
+    )
+
+
+# -- the call's life -----------------------------------------------------------
 
 
 def test_a_call_that_fails_logs_its_traceback_with_the_missing_files_path(dsn, team, capsys):
@@ -556,7 +836,7 @@ def test_a_call_that_fails_logs_its_traceback_with_the_missing_files_path(dsn, t
             raise FileNotFoundError(2, "No such file or directory", "/gone/front")
 
     async def go():
-        _, the = await a_call_of(dsn, team, Missing(), Front([]), judged())
+        _, the = await a_call_of(dsn, team, Missing(), Gemini())
         return await asyncio.wait_for(the.run(), 10)
 
     reason = run(go())
@@ -565,67 +845,44 @@ def test_a_call_that_fails_logs_its_traceback_with_the_missing_files_path(dsn, t
     assert "Traceback" in out and "/gone/front" in out and "in run" in out
 
 
-# -- the call's life -----------------------------------------------------------
-
-
-@pytest.fixture
-def quick(monkeypatch):
-    monkeypatch.setattr(call, "STATE_S", 0.05)
-    monkeypatch.setattr(call, "TICK_S", 0.02)
-
-
-async def wait_for(check, s=5.0):
-    for _ in range(int(s / 0.02)):
-        if await check():
-            return True
-        await asyncio.sleep(0.02)
-    return False
-
-
 def test_a_stop_leaves_within_seconds_drops_the_workers_question_and_ends_the_call_once(dsn, team, quick):
     async def go():
-        page = Page()
         hold = asyncio.Event()
 
         async def worker(question):
             await hold.wait()
             raise tasks.TaskStopped(question)
 
-        _, the = await a_call_of(dsn, team, page, Front([]), judged(), worker=worker)
-        running = asyncio.create_task(the.run())
-        assert await wait_for(lambda: _async(page.posts == [call.JOIN_LINE]))
-        the.questions.put_nowait("What broke?")
+        c = await in_call(dsn, team, worker=worker)
+        c.the.questions.put_nowait("What broke?")
         await asyncio.sleep(0.1)
         start = asyncio.get_running_loop().time()
         async with await db.connect(dsn) as conn:
-            await tasks.stop(conn, the.id, reason="enough", by="tom", via="chat")
+            await tasks.stop(conn, c.the.id, reason="enough", by="tom", via="chat")
         hold.set()
-        reason = await asyncio.wait_for(running, 10)
+        reason = await asyncio.wait_for(c.running, 10)
         took = asyncio.get_running_loop().time() - start
-        return the, page, reason, took, await bridges.rows(dsn, the.id)
+        return c, reason, took, await bridges.rows(dsn, c.the.id)
 
-    _the, page, reason, took, rows = run(go())
-    assert reason == "the call was stopped" and took < 5 and page.left
+    c, reason, took, rows = run(go())
+    assert reason == "the call was stopped" and took < 5 and c.page.left
     (ended,) = [r["payload"] for r in rows if r["type"] == "call.ended"]
     assert ended["stopped"] and ended["unanswered"] == ["What broke?"]
-
-
-async def _async(value):
-    return value
+    assert not c.gemini.summarised and not c.the.store.exists()  # a stop keeps no recording
 
 
 def test_valor_leave_from_tom_leaves_and_from_anyone_else_does_not(dsn, team, quick):
     async def go():
-        page = Page()
-        _, the = await a_call_of(dsn, team, page, Front([]), judged())
-        running = asyncio.create_task(the.run())
-        assert await wait_for(lambda: _async(bool(page.posts)))
-        await the._turn(turn(LOGAN, "Valor, leave."))
-        await asyncio.sleep(0.1)
-        before = the.leaving.is_set()
-        await the._turn(turn(TOMS, "Thanks Valor, you can leave now."))
-        reason = await asyncio.wait_for(running, 10)
-        return before, reason, await bridges.rows(dsn, the.id)
+        c = await in_call(dsn, team)
+        for _ in range(8):
+            c.the.hear(LOGAN, loud(0.05), 48_000)
+            await asyncio.sleep(0.05)
+        await push(c.session, heard("Valor, leave."))
+        await asyncio.sleep(call.QUIET_S + 0.3)
+        before = c.the.leaving.is_set()
+        c.the.chat(TOMS, "Thanks Valor, you can leave now.")
+        reason = await asyncio.wait_for(c.running, 10)
+        return before, reason, await bridges.rows(dsn, c.the.id)
 
     before, reason, rows = run(go())
     assert before is False and reason == "Tom asked Valor to leave"
@@ -633,26 +890,34 @@ def test_valor_leave_from_tom_leaves_and_from_anyone_else_does_not(dsn, team, qu
     assert kinds.count("call.ended") == 1 and "task.ended" in kinds
 
 
+def test_valor_leave_spoken_by_tom_leaves(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        for _ in range(8):
+            c.the.hear(TOMS, loud(0.05), 48_000)
+            await asyncio.sleep(0.05)
+        await push(c.session, heard("Okay Valor, please leave the call."))
+        return await asyncio.wait_for(c.running, 10)
+
+    assert run(go()) == "Tom asked Valor to leave"
+
+
 def test_a_late_worker_answer_goes_in_the_report_once(dsn, team, quick):
     async def go():
-        page = Page()
         gate = asyncio.Event()
 
         async def worker(question):
             await gate.wait()
             return "The import."
 
-        brief, the = await a_call_of(dsn, team, page, Front([]), judged(), worker=worker)
-        running = asyncio.create_task(the.run())
-        assert await wait_for(lambda: _async(bool(page.posts)))
-        the.questions.put_nowait("What shipped?")
+        c = await in_call(dsn, team, worker=worker)
+        c.the.questions.put_nowait("What shipped?")
         await asyncio.sleep(0.1)
-        page.status = "ended"
+        c.page.status = "ended"
         await asyncio.sleep(0.3)
         gate.set()
-        await asyncio.wait_for(running, 10)
-        rows = await bridges.rows(dsn, brief.id)
-        return page, rows
+        await asyncio.wait_for(c.running, 10)
+        return c.page, await bridges.rows(dsn, c.brief.id)
 
     page, rows = run(go())
     assert page.posts == [call.JOIN_LINE]
@@ -668,61 +933,34 @@ def test_a_call_not_let_in_ends_saying_so(dsn, team, quick):
     async def go():
         page = Page()
         page.status = "denied"
-        _, the = await a_call_of(dsn, team, page, Front([]), judged())
+        _, the = await a_call_of(dsn, team, page, Gemini())
         return await asyncio.wait_for(the.run(), 10), page
 
     reason, page = run(go())
     assert reason == "Valor was not let in" and page.posts == []
 
 
-def test_the_voice_process_hears_a_calls_turn_on_its_own_worker():
-    from tools import voice
-
-    async def go():
-        app = voice.app(listen=lambda path: "a voice note", heard=lambda samples: f"{len(samples)} samples")
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "127.0.0.1", 0)
-        await site.start()
-        port = site._server.sockets[0].getsockname()[1]
-        import aiohttp
-
-        async with (
-            aiohttp.ClientSession() as http,
-            http.post(f"http://127.0.0.1:{port}/hear", data=np.zeros(16000, np.float32).tobytes()) as r,
-        ):
-            got = await r.json()
-        await runner.cleanup()
-        return got
-
-    assert run(go()) == {"text": "16000 samples"}
-
-
 def test_a_steer_of_the_call_is_posted_in_its_chat_and_not_copied(dsn, team, quick):
     async def go():
-        page = Page()
-        _, the = await a_call_of(dsn, team, page, Front([]), judged())
-        running = asyncio.create_task(the.run())
-        assert await wait_for(lambda: _async(page.posts == [call.JOIN_LINE]))
+        c = await in_call(dsn, team)
         async with await db.connect(dsn) as conn:
             await ledger.append(
-                conn, the.id, "message.steered", {"text": "Logan is running five minutes late."}
+                conn, c.the.id, "message.steered", {"text": "Logan is running five minutes late."}
             )
-        assert await wait_for(lambda: _async(len(page.posts) == 2))
-        the.leave("done")
-        await asyncio.wait_for(running, 10)
-        return page, await effects(dsn, the.id)
+        assert await until(lambda: len(c.page.posts) == 2)
+        await finish(c)
+        return c.page, await effects(dsn, c.the.id)
 
-    page, done = run(go())
+    page, done_ = run(go())
     assert page.posts[1] == "Logan is running five minutes late."
-    assert not any(e["type"] == "slack.send_message" for e in done)
+    assert not any(e["type"] == "slack.send_message" for e in done_)
 
 
 def test_a_stop_before_valor_is_let_in_leaves_within_seconds(dsn, team, quick):
     async def go():
         page = Page()
         page.status = "lobby"
-        _, the = await a_call_of(dsn, team, page, Front([]), judged())
+        _, the = await a_call_of(dsn, team, page, Gemini())
         running = asyncio.create_task(the.run())
         await asyncio.sleep(0.5)
         start = asyncio.get_running_loop().time()
@@ -749,15 +987,23 @@ def test_removal_or_no_one_coming_ends_the_call_once(dsn, team, quick, monkeypat
         page = Page()
         if people is not None:
             page.people = people
-        _, the = await a_call_of(dsn, team, page, Front([]), judged())
-        running = asyncio.create_task(the.run())
-        assert await wait_for(lambda: _async(bool(page.posts)))
+        c = await in_call(dsn, team, page)
         page.status = status
-        reason = await asyncio.wait_for(running, 10)
-        return reason, await bridges.rows(dsn, the.id)
+        reason = await asyncio.wait_for(c.running, 10)
+        return reason, await bridges.rows(dsn, c.the.id)
 
     reason, rows = run(go())
     assert reason == why and [r["type"] for r in rows].count("call.ended") == 1
+
+
+def test_down_to_16k_keeps_a_tone_across_frames():
+    down = call.Down()
+    t = np.arange(48000) / 48000
+    tone = np.sin(2 * np.pi * 440 * t).astype(np.float32)
+    out = np.concatenate([down(tone[i : i + 480], 48000) for i in range(0, 48000, 480)])
+    assert abs(len(out) - 16000) <= 1
+    want = np.sin(2 * np.pi * 440 * (np.arange(len(out)) * 3 - 24) / 48000)
+    assert np.abs(out[100:] - want[100:]).max() < 0.05
 
 
 def test_a_copy_goes_to_the_telegram_topic_it_was_asked_in():
@@ -794,26 +1040,43 @@ def test_a_calls_worker_takes_no_turn_slot(dsn, tmp_path, monkeypatch):
     assert run(go())["outcome"] == "done"
 
 
-def test_with_only_one_other_person_in_the_call_whatever_they_say_is_to_valor(dsn, team):
-    """Tom's typed "Hello" in a call with only him, judged `nothing`, got no
-    answer (2026-11-05): with one other person present `meet.speak` is not
-    asked; with two it is."""
+# -- the page's player ---------------------------------------------------------------
+
+STUB = """
+window.ws = { ws: { addEventListener() {} }, sendJson() {} };
+const ctx = new AudioContext();
+window.botOutputManager = { audioContext: ctx, gainNode: ctx.createGain(), _createSourceAudioTrack() {} };
+"""
+
+
+def test_the_page_plays_chunks_back_to_back_and_a_stop_clears_them_saying_what_played():
+    """`page.js` in a real Chrome, the payload's output stubbed by a plain
+    Web Audio graph."""
+    from playwright.async_api import async_playwright
+
+    from bridges.meet import CHROME_ARGS, HERE
+
+    chunk = base64.b64encode(b"\x00\x00" * int(0.2 * call.OUT_RATE)).decode()
 
     async def go():
-        page = Page()
-        judge = judged("nothing")
-        _, the = await a_call_of(dsn, team, page, Front([["Hello Tom."], ["Unheard."]]), judge)
-        running = lanes(the)
-        the.present = {TOMS}
-        the.chat(TOMS, "Hello")
-        await settle(the)
-        the.present = {TOMS, LOGAN}
-        the.chat(TOMS, "Logan, are you there?")
-        await settle(the)
-        for job in running:
-            job.cancel()
-        return page, judge
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(channel="chrome", headless=True, args=list(CHROME_ARGS))
+            page = await browser.new_page()
+            await page.evaluate(STUB + (HERE / "page.js").read_text())
+            await page.wait_for_function(
+                "window.botOutputManager.audioContext.currentTime > 0.05"
+            )  # in a call it runs
+            stream = "([b, f]) => window.valorStream(b, 24000, f)"
+            aheads = [await page.evaluate(stream, [chunk, i == 0]) for i in range(3)]
+            await asyncio.sleep(0.3)
+            played = await page.evaluate("window.valorStop()")
+            fresh = await page.evaluate(stream, [chunk, True])
+            await browser.close()
+            return aheads, played, fresh
 
-    page, judge = run(go())
-    assert page.posts == ["Hello Tom."]
-    assert [a["said"] for a in judge.asked] == [f"{TOM} typed: Logan, are you there?"]
+    aheads, played, fresh = run(go())
+    assert aheads[1] - aheads[0] == pytest.approx(0.2, abs=0.03) and aheads[2] - aheads[1] == pytest.approx(
+        0.2, abs=0.03
+    )
+    assert 0.2 <= played <= 0.5  # played up to the stop, not the 0.6 s queued
+    assert fresh == pytest.approx(0.2, abs=0.05)  # the stop emptied the queue

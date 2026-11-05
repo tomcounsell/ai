@@ -28,14 +28,17 @@ wake writes it for a call whose process died (`sweep`).
 **The call's process** (`python -m core call SESSION`, `run`) holds
 `meet:call:<session>` while it lives, and `run:<session>`, so the kernel
 charges none of its model calls twice. It joins through the page
-(`bridges/meet`), hears each person apart (`Speaker`), decides whether to
-answer (`meet.speak`), drafts with the front model, asks its worker, and
-speaks and posts through the broker on its own session.
+(`bridges/meet`), mixes what everyone says into one Gemini Live session
+(docs/plans/gemini-live.md), which decides when Valor is addressed and
+speaks, posts and asks its worker through tools, and speaks and posts
+through the broker on its own session. After the call Gemini summarises
+its recording, kept in Yudame Tools' meeting store.
 """
 
 import asyncio
 import contextlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -53,7 +56,7 @@ import numpy as np
 import psycopg
 
 from core import broker, db, intake, ledger, tasks, workspace
-from core.settings import resolve_seat, settings
+from core.settings import CALL_CONTEXT, CALL_OUTPUT_MOST, resolve_seat, settings
 
 CHANNEL = "meet"
 # A call whose process never wrote `call.started` this long after it was
@@ -276,9 +279,11 @@ async def end(
     *,
     late: list[dict[str, str]] | None = None,
     unanswered: list[str] | None = None,
+    summary: dict[str, str] | None = None,
 ) -> bool:
     """Write the call's end once (module docstring). False when it had
-    already ended."""
+    already ended. `summary` is Gemini's summary document (`path`) or why
+    it failed (`error`); None when none was made."""
     async with conn.transaction():
         await ledger.lock(conn, f"task:{session_id}")
         rows = await ledger.read(conn, session_id)
@@ -296,11 +301,20 @@ async def end(
         dropped = await _leftovers(conn, session_id, rows, stopped)
         call = await marker(conn, session_id) or {}
         lines = [f"The call {call.get('url')} ended: {reason}."]
-        lines.append(
-            f"Its whole transcript: `valor-record call {call.get('code')}`, every page. Write the full "
-            f"summary as a file and send it in the thread it was asked in (reply_to "
-            f"{(call.get('asked_by') or {}).get('reply_to')}), with at most two lines of text beside it."
-        )
+        code, thread = call.get("code"), f"reply_to {(call.get('asked_by') or {}).get('reply_to')}"
+        if summary and summary.get("path"):
+            lines.append(
+                f"Gemini's summary of the call is {summary['path']}. Copy it into your workspace as "
+                f"call-{code}.md and send it, unchanged, in the thread it was asked in ({thread}) as the "
+                "send's `files`, with at most two lines of text beside it. The recording, transcript and "
+                "notes are in Yudame Tools' meetings on this Mac, which back them up to Drive."
+            )
+        else:
+            why = f"Gemini could not summarise it ({summary['error']})" if summary else "no summary was made"
+            lines.append(
+                f"{why}: say so in the thread it was asked in ({thread}), in one line; write no summary of "
+                f"your own. Its transcript: `valor-record call {code}`."
+            )
         lines += settled
         lines += [
             f'Answered by your worker after the call: on "{a["question"]}": {a["answer"]}' for a in late
@@ -434,20 +448,16 @@ async def sweep(conn) -> list[str]:
     return ended
 
 
-# -- hearing -------------------------------------------------------------------
+# -- hearing: everyone's audio, mixed for Gemini Live ---------------------------
 
-RATE = 16_000
-FRAME, CONTEXT = 512, 64  # Silero's frame and context at 16 kHz
-VOICED = 0.5
-PRE_FRAMES = 8  # kept from before speech starts, so its first sound is heard
-PAUSE_S = 0.3  # a pause long enough to ask Smart Turn whether the turn ended
-GIVE_UP_S = 1.6  # a pause this long ends the turn whatever Smart Turn says
-SHORT_S = 1.0  # a turn this short ends only by `GIVE_UP_S`: "Valor," then a pause is no turn
-TURN_MOST_S = 30.0
-BARGE_S = 0.12  # this much speech by the person Valor answers stops him
-TURN_ENDED = 0.5
-SMART_TURN = ("pipecat-ai/smart-turn-v3", "smart-turn-v3.2-cpu.onnx")
-SMART_TURN_SAMPLES = 8 * RATE
+RATE = 16_000  # what Live hears
+OUT_RATE = 24_000  # what Live speaks
+MIX_S = 0.04  # the mix is sent this often
+BACKLOG_S = 1.0  # a person's audio kept ahead of the mix at most
+SPEAKING = 0.01  # a person's RMS above this is speech, for who is speaking
+CHANGE_S = 0.3  # someone else this long the loudest is a change of speaker
+LAG_S = 0.8  # Live's transcript of a stretch lags its audio by up to this
+QUIET_S = 1.5  # this long with no one speaking ends a stretch of the transcript
 # Meet sends 48 kHz: a low-pass at 7.2 kHz, then every third sample.
 LOWPASS = (np.hamming(49) * np.sinc((np.arange(49) - 24) * 2 * 7200 / 48_000)).astype(np.float32)
 LOWPASS /= LOWPASS.sum()
@@ -474,291 +484,180 @@ class Down:
         return out
 
 
-class Ears:
-    """What hears: Silero's voice activity (onnx-asr's model), Smart Turn
-    v3 (Pipecat's, BSD-2) on Whisper's features, and Parakeet in the voice
-    process (`tools/voice.py`), which holds the one copy of it on the Mac."""
-
-    def __init__(self, vad, turn, transcribe: Callable[[np.ndarray], Awaitable[str]]):
-        from onnx_asr.preprocessors.numpy_preprocessor import WhisperPreprocessorNumpy
-
-        class Features(WhisperPreprocessorNumpy):
-            _chunk_length = SMART_TURN_SAMPLES // RATE
-
-        self._vad, self._turn, self.transcribe = vad, turn, transcribe
-        self._features = Features("whisper80")
-
-    @classmethod
-    def load(cls, transcribe: Callable[[np.ndarray], Awaitable[str]]) -> Ears:
-        import onnx_asr
-        import onnxruntime
-        from huggingface_hub import hf_hub_download
-
-        vad = onnx_asr.load_vad("silero")._model
-        return cls(vad, onnxruntime.InferenceSession(hf_hub_download(*SMART_TURN)), transcribe)
-
-    def voiced(self, speaker: Speaker, frame: np.ndarray) -> float:
-        """The chance a 32 ms frame is speech, carrying the speaker's state."""
-        out, speaker.vad_state = self._vad.run(
-            ["output", "stateN"],
-            {"input": np.concatenate([speaker.context, frame])[None], "state": speaker.vad_state,
-             "sr": np.array([RATE], dtype=np.int64)},
-        )  # fmt: skip
-        speaker.context = frame[-CONTEXT:]
-        return float(out[0, 0])
-
-    def ended(self, audio: np.ndarray) -> float:
-        """Smart Turn's chance the turn in `audio` is finished: its last 8 s,
-        padded at the start, normalised, as Pipecat's own inference does."""
-        a = audio[-SMART_TURN_SAMPLES:]
-        a = np.pad(a, (SMART_TURN_SAMPLES - len(a), 0))
-        a = ((a - a.mean()) / np.sqrt(a.var() + 1e-7)).astype(np.float32)
-        features, _ = self._features(a[None], np.array([len(a)], dtype=np.int64))
-        return float(self._turn.run(None, {"input_features": features.astype(np.float32)})[0].ravel()[0])
+def pcm16(x: np.ndarray) -> bytes:
+    return (np.clip(x, -1, 1) * 32767).astype("<i2").tobytes()
 
 
-async def words(audio: np.ndarray) -> str:
-    """The words of a turn, from the voice process's `/hear`
-    (`tools/voice.py`), which holds the Mac's one copy of Parakeet."""
-    import aiohttp
+class Recording:
+    """The call as Yudame Tools keeps a call: two channels, the left Valor
+    (its microphone) and the right everyone else, 16-bit at 16 kHz, written
+    as it goes to a WAV file."""
 
-    url = f"http://127.0.0.1:{settings.voice_port}/hear"
-    async with (
-        aiohttp.ClientSession() as http,
-        http.post(url, data=audio.astype(np.float32).tobytes()) as got,
-    ):
-        got.raise_for_status()
-        return (await got.json())["text"]
+    def __init__(self, path: Path):
+        import wave
 
+        self.path = path
+        self.file = wave.open(str(path), "wb")  # noqa: SIM115  open for the whole call, closed by `close`
+        self.file.setnchannels(2)
+        self.file.setsampwidth(2)
+        self.file.setframerate(RATE)
+        self.seconds = 0.0
 
-class Speaker:
-    """One person's turn as it is heard: their voiced frames from the
-    first (with the frames just before it) to a pause Smart Turn calls the
-    end, or `GIVE_UP_S` of quiet. Meet sends a person's audio only while
-    they are the loudest, so quiet is measured by the clock."""
+    def write(self, mine: np.ndarray, theirs: np.ndarray) -> None:
+        both = np.stack([mine, theirs], axis=1)
+        self.file.writeframes((np.clip(both, -1, 1) * 32767).astype("<i2").tobytes())
+        self.seconds += len(theirs) / RATE
 
-    def __init__(self, ident: str):
-        self.id = ident
-        self.down = Down()
-        self.vad_state = np.zeros((2, 1, 128), dtype=np.float32)
-        self.context = np.zeros(CONTEXT, dtype=np.float32)
-        self.carry = np.zeros(0, dtype=np.float32)
-        self.before: list[np.ndarray] = []
-        self.heard: list[np.ndarray] = []
-        self.voiced_s = 0.0
-        self.last_voice = 0.0
-        self.since = 0.0
-        self.asked = -1.0
-
-    def feed(self, ears: Ears, samples: np.ndarray, rate: int, now: float) -> bool:
-        """Hear a frame; whether they are speaking now, past `BARGE_S`."""
-        x = np.concatenate([self.carry, self.down(samples, rate)])
-        while len(x) >= FRAME:
-            frame, x = x[:FRAME], x[FRAME:]
-            voiced = ears.voiced(self, frame) >= VOICED
-            if voiced and not self.heard:
-                self.heard, self.since = list(self.before), now
-            if voiced:
-                self.voiced_s += FRAME / RATE
-                self.last_voice = now
-            if self.heard:
-                self.heard.append(frame)
-            else:
-                self.before = [*self.before[-(PRE_FRAMES - 1) :], frame]
-        self.carry = x
-        return bool(self.heard) and self.voiced_s >= BARGE_S and now - self.last_voice < PAUSE_S
-
-    def pause(self, ears: Ears, now: float) -> np.ndarray | None:
-        """The turn's audio once it has ended, else None."""
-        if not self.heard or now - self.last_voice < PAUSE_S:
-            return None
-        audio = np.concatenate(self.heard)
-        done = now - self.last_voice >= GIVE_UP_S or now - self.since >= TURN_MOST_S
-        if not done and self.asked != self.last_voice and len(audio) >= SHORT_S * RATE:
-            self.asked = self.last_voice
-            done = ears.ended(audio) >= TURN_ENDED
-        if not done:
-            return None
-        enough = self.voiced_s >= 2 * BARGE_S
-        self.heard, self.before, self.voiced_s, self.asked = [], [], 0.0, -1.0
-        return audio if enough else None
+    def close(self) -> None:
+        self.file.close()
 
 
-# -- answering -----------------------------------------------------------------
+# -- answering: one Gemini Live session per call ----------------------------------
 
-GUIDANCE = (
+INSTRUCTIONS = (
     "You are Valor Engels, in a live Google Meet call as yourself, on the {project} project. You are an AI "
-    "coworker; everyone in the call knows. Your reply is spoken aloud, or posted in the call's chat when it "
-    "was typed there: short, plain, natural sentences, one to three, no lists or markdown, no preamble.\n\n"
-    "Each message brings what was said in the call since your last reply (your own words as Valor), the "
-    "decisions open for Tom when they change, and then what was just said, which you answer. A reply of yours "
-    "that was not said is marked so: you stayed silent then.\n\n"
-    "- Answer whoever addresses you. Follow what the others want to discuss; do not steer the call.\n"
+    "coworker; everyone in the call knows. You hear everyone in the call in one stream.\n\n"
+    "- Speak only when someone addresses you (by name, or by asking you something directly), or asks what only "
+    "you would know. Otherwise stay silent: never answer or comment on talk between the others. When a note "
+    "says only one person is here with you, everything they say is to you: answer it.\n"
+    "- Lines that begin `[note]` tell you about the call (who is speaking, who is here, what your worker "
+    "found). Never answer a note or read one out.\n"
+    "- A line that begins `[typed by NAME]` was typed in the call's chat: answer it only by calling `post`, "
+    "never aloud.\n"
+    "- Speak in short, plain, natural sentences, one to three, with no preamble.\n"
+    "- Follow what the others want to discuss; do not steer the call.\n"
     "- Avoid legal and financial work, pricing, terms and people matters for now: say you will take it "
     "offline with Tom.\n"
-    "- When someone asks what is open, take them through the open decisions listed, one at a time, with "
-    "your recommendation on each, and let them choose. With anyone but Tom in the call, an open decision "
-    "about a client relationship (pricing, terms, its people) is one line: it is for Tom. Mention no "
-    "decision that is not listed, and never say an id aloud.\n"
-    "- For anything you would have to look up (code, records, documents, figures), say you will check and "
-    "end your reply with a line `ASK: <the question>`: your worker, who reads the project's code, records "
-    "and chats, answers in writing in the call's chat. Never guess a fact.\n"
+    "- For anything you would have to look up (code, records, documents, figures), call `ask` and say you "
+    "will check: your worker, who reads the project's code, records and chats, answers in the call's chat, "
+    "and you get a note. Never guess a fact.\n"
+    "- When someone asks what is open, call `open_decisions` and take them through each, one at a time, with "
+    "your recommendation, and let them choose. With anyone but Tom in the call, a decision about a client "
+    "relationship (pricing, terms, its people) is one line: it is for Tom. Never say an id aloud.\n"
     "- When Tom settles open decisions (one idea may settle several), read his answer back in a sentence and "
-    "end your reply with a line `DECIDED: <task id>/<question id>, ... | <the read-back>`, naming each "
-    "question it settles by the ids listed. Only Tom settles decisions; a correction is a new DECIDED line.\n\n"
+    "call `settle` with the ids it settles. Only Tom settles decisions; a correction is a new `settle`.\n"
+    "- Call `leave` only when Tom asks you to leave.\n\n"
     "Why you are in this call, from your notes before it:\n{prep}"
 )
-SENTENCE = re.compile(r"[.!?…](?=\s)")
-DIRECTIVES = ("ASK:", "DECIDED:")
+TOOLS = [
+    {"name": "ask", "description": "Ask your worker to look something up; the answer is posted in the call's "
+     "chat and noted to you.", "parameters": {"type": "object", "properties": {"question": {"type": "string"}},
+     "required": ["question"]}},
+    {"name": "post", "description": "Post text in the call's chat (copied to the thread the call was asked in).",
+     "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
+    {"name": "open_decisions", "description": "The decisions open for Tom on this project, with their ids.",
+     "parameters": {"type": "object", "properties": {}}},
+    {"name": "settle", "description": "Record Tom's answer to open decisions: the read-back, and each "
+     "`task id/question id` it settles.", "parameters": {"type": "object", "properties": {
+         "ids": {"type": "array", "items": {"type": "string"}}, "readback": {"type": "string"}},
+         "required": ["ids", "readback"]}},
+    {"name": "leave", "description": "Leave the call, when Tom asks you to.",
+     "parameters": {"type": "object", "properties": {}}},
+]  # fmt: skip
 
 
-def directive(line: str) -> tuple[str, dict[str, Any]] | None:
-    """An `ASK:` or `DECIDED:` line of the front model's reply as the action
-    it asks for; None for any other line."""
-    line = line.strip()
-    if line.startswith("ASK:") and line[4:].strip():
-        return "ask_worker", {"question": line[4:].strip()}
-    if line.startswith("DECIDED:") and "|" in line:
-        ids, _, readback = line[8:].partition("|")
-        settles = [
-            {"task_id": t.strip(), "question_id": q.strip()}
-            for t, _, q in (i.partition("/") for i in ids.split(","))
-            if t.strip() and q.strip()
-        ]
-        if settles and readback.strip():
-            return "record_decision", {"readback": readback.strip(), "settles": settles}
-    return None
+def live_config(project: str, prep: str, handle: str | None) -> Any:
+    """The Live session's settings: Valor's voice, transcripts both ways,
+    proactive audio (it may stay silent), a slow start to what counts as
+    someone speaking, so a cough does not cut Valor off, compression that
+    bounds what each turn bills, and resumption from `handle`."""
+    from google.genai import types
+
+    return types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=settings.call_voice)
+            )
+        ),
+        system_instruction=INSTRUCTIONS.format(project=project or "Valor", prep=prep.strip() or "(no notes)"),
+        tools=[types.Tool(function_declarations=[types.FunctionDeclaration(**t) for t in TOOLS])],
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+        proactivity=types.ProactivityConfig(proactive_audio=True),
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
+                prefix_padding_ms=300,
+            )
+        ),
+        context_window_compression=types.ContextWindowCompressionConfig(
+            trigger_tokens=CALL_CONTEXT, sliding_window=types.SlidingWindow(target_tokens=CALL_CONTEXT // 2)
+        ),
+        session_resumption=types.SessionResumptionConfig(handle=handle),
+    )
 
 
-class Front:
-    """The front model: one Claude Code session on the light seat for the
-    whole call, streaming (`claude -p` reading and writing stream-json), on
-    the call's own gateway, so it answers within a second or so of a turn
-    while `meet.speak` decides whether Valor says it. It has no tools: it
-    asks the worker and records a decision by a line of its reply
-    (`directive`), which acts only once the draft is taken. Its Claude
-    Code home (cwd, `HOME`, `CLAUDE_CONFIG_DIR`) is a temporary directory of
-    its own, made at start and removed at close: one inside the call
-    session's task directory was removed under it when the kernel
-    provisioned that session (the Captain, 2026-11-05)."""
+def note(text: str) -> dict[str, Any]:
+    """Context for the session that asks for no reply."""
+    return {"turns": {"role": "user", "parts": [{"text": f"[note] {text}"}]}, "turn_complete": False}
 
-    def __init__(self, argv: list[str], env: dict[str, str]):
-        self.argv, self.env = argv, env
-        self.home: str | None = None
-        self.proc: asyncio.subprocess.Process | None = None
-        self.lock = asyncio.Lock()
 
-    @classmethod
-    def claude(cls, base_url: str, *, model: str, project: str, prep: str) -> Front:
-        from core.gateway import TURN_TOKEN
+SUMMARY = (
+    "This is the recording of a Google Meet call Valor Engels (an AI coworker) was in, and its transcript "
+    "(heard, said and typed lines, each with its minute). Write the notes on it, using only what was said:\n"
+    "- summary: a short paragraph;\n- decisions: each decision made;\n"
+    "- actions: each thing someone said they would do, with its owner (the person who said it) or null;\n"
+    "- markdown: the full summary as a Markdown document: who joined, what was discussed, what was settled, "
+    "what Valor answered and promised, and what is still open.\n\nThe transcript:\n"
+)
+SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "decisions": {"type": "array", "items": {"type": "string"}},
+        "actions": {"type": "array", "items": {"type": "object", "properties": {
+            "task": {"type": "string"}, "owner": {"type": "string", "nullable": True}}, "required": ["task"]}},
+        "markdown": {"type": "string"},
+    },
+    "required": ["summary", "decisions", "actions", "markdown"],
+}  # fmt: skip
 
-        system = GUIDANCE.format(project=project, prep=prep.strip() or "(no notes)")
-        argv = [settings.claude, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-                "--verbose", "--include-partial-messages", "--model", model, "--system-prompt", system,
-                "--tools", "", "--setting-sources", "", "--strict-mcp-config"]  # fmt: skip
-        env = {"PATH": "/usr/bin:/bin", "ANTHROPIC_BASE_URL": base_url, "CLAUDE_CODE_OAUTH_TOKEN": TURN_TOKEN}
-        return cls(argv, env)
 
-    async def start(self) -> None:
-        self.home = tempfile.mkdtemp(prefix="valor-front-")
-        env = {**self.env, "HOME": self.home, "CLAUDE_CONFIG_DIR": self.home}
-        self.proc = await asyncio.create_subprocess_exec(
-            *self.argv, env=env, cwd=self.home, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, limit=16 * 1024 * 1024,
-        )  # fmt: skip
+GOOGLE_KEY = "GOOGLE_API_KEY"
 
-    async def close(self) -> None:
-        if self.proc is not None and self.proc.returncode is None:
-            self.proc.stdin.close()
-            with contextlib.suppress(ProcessLookupError):
-                self.proc.terminate()
-            await self.proc.wait()
-        if self.home is not None:
-            shutil.rmtree(self.home, ignore_errors=True)
 
-    async def draft(self, news: str, said: str, actions: list[tuple[str, dict[str, Any]]]):
-        """The answer to `said`, sentence by sentence as it streams; its
-        directive lines go to `actions`. Drafts take turns: a draft
-        abandoned midway is read to its end before the next is asked."""
-        await self.lock.acquire()
-        ended = False
+class Gemini:
+    """Valor's Gemini API (the key `python -m core google-key` copies from
+    the vault): a call's Live sessions and its summary."""
+
+    def __init__(self, key: str):
+        from google import genai
+
+        self.client = genai.Client(api_key=key)
+
+    def connect(self, config):
+        return self.client.aio.live.connect(model=settings.call_model, config=config)
+
+    async def summarise(self, audio: Path, transcript: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The notes on a call from its recording, uploaded through the
+        Files API (a request's own bytes stop near 20 MB) and deleted after,
+        and its transcript; with the response's usage."""
+        from google.genai import types
+
+        files = self.client.aio.files
+        up = await files.upload(file=str(audio), config={"mime_type": "audio/mp4"})
         try:
-            message = (f"{news}\n\n" if news else "") + f"Now: {said}"
-            line = {"type": "user", "message": {"role": "user", "content": message}}
-            self.proc.stdin.write((json.dumps(line) + "\n").encode())
-            await self.proc.stdin.drain()
-            text = ""
-            while True:
-                event = await self._event()
-                if event.get("type") == "result":
-                    ended = True
-                    if event.get("is_error"):
-                        raise RuntimeError(f"the front model's turn failed: {str(event.get('result'))[:300]}")
-                    break
-                delta = (event.get("event") or {}).get("delta") or {}
-                if event.get("type") != "stream_event" or delta.get("type") != "text_delta":
-                    continue
-                text += delta["text"]
-                text, done = self._sentences(text, actions)
-                for sentence in done:
-                    yield sentence
-            _, done = self._sentences(text + "\n", actions)
-            for sentence in done:
-                yield sentence
+            while up.state and up.state.name == "PROCESSING":
+                await asyncio.sleep(2)
+                up = await files.get(name=up.name)
+            got = await self.client.aio.models.generate_content(
+                model=settings.summary_model,
+                contents=[up, SUMMARY + transcript],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", response_schema=SUMMARY_SCHEMA
+                ),
+            )
         finally:
-            if ended:
-                self.lock.release()
-            else:
-                asyncio.get_running_loop().create_task(self._drain())
-
-    async def _event(self) -> dict[str, Any]:
-        raw = await self.proc.stdout.readline()
-        if not raw:
-            raise RuntimeError("the front model's session ended")
-        return json.loads(raw)
-
-    async def _drain(self) -> None:
-        try:
-            while (await self._event()).get("type") != "result":
-                pass
-        except RuntimeError:
-            pass
-        finally:
-            self.lock.release()
-
-    @staticmethod
-    def _sentences(text: str, actions: list) -> tuple[str, list[str]]:
-        """The whole sentences of `text` to say, and what is left of it. A
-        line that is (or may yet be) a directive is never said: once it is
-        whole it goes to `actions`."""
-        out = []
-        while text:
-            line, newline, rest = text.partition("\n")
-            head = line.strip()
-            if head and any(d.startswith(head) or head.startswith(d) for d in DIRECTIVES):
-                if not newline:
-                    break
-                if (found := directive(head)) is not None:
-                    actions.append(found)
-                text = rest
-                continue
-            m = SENTENCE.search(line + (" " if newline else ""))
-            if m is not None:
-                if sentence := line[: m.end()].strip():
-                    out.append(sentence)
-                text = text[m.end() :]
-            elif newline:
-                if head:
-                    out.append(head)
-                text = rest
-            else:
-                break
-        return text, out
+            with contextlib.suppress(Exception):
+                await files.delete(name=up.name)
+        usage = got.usage_metadata.model_dump(mode="json", exclude_none=True) if got.usage_metadata else {}
+        return json.loads(got.text), usage
 
 
 async def decisions(conn, project: str | None) -> str:
-    """The open decisions as the front model reads them: the project's
-    board snapshot now, each with its task and question ids, and the board's
+    """The open decisions as the call reads them: the project's board
+    snapshot now, each with its task and question ids, and the board's
     canvas as last written (`board.canvas_markdown`)."""
     from core import board
 
@@ -766,12 +665,80 @@ async def decisions(conn, project: str | None) -> str:
     if spec is None:
         return "This project has no decisions open."
     snap = await board.snapshot(conn, spec)
-    lines = [f"- task {q['task_id']}, question {q['question_id']}: {q['question']}" for q in snap["open"]]
+    lines = [f"- {q['task_id']}/{q['question_id']}: {q['question']}" for q in snap["open"]]
     canvas = await board.canvas_markdown(conn, spec)
     out = ["Open for Tom:", *(lines or ["- nothing"])]
     if canvas:
         out += ["", "The decision board as last written:", canvas]
     return "\n".join(out)
+
+
+# -- the store: a call kept as Yudame Tools keeps a meeting ------------------------
+
+
+def _escape(text: str) -> str:
+    return "".join("\\" + c if c in "\\`*_[]#<>" else c for c in text)
+
+
+def _clock(seconds: float) -> str:
+    total = int(seconds // 1)
+    h, m, s = total // 3600, total // 60 % 60, total % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def notes_md(title: str, summary: dict[str, Any]) -> str:
+    """notes.md as Yudame Tools' `NoteFormat.markdown` writes it."""
+    lines = [f"# {title} - Notes", "", "## Summary", "", summary["summary"], "", "## Decisions", ""]
+    lines += [f"- {_escape(d)}" for d in summary["decisions"]] or ["None recorded."]
+    lines += ["", "## Action items", ""]
+    lines += [
+        "- [ ] " + _escape(a["task"]) + (f" ({_escape(a['owner'])})" if a.get("owner") else "")
+        for a in summary["actions"]
+    ] or ["None recorded."]
+    return "\n".join([*lines, ""])
+
+
+def transcript_md(title: str, segments: list[dict[str, Any]]) -> str:
+    """transcript.md as Yudame Tools' `TranscriptMerge.markdown` writes it."""
+    turns: list[list] = []
+    for s in segments:
+        if turns and turns[-1][0] == s["speaker"]:
+            turns[-1][2].append(s["text"])
+        else:
+            turns.append([s["speaker"], s["start"], [s["text"]]])
+    body = [f"**{who}** ({_clock(start)}): {' '.join(text)}" for who, start, text in turns]
+    return "\n".join([f"# {title} - Transcript", "", *(x for b in body for x in (b, ""))])
+
+
+def meta_json(title: str, start: datetime, end: datetime, zone: str, segments: list[dict[str, Any]]) -> str:
+    """meta.json for a finished meeting the app has only to back up: its
+    sound checked, transcribed and summarised, every file pending upload."""
+    stamp = lambda t: t.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    speakers = list(dict.fromkeys(s["speaker"] for s in segments))
+    meta = {
+        "title": title, "start": stamp(start), "end": stamp(end), "timeZone": zone, "app": "Google Meet",
+        "mode": "call", "speakers": speakers, "transcriptPending": False, "speakersPending": False,
+        "summaryPending": False, "links": [], "audioDeleted": False, "recordingLost": False, "typedNotes": "",
+        "notesChanged": False, "recording": False, "soundChecked": True, "transcribeTried": True,
+        "uploads": [x for f in ("recording", "transcript", "notes") for x in (f, {"pending": {}})],
+    }  # fmt: skip
+    return json.dumps(meta, indent=2, sort_keys=True)
+
+
+def folder_name(title: str, start: datetime) -> str:
+    """`MeetingStore.folderName`: "2026-11-05 1000 <title>" in the Mac's zone."""
+    return f"{start.astimezone().strftime('%Y-%m-%d %H%M')} {title.replace('/', '-').replace(':', '-')}"
+
+
+def keep(staging: Path, store: Path, name: str) -> Path:
+    """Move the finished folder into the store in one rename, so the app
+    never reads a half-written one; a second with the same name gets " 2"."""
+    store.mkdir(parents=True, exist_ok=True)
+    target, n = store / name, 2
+    while target.exists():
+        target, n = store / f"{name} {n}", n + 1
+    staging.rename(target)
+    return target
 
 
 # -- the call ------------------------------------------------------------------
@@ -780,25 +747,20 @@ async def decisions(conn, project: str | None) -> str:
 LEAVE = re.compile(
     r"\bvalor\b(?:(?!\b(?:don'?t|do not|not|never)\b).){0,30}?\b(?:leave|drop off|hang up)\b", re.IGNORECASE
 )
-JOIN_LINE = "Valor here, keeping a transcript for notes."
+JOIN_LINE = "Valor here, recording for notes."
+LOST_LINE = "I've lost my voice connection; leaving, the summary will follow in the thread."
 JOIN_S = 90  # to get through Meet's join screen
 LOBBY_S = 600  # waiting to be let in
 ALONE_S = 600  # with no one else ever there
 EMPTY_S = 120  # after the last other person left
 SOCKET_S = 30  # without the page's audio, or out of the call
 WORKER_WAIT_S = 120  # for questions still with the worker after leaving
-TICK_S, STATE_S = 0.1, 2.0
-VOICED_MOST = 32  # sentences voiced ahead and kept
-RECENT = 20
-
-
-@dataclass
-class Turn:
-    id: str
-    who: str
-    name: str
-    text: str
-    via: str  # "spoke" or "typed"
+RECONNECTS = 2  # failed reconnects to Live before the call leaves
+STATE_S = 2.0
+WORDLESS_S = 0.6  # of a turn's audio held for its transcript before it is said anyway
+# Live's transcript marks silence and pauses, "<no speech>{pause}" (2026-11-05).
+MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
+MARKUP = re.compile(r"\s*(?:(?:<[^>]*>|\{[^}]*\})\s*)+")
 
 
 @dataclass
@@ -807,6 +769,25 @@ class Post:
     text: str
     copy: bool
     settles: list[dict[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class Reply:
+    """One turn of Live's: its audio, held until its `meet.say` is released,
+    and what it said, from Live's transcript of it."""
+
+    id: str
+    typed: bool  # the answer to a typed line, which is posted, never spoken
+    held: list[bytes] = field(default_factory=list)
+    released: bool = False
+    dropped: bool = False
+    text: str = ""
+    seconds: float = 0.0  # of audio received
+    posted: bool = False
+    started: float | None = None  # on the recording's clock
+    generated: bool = False
+    over: asyncio.Future | None = None
+    said: asyncio.Task | None = None
 
 
 class _Performer:
@@ -843,49 +824,59 @@ def _cut(text: str, played: float) -> str:
 
 
 class Call:
-    """Valor in one call (module docstring), with what it hears, speaks,
-    decides and asks injected, so a test drives it without Meet."""
+    """Valor in one call (module docstring): what it hears is mixed and
+    streamed to a Gemini Live session, which speaks, posts and asks through
+    its tools; the page, Gemini and the worker are injected, so a test
+    drives it without Meet or Google."""
 
     def __init__(
         self,
         session_id: str,
         info: dict[str, Any],
         page,
-        ears: Ears,
         *,
         dsn: str,
-        voice: Callable[[str], tuple[np.ndarray, int]],
-        judge: Callable[[dict[str, str], str], Awaitable[Any]],
-        front: Front,
+        gemini,
         worker: Callable[[str], Awaitable[str]],
         worker_ready: Callable[[], Awaitable[bool]],
         project: str | None = None,
         socket=None,
         clock: Callable[[], float] = time.monotonic,
+        store: str | None = None,
     ):
-        from concurrent.futures import ThreadPoolExecutor
-
         from core import bridge
 
-        self.id, self.info, self.page, self.ears, self.dsn = session_id, info, page, ears, dsn
-        self.voice, self.judge, self.front, self.worker = voice, judge, front, worker
-        self.worker_ready, self.project, self.socket, self.clock = worker_ready, project, socket, clock
+        self.id, self.info, self.page, self.dsn, self.gemini = session_id, info, page, dsn, gemini
+        self.worker, self.worker_ready, self.project = worker, worker_ready, project
+        self.socket, self.clock = socket, clock
+        self.store = Path(store or settings.meetings_store)
         self.declared = broker.Performers(*bridge.declared_performers())
         self.bound = broker.Performers(
             _Performer("meet.say", self._say), _Performer("meet.send_message", self._post)
         )
-        self.speakers: dict[str, Speaker] = {}
+        self.session = None  # the Live session, while connected
+        self.handle: str | None = None  # Live's resumption handle
+        self.downs: dict[str, Down] = {}
+        self.buffers: dict[str, np.ndarray] = {}
+        self.mine = np.zeros(0, np.float32)  # Valor's own speech, for the recording
         self.names: dict[str, str] = {}
         self.present: set[str] = set()  # who else is in the call now
         self.me: str | None = None
-        self.lines: list[str] = []  # the call so far, as the front model reads it
-        self.told = 0  # how many of `lines` the front model has read
-        self.open_told: str | None = None
-        self.unsaid = False
-        self.current: Turn | None = None  # the turn Valor is answering
-        self.playing: Turn | None = None  # the turn whose answer is being spoken
-        self.said: dict[str, int] = {}  # each turn's request numbers so far
-        self.says: asyncio.Queue = asyncio.Queue()
+        self.speaking: str | None = None  # who the session was last told is speaking
+        self.rival: tuple[str | None, float] = (None, 0.0)
+        self.energy: dict[str, float] = {}  # each person's speech in the stretch being heard
+        self.heard = ""  # Live's transcript of that stretch so far
+        self.heard_at: float | None = None
+        self.close_at: tuple[float, dict[str, float]] | None = None
+        self.last_voice = 0.0
+        self.lines: list[str] = []  # the call so far, for the worker and the summary
+        self.segments: list[dict[str, Any]] = []  # the spoken transcript, for the store
+        self.reply: Reply | None = None  # the turn Live is generating
+        self.replies: dict[str, Reply] = {}  # each turn whose `meet.say` is not settled
+        self.out: Reply | None = None  # the turn whose audio is playing
+        self.typed_next = False
+        self.metered: str | None = None  # the open `gateway.opened` call of the current turn
+        self.playing_until = 0.0
         self.posts: asyncio.Queue = asyncio.Queue()
         self.questions: asyncio.Queue = asyncio.Queue()
         self.asking: list[str] = []
@@ -896,26 +887,28 @@ class Call:
         self.reason = ""
         self.hard = False
         self.jobs: set[asyncio.Task] = set()
-        self._tts = ThreadPoolExecutor(max_workers=1)
-        self._spoken: dict[str, asyncio.Future] = {}
+        self.recording: Recording | None = None
+        self.staging: Path | None = None
+        self.started_at = datetime.now(UTC)
+        self.t0 = clock()
+
+    def now(self) -> float:
+        """Seconds into the recording."""
+        return self.recording.seconds if self.recording else self.clock() - self.t0
 
     # -- hearing (the page's socket calls these) --
 
     def hear(self, who: str, samples: np.ndarray, rate: int) -> None:
         if not who or who == self.me:
             return
-        speaker = self.speakers.setdefault(who, Speaker(who))
-        talking = speaker.feed(self.ears, samples, rate, self.clock())
-        if talking and self.playing is not None and self.playing.who == who:
-            self.playing = None
-            self._spawn(self.page.stop())
+        x = self.downs.setdefault(who, Down())(samples, rate)
+        buf = np.concatenate([self.buffers.get(who, np.zeros(0, np.float32)), x])
+        self.buffers[who] = buf[-int(BACKLOG_S * RATE) :]
 
     def chat(self, who: str, text: str) -> None:
         if who == self.me or not text.strip():
             return
-        self._spawn(
-            self._turn(Turn(ledger.new_id(), who, self.names.get(who, "someone"), text.strip(), "typed"))
-        )
+        self._spawn(self._typed(who, text.strip()))
 
     def people(self, update: dict[str, Any]) -> None:
         for p in [*(update.get("newUsers") or []), *(update.get("updatedUsers") or [])]:
@@ -924,144 +917,348 @@ class Call:
             elif p.get("deviceId"):
                 self.names[p["deviceId"]] = p.get("fullName") or p.get("displayName") or "someone"
 
-    # -- the turns --
-
-    async def listen(self) -> None:
-        """Every `TICK_S`, each person's pause asked whether their turn ended."""
+    async def mix(self) -> None:
+        """Every `MIX_S`, what everyone said since, summed, to the session
+        and the recording (silence too, which tells Live a turn ended);
+        who is loudest is who is speaking."""
+        sent, start = 0, self.clock()
         while not self.leaving.is_set():
-            for speaker in list(self.speakers.values()):
-                audio = speaker.pause(self.ears, self.clock())
-                if audio is not None:
-                    self._spawn(self._spoke(speaker.id, audio))
-            await asyncio.sleep(TICK_S)
+            await asyncio.sleep(MIX_S)
+            due = int((self.clock() - start) * RATE) - sent
+            if due <= 0:
+                continue
+            sent += due
+            await self._tick(due)
 
-    async def _spoke(self, who: str, audio: np.ndarray) -> None:
-        text = (await self.ears.transcribe(audio)).strip()
-        if text:
-            await self._turn(Turn(ledger.new_id(), who, self.names.get(who, "someone"), text, "spoke"))
+    async def _tick(self, due: int) -> None:
+        frame = np.zeros(due, np.float32)
+        loud: dict[str, float] = {}
+        for who, buf in list(self.buffers.items()):
+            take, self.buffers[who] = buf[:due], buf[due:]
+            frame[: len(take)] += take
+            if len(take):
+                loud[who] = float(np.sqrt(np.mean(take**2)))
+        mine, self.mine = self.mine[:due], self.mine[due:]
+        if self.recording is not None:
+            self.recording.write(np.pad(mine, (0, due - len(mine))), frame)
+        if self.session is not None:
+            from google.genai import types
 
-    async def _turn(self, turn: Turn) -> None:
-        async with await db.connect(self.dsn) as conn:
-            await ledger.append(conn, self.id, "call.heard", {"turn_id": turn.id, "who": turn.who, "name": turn.name,
-                                "via": turn.via, "text": turn.text})  # fmt: skip
-        self.lines.append(f"{turn.name} ({turn.via}): {turn.text}")
-        if turn.name == settings.operator_name and LEAVE.search(turn.text):
-            self.leave("Tom asked Valor to leave")
-            return
-        if self.current is not None and self.current.who == turn.who:
-            self.current = None  # they went on: what Valor was answering is stale
-        actions: list[tuple[str, dict[str, Any]]] = []
-        sentences: asyncio.Queue = asyncio.Queue()
-        drafting = asyncio.create_task(self._draft(turn, actions, sentences))
-        label = await self._decide(turn)
-        if label not in ("asked_valor", "useful_post") or self.left:
-            self.unsaid = True
-            drafting.cancel()
-            return
-        self.current = turn
-        spoken = turn.via == "spoke" and label == "asked_valor"
-        written = []
-        while (sentence := await sentences.get()) is not None:
-            if self.current is not turn:
-                self.unsaid = True
-                drafting.cancel()
-                return
-            if spoken:
-                self._prefetch(sentence)
-                self.says.put_nowait((turn, self._n(turn.id), sentence))
-            else:
-                written.append(sentence)
-        for name, args in actions:
-            if name == "ask_worker":
-                self.questions.put_nowait(str(args["question"]).strip())
-            else:
-                self.posts.put_nowait(
-                    Post(turn.id, str(args["readback"]).strip(), True, list(args["settles"]))
+            with contextlib.suppress(Exception):  # a dropped session is the receiver's to resume
+                await self.session.send_realtime_input(
+                    audio=types.Blob(data=pcm16(frame), mime_type=f"audio/pcm;rate={RATE}")
                 )
-        if written:
-            self.posts.put_nowait(Post(turn.id, " ".join(written), True))
+        await self._speakers(loud, due / RATE)
 
-    async def _news(self) -> str:
-        """What the front model has not heard yet, up to the turn it is
-        asked about: the call's lines since its last message, who is in it,
-        the open decisions when they changed, and whether its last reply
-        went unsaid."""
-        parts = []
-        if self.unsaid:
-            parts.append("(Your last reply was not said: you stayed silent.)")
-            self.unsaid = False
-        since, self.told = self.lines[self.told : -1], len(self.lines)
-        if since:
-            parts.append("Said in the call since your last reply:\n" + "\n".join(since))
-        open_now = await self._decisions()
-        if open_now != self.open_told:
-            parts.append(open_now)
-            self.open_told = open_now
-        parts.append(f"In the call: {', '.join(sorted(set(self.names.values()))) or 'only you'}.")
-        if not await self.worker_ready():
-            parts.append(
-                "Your worker's copy of the project is still being set up: asked anything, say you need a moment."
-            )
-        return "\n\n".join(parts)
+    async def _speakers(self, loud: dict[str, float], seconds: float) -> None:
+        """Who is speaking, told to the session when it changes, and where
+        a stretch of the transcript ends: at a change (once Live's
+        transcript of it has caught up), or after a quiet."""
+        voiced = {w: v for w, v in loud.items() if v >= SPEAKING}
+        now = self.now()
+        for who, v in voiced.items():
+            self.energy[who] = self.energy.get(who, 0.0) + v * seconds
+        if voiced:
+            self.last_voice = now
+            top = max(voiced, key=voiced.get)
+            if top == self.speaking:
+                self.rival = (None, 0.0)
+            elif self.rival[0] != top:
+                self.rival = (top, seconds)
+            else:
+                self.rival = (top, self.rival[1] + seconds)
+                if self.rival[1] >= CHANGE_S:
+                    if self.speaking is not None and self.close_at is None:
+                        self.close_at, self.energy = (now + LAG_S, self.energy), {}
+                    self.speaking, self.rival = top, (None, 0.0)
+                    await self._note(f"{self.names.get(top, 'someone')} is speaking.")
+        if self.close_at is not None and now >= self.close_at[0]:
+            await self._close_stretch(self.close_at[1])
+        elif self.heard and now - self.last_voice >= QUIET_S:
+            await self._close_stretch(self.energy)
 
-    async def _draft(self, turn: Turn, actions: list, sentences: asyncio.Queue) -> None:
-        said = f"{turn.name} {'said' if turn.via == 'spoke' else 'typed in the chat'}: {turn.text}"
-        try:
-            async for sentence in self.front.draft(await self._news(), said, actions):
-                if turn.via == "spoke":
-                    self._prefetch(sentence)
-                sentences.put_nowait(sentence)
-        except Exception as exc:  # noqa: BLE001  a draft that fails is silence, and the call goes on
-            _log(f"call {self.id}: the front model failed: {exc!r}")
-        finally:
-            sentences.put_nowait(None)
+    async def _close_stretch(self, energy: dict[str, float]) -> None:
+        """One `call.heard` row: what Live heard since the last, said by
+        whoever spoke most in it. "Valor, leave" from Tom leaves."""
+        text, at = self.heard.strip(), self.heard_at
+        self.heard, self.heard_at, self.close_at = "", None, None
+        if energy is self.energy:
+            self.energy = {}
+        if not text:
+            return
+        who = max(energy, key=energy.get) if energy else self.speaking
+        name = self.names.get(who, "someone") if who else "someone"
+        await self._heard(who or "", name, text, "spoke")
+        self.segments.append({"speaker": name, "start": round(at or 0.0, 2), "end": round(self.now(), 2),
+                              "text": text, "channel": "call"})  # fmt: skip
 
-    async def _decide(self, turn: Turn) -> str | None:
-        """`meet.speak`'s label; None (silence) on abstain, failure or stop.
-        With only one other person in the call, whatever they say is to
-        Valor (Tom's "Hello", judged `nothing`, 2026-11-05)."""
-        if self.present == {turn.who}:
-            return "asked_valor"
-        inputs = {
-            "said": f"{turn.name} {turn.via}: {turn.text}",
-            "recent": "\n".join(self.lines[-RECENT:-1]) or "(nothing before it)",
-            "people": ", ".join(self.names.values()) or "no one else",
-        }
-        try:
-            judged = await self.judge(inputs, turn.id)
-        except tasks.TaskStopped:
-            return None
-        return (judged.payload.get("picked") or {}).get("turn") if judged.answered else None
-
-    async def _decisions(self) -> str:
+    async def _heard(self, who: str, name: str, text: str, via: str) -> None:
         async with await db.connect(self.dsn) as conn:
-            return await decisions(conn, self.project)
+            await ledger.append(conn, self.id, "call.heard", {"turn_id": ledger.new_id(), "who": who,
+                                "name": name, "via": via, "text": text})  # fmt: skip
+        self.lines.append(f"[{_clock(self.now())}] {name} ({via}): {text}")
+        if name == settings.operator_name and LEAVE.search(text):
+            self.leave("Tom asked Valor to leave")
 
-    def _n(self, turn_id: str) -> int:
-        self.said[turn_id] = self.said.get(turn_id, -1) + 1
-        return self.said[turn_id]
+    async def _typed(self, who: str, text: str) -> None:
+        name = self.names.get(who, "someone")
+        await self._heard(who, name, text, "typed")
+        if self.leaving.is_set() or self.session is None:
+            return
+        self.typed_next = True
+        await self.session.send_client_content(
+            turns={"role": "user", "parts": [{"text": f"[typed by {name}] {text}"}]}, turn_complete=True
+        )
 
-    # -- speaking and posting --
+    async def _note(self, text: str) -> None:
+        if self.session is not None:
+            with contextlib.suppress(Exception):
+                await self.session.send_client_content(**note(text))
 
-    def _prefetch(self, text: str) -> None:
-        """Voice `text` ahead of saying it: a spoken turn's draft is voiced
-        as it streams, before `meet.speak` decides, so a sentence Valor
-        says is ready when its turn comes. The latest `VOICED_MOST` kept."""
-        if text not in self._spoken:
-            self._spoken[text] = asyncio.get_running_loop().run_in_executor(self._tts, self.voice, text)
-            while len(self._spoken) > VOICED_MOST:
-                self._spoken.pop(next(iter(self._spoken)))
+    # -- the session --
 
-    async def says_lane(self) -> None:
-        """One sentence spoken at a time, never holding up a post."""
-        while True:
-            turn, n, text = await self.says.get()
+    async def live(self) -> None:
+        """The Live session for the whole call: resumed with its handle
+        when Live says it is going away or the connection drops; after
+        `RECONNECTS` failed tries, one line in the chat and the call leaves."""
+        failed = 0
+        while not self.leaving.is_set():
+            config = live_config(self.project or "", self.info.get("prep") or "", self.handle)
+            opened = False
             try:
-                if self.current is turn:
-                    await self._effect("meet.say", {"text": text, "turn": turn.id}, f"meet/{turn.id}/{n}/say")
-                self._spoken.pop(text, None)
+                async with self.gemini.connect(config) as session:
+                    self.session, failed, opened = session, 0, True
+                    _log(f"call {self.id}: the Live session is open{' (resumed)' if self.handle else ''}")
+                    await self._receive(session)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001  a lost session is resumed, or the call leaves
+                failed = 0 if opened else failed + 1
+                _log(f"call {self.id}: the Live session {'dropped' if opened else 'failed to open'}: {exc!r}")
             finally:
-                self.says.task_done()
+                self.session = None
+                if self.reply is not None:
+                    await self._finish(self.reply, cut=True)
+            if failed >= RECONNECTS:
+                self.posts.put_nowait(Post(None, LOST_LINE, False))
+                self.leave("Valor lost its voice connection")
+            elif failed:
+                await asyncio.sleep(1)
+
+    async def _receive(self, session) -> None:
+        while not self.leaving.is_set():
+            async for m in session.receive():
+                if m.session_resumption_update and m.session_resumption_update.resumable:
+                    self.handle = m.session_resumption_update.new_handle or self.handle
+                if m.go_away is not None:
+                    _log(f"call {self.id}: Live is going away in {m.go_away.time_left}; resuming")
+                    return
+                if m.tool_call is not None:
+                    await self._tools(session, m.tool_call.function_calls or [])
+                if m.server_content is not None:
+                    await self._content(m.server_content)
+                if m.usage_metadata is not None:
+                    await self._charge(m.usage_metadata.model_dump(mode="json", exclude_none=True))
+
+    async def _begin(self) -> Reply:
+        """The reply Live has started: what was heard before it is a whole
+        stretch, and the turn is metered from here."""
+        if self.reply is None:
+            if self.close_at is not None:
+                await self._close_stretch(self.close_at[1])
+            if self.heard:
+                await self._close_stretch(self.energy)
+            self.reply, self.typed_next = Reply(ledger.new_id(), self.typed_next), False
+            self.replies[self.reply.id] = self.reply
+            await self._open(self.reply.id)
+        return self.reply
+
+    async def _content(self, sc) -> None:
+        if sc.input_transcription and sc.input_transcription.text:
+            if not self.heard:
+                self.heard_at = self.now()
+            self.heard += sc.input_transcription.text
+            if self.out is not None and self.out.generated:
+                await self._finish(self.out, cut=True)  # someone spoke over what was still playing
+        if sc.output_transcription and sc.output_transcription.text:
+            reply = await self._begin()
+            reply.text += sc.output_transcription.text
+            if MARKUP.fullmatch(reply.text):
+                reply.dropped, reply.held = True, []  # Live's "<no speech>": a turn of silence
+            elif reply.held and reply.said is None:
+                await self._audio(reply, b"")
+        if sc.model_turn:
+            for part in sc.model_turn.parts or []:
+                if part.inline_data and part.inline_data.data:
+                    await self._audio(await self._begin(), part.inline_data.data)
+        if sc.interrupted and self.reply is not None:
+            await self._finish(self.reply, cut=True)
+        if sc.turn_complete and self.reply is not None:
+            reply, self.reply = self.reply, None
+            reply.generated = True
+            text = MARKUP_PART.sub("", reply.text).strip()
+            if reply.typed and not reply.posted and text:
+                self.posts.put_nowait(Post(reply.id, text, True))
+            if reply.said is None:
+                await self._finish(reply, cut=False)
+            elif reply.released:
+                self._spawn(self._played_out(reply))
+
+    async def _audio(self, reply: Reply, data: bytes) -> None:
+        """A chunk of Live's speech: once Live's transcript of the turn
+        shows words (Live sends silence as "<no speech>", 2026-11-05) or
+        `WORDLESS_S` of it came without any, the turn requests its
+        `meet.say`; each chunk is held until that is released, and dropped
+        when it is refused or when the turn answers a typed line."""
+        if reply.typed or reply.dropped:
+            return
+        reply.seconds += len(data) / 2 / OUT_RATE
+        if reply.said is None and not reply.text.strip() and reply.seconds < WORDLESS_S:
+            reply.held.append(data)
+            return
+        if reply.said is None:
+            reply.over = asyncio.get_running_loop().create_future()
+            reply.said = asyncio.create_task(
+                self._effect("meet.say", {"turn": reply.id}, f"meet/{reply.id}/say")
+            )
+            reply.said.add_done_callback(lambda t: self._said(reply, t))
+        if reply.released:
+            await self._play(data, fresh=False)
+        elif data:
+            reply.held.append(data)
+
+    def _said(self, reply: Reply, task: asyncio.Task) -> None:
+        if task.cancelled() or task.exception() is not None or task.result().kind != "done":
+            reply.dropped, reply.held = True, []
+            if reply.over is not None and not reply.over.done():
+                reply.over.set_result({})
+
+    async def _play(self, data: bytes, *, fresh: bool) -> None:
+        ahead = await self.page.stream(data, OUT_RATE, fresh)
+        self.playing_until = self.clock() + float(ahead)
+        pcm = np.frombuffer(data, "<i2").astype(np.float32) / 32768
+        self.mine = np.concatenate([self.mine, Down()(pcm, OUT_RATE)])
+
+    async def _played_out(self, reply: Reply) -> None:
+        while self.clock() < self.playing_until and not reply.over.done():
+            await asyncio.sleep(min(0.1, self.playing_until - self.clock()))
+        await self._finish(reply, cut=False)
+
+    async def _finish(self, reply: Reply, *, cut: bool) -> None:
+        """The reply is over: played out, or cut (Live's `interrupted`,
+        someone speaking over its last words, or the session lost). Its
+        `meet.say` settles with what was said."""
+        if self.reply is reply:
+            self.reply = None
+        self.replies.pop(reply.id, None)
+        if self.out is reply:
+            self.out = None
+        if reply.over is None or reply.over.done():
+            return
+        if not reply.released:
+            played, spoken = 0.0, ""
+        elif cut:
+            played = float(await self.page.stop() or 0.0)
+            self.mine = np.zeros(0, np.float32)
+            spoken = _cut(MARKUP_PART.sub("", reply.text), played / reply.seconds if reply.seconds else 0.0)
+        else:
+            played, spoken = reply.seconds, " ".join(MARKUP_PART.sub("", reply.text).split())
+        result = {"spoken_text": spoken, "cut": cut, "played_s": round(played, 2)}
+        reply.over.set_result(result)
+        if spoken:
+            self.lines.append(f"[{_clock(self.now())}] Valor (spoke): {spoken}")
+            self.segments.append({"speaker": "Valor Engels", "start": round(reply.started or 0.0, 2),
+                                  "end": round(self.now(), 2), "text": spoken, "channel": "mic"})  # fmt: skip
+
+    async def _say(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """`meet.say`, released: the turn's held audio plays, and the say
+        settles once the turn is over."""
+        reply = self.replies.get(payload.get("turn"))
+        if reply is None or reply.over is None or reply.over.done():
+            raise broker.Failed("stale: the turn was over before it was released")
+        if self.out is not None:
+            await self._finish(self.out, cut=True)
+        reply.released, reply.started, self.out = True, self.now(), reply
+        held, reply.held = reply.held, []
+        await self._play(b"".join(held), fresh=True)
+        if reply.generated:
+            self._spawn(self._played_out(reply))
+        result = await reply.over
+        if not result:
+            raise broker.Failed("the turn was dropped")
+        return result
+
+    async def _tools(self, session, calls) -> None:
+        from google.genai import types
+
+        out = []
+        for fc in calls:
+            args = dict(fc.args or {})
+            reply = await self._begin()
+            if fc.name == "ask" and str(args.get("question") or "").strip():
+                self.questions.put_nowait(str(args["question"]).strip())
+                result = "asked: the answer will be posted in the chat and noted to you"
+                if not await self.worker_ready():
+                    result += (
+                        "; your worker's copy of the project is still being set up, so say it needs a moment"
+                    )
+            elif fc.name == "post" and str(args.get("text") or "").strip():
+                reply.posted = True
+                self.posts.put_nowait(Post(reply.id, str(args["text"]).strip(), True))
+                result = "posted"
+            elif fc.name == "open_decisions":
+                async with await db.connect(self.dsn) as conn:
+                    result = await decisions(conn, self.project)
+            elif fc.name == "settle" and args.get("ids") and str(args.get("readback") or "").strip():
+                settles = [
+                    {"task_id": t.strip(), "question_id": q.strip()}
+                    for t, _, q in (str(i).partition("/") for i in args["ids"])
+                    if t.strip() and q.strip()
+                ]
+                self.posts.put_nowait(Post(reply.id, str(args["readback"]).strip(), True, settles))
+                result = "recorded"
+            elif fc.name == "leave":
+                self.leave("Valor was asked to leave")
+                result = "leaving"
+            else:
+                result = f"not done: {fc.name} needs its arguments"
+            out.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result}))
+        if out:
+            await session.send_tool_response(function_responses=out)
+
+    # -- metering --
+
+    async def _open(self, turn_id: str) -> None:
+        """Open a turn's call before its usage comes (`spending.open_call`);
+        a stopped task refuses it, and the call leaves."""
+        from core import spending
+
+        price = spending.gemini_price(settings.call_model)
+        call = {"call_id": ledger.new_id(), "turn_id": turn_id, "model": settings.call_model,
+                "route": "gemini-live", "estimated_input": CALL_CONTEXT, "max_tokens": CALL_OUTPUT_MOST,
+                "estimate_usd_micros": spending.gemini_worst_case(price), "unpriced": price["unpriced"]}  # fmt: skip
+        try:
+            async with await db.connect(self.dsn) as conn:
+                self.metered = await spending.open_call(conn, self.id, call)
+        except tasks.TaskStopped:
+            self.leave("the call was stopped", hard=True)
+
+    async def _charge(self, usage: dict[str, Any]) -> None:
+        """A turn's usage, which Live sends at its end (a turn of silence
+        too), charged at the model's rates by modality."""
+        from core import spending
+
+        if self.metered is None:
+            await self._open(self.reply.id if self.reply else ledger.new_id())
+        if self.metered is None:
+            return
+        price = spending.gemini_price(settings.call_model)
+        async with await db.connect(self.dsn) as conn:
+            await spending.charge(conn, self.id, self.metered, spending.gemini_cost(usage, price),
+                                  {"model": settings.call_model, "usage": usage})  # fmt: skip
+        self.metered = None
+
+    # -- posting --
 
     async def posts_lane(self) -> None:
         """Each post in the call's chat, then its copy to the thread it was
@@ -1080,13 +1277,12 @@ class Call:
         done = []
         for i, part in enumerate(bridge.split_text("meet", post.text)):
             payload = {"text": part, **({"settles": post.settles} if post.settles and i == 0 else {})}
-            n = self._n(turn)
-            out = await self._effect("meet.send_message", payload, f"meet/{turn}/{n}/post")
+            out = await self._effect("meet.send_message", payload, f"meet/{turn}/{i}/post")
             if out.kind == "done":
                 done.append(part)
         if post.copy and done:
             kind, payload, chat = self._copy(" ".join(done))
-            await self._effect(kind, payload, f"meet/{turn}/{n}/copy", chat)
+            await self._effect(kind, payload, f"meet/{turn}/copy", chat)
 
     def _copy(self, text: str) -> tuple[str, dict[str, Any], str]:
         asked = self.info["asked_by"]
@@ -1120,42 +1316,18 @@ class Call:
                     raise
         raise AssertionError("unreachable")
 
-    async def _say(self, payload: dict[str, Any]) -> dict[str, Any]:
-        turn = self.current
-        if turn is None or turn.id != payload.get("turn"):
-            raise broker.Failed("stale: newer speech in the call came first")
-        voiced = self._spoken.get(payload["text"])
-        pcm, rate = (
-            await voiced if voiced is not None else await asyncio.to_thread(self.voice, payload["text"])
-        )
-        if self.current is not turn:
-            raise broker.Failed("stale: newer speech in the call came first")
-        self.playing = turn
-        try:
-            got = await self.page.play(pcm, rate)
-        finally:
-            self.playing = None
-        spoken = _cut(payload["text"], got["played"] / got["total"]) if got.get("cut") else payload["text"]
-        if got.get("cut"):
-            self.current = None
-        self.lines.append(f"Valor (spoke): {spoken}")
-        return {
-            "spoken_text": spoken,
-            "cut": bool(got.get("cut")),
-            "played_s": round(float(got["played"]), 2),
-        }
-
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not await self.page.post(payload["text"]):
             raise broker.Failed("the call's chat box was not there")
-        self.lines.append(f"Valor (typed): {payload['text']}")
+        self.lines.append(f"[{_clock(self.now())}] Valor (typed): {payload['text']}")
         return {"posted": payload["text"]}
 
     # -- the worker --
 
     async def work(self) -> None:
-        """The worker's questions, one at a time; a late answer is posted
-        naming its question, or after leaving goes in the call's report."""
+        """The worker's questions, one at a time; an answer is posted
+        naming its question and noted to the session, or after leaving goes
+        in the call's report."""
         while True:
             question = await self.questions.get()
             self.asking.append(question)
@@ -1174,6 +1346,7 @@ class Call:
                 self.late.append({"question": question, "answer": answer})
             else:
                 self.posts.put_nowait(Post(None, f'On "{question}": {answer}', True))
+                await self._note(f'Your worker answered "{question}" (posted in the chat): {answer}')
 
     # -- the call's life --
 
@@ -1188,8 +1361,10 @@ class Call:
         job.add_done_callback(self.jobs.discard)
 
     async def watch(self) -> None:
-        """Who is in the call, and the reasons to leave it."""
+        """Who is in the call, told to the session when it changes, and the
+        reasons to leave it."""
         start, alone, down, seen, inside = self.clock(), None, None, set(), self.clock()
+        told = None
         while not self.leaving.is_set():
             state = await self.page.state()
             if state["status"] in ("removed", "denied", "ended"):
@@ -1214,6 +1389,10 @@ class Call:
                         await ledger.append(
                             conn, self.id, "call.participant", {"id": p["id"], "name": p["name"]}
                         )
+            here = sorted(self.names.get(i, "someone") for i in self.present)
+            if here != told and self.session is not None:
+                told = here
+                await self._note(self._here(here))
             now = self.clock()
             alone = None if others else alone or now
             if seen and alone is not None and now - alone >= EMPTY_S:
@@ -1226,6 +1405,14 @@ class Call:
                 self.leave("the call's audio was lost")
             await asyncio.sleep(STATE_S)
 
+    @staticmethod
+    def _here(names: list[str]) -> str:
+        """Who is in the call. With one other person, whatever they say is
+        to Valor (Tom's "Hello", unanswered, 2026-11-05)."""
+        if len(names) == 1:
+            return f"Only {names[0]} is here with you: everything they say is to you, so answer it."
+        return f"In the call with you: {', '.join(names) or 'no one yet'}."
+
     async def orders(self) -> None:
         """A stop of the session leaves at once; a steer is posted in the
         call's chat."""
@@ -1236,11 +1423,11 @@ class Call:
             async with await db.connect(self.dsn) as conn:
                 if await tasks.is_stopped(conn, self.id):
                     self.leave("the call was stopped", hard=True)
-            async for note in listener.notifies():
-                if note.channel == tasks.STOP_CHANNEL and note.payload == self.id:
+            async for got in listener.notifies():
+                if got.channel == tasks.STOP_CHANNEL and got.payload == self.id:
                     self.leave("the call was stopped", hard=True)
                     return
-                said = json.loads(note.payload) if note.channel == "valor_events" else {}
+                said = json.loads(got.payload) if got.channel == "valor_events" else {}
                 if said.get("task_id") == self.id and said.get("type") == "message.steered":
                     async with await db.connect(self.dsn) as conn:
                         row = await (
@@ -1272,32 +1459,93 @@ class Call:
                 return self.reason
             await asyncio.sleep(1)
 
+    # -- after the call: the recording, its summary, the store --
+
+    async def summarise(self) -> dict[str, str] | None:
+        """The call kept as Yudame Tools keeps a meeting, with Gemini's
+        notes on it: the recording, its transcript and the notes staged
+        apart and moved into the store whole, and the summary document
+        beside them. None when nothing was heard or the call was stopped;
+        `{"error"}` when Gemini failed, and no other model writes one."""
+        if self.recording is None:
+            return None
+        self.recording.close()
+        staging, wav = self.staging, self.recording.path
+        if self.hard or not self.lines:
+            shutil.rmtree(staging, ignore_errors=True)
+            return None
+        from core import spending
+
+        audio = staging / "audio.m4a"
+        try:
+            await (await asyncio.create_subprocess_exec(
+                "afconvert", "-f", "m4af", "-d", "aac", str(wav), str(audio))).wait()  # fmt: skip
+            wav.unlink()
+            transcript = "\n".join(self.lines)
+            price = spending.gemini_price(settings.summary_model)
+            est = int(self.recording.seconds * 32) + len(transcript) // 3 + 1000
+            call_id = ledger.new_id()
+            async with await db.connect(self.dsn) as conn:
+                await spending.open_call(conn, self.id, {
+                    "call_id": call_id, "turn_id": "summary", "model": settings.summary_model,
+                    "route": "gemini", "estimated_input": est, "max_tokens": 16_000,
+                    "estimate_usd_micros": spending.gemini_worst_case(price, est, 16_000),
+                    "unpriced": price["unpriced"]})  # fmt: skip
+            notes, usage = await self.gemini.summarise(audio, transcript)
+            async with await db.connect(self.dsn) as conn:
+                await spending.charge(conn, self.id, call_id, spending.gemini_cost(usage, price),
+                                      {"model": settings.summary_model, "usage": usage})  # fmt: skip
+        except Exception as exc:  # noqa: BLE001  the report says the summary failed
+            _log(f"call {self.id}: the summary failed: {''.join(traceback.format_exception(exc)).rstrip()}")
+            keep(staging, self.store, folder_name(self._title(), self.started_at) + " (no summary)")
+            return {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        title, code = self._title(), self.info["code"]
+        segments = sorted(self.segments, key=lambda s: s["start"])
+        summary = {"summary": notes["summary"], "decisions": list(notes["decisions"]),
+                   "actions": [{k: v for k, v in a.items() if k in ("task", "owner") and v} for a in notes["actions"]]}  # fmt: skip
+        files = {
+            "meta.json": meta_json(title, self.started_at, datetime.now(UTC), _zone(), segments),
+            "transcript.json": json.dumps(segments, indent=2, sort_keys=True),
+            "transcript.md": transcript_md(title, segments),
+            "summary.json": json.dumps(summary),
+            "notes.md": notes_md(title, summary),
+            f"call-{code}.md": notes["markdown"].rstrip() + "\n",
+        }
+        for name, text in files.items():
+            (staging / name).write_text(text)
+        folder = keep(staging, self.store, folder_name(title, self.started_at))
+        return {"path": str(folder / f"call-{code}.md")}
+
+    def _title(self) -> str:
+        return f"Valor call {self.info['code']}"
+
     async def run(self) -> str:
         """The call, from joining to its end; the reason it ended."""
         lanes = []
         try:
-            lanes = [
-                asyncio.create_task(c)
-                for c in (self.orders(), self.says_lane(), self.posts_lane(), self.work())
-            ]
-            await self.front.start()
+            lanes = [asyncio.create_task(c) for c in (self.orders(), self.posts_lane(), self.work())]
             await self.page.open(self.info["url"], self.socket.port if self.socket else 0)
             why = await self.joined()
             if why is not None:
                 self.leave(why)
             else:
                 await self.page.ready()
+                self.store.parent.mkdir(parents=True, exist_ok=True)
+                self.staging = Path(tempfile.mkdtemp(prefix=".valor-call-", dir=self.store.parent))
+                self.recording = Recording(self.staging / "call.wav")
+                self.started_at, self.t0 = datetime.now(UTC), self.clock()
                 self.posts.put_nowait(Post("join", JOIN_LINE, False))
-                lanes += [asyncio.create_task(self.listen()), asyncio.create_task(self.watch())]
+                lanes += [asyncio.create_task(c) for c in (self.live(), self.mix(), self.watch())]
                 await self.leaving.wait()
         except Exception as exc:  # noqa: BLE001  the call ends, saying why
             _log(f"call {self.id}: {''.join(traceback.format_exception(exc)).rstrip()}")
             self.leave(f"Valor's call process failed: {exc!r}")
+        if not self.hard:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.posts.join(), 10)  # the line saying why, before leaving
         self.left = True
         with contextlib.suppress(Exception):
             await self.page.leave()
-        with contextlib.suppress(Exception):
-            await self.front.close()
         if not self.hard:
             waited = self.clock()
             while (self.asking or not self.questions.empty()) and self.clock() - waited < WORKER_WAIT_S:
@@ -1309,9 +1557,17 @@ class Call:
         for job in jobs:
             job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
+        summary = await self.summarise()
         async with await db.connect(self.dsn) as conn:
-            await end(conn, self.id, self.reason, late=self.late, unanswered=unanswered)
+            await end(conn, self.id, self.reason, late=self.late, unanswered=unanswered, summary=summary)
         return self.reason
+
+
+def _zone() -> str:
+    """The Mac's time zone's name, as Foundation's `TimeZone.current` gives it."""
+    with contextlib.suppress(OSError):
+        return os.readlink("/etc/localtime").split("zoneinfo/", 1)[1]
+    return "GMT"
 
 
 def _log(text: str) -> None:

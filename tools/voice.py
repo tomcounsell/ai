@@ -9,10 +9,7 @@ One process holds the model, so the three bridges share one copy
 - `POST /transcribe {"path": ...}` -> `{"text": ...}`: ffmpeg decodes any
   audio to 16 kHz mono; Parakeet (`settings.asr_model`, through onnx-asr,
   int8, on the CPU) with onnx-asr's Silero VAD, so any length is cut into
-  segments.
-- `POST /hear`, a turn of a Meet call as raw float32 samples at 16 kHz ->
-  `{"text": ...}`: the same model, on a worker thread of its own, so a
-  call is heard while a voice note transcribes (`core/call.py`).
+  segments. A Meet call is heard by Gemini Live instead (`core/call.py`).
 
 The engine is `listen`: a new model is a setting, a new engine is one
 function. The model loads on first use and stays loaded; inference runs on
@@ -84,36 +81,23 @@ def listen(path: str) -> str:
     return " ".join(t for s in _asr().recognize(decode(path)) if (t := s.text.strip()))
 
 
-def heard(samples: np.ndarray) -> str:
-    """The words spoken in 16 kHz mono samples."""
-    return " ".join(t for s in _asr().recognize(samples) if (t := s.text.strip()))
-
-
-def app(*, listen=listen, heard=heard) -> web.Application:
-    pool, calls = ThreadPoolExecutor(max_workers=1), ThreadPoolExecutor(max_workers=1)
+def app(*, listen=listen) -> web.Application:
+    pool = ThreadPoolExecutor(max_workers=1)
 
     async def transcribe(request: web.Request) -> web.Response:
         body = await request.json()
         text = await asyncio.get_running_loop().run_in_executor(pool, listen, body["path"])
         return web.json_response({"text": text})
 
-    async def hear(request: web.Request) -> web.Response:
-        samples = np.frombuffer(await request.read(), dtype=np.float32)
-        text = await asyncio.get_running_loop().run_in_executor(calls, heard, samples)
-        return web.json_response({"text": text})
-
     application = web.Application(client_max_size=64 * 1024 * 1024)
     application.router.add_post("/transcribe", transcribe)
-    application.router.add_post("/hear", hear)
     application.on_cleanup.append(lambda _: asyncio.to_thread(pool.shutdown))
-    application.on_cleanup.append(lambda _: asyncio.to_thread(calls.shutdown))
     return application
 
 
 def fetch() -> None:
-    """Download Parakeet and a Meet call's Smart Turn (into the Hugging
-    Face cache) and Kokoro's files (into `settings.tts_model_dir`); a file
-    already there is kept."""
+    """Download Parakeet (into the Hugging Face cache) and Kokoro's files
+    (into `settings.tts_model_dir`); a file already there is kept."""
     folder = Path(settings.tts_model_dir).expanduser()
     folder.mkdir(parents=True, exist_ok=True)
     for name in KOKORO_FILES:
@@ -124,11 +108,6 @@ def fetch() -> None:
             tmp.replace(folder / name)
     print(f"fetching {settings.asr_model}")
     _asr()
-    from huggingface_hub import hf_hub_download
-
-    from core import call
-
-    hf_hub_download(*call.SMART_TURN)
     print("the models are in place")
 
 

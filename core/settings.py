@@ -152,6 +152,32 @@ OPENAI_PRICES: dict[str, OpenAIPrice] = {
         checked=date(2026, 10, 3),
     ),
 }
+
+
+@dataclass(frozen=True)
+class GeminiPrice:
+    """US dollars per million tokens for a Gemini model, by modality, as
+    https://ai.google.dev/gemini-api/docs/pricing lists them on the paid
+    tier, and the day they were checked. Thinking is billed as text out."""
+
+    text_in: float
+    audio_in: float
+    text_out: float
+    audio_out: float
+    checked: date
+
+
+# A Meet call's Live model and the model that summarises a call
+# (docs/plans/gemini-live.md). Each Live turn bills its whole context, which
+# `CALL_CONTEXT` bounds by compression. `gemini-3.1-pro-preview`'s rates
+# hold to 200K input tokens; past that, $4.00 in and $18.00 out.
+GEMINI_PRICES: dict[str, GeminiPrice] = {
+    "gemini-3.8-live": GeminiPrice(0.75, 3.00, 4.50, 12.00, date(2026, 11, 5)),
+    "gemini-3.1-pro-preview": GeminiPrice(2.00, 2.00, 12.00, 12.00, date(2026, 11, 5)),
+}
+CALL_CONTEXT = 32_000  # tokens: a Live session's context is compressed past this
+CALL_OUTPUT_MOST = 8_000  # tokens a Live turn is taken to say at most, for its estimate
+
 # Tier names the API accepts for a priced tier.
 OPENAI_TIER_ALIASES: dict[str, str] = {"priority": "fast"}
 
@@ -513,6 +539,18 @@ class Settings:
         )
     )
     operator_name: str = field(default_factory=lambda: _env("VALOR_OPERATOR_NAME", "Tom Counsell"))
+    # A call speaks through Gemini Live in one of its voices, and Gemini
+    # summarises it (docs/plans/gemini-live.md). The call is saved in Yudame
+    # Tools' meeting store, whose app backs it up to Drive.
+    call_model: str = field(default_factory=lambda: _env("VALOR_CALL_MODEL", "gemini-3.8-live"))
+    call_voice: str = field(default_factory=lambda: _env("VALOR_CALL_VOICE", "Charon"))
+    summary_model: str = field(default_factory=lambda: _env("VALOR_SUMMARY_MODEL", "gemini-3.1-pro-preview"))
+    meetings_store: str = field(
+        default_factory=lambda: _env(
+            "VALOR_MEETINGS_STORE",
+            str(Path.home() / "Library" / "Application Support" / "YudameTools" / "Meetings"),
+        )
+    )
 
     # -- tunables -------------------------------------------------------------
     # Bytes per token for the gateway's input estimate, the worst case a
@@ -559,6 +597,13 @@ class Settings:
         directory, which the gateway sends upstream on the OpenAI route.
         Absent, the route forwards the turn's own key."""
         return str(Path(self.pg_passfile).parent / "openai-key")
+
+    @property
+    def google_keyfile(self) -> str:
+        """The Gemini API key (`GOOGLE_API_KEY=`) a call speaks and is
+        summarised with, in the kernel key directory, written by `python -m
+        core google-key`."""
+        return str(Path(self.pg_passfile).parent / "google-key")
 
     @property
     def sentry_dsn_file(self) -> str:

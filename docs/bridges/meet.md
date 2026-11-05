@@ -2,9 +2,10 @@
 
 Valor in a Google Meet call as itself (docs/plans/meet.md): asked for in a
 group chat, it posts the link in that thread, joins ready on the topic,
-listens to each person apart, answers aloud when it is addressed, posts
-written answers in the call's chat with a copy in the thread, and when the
-call ends the asking chat sends the full summary there as a file.
+speaks through Gemini Live (docs/plans/gemini-live.md) when it is
+addressed, posts written answers in the call's chat with a copy in the
+thread, and when the call ends Gemini summarises the recording and the
+asking chat sends that summary there as a file.
 
 **Status.** Built: `meet.join` (`tools/meet.py`), the call session and its
 end (`core/call.py`), the call's process (`python -m core call SESSION`),
@@ -30,18 +31,20 @@ against a new Meet with a second device of Valor's account
   the meeting code) and reports the link to the asking session, which
   posts it in the thread, then starts the call's process.
 - **The call's process** holds `meet:call:<session>` and
-  `run:<session>`; its gateway meters the front model and the worker on
-  the call session. It hears each person apart (Silero VAD, Smart Turn
-  v3, Parakeet through the voice process's `/hear`), asks `meet.speak`
-  whether to answer each turn (with one other person in the call, it
-  answers every turn unasked), drafts with the front model (a Claude Code
-  session on the light seat, streaming, no tools, in a temporary home of
-  its own, never the call session's task directory, which the kernel's
-  provisioning removes: `ASK:` and `DECIDED:` lines ask the worker and
-  record Tom's decision), voices with Kokoro,
-  and asks the worker (a fresh `call` turn in the session's checkout) what
-  needs looking up. The person answered talking over Valor stops it.
-  A call that fails writes its traceback to `meet.log`.
+  `run:<session>`. Everyone's audio is mixed to 16 kHz and streamed to one
+  Gemini Live session (`settings.call_model`, voice `settings.call_voice`,
+  the key in `google-key`), with notes that ask for no reply: who is
+  speaking, who is here (with one other person, all they say is to Valor),
+  and the worker's answers. Live decides when Valor is addressed and
+  speaks; its tools ask the worker (a fresh `call` turn in the session's
+  checkout, on the call's gateway), post, read the open decisions and
+  record Tom's read-backs. Each Live turn is one `meet.say`, its audio
+  held until released and settled with Live's transcript of what played;
+  a typed line is answered in the chat, never aloud. Speech over Valor
+  cuts him off. Each turn's usage is charged by modality. A Live session
+  that goes away is resumed; two failed reconnects post one line and
+  leave. "Valor, leave" from Tom is matched in Live's transcript. A call
+  that fails writes its traceback to `meet.log`.
 - **The page** (`bridges/meet/`): headless Chrome on the call profile
   (a plain Chrome left open on it is quit first; another call's ends this
   one, naming its pid), muted,
@@ -50,10 +53,16 @@ against a new Meet with a second device of Valor's account
   `127.0.0.1` is refused from Meet's page otherwise. Each of Meet's media
   connections writes its state to `meet.log` ("media connection 2:
   connected"): audio, the call's chat and who sends which stream come
-  over them; who is in the call does not.
-- **After the call**, `valor-record call <code>` reads its transcript a
-  page at a time; the asking session writes `call-<code>.md` and sends it
-  in the thread with at most two lines beside it.
+  over them; who is in the call does not. Live's speech is streamed into
+  the virtual microphone a chunk at a time (`valorStream`) and stopped at
+  once (`valorStop`, which says how much played).
+- **After the call**, the recording (two channels, Valor and the others)
+  goes to Gemini (`settings.summary_model`, through the Files API) with
+  the transcript; the call is moved whole into Yudame Tools' meetings
+  (`settings.meetings_store`) in the app's own files, which the app backs
+  up to Drive, and `call-<code>.md`, Gemini's summary, beside them. The
+  asking session sends that file unchanged in the thread with at most two
+  lines beside it. `valor-record call <code>` reads the transcript.
 
 ## Setup per Mac
 
@@ -71,9 +80,8 @@ whose profile another call's Chrome holds (Playwright's
 `--remote-debugging-pipe` on its command line) ends saying so, and leaves
 it running.
 
-Also per Mac: the voice job running with `/hear` (a rollout restarts it
-when the change reaches `tools/voice.py`); `gws` signed in as Valor; and
-Smart Turn v3 fetched with the voice models (`python -m tools.voice fetch`).
+Also per Mac: `google-key` (`python -m core google-key`); `gws` signed in
+as Valor; and Yudame Tools signed in to Google, which backs the calls up.
 
 ## Not here
 

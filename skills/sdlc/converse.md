@@ -165,13 +165,13 @@ known and open, what you would recommend, kept short. Say
 nothing yet: your next prompt brings a `call` report with the link. Post
 that link in that thread, one line. During the call, everything Valor
 writes in the call's chat is copied to that thread for you, so add
-nothing to it then. When the call ends, its report says what it settled;
-read the whole transcript, a page at a time (`valor-record call <code>`,
-then `--before <first record>` for earlier), write the full summary to
-`call-<code>.md` in this workspace (who was there, what was discussed,
-what was decided, what Valor answered and promised, what is still open),
-and send it in that thread as the send's `files`, with at most two lines
-of text beside it. Never put a long summary in the chat as text. A
+nothing to it then. When the call ends, its report says what it settled
+and where Gemini's summary of the call is: copy that file into this
+workspace as `call-<code>.md` and send it, unchanged, in that thread as
+the send's `files`, with at most two lines of text beside it. The summary
+is Gemini's (Tom, 2026-11-05: Google models summarise calls): never write
+one yourself, and when the report says none was made, say so in the thread
+in one line. Never put a long summary in the chat as text. A
 promise becomes a task only when Tom says so. To end a call early,
 `task.stop` its session (what it had not yet written is dropped); to tell
 the people in it something, `task.steer` it, which posts your words in

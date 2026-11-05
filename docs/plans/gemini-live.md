@@ -18,7 +18,7 @@ amends: docs/plans/meet.md (items 4, 5, 7)
 - The Gemini API key, not Vertex.
 - Reconnect, otherwise leave; this covers all calls.
 
-**Premise.** The vault `.env`'s `GOOGLE_API_KEY` (1Password `m-valor`) is paid tier on `gen-lang-client-0998888049`, and it reaches `gemini-3.8-live`, `gemini-2.5-flash-native-audio-*` and `gemini-3.1-pro-preview`. Today a reply takes 4 to 10 s.
+**Premise.** The vault `.env`'s `GOOGLE_API_KEY` (1Password `m-valor`) is paid tier on Valor's AI Studio project, and it reaches `gemini-3.8-live`, `gemini-2.5-flash-native-audio-*` and `gemini-3.1-pro-preview`. Today a reply takes 4 to 10 s.
 
 ## Built
 

@@ -60,6 +60,8 @@ openai-key [--name NAME]       copy the vault's NAME (default OPENAI_API_KEY)
                                into the kernel's OpenAI key file (mode 600),
                                replacing the key there; prints written,
                                kept, or missing, never a value
+google-key [--name NAME]       the same for the Gemini key a Meet call speaks
+                               and is summarised with (default GOOGLE_API_KEY)
 github-key                     copy GITHUB_PUSH_TOKEN from the vault .env into
                                the kernel's github-keys file (mode 600), the
                                same way
@@ -173,7 +175,6 @@ from core import (
     intake,
     judgement,
     judgement_sites,
-    judgement_tasks,
     ledger,
     machine,
     memory,
@@ -416,9 +417,10 @@ async def _run_task(task_id: str) -> str:
 
 async def _call(session_id: str) -> str:
     """A Meet call's process (`core/call.py`), spawned by `meet.join`: the
-    page (`bridges/meet`), the ears, the voice, `meet.speak`, the front
-    model and the worker, on the call's own gateway. It holds
-    `meet:call:<session>` and `run:<session>` while it lives."""
+    page (`bridges/meet`), its Gemini Live session (the key from
+    `python -m core google-key`), and the worker, on the call's own
+    gateway. It holds `meet:call:<session>` and `run:<session>` while it
+    lives, the holder of its metered Gemini calls."""
     sentry.init("call")
 
     from bridges.meet import Page, Socket
@@ -440,10 +442,10 @@ async def _call(session_id: str) -> str:
         await ledger.append(holder, session_id, "call.started", {"machine": settings.machine})
         from core import spending
 
-        spending.HOLDER.set(f"run:{session_id}")  # `meet.speak`'s judgement calls are this run's
+        spending.HOLDER.set(f"run:{session_id}")  # its Gemini calls are this run's
         try:
-            judgement_port = port()
-        except (credentials.MissingKey, ValueError) as exc:
+            key = credentials.read_key(settings.google_keyfile, call.GOOGLE_KEY, "google-key")
+        except credentials.MissingKey as exc:
             await call.end(holder, session_id, f"Valor's call process could not start: {exc}")
             return str(exc)
         gateway = Gateway(credential=ClaudeLogin())
@@ -475,18 +477,8 @@ async def _call(session_id: str) -> str:
             async with await db.connect(dsn) as conn:
                 return bool((await tasks.brief(conn, session_id)).workspace)
 
-        from kokoro_onnx import Kokoro
-
-        folder = Path(settings.tts_model_dir).expanduser()
-        kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
-        light = resolve_model("light")
         the = call.Call(
-            session_id, info, Page(settings.meet_profile), call.Ears.load(call.words), dsn=dsn,
-            voice=lambda text: kokoro.create(text, voice=settings.tts_voice, lang="en-us"),
-            judge=lambda inputs, turn: judgement_port.judge(
-                judgement_tasks.MEET_SPEAK, inputs, task_id=session_id, ref={"turn_id": turn}, dsn=dsn),
-            front=call.Front.claude(gateway.issue(session_id, "front"), model=light,
-                                    project=(b.project or {}).get("name") or "", prep=info.get("prep") or ""),
+            session_id, info, Page(settings.meet_profile), dsn=dsn, gemini=call.Gemini(key),
             worker=worker, worker_ready=ready, project=(b.project or {}).get("name"),
         )  # fmt: skip
         socket = Socket(the.hear, the.chat, the.people)
@@ -1083,6 +1075,16 @@ def _sync(args) -> bool:
         except FileNotFoundError:
             raise SystemExit(f"no vault .env at {settings.vault_env}") from None
         print(f"{OPENAI_KEY_NAME} (from {args.name}): {status[OPENAI_KEY_NAME]}")
+    elif args.command == "google-key":
+        from core.call import GOOGLE_KEY
+
+        try:
+            status = credentials.copy_keys(
+                settings.vault_env, settings.google_keyfile, [GOOGLE_KEY], {GOOGLE_KEY: args.name}
+            )
+        except FileNotFoundError:
+            raise SystemExit(f"no vault .env at {settings.vault_env}") from None
+        print(f"{GOOGLE_KEY} (from {args.name}): {status[GOOGLE_KEY]}")
     elif args.command == "github-key":
         try:
             status = credentials.copy_keys(
@@ -1244,6 +1246,7 @@ def main() -> None:
     sub.add_parser("settings")
     sub.add_parser("judgement-keys")
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")
+    sub.add_parser("google-key").add_argument("--name", default="GOOGLE_API_KEY")
     sub.add_parser("github-key")
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("cases")

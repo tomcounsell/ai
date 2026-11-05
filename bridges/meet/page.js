@@ -1,7 +1,7 @@
 // Valor's own page file, loaded after Attendee's payloads (vendor/): the
-// call process (core/call.py) plays speech through the payload's virtual
-// microphone, stops it at once on a barge-in, and reads where the page
-// stands. Speech goes out only through the microphone: Chrome runs muted,
+// call process (core/call.py) streams Gemini Live's speech through the
+// payload's virtual microphone, stops it at once when it is cut, and reads
+// where the page stands. Speech goes out only through the microphone: Chrome runs muted,
 // so nothing plays on the Mac's speakers.
 (() => {
     if (!window.ws || !window.ws.ws) return;
@@ -25,14 +25,17 @@
     };
     window.RTCPeerConnection.prototype = Made.prototype;
 
-    let playing = null;
-
-    // Int16 PCM, base64, at `rate`: resolves once it played out or was
-    // stopped, with the seconds played.
-    window.valorPlay = (b64, rate) => new Promise((resolve) => {
+    // Gemini Live's speech, a chunk at a time: each Int16 PCM chunk
+    // (base64, at `rate`) starts where the last one ends, so a turn plays
+    // without gaps. `fresh` starts a new turn's count of seconds played.
+    // Resolves with the seconds still queued to play.
+    let sources = [];
+    let next = 0;
+    window.valorStream = (b64, rate, fresh) => {
         const out = window.botOutputManager;
         out._createSourceAudioTrack();
         const ctx = out.audioContext;
+        if (fresh) sources = [];
         const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
         const pcm = new Int16Array(bytes.buffer);
         const buffer = ctx.createBuffer(1, pcm.length, rate);
@@ -41,28 +44,29 @@
         const source = ctx.createBufferSource();
         source.buffer = buffer;
         source.connect(out.gainNode);
-        let started = null;
-        const finish = (cut) => {
-            if (playing !== stop) return;
-            playing = null;
-            const played = started === null ? 0 : Math.min(ctx.currentTime - started, buffer.duration);
-            resolve({ played, total: buffer.duration, cut });
-        };
-        const stop = () => {
-            try { source.stop(); } catch (e) { /* never started */ }
-            finish(true);
-        };
-        if (playing) playing();
-        playing = stop;
-        source.onended = () => finish(false);
-        ctx.resume().then(() => {
-            if (playing !== stop) return;
-            started = ctx.currentTime;
-            source.start();
+        return ctx.resume().then(() => {
+            const at = Math.max(ctx.currentTime, next);
+            source.start(at);
+            next = at + buffer.duration;
+            sources.push({ source, at, duration: buffer.duration });
+            return next - ctx.currentTime;
         });
-    });
+    };
 
-    window.valorStop = () => { if (playing) playing(); };
+    // Stops the turn at once, everything queued with it; the seconds of it
+    // that played.
+    window.valorStop = () => {
+        const ctx = window.botOutputManager && window.botOutputManager.audioContext;
+        if (!ctx) return 0;
+        let played = 0;
+        for (const s of sources) {
+            played += Math.min(Math.max(ctx.currentTime - s.at, 0), s.duration);
+            try { s.source.stop(); } catch (e) { /* never started */ }
+        }
+        sources = [];
+        next = 0;
+        return played;
+    };
 
     // Where the page stands, and who is in the call.
     window.valorState = () => {

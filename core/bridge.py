@@ -44,9 +44,10 @@ impossible send at request time without importing a bridge:
   `chat.postMessage`, which truncates past 40,000); 1 GB per file (its
   file upload limit).
 - Local: none. The local chat page shows any text and no files.
-- Meet: 500 characters a post, the same cap for a sentence spoken; no files.
-  A call's own process (`core/call.py`) performs both, never a bridge's
-  outbox, and turns are not offered them (docs/plans/meet.md).
+- Meet: 500 characters a post; no files. A spoken turn is Gemini Live's
+  audio, so `meet.say` carries the turn it gates, not text. A call's own
+  process (`core/call.py`) performs both, never a bridge's outbox, and
+  turns are not offered them (docs/plans/meet.md, docs/plans/gemini-live.md).
 """
 
 import asyncio
@@ -272,8 +273,14 @@ async def _refuse_local(conn, action: broker.Action) -> str | None:
     return None
 
 
+async def _refuse_say(conn, action: broker.Action) -> str | None:
+    """A call's spoken turn: the id of the Live turn whose audio it gates."""
+    turn = action.payload.get("turn")
+    return None if isinstance(turn, str) and turn.strip() else 'a say names its turn: {"turn": "<id>"}'
+
+
 async def _refuse_meet(conn, action: broker.Action) -> str | None:
-    """A call's post or spoken sentence: text within `LIMITS["meet"]`."""
+    """A call's post: text within `LIMITS["meet"]`."""
     if not _strings(action.payload, ("text",)):
         return TEXT_SHAPE
     text = (action.payload.get("text") or "").strip()
@@ -383,7 +390,7 @@ DECLARED: dict[str, Declared] = {
         check=_refuse_local,
     ),
     "meet.say": Declared(
-        action_type="meet.say", effect_class="act", usage=None, owner="meet", check=_refuse_meet
+        action_type="meet.say", effect_class="act", usage=None, owner="meet", check=_refuse_say
     ),
     "meet.send_message": Declared(
         action_type="meet.send_message", effect_class="act", usage=None, owner="meet", check=_refuse_meet

@@ -18,6 +18,9 @@ from math import ceil
 
 from core import ledger, tasks
 from core.settings import (
+    CALL_CONTEXT,
+    CALL_OUTPUT_MOST,
+    GEMINI_PRICES,
     JUDGEMENT_PRICES,
     OPENAI_LOOPING_TOOLS,
     OPENAI_PRICES,
@@ -381,6 +384,56 @@ def openai_cost(usage: dict, tier: str | None, tool_calls: dict, price: dict) ->
     charged = sum(_per_mtok(n * rates[k]) for k, n in tokens.items())
     charged += sum(n * tool_fee(f) for f, n in tool_calls.items())
     return charged, unpriced
+
+
+# -- Gemini (a Meet call's Live session and its summary) -------------------------
+
+
+def gemini_price(model: str) -> dict:
+    """Micro-dollars per million tokens for a Gemini model, by modality; a
+    model absent from `GEMINI_PRICES` takes every entry's highest rates,
+    marked `unpriced`."""
+    entry = GEMINI_PRICES.get(model)
+    known = [entry] if entry is not None else list(GEMINI_PRICES.values())
+    rates = {
+        "text_in": max(p.text_in for p in known),
+        "audio_in": max(p.audio_in for p in known),
+        "text_out": max(p.text_out for p in known),
+        "audio_out": max(p.audio_out for p in known),
+    }
+    return {**{k: round(v * 1_000_000) for k, v in rates.items()}, "unpriced": entry is None}
+
+
+def gemini_cost(usage: dict, price: dict) -> int:
+    """What one Gemini response cost, from its `usage_metadata` (as JSON):
+    each modality's tokens at its rate, thinking as text out, and tokens
+    the details leave unlisted at the side's audio rate, the higher one."""
+
+    def side(details, total, rates) -> int:
+        listed = 0
+        units = 0
+        for d in details or []:
+            n = int(d.get("token_count") or 0)
+            listed += n
+            units += n * rates[d.get("modality") == "AUDIO"]
+        return units + max(0, int(total or 0) - listed) * rates[True]
+
+    units = side(usage.get("prompt_tokens_details"), usage.get("prompt_token_count"),
+                 {True: price["audio_in"], False: price["text_in"]})  # fmt: skip
+    units += side(usage.get("response_tokens_details"), usage.get("response_token_count"),
+                  {True: price["audio_out"], False: price["text_out"]})  # fmt: skip
+    units += int(usage.get("thoughts_token_count") or 0) * price["text_out"]
+    return _per_mtok(units)
+
+
+def gemini_worst_case(
+    price: dict, input_tokens: int = CALL_CONTEXT, output_tokens: int = CALL_OUTPUT_MOST
+) -> int:
+    """A Gemini response charged when no usage came back: its input as
+    audio in and its output as audio out, the higher rates. By default a
+    Live turn: its whole context, which compression keeps under
+    `CALL_CONTEXT`, and `CALL_OUTPUT_MOST` out."""
+    return _per_mtok(input_tokens * price["audio_in"] + output_tokens * price["audio_out"])
 
 
 async def open_call(conn, task_id: str, call: dict) -> str:

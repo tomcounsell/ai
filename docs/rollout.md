@@ -86,7 +86,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `export VALOR_PGPORT=5433` to the profile, and set `VALOR_PGPORT` when
    step 9 generates the jobs.
 5. **Keys**, copied from the Cowboy without printing them:
-   `for K in claude-token github-keys judgement-keys openai-key mail-keys sentry-dsn telegram-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; chmod 600 ~/.config/valor-kernel/$K; done`.
+   `for K in claude-token github-keys judgement-keys openai-key google-key mail-keys sentry-dsn telegram-keys; do ssh valorengels@valor-the-cowboy cat .config/valor-kernel/$K > ~/.config/valor-kernel/$K; chmod 600 ~/.config/valor-kernel/$K; done`.
    Never `slack-keys`: it holds the Cowboy's own Slack app, whose Socket
    Mode token must not run on two bridges. Each Mac has its own (step 9).
    `mail-keys` comes only this way: the mailbox's app password is in no
@@ -162,7 +162,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `~/Desktop/Valor/zshenv.sh`, and other Postgres versions, which are the
    machine's, not the old system's.
 9. **The jobs.** First the voice models, once per Mac (about 1 GB:
-   Parakeet and a call's Smart Turn into `~/.cache/huggingface`, Kokoro, which the present
+   Parakeet into `~/.cache/huggingface`, Kokoro, which the present
    skill's `tts.py` speaks with, into `~/.cache/kokoro-onnx`; Handy's own
    models folder is not used): `$PY -m tools.voice fetch`.
    Then, at the Mac itself, `$PY -m core permissions`: it builds
@@ -242,11 +242,15 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    job): over plain ssh the login keychain is locked, Chrome cannot read
    the profile's cookies and drops them, signing it out (the Captain's,
    2026-11-03). Copying Google's cookies in from another profile does not
-   sign it in: Google signed the copy out within a minute. A call needs the voice
-   job with `/hear` (a rollout restarts it when the change reaches it),
-   Smart Turn v3 (8 MB,
-   which `tools.voice fetch` now fetches too) and `gws` signed in as Valor
-   for a new Meet.
+   sign it in: Google signed the copy out within a minute. A call speaks
+   through Gemini Live (docs/plans/gemini-live.md): it needs `google-key`
+   (step 5, or `$PY -m core google-key`, which copies the vault `.env`'s
+   `GOOGLE_API_KEY`, the paid key from 1Password's `m-valor`), the
+   dependencies (`uv sync`, for `google-genai`), and `gws` signed in as
+   Valor for a new Meet. Its recording, transcript and notes go into Yudame
+   Tools' meetings (`~/Library/Application Support/YudameTools/Meetings`),
+   which the app backs up to Drive: Yudame Tools installed and, in its
+   Meetings settings, signed in to Google as valor@yuda.me.
    A kernel crash-looping after a rollout or an update: take the checkout
    back to the commit it rolled from (`from` on its `rollout.restarting`
    row), `git -C ~/src/ai reset --keep <from>`, then

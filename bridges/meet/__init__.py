@@ -6,7 +6,7 @@ headless and muted, camera off. Attendee's page payloads (`vendor/`, ELv2,
 at Attendee 5acfb99, unmodified, with protobuf.js and pako) read the call:
 each person's audio apart, the call's chat, and who is in it; they give
 the page a virtual microphone and type into the chat. `page.js`, ours,
-plays speech into that microphone, stops it at once, and says where the
+streams speech into that microphone, stops it at once, and says where the
 page stands.
 
 The payloads send what they read over a WebSocket to `127.0.0.1`
@@ -267,16 +267,16 @@ class Page:
     async def post(self, text: str) -> bool:
         return bool(await self.evaluate("(t) => window.sendChatMessage(t)", text))
 
-    async def play(self, pcm: np.ndarray, rate: int) -> dict[str, Any]:
-        """Speak `pcm` (float32 mono at `rate`); returns `played`, `total`
-        (seconds) and `cut`, once it played out or `stop` cut it."""
-        ints = (np.clip(pcm, -1, 1) * 32767).astype("<i2").tobytes()
-        return await self.evaluate(
-            "([b, r]) => window.valorPlay(b, r)", [base64.b64encode(ints).decode(), rate]
-        )
+    async def stream(self, pcm: bytes, rate: int, fresh: bool) -> float:
+        """Queue `pcm` (16-bit mono at `rate`) after what is playing;
+        `fresh` starts a new turn. The seconds still queued."""
+        return float(await self.evaluate(
+            "([b, r, f]) => window.valorStream(b, r, f)", [base64.b64encode(pcm).decode(), rate, fresh]
+        ))  # fmt: skip
 
-    async def stop(self) -> None:
-        await self.evaluate("window.valorStop()")
+    async def stop(self) -> float:
+        """Stop the turn at once; the seconds of it that played."""
+        return float(await self.evaluate("window.valorStop()") or 0.0)
 
     async def leave(self) -> None:
         button = self.page.locator('button[aria-label="Leave call"]')

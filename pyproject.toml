@@ -5,6 +5,7 @@ description = "Valor: one AI employee, corrigible by construction."
 requires-python = ">=3.14"
 dependencies = [
     "aiohttp>=3.12",
+    "google-genai>=1.0",
     "kokoro-onnx>=0.6.1",
     "onnx-asr[cpu,hub]>=0.12",
     "playwright>=1.64.1",

@@ -1,183 +1,81 @@
-"""Valor in a real Google Meet call (docs/plans/meet.md, the live checks).
+"""Valor in a real Google Meet call on Gemini Live (docs/plans/gemini-live.md,
+the live checks).
 
 Runs only when `VALOR_LIVE=1` and `VALOR_MEET_LIVE=1`, on a Mac whose call
 profile is signed in as Valor, with `gws` signed in as Valor (it makes a
-new Meet), Kokoro's and Parakeet's files fetched (`python -m tools.voice
-fetch`), and Claude Code signed in (the front model's gateway uses that
-login, or a kernel turn's own gateway when run in one). A second device of Valor's own account, from a copy of the
-profile, joins the call, asks aloud and in the chat, and listens. It
-checks: the profile opens Meet as Valor; a new open Meet is joined without
-knocking; the roster names people with no account; the gap from the end
-of a spoken question to Valor's first sound at the other device; the
-answer typed in the call's chat; each written answer's thread copy.
-`meet.speak` is a rule here (a turn naming Valor is his to answer) and the
-worker a stub: both are tested apart, and neither is what is live here.
+new Meet), Kokoro's files fetched (the other devices' voices), and the vault
+`.env` holding the Gemini key (`VALOR_LIVE_GOOGLE_KEY`, default
+`GOOGLE_API_KEY`). The call runs as the kernel runs it (`python -m core
+call`'s `_call`). Two other devices of Valor's own account, from copies of
+the profile, join it: one asks aloud and in the chat, the other talks over
+the call as a third person would. The gap from the end of each spoken
+question to Valor's first sound at the asking device is measured, the way
+the cascaded pipeline's was (`page.play` resolving to the first frame), so
+the two compare. The worker is a stub turn.
 """
 
 import asyncio
 import json
 import os
 import shutil
-import tempfile
+import statistics
+import sys
 import time
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from aiohttp import web
 
 from bridges.meet import Page, Socket
-from core import call, db, intake, tasks
+from core import call, credentials, db, intake, ledger, runs, tasks
 from core.settings import settings
 from tests import bridges
 
 pytestmark = [
-    pytest.mark.spend(usd=0.02),
+    pytest.mark.spend(usd=0.50),
     pytest.mark.skipif(
         os.environ.get("VALOR_LIVE") != "1" or os.environ.get("VALOR_MEET_LIVE") != "1",
         reason="a live Meet call: VALOR_LIVE=1 and VALOR_MEET_LIVE=1",
     ),
 ]
-REPLY_GAP_MOST_S = 10.0
-CALL_OUTLIVES_S = 240  # past 3 min 35 s, when Tom's call went silent (the Captain, 2026-11-05)
+GAP_MEDIAN_MOST_S = 2.0  # against the cascaded pipeline's 4 to 10 s (2026-11-05)
+LONG_S = 12 * 60  # past a Live connection's life, so the session is resumed
+LOOKED_UP = "The import's error rate is 0.4 percent."
 
 
-def test_valor_joins_a_new_meet_hears_a_question_answers_aloud_and_in_the_chat(dsn, tmp_path):
-    from kokoro_onnx import Kokoro
-
-    from core.gateway import ClaudeLogin, Gateway
-    from tools import voice
-
-    profile = settings.meet_profile
-    chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
-    seen: dict = {"valor_roster": [], "audio_at": None, "frames": 0, "chat": []}
-
-    async def go():
-        vapp = web.AppRunner(voice.app())
-        await vapp.setup()
-        vsite = web.TCPSite(vapp, "127.0.0.1", 0)
-        await vsite.start()
-        port = vsite._server.sockets[0].getsockname()[1]
-        with bridges.operator(tmp_path, meet_profile=profile, voice_port=port):
-            (tmp_path / "projects" / "acme.toml").write_text(
-                f'name = "acme"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\nchats = ["slack:{chat}"]\n'
-            )
-            async with await db.connect(dsn) as conn:
-                await intake.receive(conn, intake.Inbound(
-                    channel="slack", chat_id=chat, chat_kind="group", message_id="1790000000.000100",
-                    sender_id="T0ABC/ULOGAN", sender_name="Logan", sent_at="2026-10-31T02:00:00Z",
-                    text="Can we hop on a call about the launch?"))  # fmt: skip
-                await intake.bind(conn)
-                asking = await tasks.brief(conn, await intake.chat_session(conn, "slack", chat))
-            url, code = await meet_space()
-            async with await db.connect(dsn) as conn, conn.transaction():
-                session = await call.begin(
-                    conn, asking, url=url, code=code, reply_to="1790000000.000100", topic_id=None,
-                    prep="Logan wants to talk about the launch: the import shipped Tuesday, the launch is Monday.",
-                    effect_key=uuid.uuid4().hex,
-                )  # fmt: skip
-            async with await db.connect(dsn) as conn:
-                info = await call.marker(conn, session)
-            gateway = Gateway(dsn, credential=ClaudeLogin())
-            await gateway.start()
-            # In a kernel turn, the turn's own gateway; else this Mac's Claude login.
-            front_url = os.environ.get("ANTHROPIC_BASE_URL") or gateway.issue(session, "front")
-            folder = Path(settings.tts_model_dir).expanduser()
-            kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
-            the = call.Call(
-                session, info, Page(profile), call.Ears.load(transcribe), dsn=dsn,
-                voice=lambda text: kokoro.create(text, voice=settings.tts_voice, lang="en-us"),
-                judge=rule, front=call.Front.claude(front_url, model="claude-haiku-5-5",
-                                                    project="acme", prep=info["prep"]),
-                worker=worker, worker_ready=ready, project="acme",
-            )  # fmt: skip
-
-            def people(update):
-                seen["valor_roster"] += update.get("newUsers") or []
-                the.people(update)
-
-            the.socket = Socket(the.hear, the.chat, people)
-            await the.socket.start()
-            calling = asyncio.create_task(the.run())
-            other = Path(tempfile.mkdtemp(prefix="meet-other-"))
-            try:
-                await second_device(url, kokoro, other, seen)
-                the.leave("the live check is over")
-                await asyncio.wait_for(calling, 120)
-            finally:
-                shutil.rmtree(other, ignore_errors=True)
-                await the.page.close()
-                await the.socket.close()
-                await gateway.close()
-                await vapp.cleanup()
-            return session
-
-    session = asyncio.run(go())
-    rows = asyncio.run(bridges.rows(dsn, session))
-    print(f"live: reply gap {seen['gap']:.2f} s; Valor's frames at the other device {seen['frames']}")
-    # The profile opened Meet as Valor, and the new open Meet let him in at once.
-    assert any(
-        r["type"] == "effect.outcome" and r["payload"]["result"].get("posted") == call.JOIN_LINE for r in rows
-    )
-    # Meet's roster carries a display name and no account.
-    assert seen["valor_roster"] and not any("@" in json.dumps(u) for u in seen["valor_roster"])
-    # Valor answered the spoken question aloud, heard at the other device.
-    assert seen["frames"] > 0 and seen["gap"] < REPLY_GAP_MOST_S
-    assert any(r["type"] == "effect.outcome" and r["payload"]["result"].get("spoken_text") for r in rows)
-    # The typed question got a typed answer, seen at the other device, and a thread copy.
-    assert len(seen["chat"]) >= 1
-    copies = [
-        r["payload"]
-        for r in rows
-        if r["type"] == "effect.held" and r["payload"]["action_type"] == "slack.send_message"
-    ]
-    assert copies and all(c["payload"]["reply_to"] == "1790000000.000100" for c in copies)
-
-
-def test_the_kernels_call_process_joins_hears_and_answers_while_its_session_is_provisioned(
+def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_outlasts_a_reconnect(
     dsn, tmp_path, monkeypatch
 ):
-    """The call as the kernel runs it (`python -m core call`'s `_call`):
-    its own gateway, judge, Kokoro and front model, the call profile, and
-    the session's task directory removed under it as the kernel's
-    provisioning removes it (the Captain, 2026-11-05). A second device asks
-    aloud and hears Valor answer. Then the worker's turn runs to its end
-    through `runs.run_turn` on the call's gateway (its harness a stub), and
-    past `CALL_OUTLIVES_S` Valor still answers aloud: a worker turn's end
-    retired the front model's token, and Valor went silent 3 min 35 s into
-    Tom's call (the Captain, 2026-11-05). A stop ends the call."""
-    import sys
-
     from kokoro_onnx import Kokoro
 
     from core import __main__ as kernel
-    from core import ledger, runs
-    from core.__main__ import _call
-    from tools import voice
 
     def turn_for(prompt, resume, b):
         def build(url, brief, turn_id):
             return runs.TurnCommand(argv=[sys.executable, "-c", "pass"], env={}, cwd=b.workspace, harness="stub",
-                                    parse=lambda out: {"text": "The launch is on Monday, 9 a.m."})  # fmt: skip
+                                    parse=lambda out: {"text": LOOKED_UP})  # fmt: skip
 
         return build
 
     monkeypatch.setattr(kernel, "_turn_for", turn_for)
-
+    keyfile = tmp_path / "keys" / "google-key"
+    name = os.environ.get("VALOR_LIVE_GOOGLE_KEY", "GOOGLE_API_KEY")
+    assert credentials.copy_keys(settings.vault_env, keyfile, [call.GOOGLE_KEY], {call.GOOGLE_KEY: name})[
+        call.GOOGLE_KEY
+    ] in ("written", "kept")
+    monkeypatch.setattr(type(settings), "google_keyfile", property(lambda _: str(keyfile)))
     chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
-    seen: dict = {"valor_roster": [], "audio_at": None, "frames": 0, "chat": []}
+    folder = Path(settings.tts_model_dir).expanduser()
+    kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
+    seen: dict = {"gaps": {}, "chat": [], "frames": []}
 
     async def go():
-        vapp = web.AppRunner(voice.app())
-        await vapp.setup()
-        vsite = web.TCPSite(vapp, "127.0.0.1", 0)
-        await vsite.start()
-        port = vsite._server.sockets[0].getsockname()[1]
-        # `_call` connects by `settings.dsn()`: the test database here.
-        with bridges.operator(tmp_path, meet_profile=settings.meet_profile, voice_port=port,
-                              database=settings.test_database):  # fmt: skip
+        # `_call` connects by `settings.dsn()`: the test database here. The asking
+        # device's display name is Valor's, so it stands in for Tom's.
+        with bridges.operator(tmp_path, meet_profile=settings.meet_profile, database=settings.test_database,
+                              operator_name="Valor Engels", meetings_store=str(tmp_path / "store" / "Meetings"),
+                              summary_model=os.environ.get("VALOR_LIVE_SUMMARY_MODEL", settings.summary_model)):  # fmt: skip
             (tmp_path / "projects" / "acme.toml").write_text(
                 f'name = "acme"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\nchats = ["slack:{chat}"]\n'
             )
@@ -195,61 +93,206 @@ def test_the_kernels_call_process_joins_hears_and_answers_while_its_session_is_p
                     prep="Logan wants to talk about the launch: the import shipped Tuesday, the launch is Monday.",
                     effect_key=uuid.uuid4().hex,
                 )  # fmt: skip
-            task_dir = Path(settings.work_dir) / session
-            task_dir.mkdir(parents=True)
-            calling = asyncio.create_task(_call(session))
-            await asyncio.sleep(1)
-            shutil.rmtree(task_dir)  # as `serve._provision` removes a task directory it finds
-            started = time.time()
             work = tmp_path / "worker-copy"
             work.mkdir()
             async with await db.connect(dsn) as conn:
                 await ledger.append(
                     conn, session, "workspace.provisioned", {"fields": {"workspace": str(work)}}
                 )
-
-            async def after_a_worker_turn(page):
-                asked = await ask_aloud(page, kokoro, "Valor, ask your worker to check the code: when is the launch?",
-                                        seen)  # fmt: skip
-                for _ in range(120):
-                    async with await db.connect(dsn) as conn:
-                        if any(r["type"] == "turn.ended" for r in await ledger.read(conn, session)):
-                            break
-                    await asyncio.sleep(1)
-                else:
-                    raise AssertionError(f"no worker turn ended (Valor's reply came after {asked:.1f} s)")
-                await asyncio.sleep(max(0.0, CALL_OUTLIVES_S - (time.time() - started)))
-                seen["gap_after"] = await ask_aloud(page, kokoro, "Valor, are you still there?", seen)
-                await asyncio.sleep(8)
-
-            folder = Path(settings.tts_model_dir).expanduser()
-            kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
-            other = Path(tempfile.mkdtemp(prefix="meet-other-"))
+            started = time.time()
+            calling = asyncio.create_task(kernel._call(session))
+            a, b = Device(tmp_path / "a", seen), Device(tmp_path / "b", seen)
             try:
-                await second_device(url, kokoro, other, seen, then=after_a_worker_turn)
-                async with await db.connect(dsn) as conn:
-                    await tasks.stop(conn, session, reason="the live check is over")
-                reason = await asyncio.wait_for(calling, 120)
+                await asyncio.sleep(15)  # Valor joins first
+                await a.join(url)
+                await asyncio.sleep(15)
+                seen["gaps"]["hello"] = await a.ask(kokoro, "Hello.")
+                await asyncio.sleep(6)
+                seen["gaps"]["question"] = await a.ask(
+                    kokoro, "Valor, what shipped this week, and when is the launch?"
+                )
+                await asyncio.sleep(8)
+                seen["typed"] = await a.typed("Valor, can you post the launch date here?")
+                seen["gaps"]["lookup"] = await a.ask(
+                    kokoro, "Valor, please have your worker look up the import's error rate in the code."
+                )
+                for _ in range(90):
+                    if any(LOOKED_UP in t for t in seen["chat"]):
+                        break
+                    await asyncio.sleep(1)
+                seen["looked_up"] = any(LOOKED_UP in t for t in seen["chat"])
+                await asyncio.sleep(4)
+                seen["barge_at"] = await a.cut_in(kokoro, "Valor, tell me in five or six sentences everything you "
+                                                  "know about this launch.", "Valor, stop. Wait a moment.")  # fmt: skip
+                await asyncio.sleep(6)
+                await b.join(url)
+                await asyncio.sleep(8)
+                seen["side_talk_frames"] = await b.side(kokoro, "Hey Sam, did you get the invoice from the printer "
+                                                        "yesterday? I need it for the books.", a)  # fmt: skip
+                await asyncio.sleep(3)
+                seen["over_at"] = await a.cut_in(
+                    kokoro,
+                    "Valor, tell me a story of five or six sentences about a rocket launch.",
+                    "Sam, could you grab me a coffee after this?",
+                    by=b,
+                )
+                await asyncio.sleep(10)
+                await b.leave()
+                while time.time() - started < LONG_S:
+                    await asyncio.sleep(30)
+                seen["gaps"]["after_reconnect"] = await a.ask(kokoro, "Valor, are you still there?")
+                await asyncio.sleep(8)
+                await a.ask(kokoro, "Valor, please leave the call now.", wait=False)
+                reason = await asyncio.wait_for(calling, 300)
             finally:
-                shutil.rmtree(other, ignore_errors=True)
-                await vapp.cleanup()
-            return session, reason
+                await a.close()
+                await b.close()
+            return session, asking.id, reason
 
-    session, reason = asyncio.run(go())
+    session, asking_id, reason = asyncio.run(go())
     rows = asyncio.run(bridges.rows(dsn, session))
-    print(
-        f"live: reply gap {seen['gap']:.2f} s, after the worker's turn {seen['gap_after']:.2f} s; "
-        f"Valor's frames at the other device {seen['frames']}; {reason}"
-    )
-    assert reason == "the call was stopped"
-    ended = next(r["id"] for r in rows if r["type"] == "turn.ended")
-    assert any(r["id"] > ended and r["type"] == "effect.outcome" and r["payload"]["result"].get("spoken_text")
-               for r in rows)  # fmt: skip
-    assert seen["gap_after"] < REPLY_GAP_MOST_S
-    assert any(
-        r["type"] == "effect.outcome" and r["payload"]["result"].get("posted") == call.JOIN_LINE for r in rows
-    )
-    assert seen["frames"] > 0 and seen["gap"] < REPLY_GAP_MOST_S
+    report = next(r["payload"]["text"] for r in asyncio.run(bridges.rows(dsn, asking_id))
+                  if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended"))  # fmt: skip
+    says = [
+        {**r["payload"]["result"], "at": r["at"].timestamp()}
+        for r in rows
+        if r["type"] == "effect.outcome" and "spoken_text" in (r["payload"]["result"] or {})
+    ]
+    for step in ("barge_at", "over_at"):  # the say that ended as the other voice spoke
+        w = seen[step]
+        w["cut"] = any(x["cut"] for x in says if w["over"] <= x["at"] <= w["over"] + 6)
+    resumed = [
+        r for r in rows if r["type"] == "gateway.charged" and r["payload"].get("model") == settings.call_model
+    ]
+    gaps = seen["gaps"]
+    print(json.dumps({"gaps": gaps, "typed": seen["typed"], "looked_up": seen["looked_up"],
+                      "side_talk_frames": seen["side_talk_frames"], "barge": seen["barge_at"], "over": seen["over_at"],
+                      "says": says, "charged_turns": len(resumed), "reason": reason, "report": report}, indent=1))  # fmt: skip
+    # Answered when addressed, and to "Hello" with one other person there.
+    assert all(g < 30 for g in gaps.values())
+    assert statistics.median(gaps.values()) <= GAP_MEDIAN_MOST_S
+    # The typed question answered in the chat, not aloud; the lookup posted.
+    assert seen["typed"]["chat"] and not seen["typed"]["frames"]
+    assert seen["looked_up"]
+    # Silence in side talk; cut off by the person asking, not by side talk.
+    assert seen["side_talk_frames"] == 0
+    assert seen["barge_at"]["cut"] and not seen["over_at"]["cut"]
+    # "Valor, leave" from the operator, past a resumption, and Gemini's summary file.
+    assert reason in (
+        "Tom asked Valor to leave",
+        "Valor was asked to leave",
+    )  # Live's tool when it heard "Valer"
+    assert "Gemini's summary of the call is" in report
+
+
+class Device:
+    """Another device of Valor's account in the call, from a copy of the
+    profile: it speaks clips, types, and hears who else speaks."""
+
+    def __init__(self, home: Path, seen: dict):
+        self.home, self.seen = home, seen
+        self.page = self.socket = None
+        self.me: str | None = None
+        self.voice: list[float] = []  # when Valor's audio reached this device
+        self.others: set[str] = set()  # the other devices', not Valor's
+
+    async def join(self, url: str) -> None:
+        # Links as links: Chrome 156 leaves `RunningChromeVersion` dangling (the Captain, 2026-11-03).
+        shutil.copytree(
+            settings.meet_profile, self.home, symlinks=True, ignore=shutil.ignore_patterns("Singleton*")
+        )
+
+        def hear(who, samples, rate):
+            if who not in self.others and float(np.abs(samples).mean()) > 0.003:
+                self.voice.append(time.time())
+
+        def people(update):
+            for p in [*(update.get("newUsers") or []), *(update.get("updatedUsers") or [])]:
+                if p.get("isCurrentUser"):
+                    self.me = p.get("deviceId")
+
+        self.socket = Socket(hear, lambda who, text: self.seen["chat"].append(text), people)
+        await self.socket.start()
+        self.page = Page(str(self.home))
+        await self.page.open(url, self.socket.port)
+        await self.page.join()
+        for _ in range(30):
+            if (await self.page.state())["status"] == "in":
+                break
+            await asyncio.sleep(1)
+        await self.page.ready()
+
+    async def say(self, kokoro, text: str) -> float:
+        """Speak `text` into the call; when it ends playing."""
+        pcm, rate = kokoro.create(text, voice="af_heart", lang="en-us")
+        ints = (np.clip(pcm, -1, 1) * 32767).astype("<i2").tobytes()
+        ahead = await self.page.stream(ints, rate, True)
+        return time.time() + ahead
+
+    async def ask(self, kokoro, text: str, *, wait: bool = True) -> float:
+        """The seconds from the end of `text` to Valor's first sound here."""
+        heard = len(self.voice)
+        end = await self.say(kokoro, text)
+        if not wait:
+            return 0.0
+        for _ in range(120):
+            await asyncio.sleep(0.25)
+            if len(self.voice) > heard and time.time() > end:
+                break
+        later = [t for t in self.voice[heard:]]
+        await self.quiet()
+        return (later[0] - end) if later else float("inf")
+
+    async def quiet(self, s: float = 2.0) -> None:
+        """Until Valor has been silent `s` seconds."""
+        while self.voice and time.time() - self.voice[-1] < s:
+            await asyncio.sleep(0.25)
+
+    async def typed(self, text: str) -> dict:
+        before, heard = len(self.seen["chat"]), len(self.voice)
+        await self.page.post(text)
+        for _ in range(60):
+            await asyncio.sleep(0.5)
+            if len(self.seen["chat"]) > before:
+                break
+        await asyncio.sleep(3)
+        return {"chat": self.seen["chat"][before:], "frames": len(self.voice) - heard}
+
+    async def cut_in(self, kokoro, ask: str, over: str, *, by=None) -> dict:
+        """Ask for a long answer, and 1.5 s into it say `over` (from `by`);
+        when `over` began, for the say it cut, if any."""
+        heard = len(self.voice)
+        await self.say(kokoro, ask)
+        for _ in range(120):
+            await asyncio.sleep(0.25)
+            if len(self.voice) > heard:
+                break
+        await asyncio.sleep(1.5)
+        start = time.time()
+        spoke = await (by or self).say(kokoro, over)
+        await asyncio.sleep(max(0.0, spoke - time.time()) + 2.5)
+        cut = not self.voice or time.time() - self.voice[-1] > 1.5
+        await self.quiet()
+        return {"over": start, "heard_cut": cut}
+
+    async def side(self, kokoro, text: str, listener) -> int:
+        """Say `text`, not to Valor; how many of Valor's frames `listener` heard in the next 10 s."""
+        listener.others.add(self.me)
+        heard = len(listener.voice)
+        end = await self.say(kokoro, text)
+        await asyncio.sleep(max(0.0, end - time.time()) + 10)
+        return len(listener.voice) - heard
+
+    async def leave(self) -> None:
+        if self.page is not None:
+            await self.page.leave()
+
+    async def close(self) -> None:
+        if self.page is not None:
+            await self.page.close()
+        if self.socket is not None:
+            await self.socket.close()
+        shutil.rmtree(self.home, ignore_errors=True)
 
 
 async def meet_space() -> tuple[str, str]:
@@ -262,175 +305,50 @@ async def meet_space() -> tuple[str, str]:
     return space["meetingUri"], space["meetingCode"]
 
 
-async def transcribe(audio: np.ndarray) -> str:
-    import aiohttp
+SUMMARY = """# Call on the Northwind import, 2026-10-31
 
-    url = f"http://127.0.0.1:{settings.voice_port}/hear"
-    async with aiohttp.ClientSession() as http, http.post(url, data=audio.astype(np.float32).tobytes()) as r:
-        return (await r.json())["text"]
+**Who joined:** Valor, Logan Reyes, Tom Counsell.
 
+## Discussed
+- The import shipped Tuesday; the launch stays Monday.
 
-async def rule(inputs, turn):
-    label = "asked_valor" if "valor" in inputs["said"].lower() else "nothing"
-    return SimpleNamespace(answered=True, payload={"picked": {"turn": label}})
+## Settled
+- Logan drafts the launch email by Friday.
 
-
-async def worker(question: str) -> str:
-    return "The import shipped on Tuesday; the launch is on Monday."
+## Open
+- Valor checks whether the import's error rate is under one percent.
+"""
 
 
-async def ready() -> bool:
-    return True
-
-
-async def second_device(url: str, kokoro, other: Path, seen: dict, then=None) -> None:
-    """Valor's account on another device: joins, asks aloud, then (after
-    `then(page)`, when given) in the chat, and measures when Valor's voice
-    first reaches it."""
-    # Links as links: Chrome 156 leaves `RunningChromeVersion` dangling (the Captain, 2026-11-03).
-    shutil.copytree(
-        settings.meet_profile, other / "p", symlinks=True, ignore=shutil.ignore_patterns("Singleton*")
-    )
-
-    def hear(who, samples, rate):
-        if float(np.abs(samples).mean()) > 0.003:
-            seen["frames"] += 1
-            seen["audio_at"] = seen["audio_at"] or time.time()
-
-    socket = Socket(hear, lambda who, text: seen["chat"].append(text), lambda update: None)
-    await socket.start()
-    page = Page(str(other / "p"))
-    try:
-        await asyncio.sleep(15)  # Valor joins first
-        await page.open(url, socket.port)
-        await page.join()
-        for _ in range(30):
-            if (await page.state())["status"] == "in":
-                break
-            await asyncio.sleep(1)
-        await page.ready()
-        await asyncio.sleep(5)
-        seen["gap"] = await ask_aloud(
-            page, kokoro, "Valor, what shipped this week, and when is the launch?", seen
-        )
-        await asyncio.sleep(12)
-        if then is not None:
-            await then(page)
-        before = len(seen["chat"])
-        await page.post("Valor, can you post the launch date here?")
-        for _ in range(40):
-            await asyncio.sleep(0.5)
-            if len(seen["chat"]) > before:
-                break
-        seen["chat"] = seen["chat"][before:]
-        await page.leave()
-    finally:
-        await page.close()
-        await socket.close()
-
-
-async def ask_aloud(page, kokoro, text: str, seen: dict) -> float:
-    """Say `text` into the call; the seconds until Valor's voice reaches this device."""
-    question, rate = kokoro.create(text, voice="af_heart", lang="en-us")
-    seen["audio_at"] = None
-    await page.play(question, rate)
-    asked = time.time()
-    for _ in range(60):
-        await asyncio.sleep(0.5)
-        if seen["audio_at"]:
-            break
-    return (seen["audio_at"] or float("inf")) - asked
-
-
-def test_the_front_model_follows_the_others_avoids_pricing_and_lets_only_tom_settle_a_decision(dsn, tmp_path):
-    """Evals of the real front model (a Claude Code session on the light
-    seat), one fresh session a case: it takes up the topic the others
-    raised, defers a price to Tom, records nothing a client says is
-    decided, and records Tom's decision by its question's ids."""
-    from core.gateway import ClaudeLogin, Gateway
-
-    decisions = "Open for Tom:\n- task t7, question q7: Ship the Northwind import on Friday?"
-    people = "In the call: Logan Reyes, Priya Shah, Tom Counsell."
-    cases = {
-        "topic": ("Logan Reyes (spoke): I'd like to move the demo to Thursday.\nPriya Shah (spoke): Thursday works.",
-                  "Logan Reyes said: Valor, does that work for you?"),
-        "price": ("", "Priya Shah said: Valor, what should Northwind pay for the retainer?"),
-        "client": (decisions, "Priya Shah said: Valor, we've decided to ship on Friday, please record that."),
-        "tom": (decisions, "Tom Counsell said: Yes, let's ship the import on Friday."),
-    }  # fmt: skip
-
-    async def go():
-        gateway = Gateway(dsn, credential=ClaudeLogin())
-        await gateway.start()
-        async with await db.connect(dsn) as conn:
-            task = await tasks.start(conn, tasks.Brief(instruction="front model evals"))
-        url = os.environ.get("ANTHROPIC_BASE_URL") or gateway.issue(task, "front")
-        out = {}
-        for name, (news, said) in cases.items():
-            front = call.Front.claude(url, model="claude-haiku-5-5", project="northwind",
-                                      prep="The Northwind import and its launch.")  # fmt: skip
-            await front.start()
-            actions: list = []
-            text = " ".join([s async for s in front.draft(f"{news}\n\n{people}".strip(), said, actions)])
-            out[name] = (text, actions)
-            await front.close()
-        await gateway.close()
-        return out
-
-    out = asyncio.run(go())
-    print({k: v for k, v in out.items()})
-    assert "thursday" in out["topic"][0].lower()
-    assert "$" not in out["price"][0] and not any(ch.isdigit() for ch in out["price"][0])
-    assert not [a for a in out["client"][1] if a[0] == "record_decision"]
-    (decided,) = [a for a in out["tom"][1] if a[0] == "record_decision"]
-    assert decided[1]["settles"] == [{"task_id": "t7", "question_id": "q7"}]
-
-
-TRANSCRIPT = """#11 [2026-10-31 03:00 UTC] Valor (joined):
-#12 [2026-10-31 03:00 UTC] Logan Reyes (joined):
-#13 [2026-10-31 03:00 UTC] Tom Counsell (joined):
-#14 [2026-10-31 03:01 UTC] Logan Reyes (spoke): Valor, where are we on the Northwind import?
-#15 [2026-10-31 03:01 UTC] Valor (spoke): It shipped Tuesday, and the launch is planned for Monday.
-#16 [2026-10-31 03:02 UTC] Tom Counsell (spoke): Let's keep Monday, and Logan, can you own the launch email?
-#17 [2026-10-31 03:02 UTC] Logan Reyes (spoke): Yes, I'll draft it by Friday.
-#18 [2026-10-31 03:03 UTC] Valor (typed): Launch stays Monday; Logan drafts the launch email by Friday.
-#19 [2026-10-31 03:04 UTC] Tom Counsell (spoke): Valor, check whether the import's error rate is under one percent.
-#20 [2026-10-31 03:04 UTC] Valor (spoke): I'll check and post it in the thread.
-#21 [2026-10-31 03:05 UTC] Valor (left): everyone else had left"""
-
-
-def test_the_asking_chat_sends_the_summary_as_one_file_with_at_most_two_lines(tmp_path):
-    """The eval the plan lists for Tom's amendment (2026-10-31): given a
-    call's end report, the chat session (Claude Code with the converse
-    skill, on the frontier seat) reads the transcript, writes the full
-    summary to a `.md` file, and sends it in the asking thread as the
-    send's `files`, with at most two lines of text and no long text."""
+def test_the_asking_chat_sends_geminis_summary_unchanged_as_one_file_with_at_most_two_lines(tmp_path):
+    """Given a call's end report naming Gemini's summary, the chat session
+    (Claude Code with the converse skill, on the frontier seat) copies the
+    file into its workspace and sends it unchanged in the asking thread as
+    the send's `files`, with at most two lines of text and no summary of
+    its own (docs/plans/gemini-live.md)."""
     import subprocess
 
     from core.bridge import DECLARED
 
     work = tmp_path / "work"
     (work / ".valor").mkdir(parents=True)
-    bin_ = tmp_path / "bin"
-    bin_.mkdir()
-    stub = bin_ / "valor-record"
-    stub.write_text(f"#!/bin/sh\ncat <<'END'\n{TRANSCRIPT}\nEND\n")
-    stub.chmod(0o755)
+    summary_file = tmp_path / "store" / "2026-10-31 1000 Valor call abc-defg-hij" / "call-abc-defg-hij.md"
+    summary_file.parent.mkdir(parents=True)
+    summary_file.write_text(SUMMARY)
     offered = "\n".join(f"  - {d.usage}" for d in DECLARED.values() if d.usage)
     skill = (Path(settings.stages_dir) / "converse.md").read_text().replace("{effects}", offered)
     report = (
         "# In the chat since your last turn\n\n- Your task 6daae76a50c5 reports (call):\n"
         "  The call https://meet.google.com/abc-defg-hij ended: everyone else had left.\n"
-        "  Its whole transcript: `valor-record call abc-defg-hij`, every page. Write the full summary as a file "
-        "and send it in the thread it was asked in (reply_to 1790000000.000100), with at most two lines of text "
-        "beside it.\n\nYou are in the northwind team chat on Slack (chat id T0ABC/C0NORTH). "
-        f"Your workspace is {work}."
+        f"  Gemini's summary of the call is {summary_file}. Copy it into your workspace as call-abc-defg-hij.md "
+        "and send it, unchanged, in the thread it was asked in (reply_to 1790000000.000100) as the send's "
+        "`files`, with at most two lines of text beside it.\n\nYou are in the northwind team chat on Slack "
+        f"(chat id T0ABC/C0NORTH). Your workspace is {work}."
     )
-    env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}"}
     done = subprocess.run(
         [settings.claude, "-p", "--model", "claude-opus-5-5", "--append-system-prompt", skill,
          "--permission-mode", "bypassPermissions", "--setting-sources", "", "--strict-mcp-config", "--", report],
-        cwd=work, env=env, capture_output=True, text=True, timeout=600, check=False,
+        cwd=work, capture_output=True, text=True, timeout=600, check=False,
     )  # fmt: skip
     assert done.returncode == 0, done.stderr[-2000:]
     sends = [json.loads(p.read_text()) for p in (work / ".valor" / "effects").glob("*.json")]
@@ -439,9 +357,8 @@ def test_the_asking_chat_sends_the_summary_as_one_file_with_at_most_two_lines(tm
     (send,) = sends
     assert send["target"] == "T0ABC/C0NORTH" and send["payload"]["reply_to"] == "1790000000.000100"
     (f,) = send["payload"]["files"]
-    summary = Path(f["path"])
-    assert summary.suffix == ".md" and summary.is_file() and str(summary).startswith(str(work))
-    body = summary.read_text()
-    assert "Monday" in body and "Friday" in body and "error rate" in body
+    sent = Path(f["path"])
+    assert sent.name == "call-abc-defg-hij.md" and str(sent).startswith(str(work))
+    assert sent.read_text() == SUMMARY
     text = send["payload"].get("text") or ""
     assert len([line for line in text.splitlines() if line.strip()]) <= 2 and len(text) < 400
