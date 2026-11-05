@@ -559,11 +559,12 @@ TOOLS = [
 
 def live_config(project: str, prep: str, handle: str | None) -> Any:
     """The Live session's settings: Valor's voice, transcripts both ways,
-    proactive audio (it may stay silent), a slow start to what counts as
-    someone speaking, no cutting Valor off (Live's own barge-in stopped
-    him for side talk, 2026-11-05: the call cuts him off only for the
-    person he answers), compression that bounds what each turn bills, and
-    resumption from `handle`."""
+    proactive audio (it may stay silent), no cutting Valor off (Live's own
+    barge-in stopped him for side talk, 2026-11-05: the call cuts him off
+    only for the person he answers), compression that bounds what each
+    turn bills, and resumption from `handle`. Live's own sensitivity to
+    speech is kept: at its lowest it missed a short "Hello." (the live
+    tests, 2026-11-05)."""
     from google.genai import types
 
     return types.LiveConnectConfig(
@@ -579,11 +580,7 @@ def live_config(project: str, prep: str, handle: str | None) -> Any:
         output_audio_transcription=types.AudioTranscriptionConfig(),
         proactivity=types.ProactivityConfig(proactive_audio=True),
         realtime_input_config=types.RealtimeInputConfig(
-            automatic_activity_detection=types.AutomaticActivityDetection(
-                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
-                prefix_padding_ms=300,
-            ),
-            activity_handling=types.ActivityHandling.NO_INTERRUPTION,
+            activity_handling=types.ActivityHandling.NO_INTERRUPTION
         ),
         context_window_compression=types.ContextWindowCompressionConfig(
             trigger_tokens=CALL_CONTEXT, sliding_window=types.SlidingWindow(target_tokens=CALL_CONTEXT // 2)
@@ -793,7 +790,6 @@ class Reply:
     dropped: bool = False
     text: str = ""
     seconds: float = 0.0  # of audio received
-    posted: bool = False
     voiced: bool = False  # its audio has speech in it
     started: float | None = None  # on the recording's clock
     generated: bool = False
@@ -890,6 +886,7 @@ class Call:
         self.unanswered: tuple[str, str, float] | None = None  # the last stretch heard, until Valor speaks
         self.barge = 0.0
         self.typed = False  # a typed line is being answered: replies are posted, until someone speaks
+        self.typed_posted = False  # and Live posted its answer
         self.metered: str | None = None  # the open `gateway.opened` call of the current turn
         self.playing_until = 0.0
         self.posts: asyncio.Queue = asyncio.Queue()
@@ -1028,7 +1025,7 @@ class Call:
         await self._heard(who, name, text, "typed")
         if self.leaving.is_set() or self.session is None:
             return
-        self.typed, self.unanswered = True, None
+        self.typed, self.typed_posted, self.unanswered = True, False, None
         await self.session.send_client_content(
             turns={"role": "user", "parts": [{"text": f"[typed by {name}] {text}"}]}, turn_complete=True
         )
@@ -1120,7 +1117,7 @@ class Call:
             reply, self.reply = self.reply, None
             reply.generated = True
             text = MARKUP_PART.sub("", reply.text).strip()
-            if reply.typed and not reply.posted and not wordless(text):
+            if reply.typed and not self.typed_posted and not wordless(text):
                 self.posts.put_nowait(Post(reply.id, text, True))
             if reply.said is None:
                 await self._answer_alone(0.0)
@@ -1261,7 +1258,7 @@ class Call:
                         "; your worker's copy of the project is still being set up, so say it needs a moment"
                     )
             elif fc.name == "post" and str(args.get("text") or "").strip():
-                reply.posted = True
+                self.typed_posted = True
                 self.posts.put_nowait(Post(reply.id, str(args["text"]).strip(), True))
                 result = "posted"
             elif fc.name == "open_decisions":

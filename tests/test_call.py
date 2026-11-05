@@ -520,6 +520,9 @@ def test_a_typed_line_asks_for_a_reply_answered_in_the_chat_never_aloud(dsn, tea
             said("It is in the ledger."),
             done(),
         )
+        await push(
+            c.session, audio(), said("I posted it."), done()
+        )  # after its post: neither said nor posted
         await settle(c.the)
         c.the.chat(TOMS, "And the deck?")
         await asyncio.sleep(0.1)
@@ -646,8 +649,9 @@ def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
     assert config.proactivity.proactive_audio is True
     assert config.realtime_input_config.activity_handling == types.ActivityHandling.NO_INTERRUPTION
     assert config.context_window_compression.trigger_tokens == call.CALL_CONTEXT
-    detect = config.realtime_input_config.automatic_activity_detection
-    assert detect.start_of_speech_sensitivity == types.StartSensitivity.START_SENSITIVITY_LOW
+    assert (
+        config.realtime_input_config.automatic_activity_detection is None
+    )  # Live's own; LOW missed "Hello."
     assert [f.name for f in config.tools[0].function_declarations] == [
         "ask",
         "post",
