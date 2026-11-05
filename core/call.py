@@ -885,6 +885,7 @@ class Call:
         self.last_who: str | None = None
         self.unanswered: tuple[str, str, float] | None = None  # the last stretch heard, until Valor speaks
         self.barge = 0.0
+        self.voiced_s = 0.0  # speech in the stretch being heard
         self.typed = False  # a typed line is being answered: replies are posted, until someone speaks
         self.typed_posted = False  # and Live posted its answer
         self.metered: str | None = None  # the open `gateway.opened` call of the current turn
@@ -973,6 +974,7 @@ class Call:
             await self._cut_off(self.out)
         for who, v in voiced.items():
             self.energy[who] = self.energy.get(who, 0.0) + v * seconds
+        self.voiced_s += seconds if voiced else 0.0
         if voiced:
             self.last_voice = now
             top = max(voiced, key=voiced.get)
@@ -993,12 +995,16 @@ class Call:
             await self._close_stretch(self.close_at[1])
         elif self.heard and now - self.last_voice >= QUIET_S:
             await self._close_stretch(self.energy)
+        elif not self.heard and self.voiced_s >= CHANGE_S and now - self.last_voice >= QUIET_S + LAG_S:
+            # Speech Live gave no transcript of (a short "Hello." it missed, 2026-11-05).
+            who = max(self.energy, key=self.energy.get) if self.energy else self.speaking
+            self.unanswered, self.energy, self.voiced_s = (self.names.get(who, "someone"), "", now), {}, 0.0
 
     async def _close_stretch(self, energy: dict[str, float]) -> None:
         """One `call.heard` row: what Live heard since the last, said by
         whoever spoke most in it. "Valor, leave" from Tom leaves."""
         text, at = self.heard.strip(), self.heard_at
-        self.heard, self.heard_at, self.close_at = "", None, None
+        self.heard, self.heard_at, self.close_at, self.voiced_s = "", None, None, 0.0
         self.typed = self.typed and not text
         if energy is self.energy:
             self.energy = {}
@@ -1129,9 +1135,9 @@ class Call:
     async def _answer_alone(self, after_s: float) -> None:
         """With one other person in the call, all they say is to Valor
         (Tom's "Hello", unanswered, 2026-11-05; Live kept silent on "Hello."
-        with only one person there in the live tests, 2026-11-05): a turn
-        of silence after their words, or `after_s` with no turn, asks for
-        the answer, once."""
+        with only one person there, or gave no transcript of it, in the live
+        tests, 2026-11-05): a turn of silence after their words, or
+        `after_s` with no turn, asks for the answer, once."""
         if (
             len(self.present) != 1 or self.unanswered is None or self.session is None
             or self.reply is not None or self.out is not None or self.now() - self.unanswered[2] < after_s
@@ -1139,11 +1145,15 @@ class Call:
             return
         name, text, _ = self.unanswered
         self.unanswered = None
+        said = (
+            f'said to you: "{text}". Answer it.'
+            if text
+            else "spoke to you, words you did not catch: answer them."
+        )
         await self.session.send_client_content(
-            turns={"role": "user", "parts": [{"text": f'[note] {name}, the only one here, said to you: "{text}". '
-                                              "Answer it."}]},
+            turns={"role": "user", "parts": [{"text": f"[note] {name}, the only one here, {said}"}]},
             turn_complete=True,
-        )  # fmt: skip
+        )
 
     async def _audio(self, reply: Reply, data: bytes) -> None:
         """A chunk of Live's speech: once the turn shows speech, in Live's

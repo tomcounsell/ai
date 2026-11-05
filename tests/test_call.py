@@ -505,6 +505,30 @@ def test_with_one_other_person_no_turn_at_all_after_their_words_asks_for_the_ans
     assert len(run(go())) == 1
 
 
+def test_with_one_other_person_speech_live_gave_no_transcript_of_still_asks_for_the_answer(
+    dsn, team, quick, monkeypatch
+):
+    """Live gave no transcript and no turn for a short "Hello." in three
+    live tests, 2026-11-05."""
+    monkeypatch.setattr(call, "UNANSWERED_S", 0.3)
+
+    async def go():
+        page = Page()
+        page.people = page.people[:1] + page.people[2:]  # only Tom
+        c = await in_call(dsn, team, page)
+        await until(lambda: c.the.present)
+        await talk(c.the, TOMS, 0.5)
+        await until(
+            lambda: any("spoke to you" in t for t, _ in c.session.contents()), s=call.QUIET_S + call.LAG_S + 2
+        )
+        await finish(c)
+        return [(t, d) for t, d in c.session.contents() if "spoke to you" in t]
+
+    assert run(go()) == [
+        (f"[note] {TOM}, the only one here, spoke to you, words you did not catch: answer them.", True)
+    ]
+
+
 # -- the chat, the worker, decisions -------------------------------------------------
 
 
