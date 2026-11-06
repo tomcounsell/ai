@@ -278,7 +278,7 @@ def test_seed_appends_unlinked_open_issues_as_raw_rows_numbered_after_the_highes
     ]  # fmt: skip
     assert all(len(r) == len(sheet.QUEUE) and not r[2] for r in body["values"])
     gh = next(c for c in drive.calls if c[0] == "gh")
-    assert gh[:3] == ["gh", "issue", "list"] and "--state" in gh  # issues only: gh lists no pull requests
+    assert gh[:3] == ["gh", "issue", "list"] and "--state" in gh  # `gh issue list` returns issues only, never pull requests
 
 
 def test_seed_with_nothing_new_appends_nothing(monkeypatch, capsys):
