@@ -370,7 +370,9 @@ def test_a_refused_say_drops_its_audio(dsn, team, quick, monkeypatch):
 
 def test_the_person_answered_speaking_over_valor_cuts_him_off_and_side_talk_does_not(dsn, team, quick):
     """Live's own barge-in cut Valor off for side talk (the live test,
-    2026-11-05); the call cuts him off only for the person he answers."""
+    2026-11-05); the call cuts him off only for the person he answers, and
+    not for a quarter second of sound they don't go on from (three cuts in
+    Tom's call, 2026-11-06)."""
 
     async def go():
         page = Page()
@@ -381,13 +383,16 @@ def test_the_person_answered_speaking_over_valor_cuts_him_off_and_side_talk_does
         await push(c.session, audio(1.0), said("one two three four five six"), audio(1.0), done())
         await talk(c.the, TOMS, 0.6)  # side talk
         side = c.page.stops
-        await talk(c.the, LOGAN, 0.4)  # the person answered
+        await talk(c.the, LOGAN, 0.25)  # a sound from the person answered, not taken further
+        await talk(c.the, TOMS, 0.1)
+        brief = c.page.stops
+        await talk(c.the, LOGAN, 0.6)  # the person answered
         await settle(c.the)
         await finish(c)
-        return c, side, await effects(dsn, c.the.id)
+        return c, side, brief, await effects(dsn, c.the.id)
 
-    c, side, done_ = run(go())
-    assert side == 0 and c.page.stops == 1
+    c, side, brief, done_ = run(go())
+    assert side == 0 and brief == 0 and c.page.stops == 1
     (say,) = [e for e in done_ if e["type"] == "meet.say"]
     assert say["result"] == {"spoken_text": "one two three", "cut": True, "played_s": 1.0}
     assert ("[note] Logan cut you off; they heard only: one two three", False) in c.session.contents()

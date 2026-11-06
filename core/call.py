@@ -767,7 +767,10 @@ RECONNECTS = 2  # failed reconnects to Live before the call leaves
 STATE_S = 2.0
 # Live's transcript marks silence and pauses, "<no speech>{pause}" (2026-11-05).
 MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
-BARGE_S = 0.2  # this much speech by the person Valor answers cuts him off
+# This much unbroken sound from the person Valor answers cuts him off. At
+# 0.2 s three of four cuts in Tom's call (2026-11-06) were 0.22-0.24 s of
+# sound he did not go on from; the one he meant ran 0.5 s and on.
+BARGE_S = 0.4
 UNANSWERED_S = 2.0  # with one other person, this long with no answer to them asks for one
 STALL_S = 6.0  # this much speech, then this long quiet, with nothing back from Live resumes the session
 CUT_S = 3.0  # the rest of what cut Valor off ("Valor, stop. Wait a moment.") asks nothing
