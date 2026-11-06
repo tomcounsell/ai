@@ -27,7 +27,8 @@ amends: docs/plans/meet.md (items 4, 5, 7)
    - The voice is Charon. Transcription in and out, resumption and compression are on.
    - The tracks are mixed to 16 kHz mono and sent with `send_realtime_input`. Valor's own audio is not sent.
    - Activity detection: start sensitivity LOW, prefix padding 300 ms, interruptions kept.
-   - Instructions: `prep`, then meet.md item 5. Answer only when addressed, or when asked what only Valor holds. A line tagged "typed" is answered with `post()`. Proactive audio is on.
+   - Instructions: the call's mechanics (answer only when addressed, or when asked what only Valor holds; a line tagged "typed" is answered with `post()`; the tools), then the persona's own "In a call" section (`persona/conduct.md`, read by `persona.section` as the call starts; docs/plans/call-persona.md), then `prep`. Proactive audio is on.
+   - Heard speech is transcribed with `language_codes=["en-US"]`. That shapes the transcript only; the reply's language is the model's, kept English by the persona section.
 3. **Notes.** These are context only, sent as `send_client_content(turn_complete=False)`:
    - who is speaking;
    - the head count, and with one other person, "all Tom says is to you";

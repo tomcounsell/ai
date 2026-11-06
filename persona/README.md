@@ -16,7 +16,7 @@ Governed by [docs/persona.md](../docs/persona.md).
 ## Imports
 
 - Imports nothing. It holds text, not code.
-- Read by: `core/persona.py`, which `core/tasks.py` calls when it renders a turn. Nothing else reads these files.
+- Read by: `core/persona.py`, which `core/tasks.py` calls when it renders a turn, and which `core/call.py` calls for the "In a call" section of `conduct.md` in a Live call's instruction (`persona.section`). Nothing else reads these files.
 
 ## Effect classes
 

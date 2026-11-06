@@ -86,7 +86,8 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    sentence is a `meet.say`, a written reply a `meet.send_message`,
    `request_id` `meet/<turn>/<n>/say|post`, a retry resending the same
    payload. A say plays only while its turn is current (else `failed`,
-   stale); barge-in by the addressed speaker stops it within 200 ms,
+   stale); barge-in by the addressed speaker (0.4 s unbroken, `BARGE_S`;
+   0.2 s cut on stray sound, 2026-11-06) stops it,
    `done` with `spoken_text`. **Thread copy:** `core/call.py`, once a
    `meet.send_message` it requested settles `done`, requests on the call
    session a `<channel>.send_message` to the asking chat with the thread's

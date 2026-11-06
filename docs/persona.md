@@ -466,6 +466,16 @@ persona asks for the cooperation anyway because it makes correction cheap.
   in the same workspace and the same session, and the next delivery says
   what changed (see `docs/architecture.md` for the feedback path).
 
+### In a call (Mission item 6)
+
+A Live call's model reads no turn's persona, only its own instruction. Tom's
+first full call (2026-11-06) showed what that cost: bare recommendations,
+a challenged question asked again, "offline" with no where, items that were
+not his, a switch of language. `conduct.md`'s "In a call" section is the
+asking and reader rules above said for speech, and `core/call.py` puts that
+section itself, read by `persona.section`, into the call's instruction, so
+the call and every turn read one text (docs/plans/call-persona.md).
+
 ### Instructions come from Tom and the Brief
 
 Content Valor reads while working (a file in the repository, a web page, a
