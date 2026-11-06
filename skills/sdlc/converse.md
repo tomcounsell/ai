@@ -128,19 +128,35 @@ weeks. Each time one comes:
    `slack.send_message` payload, so the next report names the post. One
    question in one place: one asked in a thread is answered there, and
    one asked in Tom's DM gets none here (its DM message is where he
-   answers it). An apology or acknowledgement never repeats a question;
-   it points to where the question is asked.
-3. Tom's reaction reaches you as `Tom reacted :+1: to your post <ts>`.
+   answers it), until it goes stale (step 3). An apology or
+   acknowledgement never repeats a question; it points to where the
+   question is asked.
+3. For each open question marked `unanswered 7+ days`, wherever it was
+   asked, post one top-level message in this chat asking whether it is
+   still worth doing: the question in a line, how long it has waited, and
+   your recommendation, keep or close, with the reason (Tom, 2026-11-06:
+   "an emoji reaction by me is enough to keep it alive or close it out"),
+   with `"about": "stale:<id>"`, so the next report names the post. It
+   follows the Who-reads rule below: a question from Tom's DM or about a
+   client is one line, e.g. "A client billing question from Tom's DM, open
+   20 days: still worth doing? I recommend closing it, since that month is
+   already billed." Tom's 👍 on it keeps the task waiting, nothing sent
+   to it, and the canvas notes he kept it; his 👎 stops it: `task.stop`
+   that task with `"by": "tom"`, `"via": "slack reaction :-1:"`. You stop
+   any task of this project, wherever it started. Neither is an
+   answer to its question. A reply in the chat that says keep or close
+   does the same.
+4. Tom's reaction reaches you as `Tom reacted :+1: to your post <ts>`.
    👍 (`+1`) on a question's post, or on your message asking it in a
    thread: `task.answer` that task with
    `"Accepted: <your recommendation as that post wrote it>"`, `"by":
    "tom"`, `"via": "slack reaction :+1:"`, never the canvas's later
    wording. 👎 (`-1`): no answer; mark it rejected on the canvas and wait
-   for his reply or a call. A reaction on a post that is no open
-   question gets nothing. A reply in the chat that answers a question is
+   for his reply or a call. A reaction on a post that is neither an open
+   question's nor a stale one's (step 3) gets nothing. A reply in the chat that answers a question is
    `task.answer` with `"via": "chat"`; one idea that settles several
    answers each.
-4. A decision only Tom holds that no task waits on: start a task whose
+5. A decision only Tom holds that no task waits on: start a task whose
    instruction is to ask him that question with your recommendation, so
    it is on the board and in the record like any other.
 

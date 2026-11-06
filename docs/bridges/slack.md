@@ -306,7 +306,7 @@ is a target, owned or not. Its payload:
 | `text` | Sent as written |
 | `reply_to` | A message `ts`; the post goes in that message's thread |
 | `files` | Each a path in the task's workspace and its sha256; a voice reply is an `.mp3` from the present skill's `tts.py`, uploaded like any file, which Slack plays in the message |
-| `about` | `question:<id>` on a board session's post of an open question; stored, not read by the bridge, so the next board row knows the question's post (`core/board.py`) |
+| `about` | `question:<id>` on a board session's post of an open question, `stale:<id>` on its post asking whether a question open 7+ days is still worth doing; stored, not read by the bridge, so the next board row knows the question's post (`core/board.py`) |
 
 A target in a workspace with no pair in `slack-keys` is `broker.Failed`
 ("`<team>` is not a connected workspace"), and nothing is posted; so is one

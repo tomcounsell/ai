@@ -314,6 +314,91 @@ def test_the_board_session_answers_its_projects_tasks_with_via_and_no_one_else_d
     assert (answered["provenance"]["by"], answered["provenance"]["via"]) == ("tom", "slack reaction :+1:")
 
 
+def stop_action(task, **payload):
+    return broker.Action("task.stop", task, {"why": "no longer worth doing", "by": "tom", **payload})
+
+
+def two_chats() -> tuple[str, str]:
+    """A project with a board chat and a second chat."""
+    chat, other_chat = channel(), channel()
+    name = f"p{uuid.uuid4().hex[:6]}"
+    (pathlib.Path(settings.projects_dir) / f"{name}.toml").write_text(
+        f'name = "{name}"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'
+        f'chats = ["slack:{chat}", "slack:{other_chat}"]\nboard = "slack:{chat}"\n'
+    )
+    return chat, other_chat
+
+
+def test_the_board_session_stops_any_task_of_its_project_and_no_other_projects(dsn, dm):
+    """Another chat's task of its project, waiting or idle, stops with Tom's
+    `via`; another project's is refused, and a chat that is not the board
+    still stops only its own."""
+    from tools import chat_tasks
+
+    chat, other_chat = two_chats()
+    foreign = channel()
+    project(f"p{uuid.uuid4().hex[:6]}", foreign)
+
+    async def go():
+        here = await session_task(dsn, chat)
+        side = (await say(dsn, other_chat, "hi", at(2)))["task_id"]
+        waiting, idle = await child_of(dsn, side), await child_of(dsn, side)
+        await ask(dsn, waiting)
+        theirs = await child_of(dsn, await session_task(dsn, foreign))
+        mine_ = await child_of(dsn, here)
+        async with await db.connect(dsn) as conn:
+            stop_, side_stop = [
+                next(p for p in chat_tasks.performers(b, dsn) if p.action_type == "task.stop")
+                for b in [await tasks.brief(conn, here), await tasks.brief(conn, side)]
+            ]
+            refusals = [
+                await stop_.refuse(conn, stop_action(theirs)),
+                await side_stop.refuse(conn, stop_action(mine_)),
+            ]
+            allowed = [await stop_.refuse(conn, stop_action(t)) for t in (waiting, idle)]
+        await stop_.perform(stop_action(waiting, via="slack reaction :-1:"), ledger.new_id())
+        await stop_.perform(stop_action(idle), ledger.new_id())
+        async with await db.connect(dsn) as conn:
+            states = [machine.fold(await ledger.read(conn, t)).state for t in (waiting, idle, theirs)]
+        return refusals, allowed, states, await bridges.rows(dsn, waiting)
+
+    refusals, allowed, states, rows = run(go())
+    assert all(r and "does not report to this chat" in r for r in refusals) and allowed == [None, None]
+    assert states[:2] == [State.STOPPED] * 2 and states[2] is not State.STOPPED
+    (stopped,) = [r["payload"] for r in rows if r["type"] == "task.stopped"]
+    assert (stopped["provenance"]["by"], stopped["provenance"]["via"]) == ("tom", "slack reaction :-1:")
+
+
+def test_a_question_open_seven_days_wakes_the_board_to_ask_once_if_still_worth_doing(dsn, dm, monkeypatch):
+    """Crossing STALE_DAYS moves the digest, so a row is written with nothing
+    else changed; a question asked in another chat (Tom's DM) is then to be
+    posted here, not 'no post here'; the post with `stale:` is named."""
+    chat, other_chat = two_chats()
+
+    async def go():
+        here = await session_task(dsn, chat)
+        side = (await say(dsn, other_chat, "hi", at(2)))["task_id"]
+        q = await ask(dsn, await child_of(dsn, side), "Run the practice invoice?")
+        await owe(dsn)
+        quiet = await owe(dsn)
+        monkeypatch.setattr(board, "STALE_DAYS", 0)
+        crossed = await owe(dsn)
+        await send(dsn, here, chat, at(60), "Still worth doing? I recommend closing it.", about=f"stale:{q}")
+        await ask(dsn, await child_of(dsn, here), "Rename it?")  # a post alone writes no row
+        await owe(dsn)
+        return q, quiet, crossed, await board_rows(dsn, chat)
+
+    q, quiet, crossed, rows = run(go())
+    assert quiet == [] and crossed == [f"slack:{chat}"] and len(rows) == 3
+    fresh, stale, posted = (r["text"].split("Open:")[1].split("Decided")[0] for r in rows)
+    assert "asked in another chat (Tom's DM): no post here" in fresh and "unanswered" not in fresh
+    asks = f'post here asking whether it is still worth doing, with your recommendation, "about": "stale:{q}"'
+    assert "no post here" not in stale and asks in stale
+    assert (
+        f"asked whether still worth doing in your post {at(60)}: 👍 keeps it waiting, 👎 stops it" in posted
+    )
+
+
 # -- Tom's reaction -----------------------------------------------------------------
 
 

@@ -24,7 +24,11 @@ report there (`notices.owe` asks `here`): the board row carries it, and
 the session posts it once in the channel, the post Tom reacts to, unless
 it is already asking Tom that question in the chat (a thread or a reply),
 where the canvas points instead. A question relayed elsewhere (his DM, the operator chat) is listed as asked
-there, with no post.
+there, with no post. A question open `STALE_DAYS` or more is `stale`, which
+moves the digest the wake it crosses, so the board session is told: it posts
+once here, wherever the question was asked, whether it is still worth doing
+(`"about": "stale:<id>"`), and Tom's 👎 on that post stops the task, which
+the board session may do for any task of its project (`covers`).
 """
 
 import hashlib
@@ -36,6 +40,7 @@ from core import intake, ledger, machine, notices, tasks, workspace
 from core.machine import State
 
 DECIDED_DAYS = 14
+STALE_DAYS = 7
 
 
 def spec_of(name: str | None) -> workspace.Spec | None:
@@ -72,15 +77,20 @@ async def here(conn, task_id: str) -> bool:
     )
 
 
-async def answers(conn, session_id: str, task_id: str) -> bool:
-    """Whether `session_id` is the board session of `task_id`'s project and
-    the task waits on its question: the board session answers it, by chat,
-    reaction or call, though the task reports elsewhere."""
+async def covers(conn, session_id: str, task_id: str) -> bool:
+    """Whether `session_id` is the board session of `task_id`'s project: it
+    stops the task, though the task reports elsewhere."""
     try:
         b = await tasks.brief(conn, task_id)
     except KeyError:
         return False
-    if session_id != await session_of(conn, board_spec((b.project or {}).get("name"))):
+    return session_id == await session_of(conn, board_spec((b.project or {}).get("name")))
+
+
+async def answers(conn, session_id: str, task_id: str) -> bool:
+    """Whether `session_id` covers `task_id` and the task waits on its
+    question: the board session answers it, by chat, reaction or call."""
+    if not await covers(conn, session_id, task_id):
         return False
     return machine.fold(await ledger.read(conn, task_id)).state is State.WAITING
 
@@ -88,7 +98,8 @@ async def answers(conn, session_id: str, task_id: str) -> bool:
 async def snapshot(conn, spec: workspace.Spec) -> dict[str, Any]:
     """The project's open questions and recent answers, and its listed
     projects', oldest first, each with its task and the task's request."""
-    since = datetime.now(UTC) - timedelta(days=DECIDED_DAYS)
+    now = datetime.now(UTC)
+    since, stale = now - timedelta(days=DECIDED_DAYS), now - timedelta(days=STALE_DAYS)
     rows = await (
         await conn.execute(
             "SELECT e.task_id, e.type, e.payload, e.at, d.body->>'instruction' FROM events e "
@@ -104,7 +115,7 @@ async def snapshot(conn, spec: workspace.Spec) -> dict[str, Any]:
     for task_id, kind, p, at, instruction in rows:
         requests[task_id] = notices.short(instruction)
         if kind == "question.asked":
-            asked[(task_id, p.get("question_id"))] = {"text": p.get("text", ""), "at": at.isoformat()}
+            asked[(task_id, p.get("question_id"))] = {"text": p.get("text", ""), "at": at}
         else:
             answered.append((task_id, p, at))
     done = {(t, p.get("question_id")) for t, p, _ in answered}
@@ -121,8 +132,9 @@ async def snapshot(conn, spec: workspace.Spec) -> dict[str, Any]:
                 "request": requests[task_id],
                 "question_id": qid,
                 "question": q["text"],
-                "asked_at": q["at"],
+                "asked_at": q["at"].isoformat(),
                 "asked_here": await here(conn, task_id),
+                "stale": q["at"] < stale,
             }
         )
     decided = []
@@ -150,8 +162,8 @@ def digest(snap: dict[str, Any]) -> str:
 
 
 async def _posts(conn, chat_id: str) -> dict[str, str]:
-    """question id -> the `ts` of the board post the session made for it
-    (a `slack.send_message` to the board chat with `about`)."""
+    """`about` (`question:<id>`, `stale:<id>`) -> the `ts` of the board post
+    the session made for it (a `slack.send_message` to the board chat)."""
     rows = await (
         await conn.execute(
             "SELECT i.payload->'payload'->>'about', o.payload->'result'->'sent'->0->>'message_id' "
@@ -162,7 +174,7 @@ async def _posts(conn, chat_id: str) -> dict[str, str]:
             (chat_id,),
         )
     ).fetchall()
-    return {about.removeprefix("question:"): ts for about, ts in rows if about and ts}
+    return {about: ts for about, ts in rows if about and ts}
 
 
 async def _canvas(conn, chat_id: str) -> dict[str, Any]:
@@ -207,8 +219,19 @@ def text(board: str, snap: dict[str, Any], posts: dict[str, str], canvas: dict[s
         "Open:",
     ]
     for q in snap["open"]:
-        if q["question_id"] in posts:
-            post = f"your post {posts[q['question_id']]}"
+        mine, asked = posts.get(f"stale:{q['question_id']}"), posts.get(f"question:{q['question_id']}")
+        if q["stale"] and mine:
+            post = (
+                f"unanswered {STALE_DAYS}+ days, asked whether still worth doing in your post "
+                f"{mine}: 👍 keeps it waiting, 👎 stops it"
+            )
+        elif q["stale"]:
+            post = (
+                f"unanswered {STALE_DAYS}+ days: post here asking whether it is still worth doing, with your "
+                f'recommendation, "about": "stale:{q["question_id"]}"'
+            )
+        elif asked:
+            post = f"your post {asked}"
         elif q["asked_here"]:
             post = (
                 "no board post: if you are already asking Tom this in this chat (a thread or a reply), "

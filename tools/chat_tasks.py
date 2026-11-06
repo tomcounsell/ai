@@ -26,7 +26,8 @@ own; each refuses a task that does not report to its session
 (`tasks.reporting`: its children, and the tasks whose report is on it),
 but a project's board chat session answers any of the project's tasks
 waiting on a question (`board.answers`), since every decision for Tom on
-that project is on its board, however he answers it, and Tom's DM's
+that project is on its board, however he answers it; it stops any of
+them (`board.covers`), which is how a stale one is closed; and Tom's DM's
 session answers a question a call sent it to confirm (`call.confirms`).
 A call's session (`core/call.py`) takes a steer while the call is open,
 posted in the call's chat, and refuses one once the call has ended.
@@ -228,14 +229,26 @@ class TaskSteer(_ChatTask):
 
 class TaskStop(_ChatTask):
     action_type = "task.stop"
-    usage = '`task.stop`: target the task id, payload `{"why": "...", "by": "<who asked>"}`; stops that task.'
+    usage = (
+        '`task.stop`: target the task id, payload `{"why": "...", "by": "<who asked>", "via": "chat"}`; '
+        "stops that task; `via` is how it came (`chat`, `slack reaction :-1:`). The board chat's session "
+        "also stops any task of its project."
+    )
+
+    async def _child(self, conn, task_id: str) -> tasks.Brief:
+        try:
+            return await super()._child(conn, task_id)
+        except ValueError:
+            if not await board.covers(conn, self.session, task_id):
+                raise
+            return await tasks.brief(conn, task_id)
 
     async def perform(self, action, key: str) -> dict:
         async with await db.connect(self.dsn) as conn:
             await self._child(conn, action.target)
             await tasks.stop(
                 conn, action.target, reason=str(action.payload.get("why") or "stopped from the chat"),
-                by=str(action.payload.get("by") or "valor"), via="chat",
+                by=str(action.payload.get("by") or "valor"), via=str(action.payload.get("via") or "chat"),
             )  # fmt: skip
         return {"task_id": action.target}
 
