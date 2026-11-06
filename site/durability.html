@@ -79,11 +79,11 @@
   <h2>Recovery after a crash</h2>
   <p>Each machine runs one kernel process, kept alive by launchd, the macOS service manager. When it starts, it settles whatever a dead kernel left:</p>
   <ul class="tight">
-    <li>open model calls are charged;</li>
-    <li>orphaned turns are killed and recorded;</li>
-    <li>uncollected turns are collected;</li>
-    <li>pending pushes and merges are reconciled;</li>
-    <li>its own rollouts are finished.</li>
+    <li>open model calls are charged</li>
+    <li>orphaned turns are killed and recorded</li>
+    <li>uncollected turns are collected</li>
+    <li>pending pushes and merges are reconciled</li>
+    <li>its own rollouts are finished</li>
   </ul>
   <p>After that, it wakes each time a new row lands in the ledger.</p>
   <dl class="def-list">
