@@ -46,8 +46,9 @@ against a new Meet with a second device of Valor's account
   when the person he answers speaks over him, and side talk does not. With
   one other person in the call, a silence after their words asks Live for
   the answer. Each turn's usage is charged by modality. A Live session
-  that goes away, or sends nothing back for 6 s of speech, is resumed; two
-  failed reconnects post one line and leave. "Valor, leave" from Tom is
+  that goes away, or sends nothing back after speech through 6 s of quiet,
+  is resumed (a long turn, however little Live sends during it, is not), the
+  old session closed before the next opens; two failed reconnects post one line and leave. "Valor, leave" from Tom is
   matched in Live's transcript. A call that fails, or any of its lanes
   (the mixer, Live, the posts), ends and writes its traceback to
   `meet.log`.
