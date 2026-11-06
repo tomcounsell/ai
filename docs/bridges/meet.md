@@ -46,10 +46,12 @@ against a new Meet with a second device of Valor's account
   when the person he answers speaks over him, and side talk does not. With
   one other person in the call, a silence after their words asks Live for
   the answer. Each turn's usage is charged by modality. A Live session
-  that goes away, or sends nothing back after speech through 6 s of quiet,
-  is resumed (a long turn, however little Live sends during it, is not), the
-  old session closed before the next opens; two failed reconnects post one line and leave. "Valor, leave" from Tom is
-  matched in Live's transcript. A call that fails, or any of its lanes
+  that goes away, or sends nothing back through 6 s of speech and the 6 s
+  of quiet after it, is resumed (a long turn, however little Live sends
+  during it, is not; nor is a short utterance), the old session closed
+  before the next opens; a resume Google refuses as still connected (1008)
+  is retried like any failed open. Two failed reconnects post one line and
+  leave. "Valor, leave" from Tom is matched in Live's transcript. A call that fails, or any of its lanes
   (the mixer, Live, the posts), ends and writes its traceback to
   `meet.log`.
 - **The page** (`bridges/meet/`): headless Chrome on the call profile
