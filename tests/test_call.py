@@ -527,6 +527,36 @@ def test_with_one_other_person_a_silence_after_their_words_asks_for_the_answer(d
     )
 
 
+def test_a_turn_of_silence_during_the_heard_rows_write_still_asks_for_the_answer(
+    dsn, team, quick, monkeypatch
+):
+    """The answer was owed only once the heard row was written, so Live's
+    turn of silence finishing during that write asked nothing (a loaded
+    suite, 2026-11-06; in a call, two seconds late)."""
+    slow = call.Call._heard
+
+    async def heard_slowly(self, *args):
+        await asyncio.sleep(0.5)
+        await slow(self, *args)
+
+    monkeypatch.setattr(call.Call, "_heard", heard_slowly)
+
+    async def go():
+        page = Page()
+        page.people = page.people[:1] + page.people[2:]  # only Tom
+        c = await in_call(dsn, team, page)
+        await until(lambda: c.the.present)
+        await talk(c.the, TOMS, 0.4)
+        await push(c.session, heard("Hello."))
+        await asyncio.sleep(call.QUIET_S + 0.1)  # the quiet has closed the stretch; its row is being written
+        await push(c.session, said("..."), audio(0.5), done())
+        await asyncio.sleep(0.6)
+        await finish(c)
+        return [t for t, _ in c.session.contents() if "said to you" in t]
+
+    assert run(go()) == [f'[note] {TOM}, the only one here, said to you: "Hello.". Answer it.']
+
+
 def test_with_one_other_person_no_turn_at_all_after_their_words_asks_for_the_answer(
     dsn, team, quick, monkeypatch
 ):

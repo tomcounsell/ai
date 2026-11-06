@@ -1041,10 +1041,11 @@ class Call:
         who = max(energy, key=energy.get) if energy else self.speaking
         self.last_who = who
         name = self.names.get(who, "someone") if who else "someone"
-        await self._heard(who or "", name, text, "spoke")
         # Owed an answer only when said with no one else there: side talk
         # with Sam, answered once Sam had left (the live test, 2026-11-05), was not.
+        # Set before the row's write, which a reply can finish during.
         self.unanswered = (name, text, self.now()) if who is not None and self.present == {who} else None
+        await self._heard(who or "", name, text, "spoke")
         self.segments.append({"speaker": name, "start": round(at or 0.0, 2), "end": round(self.now(), 2),
                               "text": text, "channel": "call"})  # fmt: skip
 
