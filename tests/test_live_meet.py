@@ -40,6 +40,16 @@ pytestmark = [
     ),
 ]
 LONG_S = 12 * 60  # past a Live connection's life, so the session is resumed
+# Half a minute of one person talking: a healthy Live sent nothing back for
+# longer than the stall inside a turn like it, and was resumed (Tom's call, 2026-11-06).
+MONOLOGUE = (
+    "Valor, let me walk you through where the launch stands before you answer. The import shipped on "
+    "Tuesday and the first customers moved their data over the same afternoon. Support had a quiet week, "
+    "with two questions about date formats and one about a missing column, all fixed by Thursday. Marketing "
+    "has the email drafted, the landing page is in review, and the pricing table still needs the annual "
+    "plan added. Sales wants a short demo video, which nobody has started yet. So, in one sentence, what "
+    "do you think is the riskiest part of launching on Monday?"
+)
 LOOKED_UP = "The import's error rate is 0.4 percent."
 
 
@@ -65,7 +75,15 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
     folder = Path(settings.tts_model_dir).expanduser()
     kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
-    seen: dict = {"gaps": {}, "chat": [], "frames": []}
+    seen: dict = {"gaps": {}, "chat": [], "frames": [], "unheard_s": 0.0, "log": []}
+    speakers, log = call.Call._speakers, call._log
+
+    async def measured(self, loud, seconds):  # the most speech sent with nothing back from Live
+        await speakers(self, loud, seconds)
+        seen["unheard_s"] = max(seen["unheard_s"], self.unheard)
+
+    monkeypatch.setattr(call.Call, "_speakers", measured)
+    monkeypatch.setattr(call, "_log", lambda text: (seen["log"].append(text), log(text)))
 
     async def go():
         # `_call` connects by `settings.dsn()`: the test database here. The asking
@@ -135,6 +153,8 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                 )
                 await asyncio.sleep(10)
                 await b.leave()
+                await asyncio.sleep(6)
+                await a.ask(kokoro, MONOLOGUE)  # its answer may come late: the wait below takes it
                 while time.time() - started < LONG_S:
                     await asyncio.sleep(30)
                 seen["gaps"]["after_reconnect"] = await a.ask(kokoro, "Valor, are you still there?")
@@ -162,9 +182,13 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
         r for r in rows if r["type"] == "gateway.charged" and r["payload"].get("model") == settings.call_model
     ]
     gaps = seen["gaps"]
+    stalls = [line for line in seen["log"] if "after speech; resuming" in line]
     print(json.dumps({"gaps": gaps, "typed": seen["typed"], "looked_up": seen["looked_up"],
                       "side_talk_frames": seen["side_talk_frames"], "barge": seen["barge_at"], "over": seen["over_at"],
-                      "says": says, "charged_turns": len(resumed), "reason": reason, "report": report}, indent=1))  # fmt: skip
+                      "says": says, "charged_turns": len(resumed), "reason": reason, "report": report,
+                      "unheard_s": round(seen["unheard_s"], 1), "stalls": stalls}, indent=1))  # fmt: skip
+    # No stall-resume in a healthy call, a half-minute monologue included.
+    assert not stalls
     # Answered when addressed, and to "Hello" with one other person there.
     assert all(g < 30 for g in gaps.values())
     # Reported, not a bar: Tom dropped the 2 s median target (2026-11-05, docs/plans/gemini-live.md).
