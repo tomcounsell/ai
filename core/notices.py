@@ -31,12 +31,15 @@ question wakes the session, as everything else does.
 
 `owe(conn, task_id)` writes the reports a task's fold owes: its open
 question (`question:<id>`; none to its project's board session, whose board
-row carries it, `core/board.py`) and its end without a merge
+row carries it, `core/board.py`), once it is open `board.STALE_DAYS` the
+follow-up asking Tom whether it is still worth doing (`stale:<id>`, to the
+same session: the chat it was asked in, Tom 2026-11-06), and its end without a merge
 (`ended:<row>`). `credential` is the push credential a merge needs, and
 `report` the merge that landed (`report:<effect>`). A report whose text
 Postgres jsonb refuses is written with kernel text in its place.
 """
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -49,6 +52,13 @@ from core.machine import State
 ACTED = ("question", "ended", "report")
 # A routine's results: quiet.
 RESULTS = ("ended", "report")
+# The follow-up to a question open `board.STALE_DAYS`, in the chat it was asked in.
+STALE = (
+    "My question below has gone {days}+ days unanswered. Ask Tom here whether it is still worth doing, "
+    "with the question's full context and your recommendation, keep or close, and the reason. "
+    "His 👍 or a reply to keep leaves it waiting; his 👎 or a reply to close is `task.stop`. "
+    "Neither is an answer to the question."
+)
 
 
 async def request(
@@ -156,25 +166,31 @@ async def owe(conn, task_id: str) -> list[str]:
 
     if f.state is State.WAITING and f.open_question and not await board.here(conn, task_id):
         asked = next(
-            (r["payload"] for r in rows if r["type"] == "question.asked"
+            (r for r in rows if r["type"] == "question.asked"
              and r["payload"].get("question_id") == f.open_question),
             None,
         )  # fmt: skip
         if asked is not None:
+            head, question = await headline(conn, task_id), str(asked["payload"].get("text", ""))
             made.append(
                 await request(
                     conn,
                     task_id,
                     kind="question",
                     about_key=f"question:{f.open_question}",
-                    text="\n\n".join(
-                        [
-                            lead(await headline(conn, task_id), "I have a question for you."),
-                            str(asked.get("text", "")),
-                        ]
-                    ),
+                    text="\n\n".join([lead(head, "I have a question for you."), question]),
                 )
             )
+            if asked["at"] < datetime.now(UTC) - timedelta(days=board.STALE_DAYS):
+                made.append(
+                    await request(
+                        conn,
+                        task_id,
+                        kind="question",
+                        about_key=f"stale:{f.open_question}",
+                        text="\n\n".join([lead(head, STALE.format(days=board.STALE_DAYS)), question]),
+                    )
+                )
     if f.state is State.ENDED and f.entry is not None:
         said = await unanswered(conn, task_id, rows)
         made.append(

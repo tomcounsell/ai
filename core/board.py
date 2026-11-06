@@ -25,10 +25,12 @@ the session posts it once in the channel, the post Tom reacts to, unless
 it is already asking Tom that question in the chat (a thread or a reply),
 where the canvas points instead. A question relayed elsewhere (his DM, the operator chat) is listed as asked
 there, with no post. A question open `STALE_DAYS` or more is `stale`, which
-moves the digest the wake it crosses, so the board session is told: it posts
-once here, wherever the question was asked, whether it is still worth doing
-(`"about": "stale:<id>"`), and Tom's 👎 on that post stops the task, which
-the board session may do for any task of its project (`covers`).
+moves the digest the wake it crosses, so the board session is told. Asked
+here, it posts once whether it is still worth doing (`"about":
+"stale:<id>"`), and Tom's 👎 on that post stops the task. Asked elsewhere,
+that chat's session asks it (`notices.owe`, Tom 2026-11-06: "shouldn't that
+come through the DM tho?") and the canvas points there. The board session
+may stop any task of its project (`covers`).
 """
 
 import hashlib
@@ -220,7 +222,12 @@ def text(board: str, snap: dict[str, Any], posts: dict[str, str], canvas: dict[s
     ]
     for q in snap["open"]:
         mine, asked = posts.get(f"stale:{q['question_id']}"), posts.get(f"question:{q['question_id']}")
-        if q["stale"] and mine:
+        if q["stale"] and not q["asked_here"]:
+            post = (
+                f"unanswered {STALE_DAYS}+ days: asked whether still worth doing in the chat it was asked in "
+                "(e.g. Tom's DM), whose session keeps or stops it: no post here"
+            )
+        elif q["stale"] and mine:
             post = (
                 f"unanswered {STALE_DAYS}+ days, asked whether still worth doing in your post "
                 f"{mine}: 👍 keeps it waiting, 👎 stops it"

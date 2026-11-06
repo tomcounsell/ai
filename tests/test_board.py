@@ -371,32 +371,97 @@ def test_the_board_session_stops_any_task_of_its_project_and_no_other_projects(d
 
 def test_a_question_open_seven_days_wakes_the_board_to_ask_once_if_still_worth_doing(dsn, dm, monkeypatch):
     """Crossing STALE_DAYS moves the digest, so a row is written with nothing
-    else changed; a question asked in another chat (Tom's DM) is then to be
-    posted here, not 'no post here'; the post with `stale:` is named."""
+    else changed. A question asked here is then to be posted here, and the
+    post with `stale:` is named; one asked in another chat (Tom's DM) is
+    followed up there, so here it is a line with no post (Tom, 2026-11-06),
+    even after a board post named it."""
     chat, other_chat = two_chats()
 
     async def go():
         here = await session_task(dsn, chat)
         side = (await say(dsn, other_chat, "hi", at(2)))["task_id"]
-        q = await ask(dsn, await child_of(dsn, side), "Run the practice invoice?")
+        theirs = await ask(dsn, await child_of(dsn, side), "Run the practice invoice?")
+        mine = await ask(dsn, await child_of(dsn, here), "Use Postgres?")
         await owe(dsn)
         quiet = await owe(dsn)
         monkeypatch.setattr(board, "STALE_DAYS", 0)
         crossed = await owe(dsn)
-        await send(dsn, here, chat, at(60), "Still worth doing? I recommend closing it.", about=f"stale:{q}")
+        await send(
+            dsn, here, chat, at(60), "Still worth doing? I recommend closing it.", about=f"stale:{mine}"
+        )
+        await send(dsn, here, chat, at(61), "An old post.", about=f"stale:{theirs}")
         await ask(dsn, await child_of(dsn, here), "Rename it?")  # a post alone writes no row
         await owe(dsn)
-        return q, quiet, crossed, await board_rows(dsn, chat)
+        return theirs, mine, quiet, crossed, await board_rows(dsn, chat)
 
-    q, quiet, crossed, rows = run(go())
+    theirs, mine, quiet, crossed, rows = run(go())
     assert quiet == [] and crossed == [f"slack:{chat}"] and len(rows) == 3
-    fresh, stale, posted = (r["text"].split("Open:")[1].split("Decided")[0] for r in rows)
-    assert "asked in another chat (Tom's DM): no post here" in fresh and "unanswered" not in fresh
-    asks = f'post here asking whether it is still worth doing, with your recommendation, "about": "stale:{q}"'
-    assert "no post here" not in stale and asks in stale
+    lines = [
+        {q: next(x for x in r["text"].splitlines() if f"question {q} " in x) for q in (theirs, mine)}
+        for r in rows
+    ]
+    fresh, stale, posted = lines
     assert (
-        f"asked whether still worth doing in your post {at(60)}: 👍 keeps it waiting, 👎 stops it" in posted
+        "asked in another chat (Tom's DM): no post here" in fresh[theirs] and "unanswered" not in fresh[mine]
     )
+    elsewhere = "+ days: asked whether still worth doing in the chat it was asked in"
+    for line in (stale[theirs], posted[theirs]):
+        assert elsewhere in line and line.endswith("no post here") and "post here asking" not in line
+    asks = (
+        f'post here asking whether it is still worth doing, with your recommendation, "about": "stale:{mine}"'
+    )
+    assert asks in stale[mine]
+    assert (
+        f"asked whether still worth doing in your post {at(60)}: 👍 keeps it waiting, 👎 stops it"
+        in posted[mine]
+    )
+
+
+def test_a_question_open_seven_days_is_followed_up_in_the_chat_it_was_asked_in(dsn, dm, monkeypatch):
+    """A question from Tom's DM, open STALE_DAYS, gets one `stale:` report on
+    the DM's session, a question report naming its task, so that session's
+    `task.stop` reaches it; none before 7 days, none twice, and none for a
+    task of the board chat, whose board row asks it."""
+    chat = channel()
+    (pathlib.Path(settings.projects_dir) / "valor.toml").write_text(
+        bridges.VALOR_SPEC + f'chats = ["slack:{dm}", "slack:{chat}"]\nboard = "slack:{chat}"\n'
+    )
+
+    async def go():
+        dm_session = (await tom_says(dsn, dm, "hello", at(10)))["task_id"]
+        here = await session_task(dsn, chat)
+        child, own = await child_of(dsn, dm_session), await child_of(dsn, here)
+        q = await ask(dsn, child, "Run the practice invoice?")
+        await ask(dsn, own, "Use Postgres?")
+        async with await db.connect(dsn) as conn:
+            fresh = [await notices.owe(conn, t) for t in (child, own)]
+            monkeypatch.setattr(board, "STALE_DAYS", 0)
+            crossed = [await notices.owe(conn, t) for t in (child, own)]
+            again = await notices.owe(conn, child)
+            reporting = await tasks.reporting(conn, dm_session)
+        return (
+            q,
+            child,
+            fresh,
+            crossed,
+            again,
+            reporting,
+            await bridges.rows(dsn, dm_session),
+            await bridges.rows(dsn, here),
+        )
+
+    q, child, fresh, crossed, again, reporting, dm_rows, board_rows_ = run(go())
+    assert fresh == [[f"question:{q}"], []] and crossed == [[f"stale:{q}"], []] and again == []
+    (stale,) = [
+        r["payload"]
+        for r in dm_rows
+        if r["type"] == "child.reported" and r["payload"]["about_key"].startswith("stale:")
+    ]
+    assert stale["kind"] == "question" and stale["child_id"] == child and child in reporting
+    assert "+ days unanswered" in stale["text"] and "Run the practice invoice?" in stale["text"]
+    assert not [
+        r for r in board_rows_ if r["type"] == "child.reported" and r["payload"].get("kind") == "question"
+    ]
 
 
 # -- Tom's reaction -----------------------------------------------------------------

@@ -128,11 +128,11 @@ weeks. Each time one comes:
    `slack.send_message` payload, so the next report names the post. One
    question in one place: one asked in a thread is answered there, and
    one asked in Tom's DM gets none here (its DM message is where he
-   answers it), until it goes stale (step 3). An apology or
+   answers it), stale or not. An apology or
    acknowledgement never repeats a question; it points to where the
    question is asked.
-3. For each open question marked `unanswered 7+ days`, wherever it was
-   asked, post one top-level message in this chat asking whether it is
+3. For each open question marked `unanswered 7+ days: post here`, asked
+   in this chat, post one top-level message in this chat asking whether it is
    still worth doing: the question in a line, how long it has waited, and
    your recommendation, keep or close, with the reason (Tom, 2026-11-06:
    "an emoji reaction by me is enough to keep it alive or close it out"),
@@ -145,7 +145,10 @@ weeks. Each time one comes:
    that task with `"by": "tom"`, `"via": "slack reaction :-1:"`. You stop
    any task of this project, wherever it started. Neither is an
    answer to its question. A reply in the chat that says keep or close
-   does the same.
+   does the same. One asked in another chat (Tom's DM) is followed up
+   there, by that chat's session (Tom, 2026-11-06: "shouldn't that come
+   through the DM tho?"): here it is one canvas line pointing there, and
+   no post.
 4. Tom's reaction reaches you as `Tom reacted :+1: to your post <ts>`.
    👍 (`+1`) on a question's post, or on your message asking it in a
    thread: `task.answer` that task with
@@ -263,7 +266,14 @@ teammate would (in Tom's own chat, a good deputy):
    Otherwise raise only the rest in the chat, in your own words with your
    recommendation and the task's stated defaults, and wait; then pass one
    `task.answer` holding your answers and the chat's (the defaults where
-   it left one open). A task another room of the project started here
+   it left one open). A question gone 7+ days unanswered comes again as a
+   `stale` report: ask Tom here whether it is still worth doing, with the
+   question's full context (in Tom's DM only he reads it; elsewhere the
+   Who-reads rule of the decision board holds) and your recommendation,
+   keep or close, with the reason. His 👍 or a reply to keep leaves it
+   waiting; his 👎 or a reply to close is `task.stop` of that task, with
+   `"by": "tom"` and `"via"` naming how. Neither is an answer to its
+   question, so a 👍 on this post is no `task.answer`. A task another room of the project started here
    (its instruction names the thread in this chat it was approved in)
    is told in that thread. A session opened for such a task, with no new
    message in its opening, posts nothing until something comes in. Tell the chat a delivery or a stop in your own
