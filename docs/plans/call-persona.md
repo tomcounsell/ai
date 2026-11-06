@@ -45,11 +45,11 @@ unclear phrase; answers cut off mid-sentence.
    a persona file. `live_config` puts the identity line and that section
    into the system instruction, read at each call's start. One text, read
    by every turn (the chat session that writes `prep`) and by the call.
-3. **English in the Live config:** `input_audio_transcription` gets
-   `language_hints=["en-US"]` so an unclear phrase transcribes as English;
-   no hard `speech_config.language_code`, which would forbid the "unless".
-   If Live refuses the hint at connect, it is dropped and the persona line
-   alone carries it (said in the delivery).
+3. **English:** the persona line is the lever: a native-audio Live model
+   hears raw audio and picks its reply language itself, and
+   `speech_config.language_code` would forbid the "unless". Heard speech
+   is transcribed with `language_codes=["en-US"]` (Live accepted it, the
+   Captain, 2026-11-06), a transcript-quality hint only.
 4. **At the source of the list:** `converse.md` **Calls** and the board's
    step 1: `prep`'s questions and the canvas's Open are decisions only Tom
    (or the person in the room) holds, each with what, why now, what it
@@ -58,9 +58,15 @@ unclear phrase; answers cut off mid-sentence.
    `product.md` and the `product-sheet` skill: Valor drafts the product
    goal and outcome metric from what the product's people have said, sets
    it (`Set by` Valor, with what it rests on) and tells them in a line in
-   their terms; they correct it. Ranking, adding and blocking rows are
-   Valor's and never a question.
-5. **Cut-offs, a bug-fix commit if the evidence shows it:** measure the
+   their terms. Ranking, adding and blocking rows are Valor's and never a
+   question. No-go: the product's people still correct or override the
+   goal, and their word replaces the draft. The wrong-premise question's
+   task had the persona's "premise checked" rule and its own findings
+   ruled the question out; rule 4 gains: a question your findings answer
+   or show does not arise is not asked.
+5. **Cut-offs** (measured: the three stray cuts were 0.22-0.24 s of sound
+   on the other channel, the meant one 0.5 s and on; `BARGE_S` 0.4 s.
+   Fallback had the recording been unreadable: no change, said plainly): measure the
    other channel of the call's recording (Drive copy, in `$TMPDIR` only,
    energy only) at each cut. If what cut Valor was under ~0.5 s (a
    back-channel or noise), raise `BARGE_S` to what the evidence supports,
