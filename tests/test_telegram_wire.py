@@ -81,3 +81,40 @@ def test_a_cancel_of_the_caller_still_cancels(call):
 
     asyncio.run(go())
 
+
+@pytest.mark.parametrize("error", [TimeoutError(60, "Operation timed out"), OSError("reset"), None])
+def test_a_drop_with_or_without_an_error_is_returned_and_reconnected(error):
+    from bridges.telegram.bridge import TelegramBridge
+
+    async def go():
+        w = wire()
+        b = TelegramBridge.__new__(TelegramBridge)
+        b.wire = w
+        reconnected = asyncio.Event()
+
+        async def connect():
+            reconnected.set()
+            await asyncio.Event().wait()  # the next drop never comes
+
+        b.connect = connect
+        keep = asyncio.create_task(b._keep_connected())
+        if error is None:
+            w.client.disconnected.set_result(None)
+        else:
+            w.client.disconnected.set_exception(error)  # what Telethon's sender does on an errored drop
+        await asyncio.wait_for(reconnected.wait(), 1)
+        keep.cancel()
+
+    asyncio.run(go())
+
+
+def test_a_cancel_of_the_drop_waiter_still_cancels():
+    async def go():
+        w = wire()
+        t = asyncio.create_task(w.disconnected())
+        await asyncio.sleep(0)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    asyncio.run(go())

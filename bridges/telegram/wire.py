@@ -199,7 +199,9 @@ class TelethonWire:
         return self.client.is_connected()
 
     async def disconnected(self) -> None:
-        await self.client.disconnected
+        # Telethon fails the future with the drop's error when it had one;
+        # the connection is lost either way.
+        await asyncio.wait({self.client.disconnected})
 
     def on_message(self, handler: Handler) -> None:
         from telethon import events
