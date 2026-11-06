@@ -346,7 +346,7 @@ workspace, which the kernel reads when the turn ends:
 | `.valor/done.md` | build or patch: a candidate, what it is and how it was verified | with a clean tree (checked the same way, through a fresh index, with the same filter caveat; the candidate is the commit), the head commit and the turn are the candidate, and the checks run; uncommitted changes, or git config the kernel refuses (`core/git.py`), are an error and no candidate. `task.delivered` waits for the checks (`docs/sdlc-state-machine.md`) |
 | `.valor/stop.md` | clarify, plan, build, or patch: a note to Tom that the work is stopped, or, opening `Done:`, finished with nothing to merge | with no other stage signal beside it, the verdict `ended` and `task.ended` (`kind: decided`); Tom's report leads with "This is done; nothing needed merging." for a `Done:` note |
 | `.valor/compact.md` | a chat session's turn: a request to compact the conversation, its text added to the compaction's instructions | the turn is followed, in the same run, by a `/compact` turn in its session (`turn.started` `compaction: true`, never collected); from any other turn an error, ignored (Compaction, above) |
-| `.valor/wake.md` | a chat session's finished turn: a delay (`90s`, `20m`, `2h`, or bare minutes), optionally `post: <effect file or message id>` naming the post it watches, then a note to itself | `turn.collected` carries `wake` (`after_s`, `post`, `note`); once the delay passes with no reply to the post or message in its thread, the kernel steps the listening session with no new message (`session.wake_due`), its prompt opening with `# Your wake-up`; a newer wake on the same post (or, with no post, the newer no-post wake) replaces it. From an unfinished turn, with an unreadable delay, or from any other turn, an error, not set |
+| `.valor/wake.md` | a chat session's finished turn: a delay (`90s`, `20m`, `2h`, or bare minutes), optionally `post: <effect file or message id>` naming the post it watches, then a note to itself | `turn.collected` carries `wake` (`after_s`, `post`, `note`); once the delay passes with no reply to the post or message in its thread, the kernel steps the listening session with no new message (`session.wake_due`), its prompt opening with `# Your wake-up`, which ends by pointing it at `valor-record waits` (and, in a product room, `sheet.py due`) before it chooses to wait, nudge, go ahead, or hand on; a newer wake on the same post (or, with no post, the newer no-post wake) replaces it. From an unfinished turn, with an unreadable delay, or from any other turn, an error, not set |
 | `.valor/effects/<name>.json` | one request `{"action_type", "target", "payload"}` | each goes to the broker, which performs or refuses; a `merge` request, one that is not JSON Python can parse, one holding a surrogate code point outside an escaped pair (not text), or one the `turn.collected` row cannot hold (below), is recorded with an error and never reaches it; a send whose text fields are not strings is refused for its shape |
 
 `core.signals.collect` moves each to `.valor/handled/<turn_id>/` and reads
@@ -588,7 +588,10 @@ The workspace has `valor-record` (`tools/valor_record.py`): `chats`,
 `messages [CHAT] [--search] [--limit] [--before]`, `tasks [--search]`,
 `task ID`, `call CODE`, `hours [--since D] [--until D]` (the blocks of
 time Valor worked on the project, as the `hours` routine writes them to
-its calendar, [routines.md](routines.md)), and `memory WORDS [--limit] [--offset]`, which searches the
+its calendar, [routines.md](routines.md)), `waits` (what is waiting now,
+oldest first: each task's open question and each post a chat session
+awaits a reply to, with its note, since when, and the hours waited, in
+Tom's working hours too, Monday to Friday 09:00 to 18:00 his time), and `memory WORDS [--limit] [--offset]`, which searches the
 project's memory as recall reads it ([memory.md](memory.md), Search). The kernel answers it: each harness sets `VALOR_RECORD_URL`, the
 turn's gateway base URL with `/record`, and the gateway's `record/` route
 (before the catch-all that forwards upstream) resolves the turn's token to

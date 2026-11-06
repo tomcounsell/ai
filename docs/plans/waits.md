@@ -44,7 +44,9 @@ else's is recorded.
    A SELECT plus `session.wakes`; nothing stored.
 2. **`sheet.py blocked SHEET [--today]`**: the Blocked tab's open rows,
    each with days since `asked on` and whether `chase on` has come. Reuses
-   `values`/`rows`; `due` stays as it is.
+   `values`/`rows`; `due` stays as it is. (Built instead as `due`'s
+   `open` list, so one verb reads the Blocked tab; the wake-up names
+   `sheet.py due`.)
 3. **The wake-up.** `session._wake_report` ends with one line: run
    `valor-record waits` (and in a product room `sheet.py blocked`) before
    choosing wait, nudge, go ahead on a two-way door, or hand to the next
