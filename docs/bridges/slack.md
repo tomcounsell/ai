@@ -65,9 +65,13 @@ writes into it. Tom answers in the channel, or with 👍 on a decision's
 post, which the bridge receives (below). The board session answers and
 stops any task of its project, wherever it started (Tom, 2026-11-06: "an
 emoji reaction by me is enough to keep it alive or close it out"): a
-question open 7 days or more, wherever it was asked, gets one post asking
-whether it is still worth doing, and Tom's 👍 keeps it waiting, his 👎
-stops the task.
+question open 7 days or more gets one post asking whether it is still
+worth doing, and Tom's 👍 keeps it waiting, his 👎 stops the task. The
+post goes in the chat the question was asked in (Tom, 2026-11-06:
+"shouldn't that come through the DM tho?"): asked in the channel, the
+board session posts it; asked elsewhere (his DM), that chat's session gets
+a `stale:<id>` report, asks it there with the question's context, and may
+stop the task, while the canvas only points there.
 
 **A channel over several repositories** (Tom, 2026-10-28: "scope this
 channel to several repositories"; 2026-10-29: "fold the yudame-skills
