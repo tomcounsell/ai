@@ -433,7 +433,8 @@ to a chat; one started with `"in"` another chat of the project (a product
 room approving a build in its dev channel, [slack.md](slack.md)) is that
 chat's session's child instead, reads that chat and reports there; the session answers what it can of a question, raises only the
 rest in the chat, and passes one `task.answer`; a project's board session
-(`board` in its spec) gets its tasks' questions in its board row instead
+(`board` in its spec) gets its tasks' questions in its board row instead,
+and may answer or stop any task of the project wherever it started
 ([slack.md](slack.md)). Its workspace is the project's
 checkout with no setup and no services, brought up to the project's
 branch before each turn, so a reply waits only for the model. Its history
