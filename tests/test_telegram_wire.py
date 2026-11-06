@@ -15,7 +15,11 @@ class Client:
 
     def __init__(self):
         self.pending: asyncio.Future | None = None
-        self.disconnected = asyncio.get_running_loop().create_future()
+        self.dropped = asyncio.get_running_loop().create_future()
+
+    @property
+    def disconnected(self):
+        return asyncio.shield(self.dropped)  # as Telethon's client gives it: a new outer future each time
 
     def is_connected(self):
         return True
@@ -83,7 +87,11 @@ def test_a_cancel_of_the_caller_still_cancels(call):
 
 
 @pytest.mark.parametrize("error", [TimeoutError(60, "Operation timed out"), OSError("reset"), None])
-def test_a_drop_with_or_without_an_error_is_returned_and_reconnected(error):
+def test_a_drop_with_or_without_an_error_is_returned_and_reconnected(error, caplog):
+    """And leaves no unretrieved error for asyncio to log at ERROR, which
+    Sentry's logging integration would report."""
+    import gc
+
     from bridges.telegram.bridge import TelegramBridge
 
     async def go():
@@ -99,13 +107,15 @@ def test_a_drop_with_or_without_an_error_is_returned_and_reconnected(error):
         b.connect = connect
         keep = asyncio.create_task(b._keep_connected())
         if error is None:
-            w.client.disconnected.set_result(None)
+            w.client.dropped.set_result(None)
         else:
-            w.client.disconnected.set_exception(error)  # what Telethon's sender does on an errored drop
+            w.client.dropped.set_exception(error)  # what Telethon's sender does on an errored drop
         await asyncio.wait_for(reconnected.wait(), 1)
         keep.cancel()
 
     asyncio.run(go())
+    gc.collect()
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
 
 def test_a_cancel_of_the_drop_waiter_still_cancels():

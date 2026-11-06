@@ -25,6 +25,7 @@ next one's starts.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import mimetypes
 from collections.abc import Awaitable, Callable
@@ -200,8 +201,10 @@ class TelethonWire:
 
     async def disconnected(self) -> None:
         # Telethon fails the future with the drop's error when it had one;
-        # the connection is lost either way.
-        await asyncio.wait({self.client.disconnected})
+        # the connection is lost either way. Awaiting it retrieves the error,
+        # so asyncio logs no "exception was never retrieved" for it.
+        with contextlib.suppress(Exception):
+            await self.client.disconnected
 
     def on_message(self, handler: Handler) -> None:
         from telethon import events
