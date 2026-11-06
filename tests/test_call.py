@@ -398,6 +398,40 @@ def test_the_person_answered_speaking_over_valor_cuts_him_off_and_side_talk_does
     assert ("[note] Logan cut you off; they heard only: one two three", False) in c.session.contents()
 
 
+@pytest.mark.parametrize("quiet_between", [True, False])
+def test_valor_answers_who_spoke_last_when_his_reply_begins_before_their_words_are_heard(
+    dsn, team, quick, quiet_between
+):
+    """Live began a reply before its transcript of the question, so the
+    call took the side-talker before it as the person answered, and their
+    words over the reply cut Valor off (the live test, 2026-11-06); and a
+    reply begun while the side-talker's stretch was still closing went to
+    them too."""
+
+    async def go():
+        page = Page()
+        page.ahead, page.played = 30.0, 1.0
+        c = await in_call(dsn, team, page)
+        await talk(c.the, TOMS, 0.6)
+        await push(c.session, heard("Sam, did the invoice come?"))
+        if quiet_between:
+            await asyncio.sleep(call.QUIET_S + 0.2)
+        await talk(c.the, LOGAN, 0.6)
+        await push(c.session, audio(1.0))  # the reply, ahead of the question's transcript
+        await push(c.session, heard("Valor, tell me about the launch."))
+        await push(c.session, said("one two three four five six"), audio(1.0), done())
+        await talk(c.the, TOMS, 0.6)  # side talk over the reply
+        side = c.page.stops
+        await talk(c.the, LOGAN, 0.6)  # the person answered
+        await settle(c.the)
+        await finish(c)
+        return c, side
+
+    c, side = run(go())
+    assert side == 0 and c.page.stops == 1
+    assert ("[note] Logan cut you off; they heard only: one two three", False) in c.session.contents()
+
+
 async def talk(the, who, seconds):
     """`who` speaking for `seconds`, as Meet sends it."""
     for _ in range(round(seconds / 0.05)):

@@ -1131,13 +1131,17 @@ class Call:
 
     async def _begin(self) -> Reply:
         """The reply Live has started: what was heard before it is a whole
-        stretch, and the turn is metered from here."""
+        stretch, and the turn is metered from here. It answers whoever spoke
+        most since the last change of speaker: Live may begin a reply before
+        its transcript of the question, and the stretch closed before it was
+        another person's (a cut for side talk in the live test, 2026-11-06)."""
         if self.reply is None:
+            spoke = self.energy
+            self.answering = max(spoke, key=spoke.get) if spoke else self.speaking or self.last_who
             if self.close_at is not None:
                 await self._close_stretch(self.close_at[1])
             if self.heard:
                 await self._close_stretch(self.energy)
-            self.answering = self.last_who or self.speaking
             self.reply = Reply(ledger.new_id(), self.typed)
             self.replies[self.reply.id] = self.reply
             await self._open(self.reply.id)
