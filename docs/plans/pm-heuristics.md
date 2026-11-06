@@ -59,10 +59,21 @@ turn with no restart.
      declined with why, or handed to a named person. (Andy Grove, *High
      Output Management*, 1983: a manager's output is the output of the
      people under their influence.)
-3. **`docs/persona.md`**: the Voice mirror updated to the same words, and a
+3. **Clarity above completeness** (Tom, same thread, 04:01 UTC: "it's
+   easy to bombard humans with too much context and too many questions.
+   we must be careful and make sure questions are easy to answer and they
+   don't pile up on any one person"). Folded into the two rules it
+   sharpens, no new section: `voice.md` "Concise" adds "clarity above
+   completeness: the context the reader needs to act, not all you know";
+   `conduct.md` "How to ask" item 2 becomes **Few, easy questions**: only
+   material ones, as few as the decision allows, each answerable in a word
+   or a pick (its default makes "yes" enough), and none put to a person
+   already holding your open questions when someone else, the code or the
+   record can answer. The batch rule (item 1) stays as is.
+4. **`docs/persona.md`**: the Voice mirror updated to the same words, and a
    "Run the project (Mission item 4)" section giving each heuristic's
    source.
-4. **Test** (`tests/test_kernel.py`, beside the persona assertions): the
+5. **Test** (`tests/test_kernel.py`, beside the persona assertions): the
    rendered persona carries the audience rule (both readers) and the Run
    the project heuristics. Documented behaviour, not a check.
 
@@ -80,7 +91,8 @@ examples are covered by the bullets above.
 
 - New: rendered persona holds "how technical the reader is", the
   non-engineer exclusion of file paths, the engineer's "file and line", and
-  each "Run the project" heading.
+  each "Run the project" heading, "clarity above completeness" and
+  "Few, easy questions".
 - Existing persona assertions in `tests/test_kernel.py` still pass (none
   quote the changed voice lines; grep found no other copy outside
   `docs/persona.md`).
