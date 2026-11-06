@@ -33,9 +33,7 @@ The other 28 open issues are in two client projects: no fix here, triage only. P
    - A task never reclaimed keeps resuming its session.
    - A re-provisioned task's services are stopped by `sweep` after a killed kernel, its document ports are in `taken_ports`, and it is in `RECLAIMABLE` again once finished.
    After rollout, the two parked tasks this left on the Captain and the Cowboy get re-provisioned and run their feedback turns. That is the intended behaviour; the delivery names them and says whether each was merged or ended.
-4. **3J.** `SENTRY_DSN`, the `valor` project's DSN, sits in launchd's user environment on the Macs (`launchctl getenv`). No plist or repo code sets it, and nothing in Valor reads it: `core/sentry.py` reads `settings.sentry_dsn_file`. Every task inherits it, so client suites that init Sentry from `SENTRY_DSN` report into `valor`.
-   Fix at the source: on each Mac, spend at most 20 min looking for whatever sets it and remove `SENTRY_DSN` there. Then run `launchctl unsetenv SENTRY_DSN`, so the restart from the rollout drops it.
-   No code change and no new drop name. If the variable comes back after a reboot, Sentry reopens 3J and the delivery says the setter was not found.
+4. **3J.** `SENTRY_DSN`, the `valor` project's DSN, is in the shared vault `.env` (`~/Desktop/Valor/.env`), which `~/Desktop/Valor/zshenv.sh` exports into every zsh. So a turn that runs another project's suite from its shell reports into `valor`. (The first reading, launchd's environment, was wrong: `launchctl getenv` exits 0 when a variable is unset.) Nothing in the current system reads `SENTRY_DSN`; `core/sentry.py` reads `settings.sentry_dsn_file`. Fix at the source: remove the line from the vault `.env`, which iCloud syncs to every Mac. No code change, no new drop name.
 
 ## Then
 
