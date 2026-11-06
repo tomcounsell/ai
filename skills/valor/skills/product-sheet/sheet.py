@@ -8,7 +8,8 @@
 `new` copies the template and shares the copy; `read` prints the Queue as
 JSON; `order` sorts the Queue by the ranking rule and numbers the ready
 rows, printing each row that moved; `due` lists the blockers to chase and
-the shipped items to review today. It prints JSON and changes nothing it
+the shipped items to review today, and every open blocker with the days it
+has waited. It prints JSON and changes nothing it
 does not name."""
 
 from __future__ import annotations
@@ -84,25 +85,35 @@ def ordered(queue: list[dict[str, str]]) -> list[dict[str, str]]:
 
 
 def due(blocked: list[dict[str, str]], queue: list[dict[str, str]], today: date) -> dict[str, list]:
-    """The open blockers whose chase date has come, and the shipped items
-    whose review date has come."""
+    """The open blockers whose chase date has come, the shipped items
+    whose review date has come, and every open blocker with the days since
+    it was asked (`waited`, None without a date) and whether its chase has
+    come (`chase due`)."""
+
+    def day(text: str) -> date | None:
+        try:
+            return date.fromisoformat(text.strip())
+        except ValueError:
+            return None
 
     def come(text: str) -> bool:
-        try:
-            return date.fromisoformat(text.strip()) <= today
-        except ValueError:
-            return False
+        return (day(text) or date.max) <= today
 
+    open_ = [b for b in blocked if b.get("status", "").strip().lower() != "cleared"]
     return {
-        "chase": [
-            b
-            for b in blocked
-            if b.get("status", "").strip().lower() != "cleared" and come(b.get("chase on", ""))
-        ],
+        "chase": [b for b in open_ if come(b.get("chase on", ""))],
         "review": [
             r
             for r in queue
             if r.get("status", "").strip().lower() == "shipped" and come(r.get("review on", ""))
+        ],
+        "open": [
+            {
+                **b,
+                "waited": (today - asked).days if (asked := day(b.get("asked on", ""))) else None,
+                "chase due": come(b.get("chase on", "")),
+            }
+            for b in open_
         ],
     }
 

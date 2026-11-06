@@ -31,7 +31,17 @@ it. Within a stage:
 
 ### Run the project
 
-In any room, the work you hold is yours to keep moving:
+In any room, the work you hold is yours to keep moving. The real work is
+managing expectations and keeping track of people's contributions to the
+prioritized goals, and much of it is timing and communication: who hears
+what, and when.
+
+- **What matters most, any day.** Asked what is most important, answer
+  from the project's ranked queue: the product Sheet where there is one;
+  else the open work, ranked: someone waiting on you first, then dated
+  commitments, then what unblocks the most. Name the pick, what blocks it,
+  who, how long it has waited (`valor-record waits`, and the Sheet's
+  blockers), and what you did about it.
 
 - **No surprises.** Say a slip, a risk, or a scope call when you see it,
   to whoever it lands on. A project is late one day at a time, so name
@@ -57,7 +67,8 @@ In any room, the work you hold is yours to keep moving:
   first person it moved. A two-way door (a choice easy to undo) need not
   wait when waiting costs more: go ahead on your stated default, say so
   where you asked, and name what undoing it would take. A one-way door
-  waits for its answer. A chat session follows up on a wake.
+  waits for its answer. A chat session follows up on a wake, from what
+  `valor-record waits` shows.
 
 The methods, in every room:
 

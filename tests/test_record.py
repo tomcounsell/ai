@@ -310,3 +310,92 @@ def test_each_harness_gives_the_turn_its_record_url(tmp_path):
         turn = h.workspace_turn("hi", cwd=str(tmp_path), harness=harness)
         command = turn("http://127.0.0.1:1/t/tok", "brief", "turn-1")
         assert command.env["VALOR_RECORD_URL"] == "http://127.0.0.1:1/t/tok/record", h.__name__
+
+
+async def _asks(conn, task: str, text: str, answer: bool = False) -> None:
+    """The task asks a question through the state machine (and Tom answers it)."""
+    from tests.test_machine import Ledger
+
+    lg = Ledger().ask()
+    if answer:
+        lg = lg.answer()
+    for row in lg.rows[1:]:
+        p = {k: f"{task}-{v}" if k in ("turn_id", "question_id") else v for k, v in row["payload"].items()}
+        await ledger.append(
+            conn, task, row["type"], {**p, "text": text} if row["type"] == "question.asked" else p
+        )
+
+
+async def _wakes(conn, session: str, post: str, note: str, verdict: str = "idle") -> None:
+    await ledger.append(conn, session, "turn.collected", {
+        "turn_id": ledger.new_id(), "state": "clarify", "verdict": verdict, "effects": [], "woke": [],
+        "wake": {"after_s": 0, "post": post, "note": note},
+    })  # fmt: skip
+
+
+def test_waits_lists_open_questions_and_awaited_posts_of_its_own_project_only(fresh, tmp_path, capsys):
+    """Tom, 2026-11-06: who or what is the blocker, with time measurement, computed not tracked."""
+    with World(fresh, tmp_path) as w:
+
+        async def go():
+            async with await db.connect(fresh) as conn:
+                t = {
+                    k: await tasks.start_child(
+                        conn, w.t["s2"], instruction=f"{k} work", project={"name": "a"}
+                    )
+                    for k in ("open", "relayed", "answered")
+                }
+                await _asks(conn, t["open"], "which logo?")
+                await _asks(conn, t["relayed"], "ship Friday?")
+                await _asks(conn, t["answered"], "blue?", answer=True)
+                await _wakes(
+                    conn, w.t["s2"], "1700.1", "waits on Kim: the pricing copy; blocks the launch page"
+                )
+                await _wakes(conn, w.t["s1"], "1700.2", f"Tom, relaying {t['relayed']}'s question")
+                await _wakes(conn, w.t["s1"], "1700.3", "replied to already")
+                await ledger.append(conn, w.t["s1"], "message.heard", {"reply_to": "1700.3", "text": "yes"})
+                # A wake whose turns keep failing is still owed: it shows, overdue.
+                await _wakes(conn, w.t["mail"], "1700.4", "on the client's invoice", verdict="failed")
+                await _wakes(conn, w.t["s3"], "1700.5", "b's wait")  # another project
+                stopped = await tasks.start(conn, session_brief("a", CHAT1, tmp_path / "s9"))
+                await _wakes(conn, stopped, "1700.6", "a stopped session never wakes")
+                await tasks.stop(conn, stopped, reason="test", by="tom", via="test")
+            return t
+
+        t = asyncio.run(go())
+        ((status, found), _) = w.ask("s1", [("GET", "waits", {})])
+    assert status == 200
+    by = {x.get("task_id") or x["post"]: x for x in found}
+    # The seed's raw question.asked on t["t"] is not a task in `waiting`, so it is not a wait.
+    assert set(by) == {t["open"], t["relayed"], "1700.1", "1700.4"}
+    q = by[t["open"]]
+    assert q["question"] == "which logo?" and q["blocks"] == "open work"
+    assert q["asked_in"] == f"telegram:{CHAT2}" and q["room"] == "The team chat."
+    assert q["relayed"] is None and q["hours"] >= 0 and "tom_working_hours" in q
+    assert by[t["relayed"]]["relayed"]["post"] == "1700.2"
+    post = by["1700.1"]
+    assert post["chat"] == f"telegram:{CHAT2}" and post["note"].startswith("waits on Kim")
+    assert post["due"] == post["since"]  # a wake set for 0s is owed at once: overdue shows
+    assert by["1700.4"]["chat"] == "email:<root@a.test>"
+    assert [x["since"] for x in found] == sorted(x["since"] for x in found)
+    lines = [valor_record.wait_line(x) for x in found]
+    assert any("asks: which logo?" in line and "blocks: open work" in line for line in lines)
+    assert any("relayed in post 1700.2" in line for line in lines)
+    assert any("note: waits on Kim" in line and "wake due" in line for line in lines)
+    assert all("of Tom's working hours" in line for line in lines)
+
+
+def test_toms_working_hours_skip_the_weekend_and_count_across_his_midnight():
+    from datetime import UTC, datetime
+
+    from core import session
+
+    bkk = lambda *a: datetime(*a, tzinfo=session.ZoneInfo("Asia/Bangkok"))
+    # Friday 17:00 to Monday 10:00 Bangkok: an hour each side of the weekend.
+    assert session.working_hours(bkk(2026, 11, 6, 17), bkk(2026, 11, 9, 10)) == 2.0
+    # Inside one weekday: its span.
+    assert session.working_hours(bkk(2026, 11, 4, 10), bkk(2026, 11, 4, 12, 30)) == 2.5
+    # Across Bangkok midnight, given in UTC: Tue 16:00 to Wed 11:00 his time.
+    tue_4pm = datetime(2026, 11, 3, 9, tzinfo=UTC)
+    assert session.working_hours(tue_4pm, datetime(2026, 11, 4, 4, tzinfo=UTC)) == 4.0
+    assert session.working_hours(bkk(2026, 11, 7, 9), bkk(2026, 11, 8, 18)) == 0.0

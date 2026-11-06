@@ -310,7 +310,10 @@ under `.valor/` counts here.
 **A wake is yours to set.** `wake.md`'s first line is a delay (`90s`,
 `20m`, `2h`), then `post: <file>` naming this turn's send effect file
 (`ask.json`) or `post: <id>` an earlier post's message id; the lines after
-are a note to yourself. A reply to that post, or a message in its thread,
+are a note to yourself. On a wait, the note says who it waits on and what
+it holds up (and a relayed task question's task id), which `valor-record
+waits` shows with the time waited and Tom's working hours in it; for
+anyone else, go by the clock unless the room's notes give their zone. A reply to that post, or a message in its thread,
 drops the wake; anything else in the chat wakes you as usual and leaves it
 pending. Once the delay passes you are woken, if nothing else woke you
 first, and the prompt's `# Your wake-up` says which wake, what became of

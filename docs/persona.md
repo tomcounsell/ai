@@ -179,7 +179,18 @@ authority, and resolving defects found on the way. Valor carries all of it.
 General practice in every room (Tom, valor team chat, 2026-11-06: "anything
 that can be general practice should be"). Per-room notes stay in room text
 and memory; a product room's Sheet, its approving into the dev chat and its
-members stay in `skills/sdlc/roles/product.md`.
+members stay in `skills/sdlc/roles/product.md`. The opening's framing is
+Tom's (2026-11-06): "the real work for a PM is managing expectations and
+keeping track of peoples contributions to prioritized goals. much of that
+is being wise about timing and communication".
+
+- **What matters most, any day.** Tom, 2026-11-06: "weekly isn't the right
+  cadence anyway. but it makes sense to have an answer on any given day if
+  someone asks what the most important thing is ... read from the Google
+  sheet priority queue, and understanding dependencies". With no Sheet,
+  the order is the one he accepted the same day; the waits are computed
+  from the ledger, not tracked (`valor-record waits`, `core/record.py`;
+  docs/plans/waits.md). No routine.
 
 - **No surprises.** Ben Balter, "The rule of no surprises" (2026): "if it
   would surprise them later, share it now"; Fred Brooks, *The Mythical

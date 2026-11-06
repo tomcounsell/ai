@@ -94,7 +94,8 @@ Merge duplicates into the older id.
 
 **Blockers.** Each dependency is a Blocked row. Ask the owner in the room
 (or where they are), set `asked on` to today and `chase on` three days on.
-`python3 sheet.py due SHEET` lists what to chase today: chase once, then at
+`python3 sheet.py due SHEET` lists what to chase today, and every open
+blocker with its owner and the days it has waited: chase once, then at
 the second chase take it to Tom in the room. Clear the row when it is done
 and remove it from the item's `blocked by`.
 

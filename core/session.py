@@ -71,7 +71,7 @@ import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -519,13 +519,35 @@ def _delay(seconds: int) -> str:
     return f"{seconds} second{'s' if seconds != 1 else ''}"
 
 
+def _zone() -> tzinfo:
+    """The operator's zone: the one his identity names in parentheses
+    (`UTC+7 (Asia/Bangkok)`), else UTC."""
+    zone = re.search(r"\(([^)]+)\)", persona.identity(settings.persona_dir)["timezone"])
+    return ZoneInfo(zone[1]) if zone else UTC
+
+
 def _when(at: datetime) -> str:
-    """`at` in the operator's time and in UTC: the zone his identity names
-    in parentheses (`UTC+7 (Asia/Bangkok)`)."""
+    """`at` in the operator's time and in UTC."""
     who = persona.identity(settings.persona_dir)
-    zone = re.search(r"\(([^)]+)\)", who["timezone"])
-    local = at.astimezone(ZoneInfo(zone[1]) if zone else UTC)
-    return f"{local:%H:%M} {who['operator'].split()[0]}'s time ({at.astimezone(UTC):%H:%M} UTC)"
+    return (
+        f"{at.astimezone(_zone()):%H:%M} {who['operator'].split()[0]}'s time ({at.astimezone(UTC):%H:%M} UTC)"
+    )
+
+
+# Tom's working hours (Tom, 2026-11-06): Monday to Friday, 09:00 to 18:00 his time.
+WORKDAY = (time(9), time(18))
+
+
+def working_hours(lo: datetime, hi: datetime) -> float:
+    """The hours of the operator's working days between `lo` and `hi`."""
+    zone, total = _zone(), timedelta()
+    day = lo.astimezone(zone).date()
+    while day <= hi.astimezone(zone).date():
+        if day.weekday() < 5:
+            start, end = (datetime.combine(day, t, zone) for t in WORKDAY)
+            total += max(timedelta(), min(end, hi) - max(start, lo))
+        day += timedelta(days=1)
+    return round(total / timedelta(hours=1), 1)
 
 
 def _wake_report(owed_wakes: list[dict[str, Any]]) -> str:
@@ -542,7 +564,17 @@ def _wake_report(owed_wakes: list[dict[str, Any]]) -> str:
         else:
             line += "."
         lines.append(line + (f" Your note: {w['note']}" if w.get("note") else ""))
-    return "\n".join(["# Your wake-up", "", *lines]) if lines else ""
+    if not lines:
+        return ""
+    return "\n".join(["# Your wake-up", "", *lines, "", WAITS])
+
+
+WAITS = (
+    "Before you choose, run `valor-record waits` (in a product room also `sheet.py due` on its Sheet): "
+    "what is waiting, on whom, since when and what it holds up. Then wait, nudge, go ahead on your stated "
+    "default where it is a two-way door, or take it to the next best person, as your persona's "
+    '"Nothing stalls on one person" says, and say in the chat what you did.'
+)
 
 
 def context_size(rows: list[dict], turn_id: str, model: str) -> int | None:

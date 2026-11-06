@@ -18,6 +18,9 @@ A project's reach is the chats its spec lists now (`chats`):
   task itself is outside;
 - its hours (`hours`): the time Valor worked on it, from its tasks' turns
   (`blocks`), which the `hours` routine writes to the project's calendar;
+- its waits (`waits`): each open question of its tasks and each post its
+  chat sessions are waiting on a reply to, with how long, computed from
+  the ledger;
 - its Meet calls (`call`): a call's session is inside when the chat that
   asked for it is (`core/call.py`), and its transcript is what it heard
   and what Valor said and posted there.
@@ -30,7 +33,7 @@ Everything here is a SELECT.
 """
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -414,7 +417,85 @@ async def hours(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], qu
     return [b.shown() for b in await blocks(conn, list(tasks), first, last)]
 
 
+WAKE_ROWS = ("effect.outcome", "effect.refused", "message.steered", "message.heard", "turn.collected")
+
+
+def _waited(at: datetime, now: datetime) -> dict[str, Any]:
+    from core import session
+
+    return {
+        "hours": round((now - at) / timedelta(hours=1), 1),
+        "tom_working_hours": session.working_hours(at, now),
+    }
+
+
+async def waits(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query) -> list[dict[str, Any]]:
+    """What is waiting in the project now, oldest first, computed from the
+    ledger: each task's open question (`question`: the task, its request,
+    the question, the chat session it reports to, asked-at) and each open
+    chat session's pending wake on a post (`post`: the chat, the post, set
+    and due, the session's note naming who it waits on). A post whose note
+    names a waiting task's id is that question relayed, shown on it
+    (`relayed`). Each carries the hours waited and the hours of Tom's
+    working time among them (`session.working_hours`)."""
+    from core import notices, session
+
+    now = datetime.now(UTC)
+    found: list[dict[str, Any]] = []
+    rows = await (
+        await conn.execute(
+            "SELECT task_id, type, payload, at FROM events WHERE task_id = ANY(%s) "
+            "AND type IN ('question.asked', 'question.answered', 'task.stopped') ORDER BY id",
+            (list(tasks),),
+        )
+    ).fetchall()
+    stopped = {t for t, kind, _, _ in rows if kind == "task.stopped"}
+    asked = {(t, p.get("question_id")): (p, at) for t, kind, p, at in rows if kind == "question.asked"}
+    for t, kind, p, _ in rows:
+        if kind == "question.answered":
+            asked.pop((t, p.get("question_id")), None)
+    for (task_id, qid), (p, at) in asked.items():
+        if task_id in stopped:
+            continue
+        f = machine.fold(await ledger.read(conn, task_id))
+        if f.state is not machine.State.WAITING or f.open_question != qid:
+            continue
+        hears = await notices.hears(conn, task_id, "question")
+        chat = tasks.get(hears, {}).get("chat")
+        found.append({
+            "kind": "question", "task_id": task_id, "blocks": tasks[task_id].get("instruction"),
+            "question": p.get("text"), "asked_in": _key(chat) if chat else "the operator chat",
+            "room": spec.rooms.get(_key(chat)) if chat else None, "since": at, "relayed": None,
+            **_waited(at, now),
+        })  # fmt: skip
+    questions = {q["task_id"]: q for q in found}
+    sessions = [t for t, b in tasks.items() if b.get("chat") and t not in stopped]
+    for task_id in sessions:
+        got = await (
+            await conn.execute(
+                "SELECT id, type, payload, at FROM events WHERE task_id = %s AND type = ANY(%s) ORDER BY id",
+                (task_id, list(WAKE_ROWS)),
+            )
+        ).fetchall()
+        chat = _key(tasks[task_id]["chat"])
+        for w in session.wakes([{"id": i, "type": k, "payload": p, "at": at} for i, k, p, at in got]):
+            if not w.get("post"):
+                continue
+            post = {
+                "kind": "post", "chat": chat, "room": spec.rooms.get(chat), "post": w["key"],
+                "status": w["status"], "note": w.get("note"), "since": w["set_at"], "due": w["due"],
+                **_waited(w["set_at"], now),
+            }  # fmt: skip
+            relays = next((q for t, q in questions.items() if t in (w.get("note") or "")), None)
+            if relays is not None:
+                relays["relayed"] = post
+            else:
+                found.append(post)
+    return sorted(found, key=lambda w: w["since"])
+
+
 VERBS = {
+    "waits": waits,
     "chats": chats,
     "messages": messages,
     "tasks": task_list,

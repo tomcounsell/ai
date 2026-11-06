@@ -158,7 +158,11 @@ def test_the_wake_prompt_gives_the_delay_toms_time_and_the_note():
     report = session._wake_report(session.owed(rows, T0 + timedelta(minutes=5)))
     assert report.startswith("# Your wake-up\n\n- You asked to be woken 5 minutes after your turn that ended at "
                              "13:40 Tom's time (06:40 UTC), watching your post 100.1: nothing has replied")  # fmt: skip
-    assert report.endswith("Your note: The logo question; default: blue.")
+    assert (
+        "Your note: The logo question; default: blue.\n\nBefore you choose, run `valor-record waits`"
+        in report
+    )
+    assert report.endswith('"Nothing stalls on one person" says, and say in the chat what you did.')
     assert session._delay(90) == "90 seconds" and session._delay(3600) == "1 hour"
     assert session._wake_report([]) == ""
 

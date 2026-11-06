@@ -62,6 +62,18 @@ def test_due_lists_open_blockers_to_chase_and_shipped_items_to_review():
     assert [r["id"] for r in got["review"]] == ["P-5"]
 
 
+def test_due_gives_every_open_blocker_with_the_days_it_has_waited():
+    blocked = [
+        {"item": "P-1", "owner": "Kim", "asked on": "2026-10-30", "chase on": "2026-11-02", "status": "open"},
+        {"item": "P-2", "owner": "P-9", "asked on": "", "chase on": "2026-11-05", "status": "open"},
+        {"item": "P-3", "owner": "Lee", "asked on": "2026-10-01", "chase on": "", "status": "Cleared"},
+    ]
+    got = sheet.due(blocked, [], date(2026, 11, 2))["open"]
+    assert [(b["item"], b["owner"], b["waited"], b["chase due"]) for b in got] == [
+        ("P-1", "Kim", 3, True), ("P-2", "P-9", None, False),
+    ]  # fmt: skip
+
+
 def test_order_writes_the_whole_queue_back_and_prints_what_moved(monkeypatch, capsys):
     stored = [[*row("P-1", "raw").values()], [*row("P-2", "ready").values()]]
     calls = []

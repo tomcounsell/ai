@@ -6,6 +6,7 @@ valor-record task ID [--json]
 valor-record memory WORDS [--limit N] [--offset N] [--json]
 valor-record call CODE [--before RECORD] [--limit N] [--json]
 valor-record hours [--since DATE] [--until DATE] [--json]
+valor-record waits [--json]
 
 Reads the ledger of this turn's own project: its chats, the messages each
 received and what they were bound to, its tasks and what became of them.
@@ -17,7 +18,10 @@ match first, each record quoted as data. `call` reads a Meet call's
 transcript by its meeting code, oldest first a page at a time: who said
 or typed what, what Valor spoke and posted. `hours` prints the blocks of
 time Valor worked on this project (Bangkok days, default this month), as
-the `hours` routine writes them to the project's calendar.
+the `hours` routine writes them to the project's calendar. `waits`
+prints what is waiting now, oldest first: each task's open question and
+each post a chat session awaits a reply to, with who or what it waits on,
+since when, how long, and how much of that was Tom's working hours.
 Standard library only, and Python 3.9 (macOS's own `python3`), so it runs
 in any workspace.
 """
@@ -67,6 +71,28 @@ def task_line(t: dict) -> str:
     return out
 
 
+def _age(w: dict) -> str:
+    return f"{w['hours']}h ({w['tom_working_hours']}h of Tom's working hours)"
+
+
+def wait_line(w: dict) -> str:
+    if w["kind"] == "question":
+        where = w["asked_in"] + (f" ({w['room']})" if w.get("room") else "")
+        out = (
+            f"question from task {w['task_id']}, asked {_when(w['since'])}, waiting {_age(w)}, via {where}"
+            f"\n    asks: {(w['question'] or '')[:300]}\n    blocks: {(w['blocks'] or '')[:200]}"
+        )
+        if w.get("relayed"):
+            r = w["relayed"]
+            out += f"\n    relayed in post {r['post']} ({r['status']}), wake due {_when(r['due'])}"
+        return out
+    where = w["chat"] + (f" ({w['room']})" if w.get("room") else "")
+    return (
+        f"post {w['post']} in {where} ({w['status']}), set {_when(w['since'])}, waiting {_age(w)}, "
+        f"wake due {_when(w['due'])}\n    note: {(w.get('note') or '(none: who it waits on is unknown)')[:300]}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="valor-record", description="Read this project's record.")
     sub = parser.add_subparsers(dest="verb", required=True)
@@ -87,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     hrs = sub.add_parser("hours", help="the time Valor worked on this project, block by block")
     hrs.add_argument("--since", help="first Bangkok day, YYYY-MM-DD (default the 1st of this month)")
     hrs.add_argument("--until", help="last Bangkok day, YYYY-MM-DD (default today)")
+    sub.add_parser("waits", help="what is waiting now, on whom, since when")
     mem = sub.add_parser("memory", help="search this project's memory, best match first")
     mem.add_argument("words", nargs="+", help="what to search for")
     mem.add_argument("--limit", "-n", type=int, default=10, help="how many (at most 50)")
@@ -144,6 +171,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.verb == "tasks":
         for t in out:
             print(task_line(t))
+    elif args.verb == "waits":
+        for w in out:
+            print(wait_line(w))
     elif args.verb == "hours":
         for b in out:
             print(
