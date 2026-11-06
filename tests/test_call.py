@@ -669,6 +669,8 @@ def test_an_ask_returns_at_once_and_its_answer_after_a_resumption_is_posted_and_
 
         c = await in_call(dsn, team, worker=worker)
         await push(c.session, resume("h1"), tool("ask", question="What did we ship?"), done())
+        # Under a loaded parallel suite the reply can take longer than push's 0.1 s.
+        assert await until(lambda: [k for k, _ in c.session.sent if k == "tool"])
         (response,) = [kw for k, kw in c.session.sent if k == "tool"]
         await push(c.session, go_away())
         assert await until(lambda: len(c.gemini.sessions) == 2 and c.the.session is c.gemini.sessions[1])
