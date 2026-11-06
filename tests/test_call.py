@@ -294,7 +294,7 @@ def test_a_reply_is_one_say_its_audio_held_until_released_and_settled_with_what_
         await until(lambda: c.the.energy.get(LOGAN))  # mixed, as Live's transcript lags the audio
         await push(c.session, heard("Valor, when do we ship?"))
         await push(c.session, audio(), audio(), said("We ship Monday."), audio(), done())
-        await until(lambda: c.the.out is None and not c.the.replies)
+        assert await until(lambda: c.page.streams and c.the.out is None and not c.the.replies)
         await settle(c.the)
         await finish(c)
         return c, await effects(dsn, c.the.id), await bridges.rows(dsn, c.the.id)
@@ -333,7 +333,7 @@ def test_lives_no_speech_turn_is_silence_and_its_markup_is_never_in_what_was_sai
         await settle(c.the)
         quiet += list(c.page.streams)
         await push(c.session, said("Sure,"), audio(0.3), said(" {pause} Monday."), done())
-        await until(lambda: not c.the.replies)
+        assert await until(lambda: len(c.page.streams) > len(quiet) and not c.the.replies)
         await settle(c.the)
         await finish(c)
         return quiet, await effects(dsn, c.the.id)
