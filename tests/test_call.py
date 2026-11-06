@@ -694,7 +694,6 @@ def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
     )
 
 
-
 def test_the_call_speaks_by_the_personas_in_a_call_section_and_in_english(tmp_path, monkeypatch):
     """Tom's first full Live call (2026-11-06): bare recommendations, a challenged
     question asked again, "offline" with no where, items that were not his, and a
@@ -718,7 +717,9 @@ def test_the_call_speaks_by_the_personas_in_a_call_section_and_in_english(tmp_pa
     shutil.copytree(settings.persona_dir, tmp_path / "persona")
     conduct = tmp_path / "persona" / "conduct.md"
     conduct.write_text(conduct.read_text().replace("### In a call\n", "### In a call\n\nSay {this} first.\n"))
-    monkeypatch.setattr(call, "settings", dataclasses.replace(settings, persona_dir=str(tmp_path / "persona")))
+    monkeypatch.setattr(
+        call, "settings", dataclasses.replace(settings, persona_dir=str(tmp_path / "persona"))
+    )
     told = call.live_config("acme", "notes", None).system_instruction
     assert persona.section(tmp_path / "persona", "In a call") in told and "Say {this} first." in told
     assert told.startswith("You are Valor Engels, in a live Google Meet call")
@@ -740,6 +741,7 @@ def test_a_missing_persona_section_is_unreadable(tmp_path):
     shutil.copytree(settings.persona_dir, tmp_path / "persona")
     with pytest.raises(persona.PersonaUnreadable, match="In a meeting"):
         persona.section(tmp_path / "persona", "In a meeting")
+
 
 # -- metering ---------------------------------------------------------------------
 

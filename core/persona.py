@@ -91,7 +91,9 @@ def section(directory: str | Path, title: str) -> str:
         lines = _text(directory, name).splitlines()
         if f"### {title}" in lines:
             start = lines.index(f"### {title}")
-            end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith(("## ", "### "))), len(lines))
+            end = next(
+                (i for i in range(start + 1, len(lines)) if lines[i].startswith(("## ", "### "))), len(lines)
+            )
             return "\n".join(lines[start:end]).strip()
     raise PersonaUnreadable(f"{directory}: no section '### {title}' in {', '.join(TEXTS)}")
 

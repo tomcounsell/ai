@@ -529,7 +529,7 @@ INSTRUCTIONS = (
     "will check: your worker, who reads the project's code, records and chats, answers in the call's chat, "
     "and you get a note. Never guess a fact.\n"
     "- When someone asks what is open, call `open_decisions` and go through what is theirs to decide as "
-    "\"In a call\" below says, and let them choose. With anyone but Tom in the call, a decision about a client "
+    '"In a call" below says, and let them choose. With anyone but Tom in the call, a decision about a client '
     "relationship (pricing, terms, its people) is one line: it is for Tom. Never say an id aloud.\n"
     "- When Tom settles open decisions (one idea may settle several), read his answer back in a sentence and "
     "call `settle` with the ids it settles. Only Tom settles decisions; a correction is a new `settle`.\n"
