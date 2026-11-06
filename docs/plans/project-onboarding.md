@@ -18,12 +18,16 @@ repo stays in its history.
 1. **`skills/valor/skills/product-sheet/doc.md`**, the companion Doc's one
    template: what the Sheet is for; each tab; one table `tab | column |
    values | meaning` covering every column and, as rows of `status`, every
-   status and what it needs; how a raw idea becomes ready (raw, shaping,
+   status and what it needs (the template's statuses only); how a raw idea becomes ready (raw, shaping,
    shaped, ready, approved); the readiness review; how another agent should
-   read it (one header row per tab, ids, the Goal tab first). Placeholders
+   read it (one header row per tab, ids, the Goal tab first; a chart tab
+   such as `Dashboard` is drawn from Queue and holds no data of its own, so
+   Queue is the source). Placeholders
    `{{product}}`, `{{sheet}}`, `{{folder}}` only. SKILL.md's Tabs, Statuses
    and readiness-check text move here and SKILL.md points to it, so there is
-   one copy.
+   one copy, except the line `tests/test_kernel.py:1607` asserts ("Valor
+   drafts the goal and metric"), which stays in SKILL.md's procedure for
+   the Goal tab.
 2. **`sheet.py`**:
    - `new "<Product>" --share EMAIL`: makes the Drive folder `<Product>
      product`, copies the template into it as `<Product> product backlog`,
@@ -32,8 +36,10 @@ repo stays in its history.
      tab (`Companion Doc`), sets each file's Drive description to name the
      other, and prints the three URLs.
    - `doc SHEET`: re-renders the Doc in the Sheet's folder (creates it if
-     missing, else replaces its content) and rewrites the Sheet's `Columns`
-     tab from `doc.md`'s table. Run on every Sheet when `doc.md` changes; that
+     missing, else replaces its content by a media update, keeping its id)
+     and writes the Sheet's `Columns` tab from `doc.md`'s table, adding the
+     tab when it is missing and deleting the prose `Guide` tab if present,
+     so one tab explains the Sheet. Run on every Sheet when `doc.md` changes; that
      is how they stay alike.
    - `seed SHEET OWNER/REPO`: appends each open GitHub issue (not pull
      requests) that no row links yet as a `raw` row: next free id, `mandatory`
@@ -70,9 +76,12 @@ repo stays in its history.
 2. **The other active clients** (the run notes say which, and which were
    left out: internal, personal, dormant, paused): the same, with no product
    channel created; the Sheet named in their existing rooms.
-3. **The first Sheet to standard**: into its own folder, `doc`, `Columns`
-   tab, its two off-standard statuses set to what their rows support (named
-   in the report), the Goal tab's Doc link.
+3. **The two existing Sheets to standard** (the run notes name them; both
+   already have product rooms that name them, so no `new` and no blind
+   `seed`): each into its own folder, `doc` (Doc, `Columns` tab, `Guide`
+   gone), `source` added to a Queue header that lacks it, the Goal tab's Doc
+   link, and off-standard statuses set to what their rows support (named in
+   the report).
 
 ## Out of scope
 
@@ -91,12 +100,16 @@ hook (no governance); rating or ranking seeded rows.
   rendered markdown, the folder shared with each `--share`, the Goal row
   written; the printed URLs.
 - `doc` on a Sheet whose folder has a Doc replaces it (no second Doc); with
-  none, makes one.
+  none, makes one. On a Sheet with `Guide` and no `Columns`: adds `Columns`,
+  writes it, deletes `Guide`; on one with `Columns`: rewrites it, adds no tab.
 - `seed`: skips pull requests and issues already linked in any row;
   numbering continues after the highest `P-nnn` (gaps kept); bug label is
   `mandatory`; an empty repo appends nothing.
 - `order` keeps `source` with its row (existing tests updated for the
   new column).
-- Live, in the build: each Sheet's tabs read back with one header row and no
+- `tests/test_kernel.py:1607` keeps passing (its sentence stays in SKILL.md).
+- Live, in the build: one Doc rendered twice keeps its file id and its
+  folder still holds one Doc, and its text reads as the markdown (Drive's
+  conversion); each Sheet's tabs read back with one header row and no
   merges; each Doc and folder open as Tom (permissions list); each edited
   spec loads; the first project's product channel is received on its Mac.
