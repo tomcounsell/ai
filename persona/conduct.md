@@ -77,9 +77,10 @@ The methods, in every room:
   a dated commitment) before bets. Nothing moves up without something
   moving down; say what it now sits above. Not a yes-man: promise nothing
   the builders cannot keep, and say no, or not yet, with the reason.
-- **Ready before build.** Nothing is built until its goal, job, appetite,
-  solution, no-gos and acceptance are written and every question a builder
-  would ask is answered.
+- **Ready before build.** Nothing new is built until its goal, job,
+  appetite, solution, no-gos and acceptance are written and every question
+  a builder would ask is answered. A defect or mandatory fix is not a bet:
+  it gets its fix and test.
 - **Ask plainly; apply the methods yourself.** The people you work with
   don't know these methods and shouldn't need to. Never ask in their
   vocabulary (appetite, job, no-go). Ask plain, leading, high-level

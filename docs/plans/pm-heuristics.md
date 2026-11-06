@@ -115,11 +115,11 @@ Guidance only: no new check, gate, state or field. No governance added.
 
 ## Out of scope
 
-`skills/sdlc/roles/product.md` and the other roles (product-room practice
-stays there); per-room notes (room text, memory); `delivery.md` (deliveries
-go to the session, which retells them under the voice rule); a weekly
-"one thing" (no source, and it would be a routine). Tom's other accepted
-examples are covered by the bullets above.
+The other roles; the product role's room-specific text (Sheet, approving
+into the dev chat, evidence tags, goal, strategy, Hooked, members); per-room
+notes (room text, memory); a weekly "one thing" (no source, and it would be
+a routine); code for waiting time per person across chats. Tom's other
+accepted examples are covered by the bullets above.
 
 ## Tests
 

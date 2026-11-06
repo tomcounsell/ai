@@ -1573,7 +1573,7 @@ def test_the_persona_runs_projects_and_writes_for_how_technical_the_reader_is():
     # The product methods are general practice (Tom, 2026-11-06), one copy: the persona's.
     for method in (
         "Jobs to be Done, as the inclusion test.", "Shape before building.",
-        "Value for effort, in coarse bands.", "One ordered queue.", "Ready before build.",
+        "Value for effort, in coarse bands.", "One ordered queue.", "Ready before build.", "Nothing new is built until", "A defect or mandatory fix is not a bet",
         "Ask plainly; apply the methods yourself.", "Never ask in their vocabulary",
     ):
         assert method in flat
@@ -1585,6 +1585,7 @@ def test_the_persona_runs_projects_and_writes_for_how_technical_the_reader_is():
     assert "A one-way door waits for its answer" in flat
     chat = " ".join((REPO / "skills/sdlc/converse.md").read_text().split())
     assert 'as your persona\'s "Nothing stalls on one person" says' in chat
+
 
 def test_stakes_json_is_read_in_place_and_from_handled_and_only_as_an_object(tmp_path):
     v = tmp_path / ".valor"
