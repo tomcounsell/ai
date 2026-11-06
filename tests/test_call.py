@@ -1332,6 +1332,9 @@ def test_a_live_session_that_hears_nothing_of_speech_is_resumed(dsn, team, quick
         await push(c.session, resume("h9"))
         await talk(c.the, LOGAN, 0.5)  # nothing comes back
         assert await until(lambda: len(c.gemini.sessions) == 2 and c.the.session is c.gemini.sessions[1])
+        sent = c.session.audio_bytes()
+        await asyncio.sleep(1.0)  # the resumed session is not resumed again in the quiet
+        assert len(c.gemini.sessions) == 2 and c.session.audio_bytes() == sent
         await push(c.gemini.sessions[1], heard("Valor, are you there?"), audio(), said("Yes."), done())
         await settle(c.the)
         await finish(c)
@@ -1340,6 +1343,77 @@ def test_a_live_session_that_hears_nothing_of_speech_is_resumed(dsn, team, quick
     c, done_ = run(go())
     assert c.gemini.configs[1].session_resumption.handle == "h9" and call.LOST_LINE not in c.page.posts
     assert [e["result"]["spoken_text"] for e in done_ if e["type"] == "meet.say"] == ["Yes."]
+
+
+def test_a_long_turn_live_sends_little_back_during_resumes_nothing(dsn, team, quick, monkeypatch):
+    """Inside a long turn a healthy Live sent nothing back for longer than
+    the stall, and the call resumed it eleven times (Tom's call,
+    2026-11-06): a turn ten times the stall, its transcript in bursts
+    farther apart than the stall, or none until it ends, resumes nothing."""
+    monkeypatch.setattr(call, "STALL_S", 0.3)
+
+    async def go():
+        c = await in_call(dsn, team)
+        for _ in range(4):  # 3 s of speech, a transcript only every 0.75 s
+            await talk(c.the, LOGAN, 0.75)
+            await push(c.session, heard("and then the next part "))
+        await talk(c.the, LOGAN, 3.0)  # 3 s of speech with nothing back at all
+        await asyncio.sleep(0.15)  # Live answers the end of the turn within the stall
+        await push(c.session, heard("and that is all."), audio(), said("Got it."), done())
+        await asyncio.sleep(1.0)
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert len(c.gemini.sessions) == 1
+
+
+def test_a_short_sound_live_gives_nothing_for_resumes_nothing(dsn, team, quick, monkeypatch):
+    """Live gives no transcript of a short utterance ("Hello.", the live
+    tests, 2026-11-05), and with several people there nothing asks it to
+    answer: a second of it and then quiet is not a stall."""
+    monkeypatch.setattr(call, "STALL_S", 1.5)
+
+    async def go():
+        c = await in_call(dsn, team)
+        await talk(c.the, LOGAN, 1.0)
+        await asyncio.sleep(2.5)
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert len(c.gemini.sessions) == 1
+
+
+def test_a_resume_after_a_stall_opens_once_the_old_session_is_closed(dsn, team, quick, monkeypatch):
+    """A resume once collided with the session it replaced ("1008 ...
+    already connected to an existing client", Tom's call, 2026-11-06): the
+    stalled session is closed, its receiver ended, before the next opens."""
+    monkeypatch.setattr(call, "STALL_S", 0.3)
+    gemini, open_ = Gemini(), []
+    connect = gemini.connect
+
+    @contextlib.asynccontextmanager
+    async def one_at_a_time(config):
+        if open_:
+            raise RuntimeError("1008 already connected to an existing client")
+        async with connect(config) as session:
+            open_.append(session)
+            try:
+                yield session
+            finally:
+                open_.remove(session)
+
+    gemini.connect = one_at_a_time
+
+    async def go():
+        c = await in_call(dsn, team, gemini=gemini)
+        await talk(c.the, LOGAN, 0.5)
+        assert await until(lambda: len(gemini.sessions) == 2 and c.the.session is gemini.sessions[1])
+        await finish(c)
+
+    run(go())
+    assert len(gemini.configs) == 2
 
 
 def test_google_key_over_ssh_without_the_vault_says_missing_rather_than_failing(tmp_path, monkeypatch):

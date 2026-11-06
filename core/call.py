@@ -763,7 +763,7 @@ STATE_S = 2.0
 MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
 BARGE_S = 0.2  # this much speech by the person Valor answers cuts him off
 UNANSWERED_S = 2.0  # with one other person, this long with no answer to them asks for one
-STALL_S = 6.0  # this much speech with nothing back from Live resumes the session
+STALL_S = 6.0  # this much speech, then this long quiet, with nothing back from Live resumes the session
 CUT_S = 3.0  # the rest of what cut Valor off ("Valor, stop. Wait a moment.") asks nothing
 
 
@@ -985,9 +985,12 @@ class Call:
             self.energy[who] = self.energy.get(who, 0.0) + v * seconds
         self.voiced_s += seconds if voiced and self.out is None and now >= self.cut_at + CUT_S else 0.0
         # Live once stopped answering anything, transcripts included, for the
-        # rest of a call (the live tests on the paid key, 2026-11-05).
+        # rest of a call (the live tests on the paid key, 2026-11-05). Inside
+        # a long turn a healthy Live may send nothing for longer than that
+        # (eleven resumes in Tom's call, 2026-11-06); it answers once the
+        # room is quiet, so the stall is that quiet with nothing back.
         self.unheard += seconds if voiced and self.session is not None else 0.0
-        if self.unheard >= STALL_S and self.stalled is not None:
+        if self.unheard >= STALL_S and now - self.last_voice >= STALL_S and self.stalled is not None:
             self.stalled.set()
         if voiced:
             self.last_voice = now
@@ -1081,8 +1084,11 @@ class Call:
                     finally:
                         stall.cancel()
                         if not receiving.done():
+                            # The old session is done with before the next opens.
+                            self.session = None
                             receiving.cancel()
-                            _log(f"call {self.id}: Live heard nothing of {STALL_S:.0f} s of speech; resuming")
+                            await asyncio.gather(receiving, return_exceptions=True)
+                            _log(f"call {self.id}: Live sent nothing back after speech; resuming")
                     if receiving.done() and not receiving.cancelled() and receiving.exception() is not None:
                         raise receiving.exception()
             except asyncio.CancelledError:
