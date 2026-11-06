@@ -79,6 +79,40 @@ turn with no restart.
 
 Guidance only: no new check, gate, state or field. No governance added.
 
+## After critique (build)
+
+- One rule for delivery and voice: `delivery.md` opens by saying a
+  delivery record is for the session and the engineers who check it, and
+  what reaches a person is retold in the reader's terms; "names the
+  artifact" (voice and delivery) means a link or plain name for Tom, the
+  commit and file for an engineer.
+- "never for identity" kept; the technical axis added beside length.
+- Unknowns first says the unknown in plain words, not Cagan's labels.
+- Sources rechecked on the web: Horowitz late 1990s (a16z 2012 repost);
+  Balter 2026; Spolsky 2000; Brooks 1975; Grove 1983; GTD 2001. Tom's
+  04:01 and 04:03 messages read verbatim from the thread.
+- Tom, 04:03 UTC: "if someone disappears or drops the ball on a task ...
+  first set a reminder and then reach out to the next best person". Added
+  as **Nothing stalls on one person**, on the existing chat-session wake
+  (`converse.md`: a wake on a post, dropped by a reply). No code.
+- `docs/persona.md` "How to ask" item 2 mirrors "Few, easy questions".
+
+- Tom, 04:07 UTC: the product methods "are all general purpose qualities
+  not just only for one room", and a Socratic style. JTBD, shaping,
+  value-for-effort bands, one ordered queue, ready before build, and
+  listen-then-trade-off move from `skills/sdlc/roles/product.md` into the
+  persona's "Run the project", one copy; the role keeps the Sheet, the
+  approval into the dev chat, evidence tags, goal, strategy, Hooked and
+  members. **Ask plainly; apply the methods yourself** adds the Socratic
+  style, tied to few, easy questions. This replaces "Product-room
+  specifics stay" in Out of scope.
+
+- Tom, 04:10 UTC: "24 hr response is expected, but a “two way door”
+  situation might warrant moving ahead without an answer". Folded into
+  Nothing stalls (a day of their working day, then a reminder; a two-way
+  door goes ahead on its default, naming the rollback; a one-way door
+  waits). `converse.md`'s "A real question" wake points to it, one rule.
+
 ## Out of scope
 
 `skills/sdlc/roles/product.md` and the other roles (product-room practice

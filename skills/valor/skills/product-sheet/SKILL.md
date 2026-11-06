@@ -7,7 +7,8 @@ description: Keep a product room's backlog Sheet (Google Sheets, valor@yuda.me) 
 
 One Google Sheet per product room, owned by valor@yuda.me, copied from the
 template "Product sheet template" (`TEMPLATE` in `sheet.py`). The product
-role (`skills/sdlc/roles/product.md`) says how to act; this says how the
+role (`skills/sdlc/roles/product.md`) and the persona's "Run the project"
+say how to act; this says how the
 Sheet is kept. The standard comes from Tom's review of the first room
 (2026-11-01): no scores or decimals, lanes first, rank only what is ready,
 blockers listed apart with owners, a goal on top, a review after every

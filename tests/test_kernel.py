@@ -1551,6 +1551,41 @@ def test_a_chat_session_drafts_in_the_askers_voice_and_sends_only_when_told(dsn,
         assert "One asked to be sent goes in the note as its effect" in stage
 
 
+def test_the_persona_runs_projects_and_writes_for_how_technical_the_reader_is():
+    """Tom, 2026-11-06 (#makes-good-project): project-manager heuristics are general
+    practice in every room; a repo path to a CEO is as bad as vagueness to an engineer;
+    clarity above completeness; nothing stalls waiting on one person."""
+    from core import persona
+
+    flat = " ".join(persona.render(REPO / "persona").split())
+    assert "adjusted for length and for how technical the reader is, never for identity" in flat
+    assert "with no file paths, repo or branch names" in flat
+    assert "To an engineer: exact, with the file and line, the command, the error" in flat
+    assert "what reaches a person is retold in the reader's terms" in flat
+    assert "Clarity above completeness" in flat
+    assert "Few, easy questions" in flat and "answerable in a word or a pick" in flat
+    for heading in (
+        "Run the project", "No surprises.", "Unknowns first.", "Fixed time, variable scope.",
+        "A date is small steps and names who it waits on.", "Act, don't lament.",
+        "Unblock first; close every loop.", "Nothing stalls on one person.",
+    ):
+        assert heading in flat
+    # The product methods are general practice (Tom, 2026-11-06), one copy: the persona's.
+    for method in (
+        "Jobs to be Done, as the inclusion test.", "Shape before building.",
+        "Value for effort, in coarse bands.", "One ordered queue.", "Ready before build.",
+        "Ask plainly; apply the methods yourself.", "Never ask in their vocabulary",
+    ):
+        assert method in flat
+    product = " ".join(tasks.role_text("product").split())
+    assert 'persona\'s "Run the project"' in product and "Jobs to be Done, as the inclusion test" not in product
+    # Waiting on someone: a day of their working day, a reminder, the next best person;
+    # a two-way door goes ahead on its default, a one-way door waits (Tom, 2026-11-06).
+    assert "Give them a day of their own working day (mind their time zone), then one reminder" in flat
+    assert "A one-way door waits for its answer" in flat
+    chat = " ".join((REPO / "skills/sdlc/converse.md").read_text().split())
+    assert 'as your persona\'s "Nothing stalls on one person" says' in chat
+
 def test_stakes_json_is_read_in_place_and_from_handled_and_only_as_an_object(tmp_path):
     v = tmp_path / ".valor"
     v.mkdir()
