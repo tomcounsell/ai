@@ -23,8 +23,10 @@ ranges below. Read the Sheet before changing it; write whole rows.
 - **Guide**: the rules in brief, for people.
 - **Goal** (field, value): Product goal, Outcome metric, Baseline,
   Target, Measured by, Review on, Set by, Now, Next, Later, Strategy,
-  WIP limit (default 2). The people who own the product set the goal and
-  metric; Valor proposes and asks, never fills them in alone. Strategy
+  WIP limit (default 2). Valor drafts the goal and metric from what the
+  people who own the product have said, sets them with `Set by` Valor and
+  what they rest on, and tells them; they correct or override, and their
+  word replaces the draft (`Set by` them). Strategy
   holds the roadmap-level lenses: what an incumbent proves users want
   (second-mover) and what to eliminate, reduce, raise, create (Blue Ocean).
 - **Queue**, one row per item: `id` (P-001, never reused), `lane`
@@ -75,7 +77,8 @@ row by hand, say in the room which rows it now sits above and why.
 
 **A new product room.** When Tom opens a product channel for a project:
 1. `python3 sheet.py new "<Product> product" --share tom@yuda.me`, then
-   set the Goal tab's `Set by` to who owns the product.
+   name who owns the product in the Goal tab's `Set by` once they set or
+   correct the goal.
 2. Make sure Valor is in the channel (Tom invites it, or Valor creates a
    private `<project>-product` channel as itself and invites Tom, as the
    dev channels were made; docs/bridges/slack.md).
@@ -83,8 +86,9 @@ row by hand, say in the room which rows it now sits above and why.
    docs/plans/private-projects.md): add the channel to `chats` (not
    `mentions`), `rooms` naming the Sheet's URL and the dev chat's id, and
    `chat_roles` `product`. Load it with `Spec.load` and render the role.
-4. In the room, ask for the product goal and outcome metric first: every
-   bet's readiness depends on it.
+4. Draft the product goal and outcome metric first, from the room, the
+   code and the record, and tell the room in a line: every bet's
+   readiness depends on it.
 
 **Adding an item.** Read the code and the issues first; if it exists or
 shipped, say so instead. Otherwise append a Queue row (next free id,
@@ -103,7 +107,7 @@ and remove it from the item's `blocked by`.
 each check's result in the item's `readiness` cell. It passes only when
 every check does:
 1. **Goal.** A bet names the product goal or Now theme it serves, and
-   the Goal tab has a goal set by its owner.
+   the Goal tab has a goal (its owner's, or Valor's draft told to them).
 2. **Job.** The job line names who, what progress, and the cost of doing
    nothing; the item stays inside it.
 3. **Evidence.** The problem has at least one `observed` or `reported`

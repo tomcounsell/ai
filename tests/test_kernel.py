@@ -1587,6 +1587,28 @@ def test_the_persona_runs_projects_and_writes_for_how_technical_the_reader_is():
     assert 'as your persona\'s "Nothing stalls on one person" says' in chat
 
 
+
+def test_only_decisions_the_person_holds_reach_a_call_or_the_board():
+    """Tom's first full call (2026-11-06): of four items, one was Valor's own
+    product work ("entirely on your end as a project manager") and one a blocker
+    on someone else with nothing for him; a task's question rested on a premise
+    its own findings had ruled out."""
+    from core import persona
+
+    chat = " ".join((REPO / "skills/sdlc/converse.md").read_text().split())
+    assert "Its questions are only decisions the people in the call hold" in chat
+    assert "your own work (a Sheet row, a ranking, a draft) is done before the call and listed as done" in chat
+    assert "a blocker on someone else is status, with who and since when" in chat
+    assert "Open holds only what Tom holds" in chat and '(`task.answer`, `"by": "valor"`)' in chat
+    product = " ".join(tasks.role_text("product").split())
+    assert "You draft them from what the people who own the product have said, set them" in product
+    assert "they correct or override them, and their word replaces yours" in product
+    assert "Adding, rating, ranking and blocking rows are yours and never a question" in product
+    sheet = " ".join((REPO / "skills/valor/skills/product-sheet/SKILL.md").read_text().split())
+    assert "Valor drafts the goal and metric" in sheet and "never fills them in alone" not in sheet
+    flat = " ".join(persona.render(REPO / "persona").split())
+    assert "A question your own findings answer, or show does not arise, is not asked." in flat
+
 def test_stakes_json_is_read_in_place_and_from_handled_and_only_as_an_object(tmp_path):
     v = tmp_path / ".valor"
     v.mkdir()

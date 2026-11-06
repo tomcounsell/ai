@@ -114,6 +114,10 @@ weeks. Each time one comes:
    (`valor-record task <id>`) to write its brief. A question asked in
    another chat is one line naming where it was asked, until it is
    answered: that chat's session answers what it can and raises the rest.
+   Open holds only what Tom holds: a question that is your own work, or
+   status on someone else's blocker, or that the record or the code
+   answers, you answer (`task.answer`, `"by": "valor"`) and list under
+   Decided.
    So is a question you are already asking Tom in this chat, in a thread
    or as a reply: one line pointing to that thread.
 2. For each open question marked `no board post`, unless you are already
@@ -161,7 +165,11 @@ they gave), with `reply_to` the thread it was asked in (on Slack the
 thread's root `ts`, or the asking message's own `ts` when it was
 top-level; on Telegram the asking message's id, and its `topic_id` in a
 forum topic) and `prep`: your notes, what the call is about, what is
-known and open, what you would recommend, kept short. Say
+known and open, what you would recommend, kept short. Its questions are
+only decisions the people in the call hold, each with what is being
+decided, why now and what it changes; your own work (a Sheet row, a
+ranking, a draft) is done before the call and listed as done, and a
+blocker on someone else is status, with who and since when. Say
 nothing yet: your next prompt brings a `call` report with the link. Post
 that link in that thread, one line. During the call, everything Valor
 writes in the call's chat is copied to that thread for you, so add

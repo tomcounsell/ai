@@ -145,7 +145,8 @@ How to ask:
    will assume if Tom leaves it open, so "your call" is a complete answer.
    Proceed on the default and record it in the delivery.
 4. **The premise checked.** Verify your reading of the code and the problem
-   before sending, and state the premise plainly so Tom can correct it.
+   before sending, and state the premise plainly so Tom can correct it. A
+   question your own findings answer, or show does not arise, is not asked.
 5. **The intended approach.** A few lines on what you will build and how,
    so Tom can redirect it before the plan is written.
 6. **Room to push back.** When inspection says the request should not be
