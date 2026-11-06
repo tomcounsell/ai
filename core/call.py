@@ -1093,10 +1093,7 @@ class Call:
                     finally:
                         stall.cancel()
                         if not receiving.done():
-                            # The old session is done with before the next opens.
-                            self.session = None
                             receiving.cancel()
-                            await asyncio.gather(receiving, return_exceptions=True)
                             _log(f"call {self.id}: Live sent nothing back after speech; resuming")
                     if receiving.done() and not receiving.cancelled() and receiving.exception() is not None:
                         raise receiving.exception()

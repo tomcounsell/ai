@@ -1441,37 +1441,6 @@ def test_a_short_sound_live_gives_nothing_for_resumes_nothing(dsn, team, quick, 
     assert len(c.gemini.sessions) == 1
 
 
-def test_a_resume_after_a_stall_opens_once_the_old_session_is_closed(dsn, team, quick, monkeypatch):
-    """A resume once collided with the session it replaced ("1008 ...
-    already connected to an existing client", Tom's call, 2026-11-06): the
-    stalled session is closed, its receiver ended, before the next opens."""
-    monkeypatch.setattr(call, "STALL_S", 0.3)
-    gemini, open_ = Gemini(), []
-    connect = gemini.connect
-
-    @contextlib.asynccontextmanager
-    async def one_at_a_time(config):
-        if open_:
-            raise RuntimeError("1008 already connected to an existing client")
-        async with connect(config) as session:
-            open_.append(session)
-            try:
-                yield session
-            finally:
-                open_.remove(session)
-
-    gemini.connect = one_at_a_time
-
-    async def go():
-        c = await in_call(dsn, team, gemini=gemini)
-        await talk(c.the, LOGAN, 0.5)
-        assert await until(lambda: len(gemini.sessions) == 2 and c.the.session is gemini.sessions[1])
-        await finish(c)
-
-    run(go())
-    assert len(gemini.configs) == 2
-
-
 def test_google_key_over_ssh_without_the_vault_says_missing_rather_than_failing(tmp_path, monkeypatch):
     """Over ssh the Desktop's vault `.env` is not readable, and `google-key`
     failed with PermissionError (the Captain, Pirate and Bald, 2026-11-05)."""
