@@ -1453,7 +1453,15 @@ async def next_prompt(conn, task_id: str, now: datetime | None = None) -> tuple[
         parts = (first, chat_prompt(rows), woken, _failure_report(rows), _advice_report(rows),
                  _errors_report(f.last_collected), report, context_report(rows, b.model))  # fmt: skip
         return "\n\n".join(x for x in parts if x) or "Continue.", f.session, read_upto
-    if f.session is None:
+    if f.session is None and any(r["type"] == "workspace.removed" for r in rows):
+        # Reopened after reclaim: a new session in a new workspace.
+        rebuilt = (
+            "# Your workspace was rebuilt\n\nThe earlier workspace and session were removed after the task "
+            f"finished. This is a fresh checkout of {b.target_branch or 'the target branch'} at "
+            f"{b.base_sha or 'its head'}: work that was merged is in it, and work that was not is gone."
+        )
+        prompt = "\n\n".join(x for x in (b.instruction, rebuilt, _entry_prompt(f.entry, rows)) if x)
+    elif f.session is None:
         prompt = b.instruction
     else:
         prompt = (None if f.entry_finished else _entry_prompt(f.entry, rows)) or "Continue."

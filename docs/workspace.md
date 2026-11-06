@@ -79,7 +79,11 @@ no unremoved task and no task directory's `ports.json` names, chosen under the
 merged, or ended only) stops the services, deletes the directory, and frees the ports.
 The resident kernel does the same itself a day after a task stopped, merged,
 or ended (`serve.RECLAIM_AFTER_S`), once it runs no job for it: until then
-feedback on a merge and a restart of ended work can use it.
+feedback on a merge and a restart of ended work can use it. Feedback after
+that gets a new workspace, provisioned from the target branch's head (work
+that merged is in it, work that did not is gone), and a new session whose
+first prompt says so. A task's latest workspace row decides: a
+`workspace.provisioned` after a `workspace.removed` is a live workspace again.
 It also takes the directory a provisioning that died left for a task with no
 workspace, once the task is stopped or merged and its provisioning is not
 live (otherwise "being provisioned now"), and records `workspace.removed`.

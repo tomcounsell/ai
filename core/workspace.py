@@ -546,14 +546,25 @@ def reserved_ports(work: Path | None = None) -> set[int]:
     return out
 
 
+def removed(task: str) -> str:
+    """SQL true when the task the expression `task` names has its workspace
+    removed: its latest workspace row is `workspace.removed`, not a
+    `workspace.provisioned` that made it again (feedback reopening a
+    reclaimed task)."""
+    return (
+        f"EXISTS (SELECT 1 FROM events r WHERE r.task_id = {task} AND r.type = 'workspace.removed' "
+        f"AND NOT EXISTS (SELECT 1 FROM events m WHERE m.task_id = {task} "
+        f"AND m.type = 'workspace.provisioned' AND m.id > r.id))"
+    )
+
+
 async def taken_ports(conn, work: Path | None = None) -> set[int]:
     """Every service port named by a task whose workspace has not been
     removed, and every port a task directory has reserved."""
     rows = await (
         await conn.execute(
             "SELECT d.body->'project'->'ports' FROM documents d WHERE d.kind = 'task' "
-            "AND d.body->'project'->'ports' IS NOT NULL AND NOT EXISTS ("
-            "  SELECT 1 FROM events e WHERE e.task_id = d.id AND e.type = 'workspace.removed')"
+            f"AND d.body->'project'->'ports' IS NOT NULL AND NOT {removed('d.id')}"
         )
     ).fetchall()
     out = reserved_ports(work)
@@ -2007,9 +2018,7 @@ async def sweep(conn, task_id: str, work: Path | None = None, *, after_scan=None
                 "SELECT id, body->>'mirror' FROM (SELECT d.id, d.body || COALESCE(("
                 "  SELECT e.payload->'fields' FROM events e WHERE e.task_id = d.id "
                 "  AND e.type = 'workspace.provisioned' ORDER BY e.id DESC LIMIT 1), '{}'::jsonb) AS body "
-                "  FROM documents d WHERE d.kind = 'task' AND d.id <> %s "
-                "  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = d.id "
-                "  AND e.type = 'workspace.removed')) t "
+                f"  FROM documents d WHERE d.kind = 'task' AND d.id <> %s AND NOT {removed('d.id')}) t "
                 "WHERE jsonb_array_length(COALESCE(body->'project'->'services', '[]'::jsonb)) > 0",
                 (task_id,),
             )

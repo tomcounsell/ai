@@ -414,6 +414,10 @@ def _apply(f: Fold, row: dict[str, Any], started: bool) -> str | None:
         )
         f.turn_rows[str(p["turn_id"])] = int(p["read_upto"] if "read_upto" in p else row.get("id") or 0)
         return None
+    if kind == "workspace.removed":
+        # The session's transcript was in the workspace: the next turn is a new session.
+        f.session = None
+        return None
     if kind == "message.steered":
         f.steered.append((int(row.get("id") or 0), p))
         return None

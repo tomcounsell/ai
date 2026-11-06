@@ -141,7 +141,8 @@ from core.settings import settings
 PROVISION_TRIES = 3
 # A finished task's workspace is removed a day after it merged, stopped or
 # ended (`workspace.reclaim`): feedback on a merge and a restart of ended
-# work use it until then. On the Cowboy, 2026-10-16, 26 finished
+# work use it until then; feedback after that is provisioned a new one, from
+# the target branch (`tasks.brief`, `_ready`). On the Cowboy, 2026-10-16, 26 finished
 # workspaces (67 GB) had filled the disk and stopped a popoto turn.
 RECLAIM_AFTER_S = 24 * 3600.0
 RECLAIM_EVERY_S = 600.0
@@ -548,10 +549,9 @@ async def _rolled(conn, checkout: Path, running: str) -> list[tuple[str, dict[st
 # provisioning writes a row, a start with `--project` (and a routine run's)
 # the task's document.
 RECLAIMABLE = (
-    "SELECT DISTINCT p.task_id FROM events p WHERE p.type = 'workspace.provisioned' AND NOT EXISTS ("
-    "SELECT 1 FROM events r WHERE r.task_id = p.task_id AND r.type = 'workspace.removed' AND r.id > p.id) "
-    "UNION SELECT d.id FROM documents d WHERE d.kind = 'task' AND d.body->>'mirror' IS NOT NULL "
-    "AND NOT EXISTS (SELECT 1 FROM events r WHERE r.task_id = d.id AND r.type = 'workspace.removed')"
+    "SELECT d.id FROM documents d WHERE d.kind = 'task' AND (d.body->>'mirror' IS NOT NULL OR EXISTS ("
+    "SELECT 1 FROM events p WHERE p.task_id = d.id AND p.type = 'workspace.provisioned')) "
+    f"AND NOT {workspace.removed('d.id')}"
 )
 MERGE_OUTCOMES = (
     "SELECT o.id, o.task_id, o.payload->>'effect_id', o.payload->'result' FROM events o "

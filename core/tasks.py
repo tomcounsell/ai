@@ -308,18 +308,23 @@ async def brief(conn, task_id: str) -> Brief:
     body = row[0]
     # A task started by message is provisioned after it starts, by a kernel
     # job; what that made is a row, laid over the document written at start.
+    # The latest workspace row wins: a reclaim's removal, or a provisioning.
     made = await (
         await conn.execute(
-            "SELECT payload->'fields' FROM events WHERE task_id = %s AND type = 'workspace.provisioned' "
-            "ORDER BY id DESC LIMIT 1",
+            "SELECT type, payload->'fields' FROM events WHERE task_id = %s "
+            "AND type IN ('workspace.provisioned', 'workspace.removed') ORDER BY id DESC LIMIT 1",
             (task_id,),
         )
     ).fetchone()
-    if made is not None:
+    kind, made = made or (None, None)
+    if kind == "workspace.removed":
+        # Reclaimed: no workspace until the kernel provisions one again.
+        body = {k: v for k, v in body.items() if k not in ("workspace", "mirror")}
+    elif made is not None:
         # Provisioning remakes `project` from the spec; a key the spec does
         # not own, given at start (`chat`, `tools/chat_tasks.py`), stays.
-        project = {**(body.get("project") or {}), **(made[0].get("project") or {})}
-        body = {**body, **made[0], **({"project": project} if project else {})}
+        project = {**(body.get("project") or {}), **(made.get("project") or {})}
+        body = {**body, **made, **({"project": project} if project else {})}
     return Brief.load(body)
 
 

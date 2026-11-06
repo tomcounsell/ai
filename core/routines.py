@@ -538,7 +538,7 @@ async def open_node(ctx: Context) -> str | None:
             continue
         removed = await (
             await ctx.conn.execute(
-                "SELECT 1 FROM events WHERE task_id = %s AND type = 'workspace.removed'", (child,)
+                f"SELECT 1 FROM documents d WHERE d.id = %s AND {workspace.removed('d.id')}", (child,)
             )
         ).fetchone()
         if child in closed or removed or await tasks.is_stopped(ctx.conn, child):
