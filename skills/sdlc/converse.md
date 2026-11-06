@@ -114,12 +114,12 @@ weeks. Each time one comes:
    (`valor-record task <id>`) to write its brief. A question asked in
    another chat is one line naming where it was asked, until it is
    answered: that chat's session answers what it can and raises the rest.
+   So is a question you are already asking Tom in this chat, in a thread
+   or as a reply: one line pointing to that thread.
    Open holds only what Tom holds: a question that is your own work, or
    status on someone else's blocker, or that the record or the code
    answers, you answer (`task.answer`, `"by": "valor"`) and list under
    Decided.
-   So is a question you are already asking Tom in this chat, in a thread
-   or as a reply: one line pointing to that thread.
 2. For each open question marked `no board post`, unless you are already
    asking Tom it in this chat (a thread or a reply), post one top-level
    message in this chat: the question in a line or two and your

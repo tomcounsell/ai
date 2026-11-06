@@ -90,7 +90,7 @@ wrong-premise question (the call checks it instead).
 - The section carries each rule: decided/why now/changes before the
   recommendation, a challenged premise goes to `ask`, offline names where,
   English unless.
-- `input_audio_transcription.language_hints == ["en-US"]`; no
+- `input_audio_transcription.language_codes == ["en-US"]`; no
   `speech_config.language_code`.
 - `persona.render` still includes the section (every turn reads it);
   `section` of a missing title raises `PersonaUnreadable`.
