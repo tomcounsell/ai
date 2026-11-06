@@ -1413,7 +1413,7 @@ def test_a_lane_that_fails_ends_the_call_saying_why(dsn, team, quick, monkeypatc
     assert "the mix broke" in capsys.readouterr().out
 
 
-def test_a_live_session_that_hears_nothing_of_speech_is_resumed(dsn, team, quick, monkeypatch):
+def test_a_live_session_that_hears_nothing_of_speech_is_resumed(dsn, team, quick, monkeypatch, capsys):
     """Live stopped sending anything, transcripts included, after a typed
     answer, and Valor was deaf for the rest of the call (the live tests on
     the paid key, 2026-11-05)."""
@@ -1433,6 +1433,7 @@ def test_a_live_session_that_hears_nothing_of_speech_is_resumed(dsn, team, quick
         return c, await effects(dsn, c.the.id)
 
     c, done_ = run(go())
+    assert capsys.readouterr().out.count("Live sent nothing back after speech; resuming") == 1
     assert c.gemini.configs[1].session_resumption.handle == "h9" and call.LOST_LINE not in c.page.posts
     assert [e["result"]["spoken_text"] for e in done_ if e["type"] == "meet.say"] == ["Yes."]
 
@@ -1460,7 +1461,7 @@ def test_a_long_turn_live_sends_little_back_during_resumes_nothing(dsn, team, qu
     assert len(c.gemini.sessions) == 1
 
 
-def test_a_short_sound_live_gives_nothing_for_resumes_nothing(dsn, team, quick, monkeypatch):
+def test_a_short_sound_live_gives_nothing_for_resumes_nothing(dsn, team, quick, monkeypatch, capsys):
     """Live gives no transcript of a short utterance ("Hello.", the live
     tests, 2026-11-05), and with several people there nothing asks it to
     answer: a second of it and then quiet is not a stall."""
@@ -1475,6 +1476,8 @@ def test_a_short_sound_live_gives_nothing_for_resumes_nothing(dsn, team, quick, 
 
     c = run(go())
     assert len(c.gemini.sessions) == 1
+    # A call leaving cancels the session's receiver; that is no stall (every call's end logged one, 2026-11-06).
+    assert "Live sent nothing back" not in capsys.readouterr().out
 
 
 def test_google_key_over_ssh_without_the_vault_says_missing_rather_than_failing(tmp_path, monkeypatch):

@@ -1094,6 +1094,7 @@ class Call:
                         stall.cancel()
                         if not receiving.done():
                             receiving.cancel()
+                        if self.stalled.is_set():  # not a call that is leaving
                             _log(f"call {self.id}: Live sent nothing back after speech; resuming")
                     if receiving.done() and not receiving.cancelled() and receiving.exception() is not None:
                         raise receiving.exception()
