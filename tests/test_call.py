@@ -19,6 +19,7 @@ import base64
 import contextlib
 import dataclasses
 import json
+import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ import pytest
 from google.genai import types
 
 from core import bridge, broker, call, db, ledger, spending, tasks
+from core.settings import settings
 from tests import bridges, test_meet
 from tests.test_kernel import at
 from tests.test_meet import CODE, TOM, a_call
@@ -686,6 +688,53 @@ def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
         and "[typed by NAME]" in config.system_instruction
     )
 
+
+
+def test_the_call_speaks_by_the_personas_in_a_call_section_and_in_english(tmp_path, monkeypatch):
+    """Tom's first full Live call (2026-11-06): bare recommendations, a challenged
+    question asked again, "offline" with no where, items that were not his, and a
+    switch of language. The call's instruction carries the persona's own section,
+    byte for byte, so the call and every turn read one text."""
+    from core import persona
+
+    real = persona.section(settings.persona_dir, "In a call")
+    flat = " ".join(real.split())
+    assert "say what is being decided, why now and what it changes, then your recommendation" in flat
+    assert "Never open with a bare recommendation" in flat
+    assert "Put to the person only what only they can decide" in flat
+    assert "Your own work is done before the call and said as done" in flat
+    assert "a blocker on someone else is status in a line (who, since when) and asks nothing" in flat
+    assert "ask your worker to check it, or drop the question" in flat and "Never ask it again" in flat
+    assert "Taking something offline says where it goes" in flat
+    assert "**English,** unless the person speaks another language clearly and on purpose" in flat
+    assert real in persona.render(settings.persona_dir)  # every turn reads the same text
+
+    # One source: a changed section is what the call is told, braces and all.
+    shutil.copytree(settings.persona_dir, tmp_path / "persona")
+    conduct = tmp_path / "persona" / "conduct.md"
+    conduct.write_text(conduct.read_text().replace("### In a call\n", "### In a call\n\nSay {this} first.\n"))
+    monkeypatch.setattr(call, "settings", dataclasses.replace(settings, persona_dir=str(tmp_path / "persona")))
+    told = call.live_config("acme", "notes", None).system_instruction
+    assert persona.section(tmp_path / "persona", "In a call") in told and "Say {this} first." in told
+    assert told.startswith("You are Valor Engels, in a live Google Meet call")
+    # The mechanics defer to it: no second copy of the conduct in the template.
+    for gone in ("with your recommendation, and let them choose", "Speak in short, plain",
+                 "do not steer the call", "take it offline with Tom"):  # fmt: skip
+        assert gone not in call.INSTRUCTIONS
+
+
+def test_what_valor_hears_is_transcribed_as_english_and_the_reply_language_is_left_to_the_persona():
+    config = call.live_config("acme", "", None)
+    assert config.input_audio_transcription.language_codes == ["en-US"]
+    assert config.speech_config.language_code is None  # a hard pin would forbid "unless clearly another"
+
+
+def test_a_missing_persona_section_is_unreadable(tmp_path):
+    from core import persona
+
+    shutil.copytree(settings.persona_dir, tmp_path / "persona")
+    with pytest.raises(persona.PersonaUnreadable, match="In a meeting"):
+        persona.section(tmp_path / "persona", "In a meeting")
 
 # -- metering ---------------------------------------------------------------------
 

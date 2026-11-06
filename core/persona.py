@@ -82,5 +82,19 @@ def render(directory: str | Path) -> str:
     return "\n\n".join(sections)
 
 
+def section(directory: str | Path, title: str) -> str:
+    """One `### title` section of the voice or conduct, heading included,
+    as `render` puts it in every turn: the call's instruction reads its
+    section here (`core/call.py`), so the two never drift."""
+    directory = Path(directory)
+    for name in TEXTS:
+        lines = _text(directory, name).splitlines()
+        if f"### {title}" in lines:
+            start = lines.index(f"### {title}")
+            end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith(("## ", "### "))), len(lines))
+            return "\n".join(lines[start:end]).strip()
+    raise PersonaUnreadable(f"{directory}: no section '### {title}' in {', '.join(TEXTS)}")
+
+
 def digest(text: str) -> str:
     return ledger.digest(text)

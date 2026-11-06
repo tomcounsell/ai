@@ -55,7 +55,7 @@ from typing import Any
 import numpy as np
 import psycopg
 
-from core import broker, db, intake, ledger, tasks, workspace
+from core import broker, db, intake, ledger, persona, tasks, workspace
 from core.settings import CALL_CONTEXT, CALL_OUTPUT_MOST, resolve_seat, settings
 
 CHANNEL = "meet"
@@ -515,7 +515,7 @@ class Recording:
 # -- answering: one Gemini Live session per call ----------------------------------
 
 INSTRUCTIONS = (
-    "You are Valor Engels, in a live Google Meet call as yourself, on the {project} project. You are an AI "
+    "You are {name}, in a live Google Meet call as yourself, on the {project} project. You are an AI "
     "coworker; everyone in the call knows. You hear everyone in the call in one stream.\n\n"
     "- Speak only when someone addresses you (by name, or by asking you something directly), or asks what only "
     "you would know. Otherwise stay silent: talk between the others is not to you, even about the work, money "
@@ -525,19 +525,16 @@ INSTRUCTIONS = (
     "found). Never answer a note or read one out.\n"
     "- A line that begins `[typed by NAME]` was typed in the call's chat: answer it only by calling `post`, "
     "never aloud.\n"
-    "- Speak in short, plain, natural sentences, one to three, with no preamble.\n"
-    "- Follow what the others want to discuss; do not steer the call.\n"
-    "- Avoid legal and financial work, pricing, terms and people matters for now: when you are asked about "
-    "one, say you will take it offline with Tom.\n"
     "- For anything you would have to look up (code, records, documents, figures), call `ask` and say you "
     "will check: your worker, who reads the project's code, records and chats, answers in the call's chat, "
     "and you get a note. Never guess a fact.\n"
-    "- When someone asks what is open, call `open_decisions` and take them through each, one at a time, with "
-    "your recommendation, and let them choose. With anyone but Tom in the call, a decision about a client "
+    "- When someone asks what is open, call `open_decisions` and go through what is theirs to decide as "
+    "\"In a call\" below says, and let them choose. With anyone but Tom in the call, a decision about a client "
     "relationship (pricing, terms, its people) is one line: it is for Tom. Never say an id aloud.\n"
     "- When Tom settles open decisions (one idea may settle several), read his answer back in a sentence and "
     "call `settle` with the ids it settles. Only Tom settles decisions; a correction is a new `settle`.\n"
     "- Call `leave` only when Tom asks you to leave.\n\n"
+    "How you work, from your persona:\n\n{conduct}\n\n"
     "Why you are in this call, from your notes before it:\n{prep}"
 )
 TOOLS = [
@@ -565,7 +562,11 @@ def live_config(project: str, prep: str, handle: str | None) -> Any:
     turn bills, and resumption from `handle`. Live's own sensitivity to the
     start and end of speech is kept: at its lowest it missed a short
     "Hello.", and 500 ms to end a turn gained nothing measurable in a live
-    call (the live tests, 2026-11-05)."""
+    call (the live tests, 2026-11-05). The instruction carries the
+    persona's "In a call" section, read as the call starts. What Valor
+    hears is transcribed as English unless clearly another language (an
+    unclear phrase came out as Portuguese, 2026-11-06); the reply's
+    language is the model's, which the persona section keeps English."""
     from google.genai import types
 
     return types.LiveConnectConfig(
@@ -575,9 +576,14 @@ def live_config(project: str, prep: str, handle: str | None) -> Any:
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=settings.call_voice)
             )
         ),
-        system_instruction=INSTRUCTIONS.format(project=project or "Valor", prep=prep.strip() or "(no notes)"),
+        system_instruction=INSTRUCTIONS.format(
+            name=persona.identity(settings.persona_dir)["name"],
+            project=project or "Valor",
+            conduct=persona.section(settings.persona_dir, "In a call"),
+            prep=prep.strip() or "(no notes)",
+        ),
         tools=[types.Tool(function_declarations=[types.FunctionDeclaration(**t) for t in TOOLS])],
-        input_audio_transcription=types.AudioTranscriptionConfig(),
+        input_audio_transcription=types.AudioTranscriptionConfig(language_codes=["en-US"]),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         proactivity=types.ProactivityConfig(proactive_audio=True),
         realtime_input_config=types.RealtimeInputConfig(
