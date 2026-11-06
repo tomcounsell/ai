@@ -113,3 +113,14 @@ hook (no governance); rating or ranking seeded rows.
   conversion); each Sheet's tabs read back with one header row and no
   merges; each Doc and folder open as Tom (permissions list); each edited
   spec loads; the first project's product channel is received on its Mac.
+
+## As built
+
+- gws uploads only a file under its working directory, so `gws(upload=)`
+  takes the markdown text and runs gws in a temporary directory (found on
+  the first live `new`).
+- The Goal draft is the room session's first step (it tells the room), not
+  the run's: a task speaks to no room.
+- The board canvas is made by the board chat's session at its first open
+  decision; the checklist says so rather than making one.
+- The readiness checks live once, in `doc.md`; SKILL.md points at them.

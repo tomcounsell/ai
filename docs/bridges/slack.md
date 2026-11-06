@@ -32,14 +32,17 @@ group's. Which project has which channel, and on which Mac, is in the private sp
 has no dev channel, and one with no Mac yet goes unanswered.
 
 **Product channels** (Tom, 2026-10-31: a "product" role and room; one
-project first, others when he asks). Each is private, `<project>-product`,
-made by Valor with Tom invited (Tom adds the other members), listed in its
+project first, others when he asks). Each is `<project>-product`, made by
+Tom (or by Valor with Tom invited, when he asks; Tom adds the other
+members; public or private alike), listed in its
 project's spec with `chat_roles` `product` (ONTOLOGIES.md), not
 mentions-only, and received by the same Mac as the project's dev channel.
 Its room line names the project's backlog Sheet and its dev channel; the
 role (`skills/sdlc/roles/product.md`) keeps the queue in the Sheet, copied
 from the product Sheet template and kept by the `product-sheet` skill
-(`skills/valor/skills/product-sheet/`). Valor approves each item that
+(`skills/valor/skills/product-sheet/`). Every client project has a Sheet
+(Tom, 2026-11-06), product channel or not: its rooms name it, and the
+skill's "Onboarding a project" checklist sets one up. Valor approves each item that
 passes the skill's full readiness review (Tom, 2026-11-01: "the system
 should be the approver"), with a new thread in the dev channel and a
 `task.start` with `"in"` the dev channel, so the task reads and reports
