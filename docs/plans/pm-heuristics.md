@@ -74,8 +74,8 @@ turn with no restart.
    "Run the project (Mission item 4)" section giving each heuristic's
    source.
 5. **Test** (`tests/test_kernel.py`, beside the persona assertions): the
-   rendered persona carries the audience rule (both readers) and the Run
-   the project heuristics. Documented behaviour, not a check.
+   rendered persona carries the audience rule (both readers), the Run the
+   project heuristics, and clarity above completeness. Documented behaviour, not a check.
 
 Guidance only: no new check, gate, state or field. No governance added.
 
