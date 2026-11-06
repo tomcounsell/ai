@@ -436,7 +436,8 @@ feedback in `merge`, `merged`, or `ended`.
 **What runs.** The working session, resumed, with all of the join's findings or Tom's feedback as
 one prompt. Never a new agent: the session that built carries why each line is there, and a
 send-back costs one more turn of it. When the session nears the model's context limit it is
-compacted in place and resumed ([harnesses.md](harnesses.md)). After a merge, before each turn the
+compacted in place and resumed ([harnesses.md](harnesses.md)). Feedback after the kernel reclaimed the
+task's workspace is the exception: a new session in a newly provisioned workspace ([workspace.md](workspace.md)). After a merge, before each turn the
 kernel fast-forwards the work branch to the merged head (the candidate and the docs check's commits,
 kept in its mirror), through the bare origin, under the turn's profile (`session.merged_into_work`),
 so the round's merge lands on top of the first; when it cannot, the prompt names the head and why.

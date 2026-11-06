@@ -200,6 +200,9 @@ file its Brief carries (`skills/sdlc/<state>.md`), never sentences in the kernel
 that built, resumed with what came back (Tom, 2026-10-01). The session knows
 why each line is there; a fresh agent would rebuild that context from the
 diff at the cost of a full read and lose the decisions not written down.
+The one exception is feedback on a task whose workspace the kernel reclaimed:
+the session's transcript went with the workspace, so the patch starts a new
+session in a newly provisioned one, told so ([workspace.md](workspace.md)).
 
 **Fresh sessions for critique, review, and docs.** Each runs in a session
 of its own that never resumes, and never reads, the working session. Their
