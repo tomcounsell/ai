@@ -1551,6 +1551,33 @@ def test_a_chat_session_drafts_in_the_askers_voice_and_sends_only_when_told(dsn,
         assert "One asked to be sent goes in the note as its effect" in stage
 
 
+def test_an_email_is_drafted_in_full_then_edited_against_the_guide(dsn, team, tmp_path):
+    """Tom, 2026-11-09: never one-shot an email from the guide; write it long, then at
+    least one editorial pass against it (more when the stakes are high), then de-slop.
+    The chat session and every task stage (patch included, via channel.md) say so."""
+    from core import verdicts
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            b = tasks.Brief(
+                instruction="chat", workspace=str(tmp_path), chat={"channel": "telegram", "chat_id": LONE}
+            )
+            task = await tasks.start(conn, b)
+            await verdicts.record_chat(conn, task)
+            return (await tasks.dispatch(conn, task))["text"]
+
+    flow = (
+        "An email, drafted for someone or sent, follows the email skill's flow (`yudame:email`): the full "
+        "draft first, then at least one editorial pass against its guide (more when the stakes are high), "
+        "then de-slop."
+    )
+    chat = " ".join(run(go()).split())
+    assert flow in chat
+    # Placed above both the draft rule and the email.send reply, so it covers each.
+    assert chat.index(flow) < chat.index("A draft is text; a send is said") < chat.index("request `email.send`")
+    assert flow in " ".join(tasks.channel_text([]).split())
+
+
 def test_the_persona_runs_projects_and_writes_for_how_technical_the_reader_is():
     """Tom, 2026-11-06 (#makes-good-project): project-manager heuristics are general
     practice in every room; a repo path to a CEO is as bad as vagueness to an engineer;

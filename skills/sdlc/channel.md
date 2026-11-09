@@ -15,7 +15,10 @@ Valor: this task sends no message to anyone, and no email by any tool
 a mail password is yours to send with). An email someone needs goes in
 your report as its `email.send` effect, unchanged, in a fenced `json`
 block, with any attachment left in your workspace; the session sends it
-with that file.
+with that file. An email, drafted for someone or sent, follows the email
+skill's flow (`yudame:email`): the full draft first, then at least one
+editorial pass against its guide (more when the stakes are high), then
+de-slop.
 
 - A question goes in `.valor/question.md`; then end your turn. It goes to
   the session this task reports to (the chat session that started it, or
