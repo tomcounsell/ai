@@ -51,6 +51,6 @@ extend-exclude = ["skills/valor/skills/deep-research/run.py"]
 paths = ["core", "harnesses", "bridges", "routines", "tools", "ui", "api", "memory", "scripts"]
 min_confidence = 60
 ignore_names = [
-    "handle_*", "*DeclHandler", "Meta", "words", "isolation_level",
+    "handle_*", "*DeclHandler", "Meta", "words", "validity", "graph", "isolation_level",
     "created_at", "error_cost", "on_abstain", "consumer", "serves",
 ]

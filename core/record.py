@@ -29,9 +29,12 @@ Its memory (`memory`) is what recall reads for its tasks (core/memory.py,
 `search`): the project's records, and standards of working from any
 client.
 
-Everything here is a SELECT.
+Everything here is a SELECT, but the project's facts (`facts`, docs/memory.md,
+Facts): a POST of writes appends them on the memory stream through
+`core/memory.py` `fact_write`, the one write a turn makes here.
 """
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -236,6 +239,34 @@ async def memory_search(
         return await memory.search(
             conn, spec, query["q"], _limit(query, MEMORY_LIMIT, MEMORY_MOST), int(offset)
         )
+    except memory.Unavailable as exc:
+        raise NotFound(str(exc)) from None
+
+
+async def facts(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query) -> dict[str, Any]:
+    """The project's facts: true now or `as_of` a date (of a `kind`), a
+    fact's `history`, what a fact or entity is `related` to within `depth`,
+    or the `sources`."""
+    from core import memory
+
+    try:
+        return await memory.facts_read(conn, spec, query)
+    except (memory.Unavailable, ValueError) as exc:
+        raise NotFound(str(exc)) from None
+
+
+async def facts_write(conn, spec: workspace.Spec, task_id: str, body: Any) -> dict[str, Any]:
+    """Append the turn's `writes` to the project's facts; each one's name,
+    by label or position."""
+    from core import memory
+
+    writes = body.get("writes") if isinstance(body, dict) else None
+    if not isinstance(writes, list) or not all(isinstance(w, dict) for w in writes):
+        raise NotFound('POST facts takes {"writes": [...]}')
+    try:
+        return {"names": await memory.fact_write(conn, spec, writes, via=f"valor-record, task {task_id}")}
+    except memory.Refused as exc:
+        raise NotFound(f"{exc} (written before it: {json.dumps(exc.names)})") from None
     except memory.Unavailable as exc:
         raise NotFound(str(exc)) from None
 
@@ -501,18 +532,27 @@ VERBS = {
     "tasks": task_list,
     "task": task,
     "memory": memory_search,
+    "facts": facts,
     "call": call,
     "hours": hours,
 }
 
 
-async def answer(dsn: str, task_id: str, verb: str, query: dict[str, str]) -> Any:
-    """What `verb` reads for the asking task's project; `NotFound` when the
-    verb, the task's project, or what it names is outside the record."""
-    if verb not in VERBS:
-        raise NotFound(f"no verb {verb!r}; one of {', '.join(VERBS)}")
+# The verbs a POST writes with.
+WRITES = {"facts": facts_write}
+
+
+async def answer(dsn: str, task_id: str, verb: str, query: dict[str, str], body: Any = None) -> Any:
+    """What `verb` reads for the asking task's project, or with a `body`
+    (a POST) what it writes; `NotFound` when the verb, the task's project,
+    or what it names is outside the record."""
+    verbs = VERBS if body is None else WRITES
+    if verb not in verbs:
+        raise NotFound(f"no verb {verb!r}; one of {', '.join(verbs)}")
     async with await db.connect(dsn, application_name="valor-record") as conn:
         spec = await _project(conn, task_id)
+        if body is not None:
+            return await WRITES[verb](conn, spec, task_id, body)
         return await VERBS[verb](conn, spec, await reach(conn, spec), query)
 
 

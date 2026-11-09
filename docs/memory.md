@@ -23,8 +23,8 @@ Mac's own kernel database, as memory's role.
 - **Memory grants nothing.** Retrieved content can act as instructions to
   a model [7], so nothing read from memory changes a ceiling or a
   grant: the port, `core/memory.py`, returns a string.
-- **Memory never writes the ledger.** The port reads the ledger as
-  `valor_kernel` and hands `memory/` plain data. Once the turn's slot is
+- **Memory never writes the ledger**, but for facts (below). The port
+  reads the ledger as `valor_kernel` and hands `memory/` plain data. Once the turn's slot is
   released, `run_turn` ingests the rows memory has not taken: the
   `task.started`, answers, and feedback of tasks that have run a turn, the
   `corrections` stream (which `core/` owns and renders whole into every
@@ -124,6 +124,59 @@ Mac's own kernel database, as memory's role.
   record it came from (`python -m core correct TEXT --record <record>`),
   and once ingested that record stops being recalled outside its client,
   marked or not.
+
+## Facts
+
+Issue #3684 (docs/plans/project-facts.md). Tom, 2026-11-09: "Keep this
+issue entirely focused on data and management of truth about a project
+over time." What is true about a project, dated, with where it came from:
+
+- **A fact** (`memory/facts.py` `Fact`) is a claim of a free-text kind
+  (projects differ: code, customers, stakeholders), with its source
+  (`commit:<sha>`, `telegram:<chat>/<message>`, a ledger row) and that
+  source's date, optional `reported` and `evidence` values with why they
+  differ, and a popoto `ValidityField` opened at `since`, when it became
+  true, not when it was written. It is inferred until a person's answer
+  confirms it (`fact confirm`, naming that answer's ledger row, of any
+  ledger); an inferred fact is still read, labelled inferred. A superseded
+  fact may be confirmed too: it was true in its interval.
+- **Supersession** closes the old fact at the new one's `since` and chains
+  them (popoto's `save_and_invalidate`); both stay. Intervals are
+  half-open: at that instant the new fact holds. Chains are linear: a fact
+  already superseded is refused, naming the fact that superseded it, and a
+  date before the old fact's own start is refused.
+- **An entity** (a person, decision, event, concept) has aliases, stored
+  case- and space-folded, unique in the project: adding one under a name
+  it already has returns it with any new aliases; an alias another entity
+  holds is refused. Identity over time is an alias, entered by hand.
+- **Links** join facts and entities by kind (`about`, `decided`, ...), and
+  a popoto `CoOccurrenceField` walks them, within a depth of at most six.
+- **A source** records when a read was last tried, last succeeded, and how
+  far it got.
+
+Every write is a row on the `memory` stream (`fact.added`,
+`fact.superseded`, `fact.confirmed`, `entity.added`, `entity.aliased`,
+`link.added`, `source.read`) carrying its project (the spec's `repo`), its
+client and its provenance, taken at once by `core/memory.py`
+`fact_write`, so a later write can supersede or link it, and by every
+ingest after, so a rebuild from the ledger restores them. They make no
+record: recall and search do not read them. Each write has a key (the
+hash of what it asks, unless given), and a key already on the stream
+appends nothing, so a batch cut short is applied again whole. Reads and
+writes are of the asking project's and client's facts only; any other is
+"no such fact". This is memory's one write to the ledger from a turn, and
+it goes through the gateway rather than an effect, since effects run
+after the turn and the writer reads back what it wrote.
+
+A turn runs `valor-record facts [--as-of DATE] [--kind K]`, `--history
+FACT`, `--related FACT_OR_ENTITY [--depth N]`, `sources`, and writes with
+`fact add|supersede|confirm`, `entity add|alias`, `link`, `source`. On the
+Mac that serves a project, `python -m core facts --project NAME_OR_FILE
+apply FILE` applies a JSONL file of the same writes (`{"op": "fact", "as":
+"f1", ...}`, a later line naming it `@f1`), each keyed by the file's hash
+and its label; run it in the kernel job's environment (its
+`VALOR_MACHINE`), or the rows are taken under another ledger name and the
+kernel takes them again under its own. Nothing renders facts into a Brief.
 
 Turn-written text reaches a later task's Brief only as a record labelled
 as that turn's, escaped, scoped to its project or judged a standard of

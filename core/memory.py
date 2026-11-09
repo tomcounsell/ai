@@ -33,6 +33,12 @@ and a rebuild is every Mac ingesting its own again.
 - `bench(questions, dumps, out, scratch)` scores recall on a private set of
   dated questions against the stores in `dumps` (`memory/bench.py`), in
   the scratch database `scratch`, never the live store.
+- `fact_write(conn, spec, writes)` appends a project's fact, entity,
+  link and source rows and takes each at once, so a later write can name
+  it; `facts_read(conn, spec, query)` reads them (docs/memory.md, Facts).
+  These are the one place memory's port writes the ledger, through a
+  turn's gateway (`valor-record`) or the command line, not an effect:
+  effects run after the turn, and the writer reads back what it wrote.
 - A correction naming a record (`corrections.record(..., record=...)`)
   confines it to its own client.
 - `after_turn(dsn)` is `ingest` on a connection of its own, run by
@@ -43,6 +49,7 @@ turn.
 """
 
 import asyncio
+import functools
 import json
 import socket
 import sys
@@ -64,6 +71,18 @@ TYPES = (
     "memory.marked",
     "memory.imported",
 )
+# The fact, entity, link and source rows (`memory.facts.TYPES`), written
+# on the `memory` stream by `fact_write`.
+FACTS = (
+    "fact.added",
+    "fact.superseded",
+    "fact.confirmed",
+    "entity.added",
+    "entity.aliased",
+    "link.added",
+    "source.read",
+)
+TYPES += FACTS
 CORRECTIONS = "corrections"
 # The stream Valor's standard-of-working marks, and the old system's
 # imported records, are written on.
@@ -258,6 +277,111 @@ async def import_old(conn, lines) -> dict[str, int]:
     return counts
 
 
+class Refused(ValueError):
+    """A write that cannot be stored as asked; `names` holds what the
+    writes before it resolved to."""
+
+    def __init__(self, why: str, names: dict[str, str]):
+        super().__init__(why)
+        self.names = names
+
+
+def _labelled(value: Any, names: dict[str, str]) -> Any:
+    """`@label` replaced by the name of the earlier write it labels."""
+    if isinstance(value, list):
+        return [_labelled(v, names) for v in value]
+    if isinstance(value, str) and value.startswith("@"):
+        if value[1:] not in names:
+            raise ValueError(f"no earlier write labelled {value}")
+        return names[value[1:]]
+    return value
+
+
+def write_key(spec, write: dict[str, Any]) -> str:
+    """A write's own key: the hash of what it asks, in its project, so the
+    same write asked again appends nothing."""
+    import hashlib
+
+    body = {k: v for k, v in write.items() if k not in ("as", "key")}
+    text = json.dumps([spec.repo, spec.client or "", body], sort_keys=True, default=str)
+    return hashlib.sha256(text.encode()).hexdigest()[:32]
+
+
+async def fact_write(
+    conn, spec, writes: list[dict[str, Any]], *, by: str = "valor", via: str = "the command line"
+) -> dict[str, str]:
+    """Append each write's rows on the `memory` stream for `spec`'s project
+    and client, in order, and take each at once (`memory.facts.prepare`
+    says what a write may ask). A write carries `key`, else its hash
+    (`write_key`): a key already on the stream appends nothing and resolves
+    to the same name, so a batch cut short is applied again whole. A write
+    labelled `as` is named `@label` by later ones. Returns each write's
+    name, by label or position; a write that cannot be stored raises
+    `Refused`, the writes before it kept."""
+    if not on():
+        raise Unavailable("memory is off on this Mac")
+    mdsn = dsn_for(conn)
+    why = await asyncio.to_thread(unreachable, mdsn)
+    if why:
+        raise Unavailable(f"the memory store could not be reached ({why})")
+    from memory import facts as f
+    from memory import ingest as m
+
+    name = ledger_name(conn)
+    where = {"project": spec.repo, "client": spec.client or ""}
+    names: dict[str, str] = {}
+    await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (LOCK,))
+    try:
+        for n, write in enumerate(writes, 1):
+            label = str(write.get("as") or n)
+            try:
+                asked = {k: _labelled(v, names) for k, v in write.items()}
+                key = str(asked.get("key") or write_key(spec, asked))
+                row = await (
+                    await conn.execute(
+                        "SELECT id, type, payload FROM events WHERE task_id = %s AND type = ANY(%s) "
+                        "AND payload->>'key' = %s ORDER BY id LIMIT 1",
+                        (MARKS, list(FACTS), key),
+                    )
+                ).fetchone()
+                if row is not None:
+                    names[label] = f.named(name, row[0], row[1], row[2])
+                    continue
+                rows, known = await asyncio.to_thread(
+                    functools.partial(f.prepare, mdsn, ledger=name, write=asked, **where)
+                )
+            except ValueError as exc:
+                raise Refused(f"write {label}: {exc}", names) from None
+            for type_, payload in rows:
+                payload = {**payload, **where, "key": key, "provenance": ledger.provenance(by, via, False)}
+                row_id = await ledger.append(conn, MARKS, type_, payload)
+                unit = await _unit(conn, row_id, {})
+                unit["ledger"] = name
+                await asyncio.to_thread(m.save, mdsn, unit)
+                known = known or f.named(name, row_id, type_, payload)
+            names[label] = known or ""
+        return names
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (LOCK,))
+
+
+async def facts_read(conn, spec, query: dict[str, Any]) -> dict[str, Any]:
+    """`spec`'s project's facts as `memory.facts.read` answers `query`;
+    ValueError for what is not in the project."""
+    if not on():
+        raise Unavailable("memory is off on this Mac")
+    mdsn = dsn_for(conn)
+    why = await asyncio.to_thread(unreachable, mdsn)
+    if why:
+        raise Unavailable(f"the memory store could not be reached ({why})")
+    from memory import facts as f
+
+    name = ledger_name(conn)
+    return await asyncio.to_thread(
+        lambda: f.read(mdsn, ledger=name, project=spec.repo, client=spec.client or "", query=query)
+    )
+
+
 async def ingest(conn) -> dict[str, Any]:
     """Take every row memory has not taken. A task's rows are taken once
     the task has a `turn.started`, so its project is settled (a task
@@ -311,6 +435,8 @@ async def _unit(conn, ledger_id: int, projects: dict[str, tuple[str, str]]) -> d
             files[f["name"]] = await transcripts.joined(conn, payload["turn_id"], f["name"])
     project, client = projects[task_id]
     more: dict[str, Any] = {}
+    if type_ in FACTS:
+        project, client = payload["project"], payload["client"]
     if type_ == "memory.imported":
         from core.workspace import Spec
 

@@ -1,7 +1,8 @@
 """The model gateway: the one path a turn's model calls take.
 
-It also answers a turn's `valor-record` (`GET <base>/record/<verb>`) from
-`core/record.py`, for the project of the token's task, never upstream.
+It also answers a turn's `valor-record` (`GET <base>/record/<verb>`, and
+`POST <base>/record/facts` for the project's facts) from `core/record.py`,
+for the project of the token's task, never upstream.
 
 A local HTTP proxy with two model routes. A turn is pointed at it with a per-turn
 token in the path (`ANTHROPIC_BASE_URL`, or `<base>/openai/v1` for an
@@ -466,12 +467,18 @@ class Gateway:
         grant = self.grants.get(request.match_info["token"])
         if grant is None or grant.task_id in self.revoked:
             return web.json_response({"error": "turn token revoked or unknown"}, status=403)
-        if request.method != "GET":
+        verb, body = request.match_info["verb"], None
+        if request.method == "POST" and verb in record.WRITES:
+            try:
+                body = await request.json()
+            except ValueError:
+                return web.json_response({"error": "the body is not JSON"}, status=400)
+        elif request.method != "GET":
             return web.json_response({"error": "the record is read with GET"}, status=405)
         try:
             found = await asyncio.to_thread(
                 asyncio.run,
-                record.answer(self.dsn, grant.task_id, request.match_info["verb"], dict(request.query)),
+                record.answer(self.dsn, grant.task_id, verb, dict(request.query), body),
             )
         except record.NotFound as exc:
             return web.json_response({"error": str(exc)}, status=404)

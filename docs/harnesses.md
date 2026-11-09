@@ -594,12 +594,16 @@ time Valor worked on the project, as the `hours` routine writes them to
 its calendar, [routines.md](routines.md)), `waits` (what is waiting now,
 oldest first: each task's open question and each post a chat session
 awaits a reply to, with its note, since when, and the hours waited, in
-Tom's working hours too, Monday to Friday 09:00 to 18:00 his time), and `memory WORDS [--limit] [--offset]`, which searches the
-project's memory as recall reads it ([memory.md](memory.md), Search). The kernel answers it: each harness sets `VALOR_RECORD_URL`, the
+Tom's working hours too, Monday to Friday 09:00 to 18:00 his time), `memory WORDS [--limit] [--offset]`, which searches the
+project's memory as recall reads it ([memory.md](memory.md), Search), and
+`facts`, `sources`, `fact add|supersede|confirm`, `entity add|alias`,
+`link` and `source`, which read and write what is true about the project
+over time ([memory.md](memory.md), Facts): the one write it makes, a POST
+of the gateway's `record/facts`. The kernel answers it: each harness sets `VALOR_RECORD_URL`, the
 turn's gateway base URL with `/record`, and the gateway's `record/` route
 (before the catch-all that forwards upstream) resolves the turn's token to
-its task, the task to its project, and reads `core/record.py`'s SELECTs on a
-connection of its own in a thread of its own. The turn holds no credential
+its task, the task to its project, and reads `core/record.py`'s SELECTs (or
+appends the facts a POST writes) on a connection of its own in a thread of its own. The turn holds no credential
 it did not already hold, names no project, and the ledger's deny below is
 unchanged; a read-only Postgres role was not used, since it would need a
 password and the denied socket, and Postgres cannot scope rows by project.

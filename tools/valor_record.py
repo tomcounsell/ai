@@ -7,6 +7,16 @@ valor-record memory WORDS [--limit N] [--offset N] [--json]
 valor-record call CODE [--before RECORD] [--limit N] [--json]
 valor-record hours [--since DATE] [--until DATE] [--json]
 valor-record waits [--json]
+valor-record facts [--as-of DATE] [--kind K] | --history FACT | --related FACT_OR_ENTITY [--depth N] [--json]
+valor-record sources [--json]
+valor-record fact add CLAIM --kind K --source CITE --since DATE [--source-at DATE] [--about ENTITY]...
+             [--reported R --evidence E --why-differs W]
+valor-record fact supersede FACT CLAIM --reason R (and add's options)
+valor-record fact confirm FACT --answer LEDGER_ROW [--by WHO]
+valor-record entity add NAME --kind K [--alias A]...
+valor-record entity alias ENTITY ALIAS
+valor-record link A B --kind K [--source CITE]
+valor-record source CHANNEL [--failed] [--upto CURSOR]
 
 Reads the ledger of this turn's own project: its chats, the messages each
 received and what they were bound to, its tasks and what became of them.
@@ -22,6 +32,11 @@ the `hours` routine writes them to the project's calendar. `waits`
 prints what is waiting now, oldest first: each task's open question and
 each post a chat session awaits a reply to, with who or what it waits on,
 since when, how long, and how much of that was Tom's working hours.
+`facts` prints what is true about the project now or at a date, a fact's
+history, or what a fact or entity links to; `fact`, `entity`, `link` and
+`source` write them (docs/memory.md, Facts), each printing the name of
+what it wrote; the same write asked twice writes once. Everything starts
+inferred; only `fact confirm`, naming a person's answer, confirms.
 Standard library only, and Python 3.9 (macOS's own `python3`), so it runs
 in any workspace.
 """
@@ -93,6 +108,37 @@ def wait_line(w: dict) -> str:
     )
 
 
+def fact_write(args: argparse.Namespace) -> dict | None:
+    """The write a `fact`, `entity`, `link` or `source` asks for, as
+    `core/memory.py` `fact_write` takes it; None for a read."""
+    if args.verb == "fact" and args.op == "confirm":
+        return {"op": "confirm", "fact": args.fact, "answer": args.answer, "by": args.by}
+    if args.verb == "fact":
+        w = {"op": "fact" if args.op == "add" else "supersede", "claim": args.claim, "kind": args.kind,
+             "source": args.source, "since": args.since, "source_at": args.source_at, "about": args.about,
+             "reported": args.reported, "evidence": args.evidence, "why_differs": args.why_differs}  # fmt: skip
+        if args.op == "supersede":
+            w.update(old=args.old, reason=args.reason)
+        return {k: v for k, v in w.items() if v is not None}
+    if args.verb == "entity" and args.op == "add":
+        return {"op": "entity", "name": args.name, "kind": args.kind, "aliases": args.alias or []}
+    if args.verb == "entity":
+        return {"op": "alias", "entity": args.entity, "alias": args.alias}
+    if args.verb == "link":
+        return {"op": "link", "a": args.a, "b": args.b, "kind": args.kind, "source": args.source or ""}
+    if args.verb == "source":
+        # Each read is its own: the time keeps a second read from being the first's repeat.
+        when = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        return {
+            "op": "source",
+            "channel": args.channel,
+            "ok": not args.failed,
+            "upto": args.upto or "",
+            "at": when,
+        }
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="valor-record", description="Read this project's record.")
     sub = parser.add_subparsers(dest="verb", required=True)
@@ -118,7 +164,57 @@ def main(argv: list[str] | None = None) -> int:
     mem.add_argument("words", nargs="+", help="what to search for")
     mem.add_argument("--limit", "-n", type=int, default=10, help="how many (at most 50)")
     mem.add_argument("--offset", type=int, help="skip this many matches, for the next page")
-    for p in sub.choices.values():
+    facts = sub.add_parser("facts", help="what is true about the project, now or at a date")
+    facts.add_argument("--as-of", help="a date (YYYY-MM-DD or an ISO time); default now")
+    facts.add_argument("--kind", help="only facts of this kind")
+    facts.add_argument("--history", help="a fact's supersession chain, oldest first")
+    facts.add_argument("--related", help="what a fact or entity links to")
+    facts.add_argument("--depth", type=int, help="how many hops --related walks (default 2, at most 6)")
+    sub.add_parser("sources", help="each source of the project's facts and how far it was read")
+    leaves = list(sub.choices.values())
+    fact = sub.add_parser("fact", help="add, supersede or confirm a fact").add_subparsers(
+        dest="op", required=True
+    )
+    for op in ("add", "supersede"):
+        f = fact.add_parser(op)
+        if op == "supersede":
+            f.add_argument("old", help="the fact it supersedes")
+            f.add_argument("--reason", required=True)
+        f.add_argument("claim")
+        f.add_argument("--kind", required=True, help="free text: pricing, customer, release, decision...")
+        f.add_argument(
+            "--source", required=True, help="commit:<sha>, telegram:<chat>/<message>, a ledger row"
+        )
+        f.add_argument("--since", required=True, help="when it became true")
+        f.add_argument("--source-at", help="the source's date, if not --since")
+        f.add_argument("--about", action="append", help="an entity it is about (repeatable)")
+        for k in ("--reported", "--evidence", "--why-differs"):
+            f.add_argument(k)
+        leaves.append(f)
+    c = fact.add_parser("confirm")
+    c.add_argument("fact")
+    c.add_argument("--answer", required=True, help="the ledger row of the person's answer (<ledger>/<id>)")
+    c.add_argument("--by", default="tom")
+    entity = sub.add_parser("entity", help="add an entity or a name it has had").add_subparsers(
+        dest="op", required=True
+    )
+    e = entity.add_parser("add")
+    e.add_argument("name")
+    e.add_argument("--kind", required=True)
+    e.add_argument("--alias", action="append", help="another name it has had (repeatable)")
+    a = entity.add_parser("alias")
+    a.add_argument("entity")
+    a.add_argument("alias")
+    link = sub.add_parser("link", help="link two facts or entities")
+    link.add_argument("a")
+    link.add_argument("b")
+    link.add_argument("--kind", required=True)
+    link.add_argument("--source")
+    src = sub.add_parser("source", help="record a read of a source")
+    src.add_argument("channel")
+    src.add_argument("--failed", action="store_true", help="the read failed")
+    src.add_argument("--upto", help="how far it read: the last sha or message id")
+    for p in [*leaves, c, e, a, link, src]:
         p.add_argument("--json", action="store_true", help="print the kernel's JSON")
     args = parser.parse_args(argv)
 
@@ -137,9 +233,22 @@ def main(argv: list[str] | None = None) -> int:
         "since": getattr(args, "since", None),
         "until": getattr(args, "until", None),
     }
-    url = f"{base}/{args.verb}?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+    if args.verb == "facts":
+        query.update(
+            as_of=args.as_of, kind=args.kind, history=args.history, related=args.related, depth=args.depth
+        )
+    if args.verb == "sources":
+        args.verb, query["sources"] = "facts", "1"
+    write = fact_write(args)
+    url = f"{base}/{'facts' if write else args.verb}?" + urllib.parse.urlencode(
+        {k: v for k, v in query.items() if v is not None and not write}
+    )
+    data = json.dumps({"writes": [write]}).encode() if write else None
+    request = urllib.request.Request(
+        url, data=data, headers={"content-type": "application/json"} if write else {}
+    )
     try:
-        with urllib.request.urlopen(url, timeout=60) as r:
+        with urllib.request.urlopen(request, timeout=60) as r:
             out = json.loads(r.read())
     except urllib.error.HTTPError as e:
         try:
@@ -153,6 +262,25 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.json:
         print(json.dumps(out, indent=2, ensure_ascii=False))
+    elif write:
+        print(out["names"]["1"])
+    elif args.verb == "facts" and "sources" in out:
+        for x in out["sources"]:
+            print(
+                f"{x['channel']}: last read {x['last_ok']}, last tried {x['last_tried']}, up to {x['upto'] or '-'}"
+            )
+        if not out["sources"]:
+            print("nothing found")
+    elif args.verb == "facts" and "related" in out:
+        for x in out["links"]:
+            print(f"link {x['kind']}: {x['a']} - {x['b']}" + (f" ({x['source']})" if x["source"] else ""))
+        for x in out["related"]:
+            print(f"[{x['hops']} hop{'s' if x['hops'] > 1 else ''}] {x['entry']}")
+    elif args.verb == "facts":
+        for x in out["facts"]:
+            print(x["entry"])
+        if not out["facts"]:
+            print("nothing found")
     elif args.verb == "memory":
         for r in out["records"]:
             print(r["entry"])

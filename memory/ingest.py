@@ -16,12 +16,16 @@ first such row's id) replaces that row's record under the same key and
 ledger id, so marks and confinements naming it still apply and recall's
 bound does not move; when it moves the record to a project not served on
 the Mac (`served` false) the record is deleted and none is saved.
+A fact,
+entity, link or source row (`facts.TYPES`) makes no record: `facts.take`
+stores it, in the project and client its payload carries.
 """
 
 import json
 from datetime import datetime
 from typing import Any
 
+from memory import facts
 from memory.records import Confined, Ingested, Record, Standard, use
 
 # The row that marks a standard of working.
@@ -114,7 +118,9 @@ def save(dsn: str, unit: dict[str, Any]) -> int:
     of records."""
     use(dsn)
     payload = unit["payload"]
-    made = [] if unit["type"] == MARKED else entries(unit)
+    made = entries(unit) if unit["type"] in ORIGINS else []
+    if unit["type"] in facts.TYPES:
+        facts.take(unit)
     row = unit["id"]
     if unit.get("first"):
         row = unit["first"]

@@ -8,6 +8,17 @@ secure-login                   the kernel databases' password file, the kernel's
 memory ingest                  take the ledger rows memory has not taken (run
                                after every turn; by hand, the rollout's backfill
                                or a rebuild)
+facts --project NAME_OR_FILE apply FILE
+                               append a JSONL file of fact writes (docs/memory.md,
+                               Facts) to the project's facts on this Mac; prints
+                               each label's name. A line is keyed by the file's
+                               hash and its label, so applying the file again
+                               writes only what is not yet written. Run in the
+                               kernel job's environment, so the ledger name is
+                               the kernel's
+facts --project NAME_OR_FILE read [--as-of DATE] [--kind K] [--history FACT]
+      [--related NAME [--depth N]] [--sources] [--json]
+                               the project's facts, as `valor-record facts`
 memory mark RECORD [--by] [--via]
                                mark a record (`<ledger>/<key>`, as its
                                Remembered label names it) a standard of
@@ -334,6 +345,53 @@ def runners(judgement_port: judgement.JudgementPort | None) -> dict:
         Check.REVIEW: fresh.review_runner(_fresh_for),
         Check.DOCS: fresh.docs_runner(_fresh_for),
     }
+
+
+async def _facts(conn, args) -> None:
+    """`facts apply` and `facts read`, through the port a turn's
+    `valor-record` writes and reads with."""
+    import hashlib
+
+    try:
+        spec = workspace.Spec.load(args.project)
+    except workspace.Refused as exc:
+        raise SystemExit(str(exc)) from None
+    try:
+        if args.facts_command == "apply":
+            data = Path(args.file).read_bytes()
+            digest = hashlib.sha256(data).hexdigest()[:16]
+            writes = []
+            for n, line in enumerate(data.decode().splitlines(), 1):
+                if line.strip():
+                    w = json.loads(line)
+                    writes.append(
+                        {
+                            **w,
+                            "as": str(w.get("as") or n),
+                            "key": w.get("key") or f"{digest}:{w.get('as') or n}",
+                        }
+                    )
+            print(json.dumps(await memory.fact_write(conn, spec, writes), indent=1))
+            return
+        query = {"as_of": args.as_of, "kind": args.kind, "history": args.history,
+                 "related": args.related, "depth": args.depth, "sources": args.sources}  # fmt: skip
+        out = await memory.facts_read(conn, spec, {k: v for k, v in query.items() if v})
+    except memory.Refused as exc:
+        print(json.dumps(exc.names, indent=1))
+        raise SystemExit(f"facts refused: {exc}") from None
+    except (memory.Unavailable, ValueError) as exc:
+        raise SystemExit(f"facts: {exc}") from None
+    if args.json:
+        print(json.dumps(out, indent=1, ensure_ascii=False))
+        return
+    for x in out.get("sources", []):
+        print(
+            f"{x['channel']}: last read {x['last_ok']}, last tried {x['last_tried']}, up to {x['upto'] or '-'}"
+        )
+    for x in out.get("links", []):
+        print(f"link {x['kind']}: {x['a']} - {x['b']}")
+    for x in out.get("facts", []) + out.get("related", []):
+        print(x["entry"])
 
 
 def _usd(micros: int) -> str:
@@ -978,6 +1036,8 @@ async def _run(args) -> None:
             print(json.dumps(await memory.import_old(conn, lines)))
         elif args.command == "memory":
             print(json.dumps(await memory.ingest(conn)))
+        elif args.command == "facts":
+            await _facts(conn, args)
         elif args.command == "status":
             state = await tasks.status(conn, args.task_id)
             state["metered_spending"] = _usd(state["spent_usd_micros"])
@@ -1257,6 +1317,18 @@ def main() -> None:
     bench.add_argument("dumps", nargs="+")
     bench.add_argument("--out", required=True)
     bench.add_argument("--scratch", required=True)
+    facts = sub.add_parser("facts")
+    facts.add_argument("--project", required=True, help="a project spec's name, or a spec file")
+    facts_cmd = facts.add_subparsers(dest="facts_command", required=True)
+    facts_cmd.add_parser("apply").add_argument("file")
+    facts_read = facts_cmd.add_parser("read")
+    facts_read.add_argument("--as-of")
+    facts_read.add_argument("--kind")
+    facts_read.add_argument("--history")
+    facts_read.add_argument("--related")
+    facts_read.add_argument("--depth", type=int)
+    facts_read.add_argument("--sources", action="store_true")
+    facts_read.add_argument("--json", action="store_true")
     sub.add_parser("settings")
     sub.add_parser("judgement-keys")
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")
