@@ -12,106 +12,83 @@ in full, so venvs overstate):
 |---|---|---|---|
 | `cache/uv` | 0.5-2.3 GB | 0.5-1.5 GB | uv's download/wheel cache, one per task, refilled by every task |
 | `cache/npm`, `cache/python` | 312 MB, 76 MB | -, 77 MB | npm's cache; a uv-installed Python, per task |
-| `repo/.venv` | 480-530 MB | 500 MB (a submodule's) | clones of `cache/uv` files (uv's macOS default link mode is clone) |
-| `repo/.git`, `origin.git`, `kernel.git` | 97 MB each | 2-66 MB, up to 316 MB | the same history three times; the monorepo's `kernel.git` grows by each check worktree's submodule clone |
-| `checks/*` | 133 MB each | 108 MB each | check worktrees (plus, for the monorepo, its submodules fetched again per check) |
-| `checks/seed/` | (no live task has one) | 0 B (setup installs nothing) | the base suite run's package cache, which starts empty and downloads everything again: one more full uv cache per task that runs a suite |
+| `repo/.venv` | 480-530 MB | 500 MB (a submodule's) | clones of `cache/uv` files (uv's macOS default link mode) |
+| `repo/.git`, `origin.git`, `kernel.git` | 97 MB each | 2-66 MB, up to 316 MB | the same history three times; the monorepo's `kernel.git` grows by each check's submodule clone |
+| `checks/*` | 133 MB each | 108 MB each | check worktrees (the monorepo's fetch its submodules again) |
+| `checks/seed/` + each check's `cache/` | none live | 0 B (setup installs nothing) | the checks' own package caches: the base run's setup downloads everything again into an empty cache |
 | `out/` | 1.1 GB | - | a deliverable (a video) |
 
 The 5-19 GB workspaces of 2026-11-06 were reclaimed before this task; the
-live ones show the same parts. The Mac-wide `~/.cache/uv` (2.8 GB) already
-exists and the overnight update already runs `uv cache prune` on it
-(`core/__main__.py` `update_runner`).
+live ones show the same parts.
 
 **Why the per-task caches were there.** They date from the 1.4 sandbox,
-whose profile write-denied uv's shared cache (f77f0157b); Strip B
-(c86f22c39) removed that rule, so nothing needs them now. The checks' own
-cache copies (`check_harness`, `checks.suite`'s seed) have a live reason,
-"nothing one run writes reaches another", and keep it; only where their
-first copy comes from changes.
+whose profile write-denied uv's shared cache (f77f0157b) and kept checks
+apart from anything the builder wrote. Strip B (c86f22c39) removed that
+isolation; a builder's setup already writes what a check then installs
+from. With the builder on the Mac's cache, a check's private copy protects
+nothing but the downloads it repeats, so it goes too.
 
 ## What will be built
 
-1. **Packages.** `harness_env` stops setting `UV_CACHE_DIR`,
-   `UV_PYTHON_INSTALL_DIR` and `npm_config_cache`, so a turn and its setup
-   use the Mac's own caches (`~/.cache/uv`, `~/.local/share/uv/python`,
-   `~/.npm`), as a developer does. uv and npm caches are safe for
-   concurrent use; venvs are APFS clones of the cache (uv's default on
-   macOS, no `UV_LINK_MODE` needed). The shared cache is not capped
-   (the nightly `uv cache prune` removes only unreachable entries; it
-   stood at 19.5 GiB on the Captain on 2026-10-22), so the report counts
-   its measured size as a fixed cost per Mac. No cap is added. `provision` stops making `cache/`
-   and `Layout.cache` goes (nothing would use it).
-2. **The checks' first cache.** Where `checks/seed/` does not exist yet
-   (`checks.suite` and the review in `core/fresh.py`, the two places that
-   today `mkdir` an empty cache), the check's `cache/uv`, `cache/python`
-   and `cache/npm` are `clone_tree` copies of the Mac's three caches: APFS
-   clones, near free, and a write to a clone never reaches the original,
-   so runs stay apart. The base run's setup then downloads only what the
-   Mac lacks, and the seed cloned from it stays near free. One helper in
-   `core/workspace.py` beside `clone_tree`, used by both places. It finds
-   the Mac's caches as a turn's uv and npm do once the variables are gone:
-   `uv cache dir` and `uv python dir` (through `settings.uv`) and
-   `npm config get cache`, run with the kernel's environment; a cache that
-   does not exist, or a tool that is missing, gives an empty directory, as
-   today. The Mac's caches change while they are cloned (uv and npm build
-   in temporary directories and rename them; the nightly prune deletes),
-   so the helper runs `cp -c -R` without `check`: an entry that vanished
-   mid-walk is left out, an entry at its final name is complete, and a
-   half-copied temporary directory is ignored by uv and npm.
-3. **Git.** `repo` is cloned with `--reference <cache/<name>.git>`;
+1. **One package cache per Mac.** `harness_env` and `check_harness` stop
+   setting `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR` and `npm_config_cache`,
+   so turns, setup and suites use the Mac's own caches (`~/.cache/uv`,
+   uv's python dir, `~/.npm`), as a developer does. uv's and npm's caches
+   are safe for concurrent use; venvs are APFS clones (uv's macOS default),
+   so pruning the cache never breaks one. The cache is not capped (it was
+   19.5 GiB on the Captain on 2026-10-22); the report counts its size as a
+   fixed cost per Mac. No cap is added.
+2. **The check seed goes.** With no per-check cache there is nothing to
+   seed: `checks.SEED`, the setup-only base run that made it
+   (`run_suite=False` in `checks.suite`/`base_and_head`), the clones in
+   `checks.suite` and the review in `core/fresh.py`, `workspace.clone_tree`
+   and `Layout.cache` are deleted; `provision` makes no `cache/`.
+3. **The overnight prune no longer blocks the routine.** `uv cache prune`
+   waits while any uv process holds the cache (reproduced, uv 0.13.7), and
+   after step 1 tasks' long-lived `uv run`s do. `update_runner` starts the
+   prune as a detached process (`subprocess.Popen`, new session, output to
+   the kernel's log) and returns at once, reporting "uv cache prune
+   started"; the prune finishes whenever the cache is free. No timeout,
+   no `--force` (uv warns it is unsafe with concurrent use).
+4. **Git.** `repo` is cloned with `--reference <cache/<name>.git>`;
    `origin.git` and `kernel.git` get `objects/info/alternates` naming the
    cache's objects before their push/fetch, so each holds only the task's
-   own new objects. `_cache` sets `gc.pruneExpire never` on the cache (also
-   on existing caches) so an object a workspace borrows is never pruned
-   after a force-push upstream. `docs_clone` keeps its deliberate
-   object-free copy.
-4. Docs: the layout in `core/workspace.py`'s docstring and
-   `docs/workspace.md` say the caches are the Mac's and history is
-   borrowed from `cache/<name>.git`; `docs/sdlc-checks-test.md` and
-   `docs/machine.md` say a check's first cache is a clone of the Mac's.
+   own objects. `_cache` sets `gc.pruneExpire never` on the cache (also on
+   existing ones), so a borrowed object is never pruned after an upstream
+   force-push. `docs_clone` keeps its deliberate object-free copy.
+5. **Docs.** `core/workspace.py`'s layout docstring and `check_harness`'s
+   comment, `core/fresh.py`'s docstring (what the review reads of the
+   builder's), `core/checks.py`'s docstring, `docs/workspace.md`,
+   `docs/sdlc-checks-test.md`, `docs/machine.md`: the caches are the Mac's,
+   shared by builder and checks; history is borrowed from `cache/<name>.git`.
 
 Existing workspaces keep their Brief's environment; only new ones change.
 
-## Out of scope (named in the report)
+**Out of scope (named in the report):** the monorepo's per-check
+submodule fetch, node_modules (npm copies), deliverables in `out/`, the
+reclaim window. No check, gate, quota or limit.
 
-The monorepo's
-per-check submodule fetch (a spec setup line, `--reference`), node_modules
-(npm copies, it cannot clone), deliverables in `out/`, the reclaim window.
-No check, gate, quota or limit.
+## Tests (`tests/test_kernel.py` and the checks/routine tests; real git, no network)
 
-## Tests (`tests/test_kernel.py`, real git, no network)
-
-- A provisioned workspace's harness env has none of the three cache
-  variables; `provision` makes no `cache/` in the task root.
-- `repo`, `origin.git`, `kernel.git` each name the cache's objects in
-  `objects/info/alternates`, hold no copy of the base's history
-  (`count-objects` tiny against the cache's pack), and `fsck` clean.
-- A candidate commit from `repo` reaches `kernel.git` through
+- A provisioned workspace's env and a suite check's env have none of the
+  three cache variables; `provision` makes no `cache/`; a check has no
+  `cache/` and no seed is made.
+- `repo`, `origin.git`, `kernel.git` name the cache's objects in
+  `objects/info/alternates`, hold no copy of the base's history, and
+  `fsck` clean; a candidate from `repo` reaches `kernel.git` through
   `fetch_into_mirror` and a check worktree of it checks out.
-- Upstream force-push, cache refetched, then `git gc` in the cache: the
-  workspace still reads its base (`fsck` clean); the cache has
-  `gc.pruneExpire=never`, also when it existed before.
-- A suite check with no seed starts with `cache/uv` holding the Mac's
-  cache's files (a test uv cache dir set as the Mac's), its writes do not
-  appear in the Mac's cache, and the seed made from it is used by the
-  head run; with no Mac cache present the check starts empty, as today.
-  The review's check (`core/fresh.py`) gets the same first cache.
-- A source entry that disappears during the clone (a stand-in `cp` that
-  copies, then exits 1 as cp does): the check still starts with what
-  was copied. The cache dirs come from the commands above (stub `uv` and
-  `npm` printing test paths).
-- Removing a workspace leaves `cache/<name>.git` and its objects intact,
-  and a second task provisions from it.
-- Existing tests on `harness_env` updated.
+- Upstream force-push, cache refetched, `git gc` in the cache: the
+  workspace still reads its base; `gc.pruneExpire=never` is set, also on a
+  cache that existed before. Removing a workspace leaves the cache intact.
+- `update_runner` with a stub `uv` that blocks (as a held cache does)
+  returns and reports while the stub is still running.
+- Existing tests on `harness_env`, the seed and the setup-only run updated
+  or removed.
 
 Then the full suite, merge, rollout to the four Macs, and on the Captain a
 throwaway workspace (own work dir, removed after) of the Django client
-project and of the monorepo provisioned at the old and the new main, with
-setup run and then one base suite run (`checks.suite` at the base, which
-makes the seed): free-disk delta (`df`, which counts clones correctly) and
-`du` per part, the seed included, the Mac's shared caches' size as a
-fixed per-Mac cost, and the base check's start-up time (the clone of the
-Mac's caches) beside the old empty start. From those, how many active tasks fit in
-the Captain's free space, and whether an attached SSD is still worth
-buying.
+project and of the monorepo at the old and the new main, with setup and one
+base suite run: free-disk delta (`df`) and `du` per part, the shared
+caches' size as a fixed per-Mac cost, and the base check's time. From
+those, how many active tasks fit in the Captain's free space, and whether
+an attached SSD is still worth buying.
