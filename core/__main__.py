@@ -645,15 +645,14 @@ DISK_LOW_GB = 15
 
 async def update_runner(ctx: routines.Context) -> routines.Ran:
     """The overnight update: one request, which the resident kernel rolls;
-    no task. It also prunes uv's shared cache (19.5 GiB on the Captain,
-    2026-10-22), tells Tom once a day when this Mac's disk is low, and once
-    a week while its call profile is not signed in (the Captain was first
+    no task. It also starts a prune of uv's shared cache (19.5 GiB on the
+    Captain, 2026-10-22), left to run on its own, since `uv cache prune`
+    waits for every uv process using the cache (tasks share it); tells Tom
+    once a day when this Mac's disk is low, and once a week while its call profile is not signed in (the Captain was first
     asked mid-call, 2026-11-02)."""
     request_id = await intake.request_update(ctx.conn, by="routine", via="routine")
-    pruned = await asyncio.to_thread(
-        subprocess.run, [settings.uv, "cache", "prune"], capture_output=True, text=True, check=False
-    )
-    said = (pruned.stderr.strip().splitlines() or ["uv cache pruned"])[-1]
+    await asyncio.to_thread(subprocess.Popen, [settings.uv, "cache", "prune"], stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)  # fmt: skip
     free = shutil.disk_usage(Path.home()).free / 1e9
     if free < DISK_LOW_GB:
         await notices.request(
@@ -676,7 +675,9 @@ async def update_runner(ctx: routines.Context) -> routines.Ran:
             f"Google as Valor, once, at that Mac: {call.SIGN_IN}. The Chrome window may be left open; "
             "the next call quits it.",
         )
-    return routines.Ran(None, "started", f"update {request_id} requested; {said}; {free:.0f} GB free")
+    return routines.Ran(
+        None, "started", f"update {request_id} requested; uv cache prune started; {free:.0f} GB free"
+    )
 
 
 # How long `update --wait` waits for its request to end or fail.

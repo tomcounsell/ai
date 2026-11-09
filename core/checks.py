@@ -8,8 +8,6 @@ base the task started from and at the candidate. Each run gets:
 
 - a git worktree of the commit from the kernel mirror under
   `checks/test-<role>-<sha>/repo` (`worktree`);
-- its own copy of the caches, cloned from `checks/seed/` (the base's
-  setup output), so nothing one run writes reaches another;
 - fresh Postgres and Redis instances on the task's own ports
   (`workspace.check_services`), the task's own stopped meanwhile;
 - the spec's setup;
@@ -47,7 +45,6 @@ from core.machine import Check, State
 
 SUITE = "suite.ran"
 JUNIT = "tmp/junit.xml"
-SEED = "seed"
 NO_TESTS = "the suite ran no tests at head"
 BOTH_FAIL = "the whole suite fails at base and at head, with no per-test results to tell them apart"
 # Files at a commit's top level that pin what setup installs.
@@ -707,12 +704,11 @@ def _lint_file(path: Path) -> list[dict[str, Any]]:
 
 
 async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str, stop: asyncio.Task,
-                *, digest: str, run_suite: bool = True, lint: bool = False) -> dict[str, Any]:  # fmt: skip
-    """One run at `sha`: checkout, the cache clone, fresh services, setup,
+                *, digest: str, lint: bool = False) -> dict[str, Any]:  # fmt: skip
+    """One run at `sha`: checkout, fresh services, setup,
     the suite, and with `lint` the spec's lint after it in the same
     checkout (`lint` in the payload: None when the spec has none, or when
-    setup failed and nothing ran). Returns the `suite.ran` payload. With
-    `run_suite` false only setup runs, to make the seed cache. Raises
+    setup failed and nothing ran). Returns the `suite.ran` payload. Raises
     `_Stopped` on a stop."""
     project = b.project or {}
     command = project.get("suite") or "true"
@@ -751,12 +747,6 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
     except git.GitError as exc:
         # The mirror holds the commit, so a checkout that fails is the kernel's.
         return done(cause="kernel", why=f"no checkout of {sha[:12]} from the mirror: {exc}")
-    seed = lay.checks / SEED
-    cache = check_dir / "cache"
-    if seed.is_dir():
-        await asyncio.to_thread(workspace.clone_tree, seed, cache)
-    else:
-        cache.mkdir()
     services = workspace.check_services(lay, check_dir, project, ctx.task_id)
     try:
         # A failed start has already cleaned up inside `check_services`.
@@ -776,10 +766,6 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
                 exit=last["exit"], tail=last["tail"], cause="commit",
                 why=f"setup failed at {role}: {last['command']} exited {last['exit']}",
             )  # fmt: skip
-        if role == "base" and commands:
-            await asyncio.to_thread(workspace.clone_tree, cache, seed)
-        if not run_suite:
-            return done()
         junit = check_dir / JUNIT
         argv = workspace.sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c",
                                    command.replace("{junit}", str(junit)))  # fmt: skip
@@ -806,8 +792,7 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
 async def base_and_head(ctx, lay: workspace.Layout, b: tasks.Brief, stop: asyncio.Task, base: str, head: str,
                         head_role: str, *, lint: bool = False) -> dict[str, Any]:  # fmt: skip
     """The base run at `base` and the head run at `head` under `head_role`, each a
-    usable `suite.ran` reused or run and appended. The seed cache is made
-    from the base's setup when it is missing. Returns {"ran": {"base":
+    usable `suite.ran` reused or run and appended. Returns {"ran": {"base":
     row, "head": row}} or a runner result (`stopped`, `lock lost`, or
     `failed` on a `kernel` cause). Raises `_Stopped` on a stop."""
     bin_dir = lay.root.parent / "bin"
@@ -825,9 +810,6 @@ async def base_and_head(ctx, lay: workspace.Layout, b: tasks.Brief, stop: asynci
         if kept is not None:
             ran[key] = kept
             continue
-        if key == "head" and not (lay.checks / SEED).is_dir() and (b.project or {}).get("setup"):
-            base_digest = ran["base"]["payload"]["digest"]
-            await suite(ctx, lay, b, base, "base", stop, digest=base_digest, run_suite=False)
         if not await ctx.alive():
             return {"status": "lock lost"}
         payload = await suite(ctx, lay, b, sha, role, stop, digest=digest, lint=lint and key == "head")

@@ -9,6 +9,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -696,6 +697,9 @@ def test_the_update_routine_writes_one_request_and_no_task(fresh, monkeypatch):
 
 
 def test_the_update_routine_prunes_uv_and_reports_low_disk_once_a_day(fresh, tmp_path, monkeypatch):
+    """The prune is started and left running: a task's uv holding the
+    Mac's shared cache makes `uv cache prune` wait, and the routine must
+    still end and report (a uv here that blocks until released)."""
     import dataclasses
     import shutil
 
@@ -703,7 +707,8 @@ def test_the_update_routine_prunes_uv_and_reports_low_disk_once_a_day(fresh, tmp
     from core import routines
 
     uv = tmp_path / "uv"
-    uv.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/argv\necho "Removed 3 files (1.0GiB)" >&2\n')
+    release = tmp_path / "release"
+    uv.write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/argv\nwhile [ ! -e {release} ]; do sleep 0.05; done\n')
     uv.chmod(0o755)
     profile = signed(tmp_path / "meet-chrome")
     monkeypatch.setattr(main, "settings", dataclasses.replace(settings, uv=str(uv), meet_profile=profile))
@@ -714,10 +719,17 @@ def test_the_update_routine_prunes_uv_and_reports_low_disk_once_a_day(fresh, tmp
             for _ in range(2):
                 await routines.run(conn, "update", main._routine_runners(), directory=serve.ROOT / "routines")
 
-    run(go())
-    assert (tmp_path / "argv").read_text() == "cache prune\n" * 2
-    ran = run(of_type(fresh, "routine.ran"))
-    assert ran[0]["summary"].endswith("; Removed 3 files (1.0GiB); 8 GB free")
+    try:
+        run(go())
+        ran = run(of_type(fresh, "routine.ran"))
+        assert len(ran) == 2 and ran[0]["summary"].endswith("; uv cache prune started; 8 GB free")
+        for _ in range(100):
+            if (tmp_path / "argv").exists() and (tmp_path / "argv").read_text() == "cache prune\n" * 2:
+                break
+            time.sleep(0.05)
+        assert (tmp_path / "argv").read_text() == "cache prune\n" * 2
+    finally:
+        release.touch()
     ((_, notice),) = reports(fresh)
     assert notice["kind"] == "rollout" and notice["about_key"].startswith("disk:20")
     assert "8 GB of disk left" in notice["text"] and notice["child_id"] is None

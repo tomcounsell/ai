@@ -11,16 +11,20 @@ Serves Mission item 1 (delivering within authority) and the constraint
 `core/workspace.py` provisions a task's workspace from a project spec
 (`settings.projects_dir`, by default the private `~/Desktop/Valor/projects/`;
 [projects/README.md](../projects/README.md)) under `work_dir/<task id>/` before the task starts, cloning from
-a bare cache per repository URL (keyed by the URL's digest).
+a bare cache per repository URL (keyed by the URL's digest). The workspace's git repositories
+borrow that cache's objects, so they hold only the task's own; the cache keeps every object
+(`gc.pruneExpire never`), since a force-pushed upstream would otherwise let gc delete history a
+workspace still reads. Package caches are the Mac's own (`~/.cache/uv`, uv's Python directory,
+`~/.npm`), shared by every turn, setup and suite run as a developer's are; a workspace sets none.
 
 | Part | What it is |
 |---|---|
-| `repo/` | the repository at the base commit with no later history, tags, or remotes besides `origin`; reflog expired and garbage collected; on a work branch; `.valor/` excluded from git |
-| `origin.git/` | a local bare repository, the clone's only remote, the target branch at the base, every ref update logged, non-fast-forward pushes refused. Only the broker's `push_branch` and `merge` write it, from the kernel's process, when the push is requested inside the task's ceiling. After a merge the kernel also puts the merged head on the target branch from its mirror, and the clone's work branch is fast-forwarded to it before each `patch` turn (`workspace.bring_merged`) |
-| `kernel.git/` | the kernel mirror: seeded with the base, and fed each plan commit, candidate, and docs head (a docs session's kept head under `refs/valor/docs/`); the merge predicate and the merge read it |
+| `repo/` | the repository at the base commit with no later history, tags, or remotes besides `origin`, its objects borrowed from the kernel's `cache/<name>.git` (`--reference`); reflog expired and garbage collected; on a work branch; `.valor/` excluded from git |
+| `origin.git/` | a local bare repository borrowing the cache's objects (`objects/info/alternates`), the clone's only remote, the target branch at the base, every ref update logged, non-fast-forward pushes refused. Only the broker's `push_branch` and `merge` write it, from the kernel's process, when the push is requested inside the task's ceiling. After a merge the kernel also puts the merged head on the target branch from its mirror, and the clone's work branch is fast-forwarded to it before each `patch` turn (`workspace.bring_merged`) |
+| `kernel.git/` | the kernel mirror, borrowing the cache's objects as `origin.git/` does: seeded with the base, and fed each plan commit, candidate, and docs head (a docs session's kept head under `refs/valor/docs/`); the merge predicate and the merge read it |
 | `home/` | `pgpass` and the profiles: `turn.sb` and `service.sb` |
 | `tmp/` | the working session's `TMPDIR`: emptied before each turn starts and removed once it ends (`core/runs.py`), so a turn's scratch never outlives it; a fresh session's is its `checks/<name>/tmp/` |
-| `cache/`, `state/work/`, `checks/` | the builder's package caches; the working session's Claude Code config; each fresh session's checkout and `claude/`; each suite run's checkout and its own copy of the caches, cloned from `checks/seed/` (the base's setup output) |
+| `state/work/`, `checks/` | the working session's Claude Code config; each fresh session's checkout and `claude/`; each suite run's checkout |
 | `pg/`, `redis/`, `ports.json` | the task's services, below, and their ports, recorded when chosen |
 | `setup/`, `turns/` | each setup command's whole output, and each turn's whole stdout and stderr |
 

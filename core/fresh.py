@@ -9,8 +9,7 @@ A fresh session gets:
   a real clone of the candidate through the pack
   protocol, sharing no object file with the mirror, whose commits the
   kernel fetches into the mirror and cuts to the prefix it keeps;
-- for review, a checkout the kernel set up: the seed cache cloned in, the
-  spec's setup run under the check profile, and the turn inside fresh
+- for review, a checkout the kernel set up: the spec's setup run under the check profile, and the turn inside fresh
   Postgres and Redis on the task's ports (`workspace.check_services`), the
   task's own stopped meanwhile;
 - inputs as files under `.valor/inputs/`, written by the kernel from ledger
@@ -21,7 +20,8 @@ A fresh session gets:
   the whole work directory, `/private/tmp`, `/private/var/tmp`,
   `/private/var/folders`, and the user's Claude Code state denied, so it
   reads nothing the builder wrote in the paths the kernel names for the
-  builder (its clone, caches, `TMPDIR`, and Claude Code state); what the
+  builder (its clone, `TMPDIR`, and Claude Code state); the package caches
+  are the Mac's, shared with the builder as a developer's are; what the
   builder writes elsewhere in the user's home is outside this (harnesses.md,
   Known openings). Critique and docs get no database credential and no
   service port;
@@ -917,11 +917,6 @@ def review_runner(fresh_for: FreshFor, model: str | None = None, seat: str = SEA
             await asyncio.to_thread(checks.worktree, b.mirror, candidate, checkout)
         except git.GitError as exc:
             return failed(f"review checkout: {exc}")
-        seed = lay.checks / checks.SEED
-        if seed.is_dir():
-            await asyncio.to_thread(workspace.clone_tree, seed, check_dir / "cache")
-        else:
-            (check_dir / "cache").mkdir()
         services = workspace.check_services(lay, check_dir, project, ctx.task_id)
         try:
             env = await asyncio.to_thread(services.__enter__)

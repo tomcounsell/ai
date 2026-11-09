@@ -13,7 +13,7 @@ While breadth has no passing calibration record, what it lists is
 information shown in the delivery, never a behavior. Then the project's own
 suite command, deterministic, at the task's base commit and then at the
 candidate's head, each in a worktree of the commit from the kernel mirror
-(`checks.worktree`) with its own copy of the caches and fresh Postgres and Redis on the task's ports
+(`checks.worktree`), the Mac's package caches, and fresh Postgres and Redis on the task's ports
 (`core/checks.py`). A base run whose setup failed is never reused. No
 setup command or suite has a time limit; a stop ends a running one.
 A JUnit report that

@@ -142,8 +142,8 @@ in the design ([sdlc-state-machine.md](sdlc-state-machine.md)), and on the Air t
 that are free: the review and docs turns are turns, and the test branch's suite run is turn-sized
 work (the 3,000 MB line above). With two slots, two of them run at once and the third waits, with
 the same verdicts and the same join. A suite run stops the task's own Postgres and Redis and starts
-fresh ones on the same ports for itself, so a check adds no service to the memory budget; its copy
-of the package caches is an APFS clone of `checks/seed/`, near free on disk and no RAM.
+fresh ones on the same ports for itself, so a check adds no service to the memory budget; it uses
+the Mac's package caches, as the builder does.
 
 A turn slot is one of the session advisory locks `turn-slot:<machine>:<i>`, `i` below `max_turns`
 (`core/slot.py`): every harness turn holds one, so a second kernel or a `python -m core run` beside

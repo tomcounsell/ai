@@ -2,7 +2,9 @@
 starts, from a project spec the kernel reads (never the candidate).
 
     <work_dir>/
-      cache/<name>.git     bare clone per repository, fetched by the kernel
+      cache/<name>.git     bare clone per repository, fetched by the kernel;
+                           each task's repo/, origin.git/ and kernel.git/
+                           borrow its objects (`objects/info/alternates`)
       bin/                 shared tools
       <task_id>/
         repo/              the builder's clone: the working session's cwd
@@ -12,7 +14,6 @@ starts, from a project spec the kernel reads (never the candidate).
         kernel.git/        the kernel mirror: the base, plan commits,
                            candidates, docs heads; no turn writes it
         home/              pgpass, profiles/*.sb
-        cache/             the builder's uv and npm caches
         state/work/        the working session's Claude Code config directory
         tmp/               the working session's TMPDIR, emptied when each
                            turn ends (`core.runs`)
@@ -365,10 +366,6 @@ class Layout:
         return self.home / "profiles"
 
     @property
-    def cache(self) -> Path:
-        return self.root / "cache"
-
-    @property
     def work_state(self) -> Path:
         return self.root / "state" / "work"
 
@@ -626,6 +623,9 @@ def _cache(
     if not cache.exists():
         cache.parent.mkdir(parents=True, exist_ok=True)
         git.trusted(cache.parent, "init", "-q", "--bare", str(cache))
+    # Workspaces borrow its objects, so none is ever pruned, not even one an
+    # upstream force-push left unreachable.
+    git.trusted(cache, "config", "gc.pruneExpire", "never")
 
     def remote(*args: str) -> str:
         if not keyed:
@@ -705,7 +705,7 @@ def harness_env(
     passfile: Path,
 ) -> dict[str, str]:
     """The turn's environment for this project: tools (`bin_dir`, the work
-    directory's `bin/`) first on PATH, then Postgres's, then the operator's; the caches under `lay`, the database and Redis it was given, `passfile` as the
+    directory's `bin/`) first on PATH, then Postgres's, then the operator's; the database and Redis it was given, `passfile` as the
     Postgres password file, and the business's knowledge base folder
     (`VALOR_KNOWLEDGE_BASE`) when the spec names one. The directories are
     passed, never derived from `lay`, so a check's own service layout gets
@@ -717,9 +717,6 @@ def harness_env(
     env = {
         "PATH": os.pathsep.join([str(bin_dir), *pg, os.environ.get("PATH", "/usr/bin:/bin")]),
         "VALOR_BROWSER": settings.browser,
-        "UV_CACHE_DIR": str(lay.cache / "uv"),
-        "UV_PYTHON_INSTALL_DIR": str(lay.cache / "python"),
-        "npm_config_cache": str(lay.cache / "npm"),
     }
     # The workspace's origin is the task's local bare copy, so `gh` is told
     # which GitHub repository it is working in.
@@ -810,17 +807,19 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     branch = spec.branch or _remote_head(cache)
     base_sha = _commit_of(cache, base or f"refs/heads/{branch}")
     target = spec.target_branch or branch
-    for d in (lay.repo.parent, lay.home, lay.profiles, lay.cache, lay.work_state / "claude",
+    for d in (lay.repo.parent, lay.home, lay.profiles, lay.work_state / "claude",
               lay.work_state / "pi", lay.work_state / "codex", lay.checks,
               lay.root.parent / "bin"):  # fmt: skip
         d.mkdir(parents=True, exist_ok=True)
     install_tools(lay.root.parent / "bin")
-    # The clone: history up to the base only, no tags, one work branch.
+    # The clone: history up to the base only, no tags, one work branch, its
+    # objects borrowed from the cache, as are the bare origin's and the
+    # mirror's below; each holds only the task's own.
     ref = f"refs/heads/valor-base/{task_id}"
     git.trusted(cache, "update-ref", ref, base_sha)
     try:
-        git.trusted(lay.root, "clone", "-q", "--no-tags", "--single-branch", "--branch",
-                    f"valor-base/{task_id}", f"file://{cache}", str(lay.repo))  # fmt: skip
+        git.trusted(lay.root, "clone", "-q", "--no-tags", "--single-branch", "--reference", str(cache),
+                    "--branch", f"valor-base/{task_id}", f"file://{cache}", str(lay.repo))  # fmt: skip
     finally:
         with git.uninterrupted():  # the shared cache keeps no ref of an interrupted task
             git.trusted(cache, "update-ref", "-d", ref)
@@ -834,6 +833,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         f.write(".valor/\n")
     # The bare origin: the target branch at the base.
     git.trusted(lay.root, "init", "-q", "--bare", str(lay.origin))
+    _borrow(lay.origin, cache)
     git.trusted(lay.origin, "symbolic-ref", "HEAD", f"refs/heads/{target}")
     git.trusted(lay.origin, "config", "core.logAllRefUpdates", "always")
     git.trusted(lay.origin, "config", "receive.denyNonFastForwards", "true")
@@ -842,6 +842,7 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
     git.trusted(lay.repo, "fetch", "-q", "origin")
     # The kernel mirror, seeded with the base from the kernel's own cache.
     git.trusted(lay.root, "init", "-q", "--bare", str(lay.mirror))
+    _borrow(lay.mirror, cache)
     git.trusted(lay.mirror, "fetch", "-q", "--no-tags", f"file://{cache}", f"{base_sha}:refs/valor/base")
     # Home: the profiles.
     kb = knowledge_base(spec)
@@ -898,6 +899,11 @@ def _provision(lay: Layout, task_id: str, spec: Spec, ports: dict[str, int], *, 
         harness=harness,
         project=project,
     )
+
+
+def _borrow(bare: Path, cache: Path) -> None:
+    """`bare` reads the cache's objects as its own (`objects/info/alternates`)."""
+    (bare / "objects" / "info" / "alternates").write_text(f"{cache / 'objects'}\n")
 
 
 def _remote_head(cache: Path) -> str:
@@ -1476,20 +1482,11 @@ def check_harness(
     task's services (critique) gets none of their ports and only the PATH
     of the task's environment, so no database credential. With `services`
     (test, review) the session gets the environment `check_services` made
-    for its fresh instances and its caches under `<check_dir>/cache/`."""
+    for its fresh instances; its package caches are the Mac's, as the
+    builder's are."""
     path = lay.profiles / "turn.sb"
     _write(path, turn_profile())
-    if services:
-        # The check's own copy of the caches, never the builder's.
-        cache = check_dir / "cache"
-        fresh_env = {
-            **env,
-            "UV_CACHE_DIR": str(cache / "uv"),
-            "UV_PYTHON_INSTALL_DIR": str(cache / "python"),
-            "npm_config_cache": str(cache / "npm"),
-        }
-    else:
-        fresh_env = {"PATH": env.get("PATH", "/usr/bin:/bin")}
+    fresh_env = dict(env) if services else {"PATH": env.get("PATH", "/usr/bin:/bin")}
     return {
         "sandbox_profile": str(path),
         "claude_config_dir": str(check_dir / "claude"),
@@ -1823,14 +1820,6 @@ def copy_new(src: Path, dest: Path) -> None:
     fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(data)
-
-
-def clone_tree(src: Path, dest: Path) -> None:
-    """`src` copied to `dest` as an APFS clone (`cp -c`), near free on disk;
-    a file written in one never shows in the other."""
-    rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["/bin/cp", "-c", "-R", str(src), str(dest)], check=True, capture_output=True)
 
 
 def rmtree(path: Path) -> None:
