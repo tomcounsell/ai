@@ -64,7 +64,7 @@ text reached it on 2026-10-25.
 `chromium_headless_shell-1208` in `~/Library/Caches/ms-playwright/`, never the
 newest in the cache. A turn that
 installs Playwright into its own project sets `PLAYWRIGHT_BROWSERS_PATH` to
-its task cache.
+a directory in its workspace (a task has no package cache of its own).
 
 **Sandbox.** Chromium's own sandbox cannot start inside a turn's sandbox-exec
 profile: the GPU process exits with "sandbox initialization failed: Operation
