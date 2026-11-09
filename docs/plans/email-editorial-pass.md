@@ -20,11 +20,12 @@ long, and the guide was nowhere in the flow.
   break both of de-slop's rules. These are two concerns: the guide pass is
   the author's rewrite with the sources at hand, and de-slop is the cold copy
   edit after it. So the guide goes into the email skill, and de-slop is unchanged.
-- `tomcounsell/ai` (public): email is drafted by the chat session
-  (`skills/sdlc/converse.md`, "A draft is text; a send is said") and by tasks
-  (the "When the work is done with nothing to merge" paragraph, the same in
-  `clarify.md`, `plan.md` and `build.md`). Each turn loads the yudame plugin from
-  the marketplace clone that the nightly job pulls (`skills/README.md`).
+- `tomcounsell/ai` (public): the chat session drafts email, and sends its own
+  replies in an email thread with `email.send` (`skills/sdlc/converse.md`,
+  lines 307-319). Every task turn, at any stage including patch, gets
+  `skills/sdlc/channel.md` (`core/tasks.py` `channel_text`), which already
+  holds the task rule for email (lines 13-18). Each turn loads the yudame plugin
+  from the marketplace clone that the nightly job pulls (`skills/README.md`).
 
 ## What will be built
 
@@ -39,22 +40,30 @@ In `yudame/skills`, on a branch, as a PR that I merge:
    sources at hand: rewrite the whole draft against the guide's rules, then
    go through its checklist. High stakes (a client, money, terms, a complaint,
    anything hard to take back) get at least two passes, each on the last
-   pass's result. (c) Then the existing de-slop step, unchanged. Every email
-   gets the pass, a one-liner included. The description becomes "drafted in
+   pass's result. (c) Then the existing de-slop step, unchanged, with its
+   "trivial logistics can skip" line kept as it is. The guide pass has no skip:
+   every email gets it, a one-liner included, and the skill says so. The description becomes "drafted in
    full, edited against the email guide, then de-slopped".
 4. `tests/check_email.py` (stdlib): asserts the guide's sha256, that SKILL.md
    links it, says it is never used for the first draft, puts the full draft
-   before the editorial pass and the pass before de-slop, and says high stakes
-   get at least two passes. It fails on today's file. Added to README's test line.
+   before the editorial pass and the pass before de-slop, says high stakes
+   get at least two passes, and that the Drafting section has no skip or
+   exemption wording (the de-slop skip stays in Sending). It fails on today's file. Added to README's test line.
 
 In `tomcounsell/ai`, after that merge:
-5. One sentence after the draft wording in `converse.md` and in the stage
-   paragraph of `clarify.md`, `plan.md` and `build.md`: an email, drafted or
+5. One sentence, the same in two places: an email, drafted for someone or
    sent, follows the email skill's flow (`yudame:email`): the full draft first,
    then at least one editorial pass against its guide (more when the stakes are
-   high), then de-slop.
-6. `tests/test_kernel.py`: a test that the rendered chat-session text and the
-   clarify, plan and build stage texts carry that sentence.
+   high), then de-slop. In `converse.md`, placed before the "A draft is text"
+   paragraph so it covers both the draft and the `email.send` reply below it;
+   in `channel.md`, beside the existing email line, so every task stage (patch
+   too) has it. The stage files are not changed.
+6. `tests/test_kernel.py`: a test that the rendered chat-session text and
+   `channel_text()` carry that sentence.
+7. Before the demo: `claude plugin marketplace update yudame` and
+   `claude plugin update yudame@yudame` on this Mac, and confirm the
+   installed email SKILL.md has the Drafting section, so the demo and the
+   next real drafts run the new skill.
 
 ## Demo (build stage, not committed, sent to no one)
 
