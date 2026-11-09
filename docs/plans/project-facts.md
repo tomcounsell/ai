@@ -1,9 +1,8 @@
 # Truth over time: dated, superseding, linked facts per project
 
-Issue #3684 is the spec (its Data model, Operations, No-gos, Acceptance).
-Tom, 2026-11-09: "Keep this issue entirely focused on data and management
-of truth about a project over time." "Yes, happy to use popoto." The first
-real use is a client project named in the task's Brief, not here (public).
+Issue #3684 is the spec (Data model, Operations, No-gos, Acceptance). Tom,
+2026-11-09: "Yes, happy to use popoto." The first real use is a client
+project named in the task's Brief, not here (the repo is public).
 
 ## What is built
 
@@ -12,9 +11,8 @@ real use is a client project named in the task's Brief, not here (public).
    Each stores `project` = the spec's `repo` and its `client`, as `Record`
    does, and `ledger`. `Fact.validity` is a `ValidityField` (valid-from =
    when it became true); `Link` carries a kind and a `CoOccurrenceField`
-   for the bounded BFS. Spiked on popoto 1.10.1: backdated validity,
-   `as_of`, `save_and_invalidate(closes=)`, `chain`, BFS over text refs all
-   work, so popoto needs no change (one found in build goes to popoto).
+   for the bounded BFS. Spiked on popoto 1.10.1: all of it works, so
+   popoto needs no change (one found in build goes to popoto).
 2. **Ledger rows, one unit each**, on the `memory` stream: `fact.added`,
    `fact.superseded`, `fact.confirmed`, `entity.added`, `entity.aliased`,
    `link.added`, `source.read`, each payload carrying project, client,
@@ -36,20 +34,16 @@ real use is a client project named in the task's Brief, not here (public).
    as `@label`. Per write it looks the key up on the `memory` stream (a hit
    returns the existing name, appends nothing), checks the rules, appends,
    and ingests, so later writes can supersede or link it. Returns label ->
-   name. `facts_read` serves `--as-of`, `--history`, `--related`,
-   `sources`. Every read and write filters on the spec's repo and client;
-   anything else is "no such fact". Memory's first turn write to the
-   ledger goes through the gateway, not an effect, because effects run
-   after the turn and the writer could not read back, supersede or link.
-   Docs that say otherwise change: `core/record.py` ("Everything here is a
-   SELECT"), `docs/harnesses.md` "Reading the project's record",
-   `docs/memory.md` "Memory never writes the ledger", `core/memory.py`.
-5. **Turns: `valor-record`** `fact add|supersede|confirm`, `entity
-   add|alias`, `link`, `source`, `facts`, `sources` (the issue's
-   operations; the project is the turn's grant). Writes are POST
-   (`core/gateway.py`), keyed by a key the CLI generates per call, so a
-   retried POST appends nothing. Inferred facts print labelled; text is
-   quoted as data.
+   name. `facts_read` serves the reads. All filter on the spec's repo and
+   client; anything else is "no such fact". Writes go through the gateway,
+   not an effect: effects run after the turn, so the writer could not read
+   back, supersede or link. The docs saying the record route and the port
+   only read change (`core/record.py`, `docs/harnesses.md`,
+   `docs/memory.md`, `core/memory.py`).
+5. **Turns: `valor-record`** gains the issue's operations (`fact`,
+   `entity`, `link`, `source`, `facts`, `sources`), project from the grant;
+   writes are POST with a per-call key, so a retry appends nothing. Text
+   prints quoted as data, inferred facts labelled.
 6. **The kernel CLI** `python -m core facts --project NAME_OR_FILE apply
    FILE | read ...`: JSONL writes, keyed by the file's hash and line label,
    so a re-run after a dropped ssh writes only the rest and prints the same
@@ -58,8 +52,7 @@ real use is a client project named in the task's Brief, not here (public).
    `VALOR_PGPORT`, PATH from `launchctl print gui/$UID/com.valor.kernel`),
    since over ssh the hostname is `Mac.local` and `ledger_name` would
    differ from the kernel's, which would ingest every row again.
-7. **Docs:** `docs/memory.md` Facts section, `memory/README.md`,
-   `tools/README.md`, the harness text listing `valor-record` verbs.
+7. **Docs:** `docs/memory.md` Facts, `memory/README.md`, `tools/README.md`.
 
 ## Seeding the first project (after the merge)
 
@@ -78,11 +71,8 @@ inferred; `source.read` rows record the last sha and message read. It
 ends with one numbered batch of the least sure facts, each with my reading
 as the default, for the session. Nothing is posted to the dev chat.
 
-## Out of scope
-
-Briefs, recall, status pages, the UI (#3685); stored decay; automatic
-alias matching; a job that extracts on its own; ending a fact with no
-successor.
+**Out of scope:** the issue's No-gos, the UI (#3685), stored decay,
+ending a fact with no successor.
 
 ## Tests (`tests/test_facts.py`, real Postgres, made-up projects)
 
@@ -96,6 +86,4 @@ written by the CLI with a spec file are returned by `valor-record facts`
 in a turn of that project through a live gateway; the CLI's ledger name and
 `Ingested` rows equal the kernel's, so its next ingest takes nothing; fact
 rows make no `Record`.
-
-No check, gate, hook or approval step is added: confirmation is a recorded
-answer, and an inferred fact stays readable.
+No check, gate or approval step is added: confirmation is a recorded answer.
