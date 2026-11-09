@@ -568,7 +568,7 @@ def current(rows: list[dict]) -> dict[str, dict[str, Any]]:
     return out
 
 
-GONE = "gone from the chat: its sender probably deleted it, often a message sent unfinished"
+GONE = "gone from the chat: its sender probably deleted it"
 
 
 def shown(rows: list[dict]) -> dict[str, str]:
