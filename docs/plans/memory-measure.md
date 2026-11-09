@@ -39,20 +39,28 @@ date. Tom's 2026-10-21 rules stand for what is imported.
 3. **A second row corrects the first.** `import_old` copies the line's
    `occurred_at`, `dated_by`, project and client into the payload, and
    appends a second row for a `memory_id` already on the stream only when
-   its date, project or client differ from the latest row's. `_unit`
+   its date, project or client differ from the latest row's, on any Mac
+   whose stream holds that `memory_id`, served there or not (a first row
+   still needs a project served here). `_unit`
    (`core/memory.py`, which reads the ledger; `memory/ingest.py` does not)
    finds the first `memory.imported` row of that `memory_id` and passes it
    in the unit; ingest deletes the record saved from it and saves one under
    the same key `<first id>.0` and the same `ledger_id`, with the new
-   project, client and `meta.occurred_at`. So a misplaced record on a Mac
-   that already imported leaves the wrong project's candidates; marks name
+   project, client and `meta.occurred_at`; when the new project is not
+   served on that Mac the record is deleted and none saved. So a misplaced
+   record leaves the wrong project's candidates, and the Mac serving the
+   right project imports it once, as a first row; marks name
    the same ref; the recall cutoff does not move; a rebuild replays the
    rows in order to the same result. In live recall the date changes only
    the label (`occurred <date> (<dated_by>)`) and the cross-ledger order.
 4. **Run, per Mac, its own projects**, over ssh as that Mac's user (the
    commands rollout.md step 7 names): `python -m core backup` and
    `pg_dump -n memory` into `backup_dir`; prep over all four exports
-   together, so cross-Mac duplicates collapse; Valor reads `report.md`;
+   together, so cross-Mac duplicates collapse, reading the existing
+   `import.jsonl` files first: an already-imported `memory_id` is its
+   group's keeper and gets only dating and project correction; the
+   duplicates of it and of each other are dropped; only records never
+   imported or grouped go through the model passes; Valor reads `report.md`;
    `memory import`; `memory ingest`; a second `pg_dump -n memory`, the
    bench's input (one dump in all, once `memory_dsn` names the shared
    store).
@@ -107,6 +115,10 @@ adds none: Valor's reading of `report.md` is by hand.
 - Export: dated by message, batch, doc, metadata, bound by superseder and
   by outcome, undated; a record mapped to project A whose chat is B's is
   written for B and listed.
+- Prep: an imported `memory_id` with a near-duplicate in another export
+  stays keeper, and no line is written for the duplicate.
+- Import: on a Mac serving only A, a line moving an imported A record to B
+  leaves no record in A's candidates; on B's Mac it is imported once.
 - Ingest: a second row on a store already holding the first record leaves
   one record, first key and `ledger_id`, dated; one moving A to B leaves it
   only in B's candidates; render, search and a mark work on it; a rerun
