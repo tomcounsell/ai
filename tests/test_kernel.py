@@ -1574,7 +1574,9 @@ def test_an_email_is_drafted_in_full_then_edited_against_the_guide(dsn, team, tm
     chat = " ".join(run(go()).split())
     assert flow in chat
     # Placed above both the draft rule and the email.send reply, so it covers each.
-    assert chat.index(flow) < chat.index("A draft is text; a send is said") < chat.index("request `email.send`")
+    assert (
+        chat.index(flow) < chat.index("A draft is text; a send is said") < chat.index("request `email.send`")
+    )
     assert flow in " ".join(tasks.channel_text([]).split())
 
 
