@@ -16,7 +16,7 @@ are VALOR-MJ, MK, MN and MP. All come from the Captain's Telegram bridge, releas
 
 ## Fix (one commit with its test, hard rule 9)
 
-`TelethonWire.connect()` calls `await self.client.disconnect()` before `self.client.connect()`. That is Telethon's own teardown: it cancels the previous connection's update and keepalive loops, saves the update state, and closes the session file, which Telethon reopens on next use. On a fresh client it does nothing, which I checked. One line plus a sentence in the module docstring. Nothing else changes.
+`TelethonWire.connect()` calls `await self.client.disconnect()` before `self.client.connect()`. That is Telethon's own teardown: it cancels the previous connection's update and keepalive loops, saves the update state, and closes the session file, which Telethon reopens on next use. On a fresh client it does nothing, which I checked. One line plus a comment on it. Nothing else changes.
 
 There is no Sentry filter. These errors came from the bug, not from Telethon logging something it recovers from. `core/sentry.py` stays as it is.
 
