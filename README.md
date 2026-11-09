@@ -13,7 +13,7 @@ On the product and project side, he:
 - turns a request in a team chat into a task and reports back in the chat when it is done
 - joins Google Meet calls, answers questions and posts a summary afterwards
 - writes sourced research reports, and turns them into episodes of the Yudame Research podcast when Tom asks
-- creates client invoices once Tom approves them, and drafts email in the asker's voice for them to send
+- drafts email in the asker's voice for them to send (Tom does Yudame's invoicing himself, in his Claude Desktop with his local skills)
 
 On the engineering side, he plans changes, builds and tests them, and ships them in the repositories he works in, this one included.
 

@@ -269,18 +269,16 @@ class Gmail:
                 break
 
 
-def test_a_task_drafts_an_invoice_notice_with_its_pdf_and_the_session_sends_it(
-    dsn, dm, tmp_path, monkeypatch
-):
-    """An invoice notice end to end: a task drafts it with Mercury's PDF in
+def test_a_task_drafts_an_email_with_its_pdf_and_the_session_sends_it(dsn, dm, tmp_path):
+    """An email with an attachment end to end: a task drafts it with a PDF in
     its own workspace and sends nothing; its report wakes the operator
     session; the session's `email.send` may attach that PDF, and the email
     performer delivers it to the mail server with the PDF's bytes. A file in
     a task that does not report to the session is refused."""
+    from datetime import date
+
     from bridges.email import smtp
     from bridges.email.config import Config
-    from tests.test_mercury_invoicing import NORTHWIND, TODAY, inv, mercury
-    from tests.test_mercury_invoicing import Mercury as FakeMercury
 
     cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
     subprocess.run(
@@ -289,18 +287,27 @@ def test_a_task_drafts_an_invoice_notice_with_its_pdf_and_the_session_sends_it(
         check=True, capture_output=True,
     )  # fmt: skip
     server = Gmail(cert, key)
-    fake = FakeMercury(invoices=[inv("NEW")], customers=[NORTHWIND])
-    monkeypatch.setattr(mercury, "call", fake)
     workspace = tmp_path / "run"
-    effect = mercury.email(fake("GET", "/ar/invoices/i-NEW"), NORTHWIND, workspace / ".valor" / "invoices")
-    stray = tmp_path / "stray" / "invoice_1.pdf"
+    pdf_file = workspace / "report.pdf"
+    pdf_file.parent.mkdir()
+    pdf_file.write_bytes(b"%PDF-1.4 the report")
+    effect = {
+        "action_type": "email.send",
+        "target": "someone@client.example",
+        "payload": {
+            "to": ["someone@client.example"], "cc": [], "subject": "The report", "body": "Attached.\n",
+            "in_reply_to": None, "references": [],
+            "files": [{"path": str(pdf_file), "sha256": hashlib.sha256(pdf_file.read_bytes()).hexdigest()}],
+        },
+    }  # fmt: skip
+    stray = tmp_path / "stray" / "report_1.pdf"
     stray.parent.mkdir()
     stray.write_bytes(b"%PDF-1.4")
 
     async def go():
         run_ = await new_task(dsn, max_effect_class="act", workspace=str(workspace))
         await new_task(dsn, workspace=str(stray.parent))
-        await end(dsn, run_, f"Done: one notice drafted.\n\n```json\n{json.dumps(effect)}\n```")
+        await end(dsn, run_, f"Done: one email drafted.\n\n```json\n{json.dumps(effect)}\n```")
         hearer = await operator(dsn)
         send = next(
             d for d in declared_performers(str(tmp_path / "session"), hearer) if d.action_type == "email.send"
@@ -318,19 +325,19 @@ def test_a_task_drafts_an_invoice_notice_with_its_pdf_and_the_session_sends_it(
     action, ok, no, rows_ = run(go())
     assert session.chat_waiting(rows_) and ok is None
     assert no == "files[0] is not a regular file in your workspace or a reporting task's"
-    cfg = Config(address="valor@yuda.me", since=TODAY, imap_host="", imap_port=0, smtp_host="127.0.0.1",
+    cfg = Config(address="valor@yuda.me", since=date(2026, 11, 20), imap_host="", imap_port=0, smtp_host="127.0.0.1",
                  smtp_port=server.port, imap_user="", smtp_user="valor@yuda.me", imap_password="",
                  smtp_password="app-password", cafile=str(cert))  # fmt: skip
-    out = smtp.perform(cfg, action, "notice-NEW")
+    out = smtp.perform(cfg, action, "report")
     assert out["accepted"] == ["someone@client.example"]
     (raw,) = server.got
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     assert (msg["From"], msg["To"], msg["Subject"]) == (
         "valor@yuda.me",
         "someone@client.example",
-        "Invoice NEW from Yudame",
+        "The report",
     )
     (pdf,) = list(msg.iter_attachments())
     pdf_path = pathlib.Path(effect["payload"]["files"][0]["path"])
-    assert pdf.get_filename() == "invoice_NEW.pdf" and pdf.get_content() == pdf_path.read_bytes()
+    assert pdf.get_filename() == "report.pdf" and pdf.get_content() == pdf_path.read_bytes()
     assert pdf_path.is_relative_to(workspace)

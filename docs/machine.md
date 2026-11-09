@@ -287,12 +287,12 @@ authority a turn never holds.
 The businesses' own credentials are another matter. Yudame shares them
 through its shared 1Password vaults: `Yudame Secrets` for company services,
 `m-valor` and `Valor env` for the Valor accounts a turn signs in to and for
-tokens Tom makes for Valor (the Mercury token is item `Mercury API Token` in `m-valor`). A turn reads one at use time with `op read`,
+tokens Tom makes for Valor. A turn reads one at use time with `op read`,
 holds it in memory only, and never writes it to a file, a commit, a log or
 a message. `op` signs in with the 1Password service account,
 `OP_SERVICE_ACCOUNT_TOKEN`, which a turn's environment carries (checked
 2026-10-21) and which the vault `.env` holds for a process that lacks it
-(`scripts/deploy-site.sh`, `mercury.py`). A credential Valor makes for
+(`scripts/deploy-site.sh`). A credential Valor makes for
 itself goes into `m-valor`. Valor's own logins (Instagram, its personal
 Gmail) are in its employee vault. The service account can't see that vault:
 on 2026-10-26, `op vault list` showed only `m-valor`, `Valor env` and

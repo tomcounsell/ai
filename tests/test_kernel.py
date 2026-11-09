@@ -1537,7 +1537,7 @@ def test_a_chat_session_drafts_in_the_askers_voice_and_sends_only_when_told(dsn,
     assert "write it in the asker's voice, as from them, and give it back in the chat as text" in flat
     assert "for them to send; send nothing" in flat
     assert "A send to anyone outside the chat goes when the asker says send" in flat
-    assert "or on a standing say-so from Tom (a routine he set up, an invoice he approved)" in flat
+    assert "or on a standing say-so from Tom (a routine he set up)" in flat
     assert "Silence, a wake or a timer is never a yes to a send" in flat
     assert "When Tom says send, send it, with no further check" in flat
     assert "This is for work you build, never for a send" in flat
