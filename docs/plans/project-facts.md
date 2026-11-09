@@ -70,6 +70,12 @@ cite a sha or message id, are dated when they became true, start
 inferred; `source.read` rows record the last sha and message read. It
 ends with one numbered batch of the least sure facts, each with my reading
 as the default, for the session. Nothing is posted to the dev chat.
+The turn exits `ended` with `.valor/stop.md` (no candidate, no review).
+Tom's answers come back the same way, steered as feedback: a reopened turn
+writes `fact confirm` rows with the CLI on the Captain, each citing the
+`feedback.given` row as `<ledger>/<id>` (another ledger's id is accepted).
+Done (rule 5) is dated in this file's last line, quoting Tom's question,
+by the turn that answers it from the facts.
 
 **Out of scope:** the issue's No-gos, the UI (#3685), stored decay,
 ending a fact with no successor.
@@ -80,10 +86,13 @@ The issue's Acceptance list, plus: as-of exactly at a supersede instant;
 non-head supersede refused, nothing written; confirm of a superseded fact;
 entity add with a known alias returns it, a held alias refused; a labelled
 file applies in order with `@label`; the same file applied twice writes
-nothing the second time and prints the same map; a partly applied file
+nothing the second time and prints the same map; a confirm citing another
+task's or ledger's row reads as confirmed with that answer; a partly applied file
 re-run writes only the rest; a retried keyed POST appends once; facts
 written by the CLI with a spec file are returned by `valor-record facts`
 in a turn of that project through a live gateway; the CLI's ledger name and
 `Ingested` rows equal the kernel's, so its next ingest takes nothing; fact
 rows make no `Record`.
 No check, gate or approval step is added: confirmation is a recorded answer.
+
+Done: not yet.
