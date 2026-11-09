@@ -37,20 +37,20 @@ def test_bench_replays_each_question_on_the_store_as_it_stood(dsn, specs, tmp_pa
             await memory.import_old(
                 conn,
                 [
-                    line("June: the florist invoice goes out as a PDF", occurred="2026-06-01T00:00:00+00:00"),
+                    line("June: the greenhouse ledger goes out as a PDF", occurred="2026-06-01T00:00:00+00:00"),
                     line(
-                        "July: the florist invoice now goes out as a link",
+                        "July: the greenhouse ledger now goes out as a link",
                         occurred="2026-07-01T00:00:00+00:00",
                     ),
-                    line("Undated: the florist invoice is due on the fifth"),
+                    line("Undated: the greenhouse ledger is due on the fifth"),
                     line(
-                        "Weeds: the florist invoice for the weeds client",
+                        "Weeds: the greenhouse ledger for the weeds client",
                         WEEDS,
                         "weeds-co",
                         "2026-05-01T00:00:00+00:00",
                     ),
                     line(
-                        "Weeds standard: every invoice names its due date",
+                        "Weeds standard: every greenhouse ledger names its due date",
                         WEEDS,
                         "weeds-co",
                         "2026-05-01T00:00:00+00:00",
@@ -80,7 +80,7 @@ def test_bench_replays_each_question_on_the_store_as_it_stood(dsn, specs, tmp_pa
         conn.execute(f'DROP DATABASE IF EXISTS "{scratch_name}"')
         conn.execute(f'CREATE DATABASE "{scratch_name}"')
     scratch = make_conninfo(owner, dbname=scratch_name)
-    ask = {"ledger": name, "project": FLOWERS, "client": "flowers-co", "query": "florist invoice"}
+    ask = {"ledger": name, "project": FLOWERS, "client": "flowers-co", "query": "greenhouse ledger"}
     questions = tmp_path / "questions.json"
     questions.write_text(json.dumps({"version": "v-test", "questions": [
         {"id": "june", "type": "long-term", "asked_on": "2026-06-15", "gold": [refs["June"]],

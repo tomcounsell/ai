@@ -203,9 +203,10 @@ def test_prep_drops_what_is_not_worth_recalling_and_lists_it(tmp_path, prep, mon
 
 def test_a_second_row_redates_the_record_under_its_first_key(dsn, specs):
     """docs/plans/memory-measure.md: a store already holding the undated
-    record gets one record, dated, under the first row's key and ledger id;
-    a mark on it still applies, search and the label show the date, and a
-    rerun appends nothing."""
+    record gets one record, dated, under the first row's key and ledger id,
+    on a Mac that no longer serves its project too; a mark on it still
+    applies, search and the label show the date, and a rerun appends
+    nothing."""
 
     async def go():
         async with await db.connect(dsn) as conn:
@@ -219,6 +220,8 @@ def test_a_second_row_redates_the_record_under_its_first_key(dsn, specs):
             (first,) = [r for r in Record.query.filter(project=FLOWERS) if r.text == text]
             name = ref(first.ledger, first.key)
             await memory.mark(conn, name)
+            for p in pathlib.Path(specs.projects_dir).glob("flowers.toml"):
+                p.write_text(p.read_text() + 'machine = "another Mac"\n')
             dated = json.loads(line(text, memory_id=mid)) | {
                 "occurred_at": "2026-06-01T09:00:00+00:00",
                 "dated_by": "telegram message",

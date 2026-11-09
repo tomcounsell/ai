@@ -14,8 +14,8 @@ date when one was found (`occurred_at`, which is then the record's time).
 A later `memory.imported` row of the same old `memory_id` (`first`, the
 first such row's id) replaces that row's record under the same key and
 ledger id, so marks and confinements naming it still apply and recall's
-bound does not move; when its project is not served on the Mac
-(`served` false) the record is deleted and none is saved.
+bound does not move; when it moves the record to a project not served on
+the Mac (`served` false) the record is deleted and none is saved.
 """
 
 import json

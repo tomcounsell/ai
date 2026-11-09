@@ -317,13 +317,14 @@ async def _unit(conn, ledger_id: int, projects: dict[str, tuple[str, str]]) -> d
         project, client = payload["project"], payload["client"]
         first = await (
             await conn.execute(
-                "SELECT min(id) FROM events WHERE task_id = %s AND type = 'memory.imported' "
-                "AND payload->>'memory_id' = %s",
+                "SELECT id, payload->>'project' FROM events WHERE task_id = %s AND type = 'memory.imported' "
+                "AND payload->>'memory_id' = %s ORDER BY id LIMIT 1",
                 (MARKS, payload["memory_id"]),
             )
         ).fetchone()
         if first[0] != ledger_id:
-            more = {"first": first[0], "served": project in {s.repo for s in Spec.here()}}
+            served = first[1] == project or project in {s.repo for s in Spec.here()}
+            more = {"first": first[0], "served": served}
     return {
         **more,
         "id": ledger_id,
