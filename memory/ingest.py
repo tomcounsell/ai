@@ -9,10 +9,17 @@ unit cut short is taken again whole and overwrites the same keys.
 A `memory.marked` row makes no record: it marks the record it names a
 standard of working. A correction that names a record (`memory_record`)
 confines that record to its client. A `memory.imported` row is one record
-of the old system's memory, carrying its own project and client.
+of the old system's memory, carrying its own project and client, and its
+date when one was found (`occurred_at`, which is then the record's time).
+A later `memory.imported` row of the same old `memory_id` (`first`, the
+first such row's id) replaces that row's record under the same key and
+ledger id, so marks and confinements naming it still apply and recall's
+bound does not move; when its project is not served on the Mac
+(`served` false) the record is deleted and none is saved.
 """
 
 import json
+from datetime import datetime
 from typing import Any
 
 from memory.records import Confined, Ingested, Record, Standard, use
@@ -59,6 +66,9 @@ def entries(unit: dict[str, Any]) -> list[dict[str, Any]]:
         )
         if origin == "correction":
             meta.update(number=payload.get("number"), source_class=payload.get("source_class", ""))
+        if payload.get("occurred_at"):
+            meta.update(occurred_at=payload["occurred_at"], dated_by=payload.get("dated_by", ""))
+            meta["ledger_at"] = datetime.fromisoformat(payload["occurred_at"]).timestamp()
         texts = [payload.get("instruction" if origin == "instruction" else "text") or ""]
     texts = [t.replace("\x00", "") for t in texts]
     return [
@@ -105,12 +115,18 @@ def save(dsn: str, unit: dict[str, Any]) -> int:
     use(dsn)
     payload = unit["payload"]
     made = [] if unit["type"] == MARKED else entries(unit)
+    row = unit["id"]
+    if unit.get("first"):
+        row = unit["first"]
+        for old in Record.query.filter(ledger=unit["ledger"], key=f"{row}.0"):
+            old.delete()
+        made = [{**e, "key": f"{row}.0"} for e in made] if unit.get("served", True) else []
     for e in made:
         Record.create(
             ledger=unit["ledger"],
             client=unit.get("client") or "",
             project=unit["project"],
-            ledger_id=unit["id"],
+            ledger_id=row,
             **e,
         )
     if unit["type"] == MARKED and payload.get("record"):

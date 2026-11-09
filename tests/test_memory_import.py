@@ -91,8 +91,8 @@ def test_import_twice_appends_once_and_only_what_is_served_here(dsn, specs):
                     ([json.loads(x)["memory_id"] for x in lines],),
                 )
             ).fetchone()
-        assert first == {"appended": 2, "already imported": 0, "not served here": 1}
-        assert second == {"appended": 0, "already imported": 2, "not served here": 1}
+        assert first == {"appended": 2, "corrected": 0, "already imported": 0, "not served here": 1}
+        assert second == {"appended": 0, "corrected": 0, "already imported": 2, "not served here": 1}
         assert n == (2,)
 
     asyncio.run(go())
@@ -199,3 +199,113 @@ def test_prep_drops_what_is_not_worth_recalling_and_lists_it(tmp_path, prep, mon
     assert "## Dropped, not worth recalling (2)" in report
     assert "- (valor, by tom): Continue" in report
     assert "- (valor, by valor): Agent session initialized with bypassPermissions mode enabled" in report
+
+
+def test_a_second_row_redates_the_record_under_its_first_key(dsn, specs):
+    """docs/plans/memory-measure.md: a store already holding the undated
+    record gets one record, dated, under the first row's key and ledger id;
+    a mark on it still applies, search and the label show the date, and a
+    rerun appends nothing."""
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            mid = uuid.uuid4().hex
+            text = "The florist's invoices are sent on the first of the month."
+            await memory.import_old(conn, [line(text, memory_id=mid)])
+            await memory.ingest(conn)
+            from memory.records import Record, Standard, ref, use
+
+            use(memory.dsn_for(conn))
+            (first,) = [r for r in Record.query.filter(project=FLOWERS) if r.text == text]
+            name = ref(first.ledger, first.key)
+            await memory.mark(conn, name)
+            dated = json.loads(line(text, memory_id=mid)) | {
+                "occurred_at": "2026-06-01T09:00:00+00:00",
+                "dated_by": "telegram message",
+            }
+            counts = await memory.import_old(conn, [json.dumps(dated)])
+            again = await memory.import_old(conn, [json.dumps(dated)])
+            await memory.ingest(conn)
+            use(memory.dsn_for(conn))
+            (record,) = [r for r in Record.query.filter(project=FLOWERS) if r.text == text]
+            assert (record.key, int(record.ledger_id)) == (first.key, int(first.ledger_id))
+            assert record.meta["occurred_at"] == "2026-06-01T09:00:00+00:00"
+            assert name in {s.record for s in Standard.query.all()}
+            spec = type("S", (), {"repo": FLOWERS, "client": "flowers-co"})
+            page = await memory.search(conn, spec, "florist invoices first of the month", 10, 0)
+            (hit,) = [h for h in page["records"] if h["record"] == name]
+            assert "occurred 2026-06-01T09:00:00+00:00 (telegram message)" in hit["label"]
+            assert hit["at"].startswith("2026-06-01")
+        assert counts["corrected"] == 1 and again == {
+            "appended": 0, "corrected": 0, "already imported": 1, "not served here": 0,
+        }  # fmt: skip
+
+    asyncio.run(go())
+
+
+def test_a_row_moving_a_record_to_an_unserved_project_removes_it(dsn, specs):
+    """On a Mac serving only flowers, a line moving an imported flowers
+    record to a project placed elsewhere leaves it in no candidates here;
+    where that project is served, the line is a first row, imported once."""
+    far = "https://example.test/faraway.git"
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            mid = uuid.uuid4().hex
+            text = "The far client's deploys run on Thursdays."
+            await memory.import_old(conn, [line(text, memory_id=mid)])
+            await memory.ingest(conn)
+            moved = json.loads(line(text, far, memory_id=mid)) | {"client": "faraway-co"}
+            assert (await memory.import_old(conn, [json.dumps(moved)]))["corrected"] == 1
+            await memory.ingest(conn)
+            from memory.records import Record, use
+
+            use(memory.dsn_for(conn))
+            assert not [r for r in Record.query.all() if r.text == text]
+            brief = tasks.Brief(
+                instruction="when do the deploys run",
+                project={"name": "flowers", "repo": FLOWERS, "client": "flowers-co"},
+            )
+            assert text not in await memory.recall(conn, await tasks.start(conn, brief), None)
+            for p in pathlib.Path(specs.projects_dir).glob("*.toml"):
+                p.write_text(p.read_text().replace('machine = "another Mac"\n', ""))
+            other = json.dumps(json.loads(line(text, far)) | {"client": "faraway-co"})
+            assert (await memory.import_old(conn, [other]))["appended"] == 1
+            assert (await memory.import_old(conn, [other]))["appended"] == 0
+
+    asyncio.run(go())
+
+
+def test_prep_moves_by_group_chat_and_keeps_what_was_imported(tmp_path, prep, monkeypatch):
+    monkeypatch.setattr(prep, "judge", lambda group: [[r["memory_id"] for r in group]])
+    (pathlib.Path(prep.settings.projects_dir) / "northwind.toml").write_text(
+        'name = "northwind"\nclient = "northwind"\nrepo = "https://example.test/northwind.git"\n'
+        'kind = "plain"\nsuite = "true"\nchats = ["telegram:-100777"]\n'
+    )
+    kept = "the weekly report for the client goes out every Monday morning by email"
+    export = [
+        rec("group", "Amr asked for the staging password", project="valor") | {"chat_id": "-100777"},
+        rec("direct", "Amr asked about the gym", project="valor") | {"chat_id": "555"},
+        rec("old", kept, project="valor") | {"occurred_at": "2026-06-02T00:00:00+00:00", "dated_by": "x"},
+        rec("gone", "an earlier import merged this away", project="valor"),
+    ]
+    other = [rec("dup", kept + " again", agent="Jamie", project="valor")]
+    a, b, imp = tmp_path / "a.jsonl", tmp_path / "b.jsonl", tmp_path / "imported.jsonl"
+    a.write_text("".join(json.dumps(r) + "\n" for r in export))
+    b.write_text("".join(json.dumps(r) + "\n" for r in other))
+    valor = "unused"  # the valor spec's repo in tests (bridges.VALOR_SPEC)
+    imp.write_text(json.dumps({"memory_id": "old", "project": valor, "merged_from": ["gone"]}) + "\n")
+    prep.main([str(a), str(b), str(tmp_path / "out"), "--imported", str(imp)])
+    rows = {
+        r["memory_id"]: r for r in map(json.loads, (tmp_path / "out/import.jsonl").read_text().splitlines())
+    }
+    assert set(rows) == {"group", "direct", "old"}
+    assert rows["group"]["project"] == "https://example.test/northwind.git"
+    assert rows["direct"]["project"] == rows["old"]["project"] == valor
+    assert (rows["old"]["text"], rows["old"]["occurred_at"], rows["old"]["dated_by"]) == (
+        kept, "2026-06-02T00:00:00+00:00", "x",
+    )  # fmt: skip
+    report = (tmp_path / "out/report.md").read_text()
+    assert "## Moved by the record's own chat or label (1)" in report
+    assert "`group` valor -> northwind" in report
+    assert "| merged by an earlier import | 1 |" in report

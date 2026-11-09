@@ -10,10 +10,21 @@ dropped and listed. Within a project, records whose content shares at least
 0.8 of its words (token Jaccard) collapse into one; `claude -p` then drops,
 40 records at a time, those not worth recalling on a future task, and of
 the groups sharing 0.4 to 0.8 names one keeper per real duplicate group.
-A keeper is an existing record's text, Tom's own when he wrote one. Writes
-OUT/import.jsonl and OUT/report.md, which Valor reviews before the import.
-Run from the kernel checkout:
-  PYTHONPATH=. .venv/bin/python scripts/memory_import_prep.py EXPORT.jsonl... OUT/
+A keeper is an existing record's text, Tom's own when he wrote one.
+
+A record's project is also read from evidence apart from that mapping (docs/
+plans/memory-measure.md): the chat its Telegram message came from (the
+export's `chat_id`, a group's) among the specs' chats, paused specs (`*.toml.paused`)
+included, else the extraction label; where the two disagree the evidence
+wins and the report lists the move. `--imported FILE` (repeatable) names
+JSON lines of rows already imported on some Mac (`memory_id`, `project`,
+`merged_from`): each such record keeps its place, as its group's keeper,
+past every filter and the model passes, and gets only its date and its
+project corrected; a record an earlier import merged away stays merged.
+Each line carries the export's `occurred_at` and `dated_by` when it has
+them. Writes OUT/import.jsonl and OUT/report.md, which Valor reviews before
+the import. Run from the kernel checkout:
+  PYTHONPATH=. .venv/bin/python scripts/memory_import_prep.py EXPORT.jsonl... OUT/ [--imported FILE]...
 """
 
 import json
@@ -25,6 +36,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from core.settings import settings
 from core.workspace import Spec
 
 SUMMARY = re.compile(r"^In an? \d+-event session")
@@ -63,8 +75,9 @@ def groups(recs: list[dict], low: float, high: float) -> list[list[dict]]:
 
 
 def keeper(group: list[dict]) -> dict:
-    """Tom's own record when he wrote one, else the longest."""
-    return min(group, key=lambda r: (r["by"] != "tom", -len(r["text"])))
+    """A record already imported, else Tom's own when he wrote one, else
+    the longest."""
+    return min(group, key=lambda r: (not r.get("imported"), r["by"] != "tom", -len(r["text"])))
 
 
 def ask(prompt: str) -> dict:
@@ -104,9 +117,12 @@ def judge(group: list[dict]) -> list[list[str]]:
 
 
 def merge(group: list[dict]) -> dict:
+    """The keeper of `group`, every other record merged into it but one
+    already imported, which keeps its place."""
     keep = keeper(group)
-    keep["merged_from"] += [m for r in group if r is not keep for m in [r["memory_id"], *r["merged_from"]]]
-    keep["merged"] = keep.get("merged", []) + [r for r in group if r is not keep]
+    gone = [r for r in group if r is not keep and not r.get("imported")]
+    keep["merged_from"] += [m for r in gone for m in [r["memory_id"], *r["merged_from"]]]
+    keep["merged"] = keep.get("merged", []) + gone
     return keep
 
 
@@ -121,7 +137,8 @@ def collapse(recs: list[dict]) -> tuple[list[dict], list[dict]]:
 def sift(recs: list[dict]) -> tuple[list[dict], list[dict]]:
     """`recs` split by Claude Code, `BATCH` at a time, into those worth
     recalling and those not."""
-    batches = [recs[i : i + BATCH] for i in range(0, len(recs), BATCH)]
+    asked = [r for r in recs if not r.get("imported")]
+    batches = [asked[i : i + BATCH] for i in range(0, len(asked), BATCH)]
     with ThreadPoolExecutor(8) as pool:
         answers = list(pool.map(worth, batches))
     gone = {id(b[n - 1]) for b, a in zip(batches, answers, strict=True) for n in a if 0 < n <= len(b)}
@@ -131,7 +148,12 @@ def sift(recs: list[dict]) -> tuple[list[dict], list[dict]]:
 def paraphrases(recs: list[dict]) -> tuple[list[dict], list[dict]]:
     """`recs` with the duplicate groups Claude Code names merged, each
     candidate group asked about 20 records at a time."""
-    candidates = [g[i : i + 20] for g in groups(recs, CANDIDATE, NEAR) for i in range(0, len(g), 20)]
+    candidates = [
+        g[i : i + 20]
+        for g in groups(recs, CANDIDATE, NEAR)
+        if not all(r.get("imported") for r in g)
+        for i in range(0, len(g), 20)
+    ]
     with ThreadPoolExecutor(8) as pool:
         answers = list(pool.map(judge, candidates))
     merged = []
@@ -149,7 +171,20 @@ def cell(text: str) -> str:
     return " ".join(text.split()).replace("|", "\\|")
 
 
+def evidence(r: dict, chats: dict[str, str]) -> str | None:
+    """The project the record's own origin names: its Telegram group's spec
+    (not a direct chat, whose person may work on several projects), else
+    its extraction label."""
+    chat = str(r.get("chat_id") or "")
+    if chat.startswith("-") and (name := chats.get(f"telegram:{chat}")) is not None:
+        return name
+    label = LABEL.match(str(r.get("agent_id") or ""))
+    return label.group(1) if label else None
+
+
 def main(argv: list[str]) -> None:
+    previous = [argv[i + 1] for i, a in enumerate(argv) if a == "--imported"]
+    argv = [a for i, a in enumerate(argv) if a != "--imported" and (i == 0 or argv[i - 1] != "--imported")]
     if len(argv) < 2:
         raise SystemExit(__doc__)
     *exports, out = argv
@@ -159,20 +194,39 @@ def main(argv: list[str]) -> None:
             if line.strip():
                 r = json.loads(line)
                 seen.setdefault(r["memory_id"], r)
-    specs = {s.name: s for s in Spec.all()}
+    imported: dict[str, str] = {}
+    merged_away: set[str] = set()
+    for path in previous:
+        for line in Path(path).read_text().splitlines():
+            if line.strip():
+                row = json.loads(line)
+                imported[row["memory_id"]] = row["project"]
+                merged_away.update(row.get("merged_from") or ())
+    paused = [Spec.load(str(p)) for p in sorted(Path(settings.projects_dir).glob("*.toml.paused"))]
+    specs = {s.name: s for s in [*paused, *Spec.all()]}
+    chats = {c: s.name for s in specs.values() for c in s.chats}
+    by_repo = {s.repo: s.name for s in specs.values()}
     stage: Counter = Counter(read=len(seen))
-    dropped, by_project = [], {}
+    dropped, by_project, moved = [], {}, []
     for r in seen.values():
         content = str(r.get("content") or "")
-        if r.get("source") not in ("human", "agent"):
+        old = r["memory_id"] in imported
+        if r["memory_id"] in merged_away and not old:
+            stage["merged by an earlier import"] += 1
+        elif not old and r.get("source") not in ("human", "agent"):
             stage["knowledge skipped"] += 1
-        elif r.get("superseded_by"):
+        elif not old and r.get("superseded_by"):
             stage["superseded skipped"] += 1
-        elif SUMMARY.match(content):
+        elif not old and SUMMARY.match(content):
             stage["session summaries dropped"] += 1
         else:
             label = LABEL.match(str(r.get("agent_id") or ""))
-            name = label.group(1) if label else r.get("project_key")
+            name = by_repo.get(
+                imported.get(r["memory_id"], ""), label.group(1) if label else r.get("project_key")
+            )
+            if (found := evidence(r, chats)) is not None and found != name:
+                moved.append((r["memory_id"], name, found, content))
+                name = found
             if name not in specs:
                 dropped.append((r["memory_id"], name, content))
                 continue
@@ -183,13 +237,15 @@ def main(argv: list[str]) -> None:
                 "by": by,
                 "merged_from": [],
                 "words": words(content),
+                "imported": old,
+                "dates": {k: r[k] for k in ("occurred_at", "dated_by") if r.get(k)},
             }
             by_project.setdefault(name, []).append(rec)
     stage["no project dropped"] = len(dropped)
     rows, merges, unworthy = [], [], []
     table = [
-        "| project | chosen | after near-exact | not worth recalling | after paraphrase |",
-        "|---|---|---|---|---|",
+        "| project | chosen | after near-exact | not worth recalling | after paraphrase | dated | no later than | undated |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for name, recs in sorted(by_project.items()):
         near, m1 = collapse(recs)
@@ -197,7 +253,12 @@ def main(argv: list[str]) -> None:
         kept, m2 = paraphrases(worthy)
         merges += [m for m in m1 if not any(m is r for r in gone)] + m2
         unworthy += [(name, r) for r in gone]
-        table.append(f"| {name} | {len(recs)} | {len(near)} | {len(gone)} | {len(kept)} |")
+        bound = sum("no later than" in r["dates"].get("dated_by", "") for r in kept)
+        undated = sum(not r["dates"] for r in kept)
+        table.append(
+            f"| {name} | {len(recs)} | {len(near)} | {len(gone)} | {len(kept)} "
+            f"| {len(kept) - bound - undated} | {bound} | {undated} |"
+        )
         spec = specs[name]
         rows += [
             {
@@ -207,6 +268,7 @@ def main(argv: list[str]) -> None:
                 "by": r["by"],
                 "memory_id": r["memory_id"],
                 "merged_from": r["merged_from"],
+                **r["dates"],
             }
             for r in kept
         ]
@@ -221,6 +283,8 @@ def main(argv: list[str]) -> None:
     report += [f"| {k} | {v} |" for k, v in stage.items()]
     report += ["", "## Per project", "", *table, "", f"## Dropped, no project ({len(dropped)})", ""]
     report += [f"- `{i}` ({n or 'none'}): {cell(c)}" for i, n, c in dropped]
+    report += ["", f"## Moved by the record's own chat or label ({len(moved)})", ""]
+    report += [f"- `{i}` {a or 'none'} -> {b}: {cell(c)}" for i, a, b, c in moved]
     report += ["", f"## Dropped, not worth recalling ({len(unworthy)})", ""]
     report += [f"- ({n}, by {r['by']}): {cell(r['text'])}" for n, r in unworthy]
     sample = random.Random(0).sample(merges, min(20, len(merges)))

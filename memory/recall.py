@@ -76,14 +76,7 @@ def render(
     `query`; the empty string when nothing is found."""
     backend = use(dsn)
     found = candidates(ledger=ledger, project=project, client=client, cutoff=cutoff, started_at=started_at)
-    chosen, total = [], 0
-    for record in ranked(backend, found, query, LIMIT):
-        text = entry(record)
-        cost = _estimate_tokens(text)
-        if chosen and total + cost > MAX_TOKENS:
-            continue
-        chosen.append((record, text))
-        total += cost
+    chosen = brief(backend, found, query)
     if not chosen:
         return ""
 
@@ -96,6 +89,21 @@ def render(
 
     chosen.sort(key=order)
     return HEADER + "\n\n" + "\n".join(text for _, text in chosen)
+
+
+def brief(backend, found: dict[str, Record], query: str) -> list[tuple[Record, str]]:
+    """The records of `found` recall puts in a Brief for `query`, each with
+    its entry, as popoto's context assembler chooses: the first fit in rank
+    order of the best `LIMIT`, within `MAX_TOKENS`."""
+    chosen, total = [], 0
+    for record in ranked(backend, found, query, LIMIT):
+        text = entry(record)
+        cost = _estimate_tokens(text)
+        if chosen and total + cost > MAX_TOKENS:
+            continue
+        chosen.append((record, text))
+        total += cost
+    return chosen
 
 
 def ranked(backend, found: dict[str, Record], query: str, limit: int) -> list[Record]:
@@ -167,7 +175,9 @@ def label(origin: str, meta: dict[str, Any], name: str = "") -> str:
         whose = f"Tom's {origin}"
     else:
         whose = f"{origin} written by {by}"
-    return f"{head}, {whose} (by {by}, via {via}, {at})"
+    occurred = meta.get("occurred_at")
+    when = f", occurred {_one_line(occurred)} ({_one_line(meta.get('dated_by', ''))})" if occurred else ""
+    return f"{head}, {whose} (by {by}, via {via}, {at}){when}"
 
 
 def quote(text: str) -> str:

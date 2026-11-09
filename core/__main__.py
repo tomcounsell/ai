@@ -12,6 +12,13 @@ memory mark RECORD [--by] [--via]
                                mark a record (`<ledger>/<key>`, as its
                                Remembered label names it) a standard of
                                working, recalled for any client's task
+memory import FILE             append the old memory's lines this Mac serves,
+                               and a row re-dating or moving one imported
+                               here before (scripts/memory_import_prep.py)
+memory bench QUESTIONS DUMP... --out DIR --scratch DSN
+                               score recall on private dated questions
+                               against `pg_dump -Fc -n memory` files, in the
+                               scratch database DSN, never the live store
 settings                     every setting, as shell assignments
 meet-sign-in                   sign this Mac's call profile in to Google, at the
                                Mac: its Chrome closes itself once signed in
@@ -1056,6 +1063,8 @@ def _sync(args) -> bool:
         print(json.dumps(_secure_login()))
     elif args.command == "settings":
         print(settings.as_shell())
+    elif args.command == "memory" and args.memory_command == "bench":
+        print(json.dumps(memory.bench(args.questions, args.dumps, args.out, args.scratch), indent=1))
     elif args.command == "meet-sign-in":
         from core import call
 
@@ -1243,6 +1252,11 @@ def main() -> None:
     mark.add_argument("--by", default="valor")
     mark.add_argument("--via", default="the command line")
     memory_cmd.add_parser("import").add_argument("file")
+    bench = memory_cmd.add_parser("bench")
+    bench.add_argument("questions")
+    bench.add_argument("dumps", nargs="+")
+    bench.add_argument("--out", required=True)
+    bench.add_argument("--scratch", required=True)
     sub.add_parser("settings")
     sub.add_parser("judgement-keys")
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")

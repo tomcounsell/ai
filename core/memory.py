@@ -27,7 +27,12 @@ and a rebuild is every Mac ingesting its own again.
   record is a standard of working, recalled for any client's task.
 - `import_old(conn, lines)` appends one `memory.imported` row per line of
   `scripts/memory_import_prep.py`'s `import.jsonl` whose project this Mac
-  serves, once per old `memory_id`.
+  serves, once per old `memory_id`, and a later row for a `memory_id`
+  already imported here, served or not, when the line brings another
+  date, project or client.
+- `bench(questions, dumps, out, scratch)` scores recall on a private set of
+  dated questions against the stores in `dumps` (`memory/bench.py`), in
+  the scratch database `scratch`, never the live store.
 - A correction naming a record (`corrections.record(..., record=...)`)
   confines it to its own client.
 - `after_turn(dsn)` is `ingest` on a connection of its own, run by
@@ -207,39 +212,49 @@ async def mark(conn, record: str, *, by: str = "valor", via: str = "the command 
     )
 
 
+# What a later `memory.imported` row of the same `memory_id` may change.
+REDATED = ("occurred_at", "dated_by", "project", "client")
+
+
 async def import_old(conn, lines) -> dict[str, int]:
     """Append a `memory.imported` row on the `memory` stream for each JSON
-    line (`text`, `project`, `client`, `by`, `memory_id`, `merged_from`)
-    whose project is a spec's `repo` on this Mac. A line whose old
-    `memory_id` is already on the stream appends nothing. Returns the
-    counts appended and skipped."""
+    line (`text`, `project`, `client`, `by`, `memory_id`, `merged_from`,
+    and `occurred_at` and `dated_by` when it was dated) whose project is a
+    spec's `repo` on this Mac. A line whose old `memory_id` is already on
+    the stream appends a row only when its date, project or client differ
+    from that `memory_id`'s latest row, whether or not its project is
+    served here: that row moves or removes the record (`memory/ingest.py`).
+    Returns the counts appended and skipped."""
     from core.workspace import Spec
 
     served = {s.repo for s in Spec.here()}
-    done = {
-        r[0]
-        for r in await (
+    latest = {
+        p["memory_id"]: p
+        for (p,) in await (
             await conn.execute(
-                "SELECT payload->>'memory_id' FROM events WHERE task_id = %s AND type = 'memory.imported'",
+                "SELECT payload FROM events WHERE task_id = %s AND type = 'memory.imported' ORDER BY id",
                 (MARKS,),
             )
         ).fetchall()
     }
-    counts = {"appended": 0, "already imported": 0, "not served here": 0}
+    counts = {"appended": 0, "corrected": 0, "already imported": 0, "not served here": 0}
     for line in lines:
         if not line.strip():
             continue
         r = json.loads(line)
-        if r["project"] not in served:
-            counts["not served here"] += 1
-        elif r["memory_id"] in done:
+        before = latest.get(r["memory_id"])
+        if before is not None and all(before.get(k) == r.get(k) for k in REDATED):
             counts["already imported"] += 1
-        else:
-            payload = {k: r[k] for k in ("text", "project", "client", "memory_id", "merged_from")}
-            payload["provenance"] = ledger.provenance(r["by"], "the old system's memory", False)
-            await ledger.append(conn, MARKS, "memory.imported", payload)
-            done.add(r["memory_id"])
-            counts["appended"] += 1
+            continue
+        if before is None and r["project"] not in served:
+            counts["not served here"] += 1
+            continue
+        keys = ("text", "project", "client", "memory_id", "merged_from", "occurred_at", "dated_by")
+        payload = {k: r[k] for k in keys if k in r}
+        payload["provenance"] = ledger.provenance(r["by"], "the old system's memory", False)
+        await ledger.append(conn, MARKS, "memory.imported", payload)
+        latest[r["memory_id"]] = payload
+        counts["corrected" if before is not None else "appended"] += 1
     return counts
 
 
@@ -295,9 +310,22 @@ async def _unit(conn, ledger_id: int, projects: dict[str, tuple[str, str]]) -> d
         for f in (payload.get("transcript") or {}).get("files", []):
             files[f["name"]] = await transcripts.joined(conn, payload["turn_id"], f["name"])
     project, client = projects[task_id]
+    more: dict[str, Any] = {}
     if type_ == "memory.imported":
+        from core.workspace import Spec
+
         project, client = payload["project"], payload["client"]
+        first = await (
+            await conn.execute(
+                "SELECT min(id) FROM events WHERE task_id = %s AND type = 'memory.imported' "
+                "AND payload->>'memory_id' = %s",
+                (MARKS, payload["memory_id"]),
+            )
+        ).fetchone()
+        if first[0] != ledger_id:
+            more = {"first": first[0], "served": project in {s.repo for s in Spec.here()}}
     return {
+        **more,
         "id": ledger_id,
         "task_id": task_id,
         "type": type_,
@@ -343,3 +371,70 @@ def reset() -> None:
     database that was dropped and made again."""
     if "memory.records" in sys.modules:
         sys.modules["memory.records"].reset()
+
+
+def bench(questions: str, dumps: list[str], out: str, scratch: str) -> dict[str, Any]:
+    """Score recall on the questions in the JSON file `questions` against
+    the memory stores in `dumps` (`pg_dump -Fc -n memory` files), loaded
+    into the database `scratch` (its schema `memory` is replaced; never
+    give it the live store). Each dump is first restored into a database of
+    its own beside `scratch`, read, and dropped. Writes `<out>/<question
+    set>-<date>.json`, naming the question set and its sha256, and returns
+    the scores by type (docs/plans/memory-measure.md)."""
+    import hashlib
+    import subprocess
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    import psycopg
+    from psycopg.conninfo import make_conninfo
+
+    from memory import bench as m
+    from memory.records import SCHEMA, reset
+
+    raw = Path(questions).read_bytes()
+    qset = json.loads(raw)
+    name = conninfo_to_dict(scratch)["dbname"]
+    stores = []
+    reset()
+    try:
+        with psycopg.connect(scratch, autocommit=True) as conn:
+            for i, dump in enumerate(dumps):
+                db_ = f"{name}_dump{i}"
+                conn.execute(f'DROP DATABASE IF EXISTS "{db_}"')
+                conn.execute(f'CREATE DATABASE "{db_}"')
+                try:
+                    one = make_conninfo(scratch, dbname=db_)
+                    subprocess.run(
+                        [
+                            str(Path(settings.pg_bin) / "pg_restore"),
+                            "--no-owner",
+                            "--no-privileges",
+                            "-d",
+                            one,
+                            dump,
+                        ],
+                        check=True,
+                        capture_output=True,
+                    )
+                    stores.append(m.read(one))
+                finally:
+                    reset()
+                    conn.execute(f'DROP DATABASE IF EXISTS "{db_}"')
+            conn.execute(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")
+            conn.execute(f"CREATE SCHEMA {SCHEMA}")
+        times = m.load(scratch, stores)
+        result = m.score(scratch, times, qset["questions"])
+    finally:
+        reset()
+    result |= {
+        "question_set": qset.get("version", Path(questions).stem),
+        "question_set_sha256": hashlib.sha256(raw).hexdigest(),
+        "records": len(times),
+        "undated_records": sum(t is None for t in times),
+        "run_at": datetime.now(UTC).isoformat(),
+    }
+    Path(out).mkdir(parents=True, exist_ok=True)
+    path = Path(out) / f"{result['question_set']}-{datetime.now(UTC).date()}.json"
+    path.write_text(json.dumps(result, indent=1))
+    return result["by_type"]
