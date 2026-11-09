@@ -56,7 +56,7 @@ def _key(chat: dict[str, Any]) -> str:
     return f"{chat['channel']}:{chat['chat_id']}"
 
 
-async def _project(conn, task_id: str) -> workspace.Spec:
+async def spec_of(conn, task_id: str) -> workspace.Spec:
     row = await (
         await conn.execute(
             "SELECT body->'project'->>'name' FROM documents WHERE kind = 'task' AND id = %s", (task_id,)
@@ -550,7 +550,7 @@ async def answer(dsn: str, task_id: str, verb: str, query: dict[str, str], body:
     if verb not in verbs:
         raise NotFound(f"no verb {verb!r}; one of {', '.join(verbs)}")
     async with await db.connect(dsn, application_name="valor-record") as conn:
-        spec = await _project(conn, task_id)
+        spec = await spec_of(conn, task_id)
         if body is not None:
             return await WRITES[verb](conn, spec, task_id, body)
         return await VERBS[verb](conn, spec, await reach(conn, spec), query)
@@ -563,7 +563,7 @@ async def memories(conn, task_id: str) -> str:
     that session's own config directory, under the git root it ran in.
     None for a task with no project, or when no other session has one."""
     try:
-        spec = await _project(conn, task_id)
+        spec = await spec_of(conn, task_id)
     except NotFound:
         return ""
     found = []

@@ -15,7 +15,7 @@ from aiohttp import web
 from yarl import URL
 
 from core import db, ledger, runs, tasks
-from core.gateway import Gateway
+from core.gateway import ClaudeLogin, Gateway
 from tests import bridges
 from tests.ports import listen
 from tests.test_kernel import audit, new_task
@@ -219,3 +219,55 @@ def test_a_stop_still_cuts_the_front_models_stream_and_refuses_its_token(dsn, tm
     assert ended["outcome"] == "stopped"
     assert cut != (200, STREAM)  # cut short, not run to its end
     assert after[0] == 403 and audit(state) == []
+
+
+# -- a client's own Claude account ------------------------------------------------
+
+
+def test_a_turn_bills_its_clients_own_claude_token_and_every_other_turn_valors(dsn, tmp_path):
+    """A turn on a project whose spec's `client` has `claude-token.<client>`
+    beside the kernel's `claude-token` is sent upstream with that token;
+    a client with none, and a task with no project, get the kernel's."""
+    seen: list[str] = []
+
+    async def handle(request: web.Request) -> web.Response:
+        seen.append(request.headers["authorization"])
+        await request.read()
+        return web.Response(body=WHOLE, content_type="application/json")
+
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    (keys / "claude-token").write_text("valor-token\n")
+    (keys / "claude-token.mastery").write_text("mastery-token\n")
+
+    async def go():
+        app = web.Application()
+        app.router.add_post("/v1/messages", handle)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", listen())
+        await site.start()
+        url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        projects = Path(bridges.settings.projects_dir)
+        for name, client in (("m", "mastery"), ("y", "yudame")):
+            (projects / f"{name}.toml").write_text(
+                f'name = "{name}"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\nclient = "{client}"\n'
+            )
+        async with await db.connect(dsn) as conn:
+            started = [
+                await tasks.start(conn, tasks.Brief(instruction="work", project=p))
+                for p in ({"name": "m"}, {"name": "y"}, None)
+            ]
+        gateway = Gateway(
+            dsn, upstream=url, credential=ClaudeLogin(str(keys / "claude-token"), keychain=lambda: None)
+        )
+        await gateway.start(port=listen())
+        for task in started:
+            await _post(gateway.issue(task, "turn-1"))
+            await gateway.drain(task)
+        await gateway.close()
+        await runner.cleanup()
+
+    with bridges.operator(tmp_path):
+        asyncio.run(go())
+    assert seen == ["Bearer mastery-token", "Bearer valor-token", "Bearer valor-token"]

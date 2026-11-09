@@ -48,7 +48,10 @@ except that the first 401 after a read allows one more (the user's own
 sessions rotate the token). The kernel
 never refreshes that login: refresh tokens rotate, and a refresh here could
 sign out the user's own sessions. An expired login is a 401 naming the
-remedy, never a silent fallback.
+remedy, never a silent fallback. A turn on a project whose spec names a
+`client` with its own long-lived token, `claude-token.<client>` beside
+`claude-token` (`claude setup-token` signed in as the client's account), is
+sent that token instead, so the client's account bills it.
 
 **The OpenAI key.** `OpenAIKey` reads the kernel's key from its key file
 (`python -m core openai-key`). On the OpenAI route the turn's
@@ -384,6 +387,9 @@ class Gateway:
         self.openai_credential = openai_credential
         self.openai_upstream = (openai_upstream or settings.openai_upstream).rstrip("/")
         self.grants: dict[str, Grant] = {}
+        # Each grant's client, read from its task's spec on its first call.
+        self.client_of: dict[Grant, str | None] = {}
+        self.client_credentials: dict[str, ClaudeLogin] = {}
         self.revoked: set[str] = set()
         # Each grant's calls, so a turn's end touches only its own.
         self.calls: dict[Grant, set[asyncio.Task]] = {}
@@ -437,6 +443,8 @@ class Gateway:
         mine = self._of(self.grants.values(), task_id, turn_id)
         for token in [t for t, g in self.grants.items() if g in mine]:
             del self.grants[token]
+        for grant in mine:
+            self.client_of.pop(grant, None)
 
     def revoke(self, task_id: str) -> None:
         """Retire the task's tokens and cut its in-flight calls now, whether
@@ -502,8 +510,9 @@ class Gateway:
         path = "/" + tail + query
         if self.credential is not None:
             headers = {k: v for k, v in headers.items() if k.lower() not in CREDENTIAL_HEADERS}
+            credential = await self._claude(grant)
             try:
-                headers["authorization"] = "Bearer " + await asyncio.to_thread(self.credential.token)
+                headers["authorization"] = "Bearer " + await asyncio.to_thread(credential.token)
             except CredentialUnavailable as exc:
                 return _error(401, "authentication_error", str(exc))
         if request.method == "POST" and tail == "v1/messages":
@@ -511,6 +520,27 @@ class Gateway:
         if request.method == "POST" and tail.startswith("v1/messages/batches"):
             return _error(400, "invalid_request_error", "batches are not metered")
         return await self._forward(request, self.upstream + path, headers, body)
+
+    async def _claude(self, grant: Grant) -> ClaudeLogin:
+        """The Claude credential for the grant's calls: its client's own
+        token when the file is there, else the kernel's."""
+        if grant not in self.client_of:
+            self.client_of[grant] = await asyncio.to_thread(asyncio.run, self._client(grant.task_id))
+        client = self.client_of[grant]
+        if client:
+            path = self.credential.token_file.with_name(f"claude-token.{client}")
+            if path.is_file():
+                if client not in self.client_credentials:
+                    self.client_credentials[client] = ClaudeLogin(str(path), keychain=lambda: None)
+                return self.client_credentials[client]
+        return self.credential
+
+    async def _client(self, task_id: str) -> str | None:
+        async with await db.connect(self.dsn) as conn:
+            try:
+                return (await record.spec_of(conn, task_id)).client
+            except record.NotFound:
+                return None
 
     async def _call(self, grant: Grant, coro) -> web.StreamResponse:
         """Run one metered call as its own task, which `drain` waits on. A
@@ -538,7 +568,8 @@ class Gateway:
         if status != 401:
             return
         if openai is None and self.credential is not None:
-            self.credential.invalidate()
+            for credential in (self.credential, *self.client_credentials.values()):
+                credential.invalidate()
         elif openai == "kernel" and self.openai_credential is not None:
             self.openai_credential.invalidate()
 
