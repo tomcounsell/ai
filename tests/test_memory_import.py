@@ -287,8 +287,8 @@ def test_prep_moves_by_group_chat_and_keeps_what_was_imported(tmp_path, prep, mo
     )
     kept = "the weekly report for the client goes out every Monday morning by email"
     export = [
-        rec("group", "Amr asked for the staging password", project="valor") | {"chat_id": "-100777"},
-        rec("direct", "Amr asked about the gym", project="valor") | {"chat_id": "555"},
+        rec("group", "Riley asked for the staging password", project="valor") | {"chat_id": "-100777"},
+        rec("direct", "Riley asked about the gym", project="valor") | {"chat_id": "555"},
         rec("old", kept, project="valor") | {"occurred_at": "2026-06-02T00:00:00+00:00", "dated_by": "x"},
         rec("gone", "an earlier import merged this away", project="valor"),
     ]
