@@ -14,7 +14,9 @@ imported record with no date ranks before every question, as it precedes
 every later task in live recall; `score` scores each question with and
 without those records, since one written after an event would otherwise
 answer a question about before it. Keys are kept, so gold refs name the
-same records as in the live stores.
+same records as in the live stores. `fixture` writes the same records and
+questions for popoto's own benchmark harness (`--dataset dated`), which
+compares BM25 alone with hybrid retrieval.
 """
 
 import bisect
@@ -79,8 +81,8 @@ def score(dsn: str, times: list[float | None], questions: list[dict[str, Any]]) 
     """Each question replayed against the scratch store as it stood on its
     `asked_on`, with and without undated records: whether a gold record
     is in the top `LIMIT`, whether it reached the Brief, and whether any
-    forbidden record, or any other client's record that is not a standard
-    of working, reached the Brief."""
+    forbidden record, or any record of another project and client that is
+    not a standard of working, reached the Brief."""
     backend = use(dsn)
     undated = sum(t is None for t in times)
     dated = [t for t in times if t is not None]
@@ -104,7 +106,9 @@ def score(dsn: str, times: list[float | None], questions: list[dict[str, Any]]) 
             leaked = refs & set(q.get("forbidden") or ()) | {
                 ref(r.ledger, r.key)
                 for r in chosen
-                if (r.client or "") != q["client"] and ref(r.ledger, r.key) not in standards
+                if r.project != q["project"]
+                and (r.client or "") != q["client"]
+                and ref(r.ledger, r.key) not in standards
             }
             row[arm] = {
                 "at10": bool(gold & set(top)) if gold else None,
@@ -140,3 +144,27 @@ def summary(results: list[dict[str, Any]]) -> dict[str, Any]:
                 "undated_in_top10": sum(r[arm]["undated_in_top"] for r in rows),
             }
     return out
+
+
+def fixture(stores: list[dict[str, list]], questions: dict[str, Any]) -> dict[str, Any]:
+    """The same questions and records as popoto's `dated` benchmark fixture
+    (tests/benchmarks/datasets/dated.py): a record's project is its ledger
+    and project, as recall's candidates are, and its time is `when`'s."""
+    wanted = {(q["ledger"], q["project"]) for q in questions["questions"]}
+    return {
+        "version": questions.get("version", ""),
+        "records": [
+            {
+                "id": ref(r["ledger"], r["key"]),
+                "text": r["text"],
+                "project": f"{r['ledger']}|{r['project']}",
+                "at": None if when(r) is None else datetime.fromtimestamp(when(r), UTC).isoformat(),
+            }
+            for s in stores
+            for r in s["records"]
+            if (r["ledger"], r["project"]) in wanted and r["origin"] != "correction"
+        ],
+        "questions": [
+            {**q, "project": f"{q['ledger']}|{q['project']}"} for q in questions["questions"] if q.get("gold")
+        ],
+    }

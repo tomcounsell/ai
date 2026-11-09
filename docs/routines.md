@@ -51,7 +51,9 @@ instruction and ceiling, and the working session ends it with `stop.md`
 when the work was only effects. It starts nothing, returning
 `nothing_due`, on a Mac the project is not placed on, so a routine
 installed on every Mac runs on one. `sentry` (the nightly review of the
-`valor` Sentry project's issues) is one. A run's result is held in the
+`valor` Sentry project's issues) is one, and `memory-bench` (the 1st of
+each month, 07:00: the private memory measurement re-run,
+[memory.md](memory.md), Measuring recall) another. A run's result is held in the
 record and wakes no session.
 
 A routine is deleted by deleting its directory. Every update's check of

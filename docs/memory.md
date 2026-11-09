@@ -73,17 +73,52 @@ Mac's own kernel database, as memory's role.
   reason. A chat message's own words are not a record (a turn's prompt is
   left out of its transcript entries); `valor-record messages --search`
   finds them.
-- **The old system's memory.** `scripts/memory_import_prep.py EXPORT...
-  OUT/` chooses the old records Tom kept (human and agent, not superseded,
-  no session summaries), maps each to its project, drops by `claude -p`
-  those not worth recalling on a future task, and deduplicates the rest
-  (near-exact by word overlap, paraphrases by `claude -p`), writing
-  `import.jsonl` and a `report.md`, listing every drop, that Valor reviews
-  first. `python -m core memory
-  import FILE` then appends one `memory.imported` row per line on the
-  `memory` stream for the projects this Mac serves, once per old
+- **The old system's memory.** `scripts/cutover_export_memory.py` reads an
+  old Redis (or a dump restored into a throwaway one) and dates each record
+  from the best source it holds: its Telegram message, an extraction's
+  message or session, a document's file date, a date in its fields, and
+  with `--telegram` the chat's own history; failing those, an upper bound
+  (the record that superseded it, its first outcome), labelled `(no later
+  than)`. `scripts/memory_import_prep.py EXPORT... OUT/ [--imported
+  ROWS]` chooses the old records Tom kept (human and agent, not
+  superseded, no session summaries), maps each to its project, moves one
+  whose own Telegram group or extraction label names another project,
+  drops by `claude -p` those not worth recalling on a future task, and
+  deduplicates the rest (near-exact by word overlap, paraphrases by
+  `claude -p`), keeping each record already imported on some Mac as its
+  group's keeper, past every filter; it writes `import.jsonl` and a
+  `report.md`, listing every move and drop and the dated, bounded and
+  undated counts per project, that Valor reviews first. `python -m core
+  memory import FILE` then appends one `memory.imported` row per line on
+  the `memory` stream for the projects this Mac serves, once per old
   `memory_id`; ingest makes each a record of origin `imported` in the
-  line's own project and client, recalled like any other.
+  line's own project and client, recalled like any other, its time its
+  `occurred_at` when it has one, which its label shows. A line for a
+  `memory_id` already imported here whose date, project or client differ
+  appends a second row, served here or not; ingest replaces the first
+  row's record under the same key and ledger id (marks and confinements
+  still name it, recall's bound does not move), or deletes it when the
+  line moves it to a project this Mac does not serve. A rerun appends
+  nothing.
+- **Measuring recall.** Tom, 2026-11-08: "I'd like to better measure its
+  effectiveness at long term, episodic, and seasonal memory". A private set
+  of dated questions (long-term: a superseded decision, the current one
+  gold; episodic: before or after a dated event; seasonal: a monthly or
+  weekly cycle, and a topic quiet for two to five months that comes back;
+  client confinement), each with the day it is asked, is replayed against
+  the four Macs' stores as they stood that day: `python -m core memory
+  bench QUESTIONS DUMP... --out DIR --scratch DSN` loads `pg_dump -Fc -n
+  memory` files into a scratch database (never the live store), ranks the
+  records by time so recall's own candidates and ranking
+  (`memory/bench.py`) see only the records from before each question,
+  and scores whether a gold record is in the top ten and reaches the
+  Brief, with and without undated imports, and whether any other client's
+  record reaches it. It writes the same questions as a fixture for
+  popoto's `dated` benchmark, which compares BM25 alone with hybrid
+  retrieval. The questions, gold answers and results stay in the private
+  Valor folder; the routine `memory-bench` re-runs it on the 1st of each
+  month against a fixed question set, new calendar questions scored as a
+  set of their own.
 - **A client fact in the wrong Brief.** A fact about one client that turns
   up in another client's Brief is recorded as a correction naming the
   record it came from (`python -m core correct TEXT --record <record>`),

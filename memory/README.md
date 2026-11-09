@@ -8,7 +8,7 @@ What Valor remembers across sessions.
 - Standards of working: the records Valor marked (`memory.marked` rows), and the records a correction confined to their client.
 - Recall: the Remembered section of a working session's Brief, found by BM25 among the task's own project's records and the standards of working from any client, all from before the task began, quoted and escaped as data.
 - Search: a turn's `valor-record memory`, recall's own candidates and BM25 ranking with no start-of-task bound, a page at a time (`recall.search`, reached through `core/memory.py` `search`). It reads only.
-- `records.py` holds the popoto models and their Postgres backend (schema `memory`, role `valor_memory`, on the store `memory_dsn` names or the kernel database); `ingest.py` turns a ledger row, handed over as plain data, into records, marks, and confinements; `recall.py` searches and renders, for recall and for a turn's search.
+- `records.py` holds the popoto models and their Postgres backend (schema `memory`, role `valor_memory`, on the store `memory_dsn` names or the kernel database); `ingest.py` turns a ledger row, handed over as plain data, into records, marks, and confinements; `recall.py` searches and renders, for recall and for a turn's search; `bench.py` scores recall on private dated questions in a scratch store (`python -m core memory bench`).
 
 Built on popoto 1.10.0's Postgres backend. `VALOR_MEMORY=off` means nothing here is imported.
 

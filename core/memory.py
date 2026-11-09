@@ -380,8 +380,9 @@ def bench(questions: str, dumps: list[str], out: str, scratch: str) -> dict[str,
     into the database `scratch` (its schema `memory` is replaced; never
     give it the live store). Each dump is first restored into a database of
     its own beside `scratch`, read, and dropped. Writes `<out>/<question
-    set>-<date>.json`, naming the question set and its sha256, and returns
-    the scores by type (docs/plans/memory-measure.md)."""
+    set>-<date>.json`, naming the question set and its sha256, and beside it
+    the same records and questions as popoto's `dated` benchmark fixture,
+    and returns the scores by type (docs/plans/memory-measure.md)."""
     import hashlib
     import subprocess
     from datetime import UTC, datetime
@@ -438,4 +439,5 @@ def bench(questions: str, dumps: list[str], out: str, scratch: str) -> dict[str,
     Path(out).mkdir(parents=True, exist_ok=True)
     path = Path(out) / f"{result['question_set']}-{datetime.now(UTC).date()}.json"
     path.write_text(json.dumps(result, indent=1))
+    path.with_name(f"{path.stem}-popoto-fixture.json").write_text(json.dumps(m.fixture(stores, qset)))
     return result["by_type"]

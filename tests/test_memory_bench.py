@@ -37,7 +37,9 @@ def test_bench_replays_each_question_on_the_store_as_it_stood(dsn, specs, tmp_pa
             await memory.import_old(
                 conn,
                 [
-                    line("June: the greenhouse ledger goes out as a PDF", occurred="2026-06-01T00:00:00+00:00"),
+                    line(
+                        "June: the greenhouse ledger goes out as a PDF", occurred="2026-06-01T00:00:00+00:00"
+                    ),
                     line(
                         "July: the greenhouse ledger now goes out as a link",
                         occurred="2026-07-01T00:00:00+00:00",
@@ -105,6 +107,10 @@ def test_bench_replays_each_question_on_the_store_as_it_stood(dsn, specs, tmp_pa
     assert result["question_set"] == "v-test" and len(result["question_set_sha256"]) == 64
     assert by_type["long-term"]["dated_only"]["recall_at_10"] == round(2 / 3, 3)
     assert by_type["episodic"]["with_undated"]["undated_in_top10"] == 1
+    fixture = json.loads(next(out.glob("v-test-*-popoto-fixture.json")).read_text())
+    assert {q["id"] for q in fixture["questions"]} == {"june", "undated", "early", "july"}
+    assert {r["id"]: r["at"] for r in fixture["records"]}[refs["Undated"]] is None
+    assert all(r["project"] == f"{name}|{FLOWERS}" for r in fixture["records"])
     assert records._dsn is None
     records.use(memory_dsn(dsn))
     assert len(records.Record.query.all()) == before

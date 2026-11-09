@@ -1,0 +1,25 @@
+name = "memory-bench"
+runner = "task"
+ceiling = "act"
+model = "frontier"
+mission_item = "Tom's ask (rule 2): measure memory's long-term, episodic and seasonal recall, re-run monthly"
+need = [
+    "Tom, 2026-11-08 (valor team chat): \"I'd like to better measure its effectiveness at long term, episodic, and seasonal memory\"; 2026-11-09: yes to building the test set",
+    "The old system's recall was never measured stably: its July baseline reported a 99% act rate while its outcome log held about 14,000 dismissals to 370 uses",
+]
+created = 2026-11-09
+project = "valor"
+branch = "main"
+instruction = """Re-run the private memory measurement (docs/plans/memory-measure.md, docs/memory.md "Measuring recall"). Everything it reads and writes is in ~/Desktop/Valor/memory-bench/ (its README.md says how); none of it goes in any repository, and you send no one anything.
+
+1. Dump each Mac's memory store after the month: over ssh as valorengels to valor-the-cowboy, -pirate, -bald and -captain, `pg_dump -Fc -n memory` with that Mac's memory DSN into ~/valor-backups/memory-<date>.dump, copied to dumps/<date>/<mac>.dump (one dump in all once `memory_dsn` names the shared store).
+2. Score the fixed set: `python -m core memory bench questions-v1.json dumps/<date>/*.dump --out results --scratch <a database of your workspace cluster>`, then popoto's harness on the fixture it writes (`python -m tests.benchmarks.run_external --dataset dated --fixture ... --limit 60 --sample stratified --seed 0`, lexical and hybrid, `--output results/popoto/...`), from a popoto checkout.
+3. Add new seasonal-calendar questions for the month that ended (monthly invoicing, weekly client updates) as their own set, questions-calendar-<YYYY-MM>.json, scored apart; never edit questions-v1.json.
+4. Compare with last month's result file of the same question set and sha256.
+
+Stop with `Done:` and the scores per question type, BM25 against hybrid, and what moved since last month."""
+
+[schedule]
+day = 1
+hour = 7
+minute = 0
