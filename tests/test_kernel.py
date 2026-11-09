@@ -745,8 +745,17 @@ def test_every_reply_in_toms_dm_is_his_sessions_with_the_post_it_is_under(dsn, d
         async with await db.connect(dsn) as conn:
             refused = await answering.refuse(conn, broker.Action("task.answer", waiting, {"text": "blue"}))
         await answering.perform(broker.Action("task.answer", waiting, {"text": "blue", "by": "tom"}), "a1")
-        return waiting, answer, team, to_team, chat, thanks, reporting, rows, refused, await bridges.rows(
-            dsn, waiting
+        return (
+            waiting,
+            answer,
+            team,
+            to_team,
+            chat,
+            thanks,
+            reporting,
+            rows,
+            refused,
+            await bridges.rows(dsn, waiting),
         )
 
     waiting, answer, team, to_team, chat, thanks, reporting, rows, refused, waited = run(go())
@@ -780,7 +789,9 @@ def test_stop_in_toms_dm_stops_every_task_reporting_to_its_session_and_tells_the
             await ledger.append(conn, chat, "child.reported",
                                 {"child_id": other, "kind": "question", "about_key": "q", "text": "?"})  # fmt: skip
             for reporter, kind in ((merging, "credential"), (intake.UPDATES, "rollout")):
-                await notices.request(conn, reporter, kind=kind, about_key=f"{kind}:{uuid.uuid4().hex}", text="!", session=chat)
+                await notices.request(
+                    conn, reporter, kind=kind, about_key=f"{kind}:{uuid.uuid4().hex}", text="!", session=chat
+                )
         top = await tom_says(dsn, dm, "stop", at(20))
         later = await child_of(dsn, chat)
         await posted(dsn, chat, dm, at(30), "Started the next one.")
@@ -1054,10 +1065,19 @@ def test_a_chat_session_that_kept_failing_on_a_message_hands_it_to_the_next_sess
         async with await db.connect(dsn) as conn:
             await fail(conn, answered, "idle", "failed")
             fourth = await intake.chat_session(conn, "slack", dm)
-        return first, second, third, answered, fourth, [await bridges.rows(dsn, t) for t in (second, answered)]
+        return (
+            first,
+            second,
+            third,
+            answered,
+            fourth,
+            [await bridges.rows(dsn, t) for t in (second, answered)],
+        )
 
     first, second, third, answered, fourth, (second_rows, answered_rows) = run(go())
-    assert second not in (None, first) and third is None and answered not in (first, second) and fourth is None
+    assert (
+        second not in (None, first) and third is None and answered not in (first, second) and fourth is None
+    )
     handed, held = bridges.typed(second_rows, "child.reported")
     assert handed["from"] == first and not handed.get("quiet")
     assert (held["from"], held["quiet"]) == (second, True)
@@ -1335,13 +1355,15 @@ def team(tmp_path):
         yield
 
 
-async def said(dsn, text, *, chat=GROUP, sender=RAIN, name="Robin", reply_to=None, kind="group") -> dict:
+async def said(
+    dsn, text, *, chat=GROUP, sender=RAIN, name="Robin", reply_to=None, kind="group", **kw
+) -> dict:
     """A Telegram message, in a group unless `kind` says, received and
     bound: its binding."""
     mid = str(uuid.uuid4().int % 10**9)
     inbound = intake.Inbound(
         channel="telegram", chat_id=chat, chat_kind=kind, message_id=mid, sender_id=sender,
-        sender_name=name, sent_at="2026-10-16T09:30:00+00:00", text=text, reply_to=reply_to,
+        sender_name=name, sent_at="2026-10-16T09:30:00+00:00", text=text, reply_to=reply_to, **kw,
     )  # fmt: skip
     async with await db.connect(dsn) as conn:
         got = await intake.receive(conn, inbound)
@@ -1594,27 +1616,39 @@ def test_the_persona_runs_projects_and_writes_for_how_technical_the_reader_is():
     assert "Clarity above completeness" in flat
     assert "Few, easy questions" in flat and "answerable in a word or a pick" in flat
     for heading in (
-        "Run the project", "No surprises.", "Unknowns first.", "Fixed time, variable scope.",
-        "A date is small steps and names who it waits on.", "Act, don't lament.",
-        "Unblock first; close every loop.", "Nothing stalls on one person.",
+        "Run the project",
+        "No surprises.",
+        "Unknowns first.",
+        "Fixed time, variable scope.",
+        "A date is small steps and names who it waits on.",
+        "Act, don't lament.",
+        "Unblock first; close every loop.",
+        "Nothing stalls on one person.",
     ):
         assert heading in flat
     # The product methods are general practice (Tom, 2026-11-06), one copy: the persona's.
     for method in (
-        "Jobs to be Done, as the inclusion test.", "Shape before building.",
-        "Value for effort, in coarse bands.", "One ordered queue.", "Ready before build.", "Nothing new is built until", "A defect or mandatory fix is not a bet",
-        "Ask plainly; apply the methods yourself.", "Never ask in their vocabulary",
+        "Jobs to be Done, as the inclusion test.",
+        "Shape before building.",
+        "Value for effort, in coarse bands.",
+        "One ordered queue.",
+        "Ready before build.",
+        "Nothing new is built until",
+        "A defect or mandatory fix is not a bet",
+        "Ask plainly; apply the methods yourself.",
+        "Never ask in their vocabulary",
     ):
         assert method in flat
     product = " ".join(tasks.role_text("product").split())
-    assert 'persona\'s "Run the project"' in product and "Jobs to be Done, as the inclusion test" not in product
+    assert (
+        'persona\'s "Run the project"' in product and "Jobs to be Done, as the inclusion test" not in product
+    )
     # Waiting on someone: a day of their working day, a reminder, the next best person;
     # a two-way door goes ahead on its default, a one-way door waits (Tom, 2026-11-06).
     assert "Give them a day of their own working day (mind their time zone), then one reminder" in flat
     assert "A one-way door waits for its answer" in flat
     chat = " ".join((REPO / "skills/sdlc/converse.md").read_text().split())
     assert 'as your persona\'s "Nothing stalls on one person" says' in chat
-
 
 
 def test_only_decisions_the_person_holds_reach_a_call_or_the_board():
@@ -1626,7 +1660,9 @@ def test_only_decisions_the_person_holds_reach_a_call_or_the_board():
 
     chat = " ".join((REPO / "skills/sdlc/converse.md").read_text().split())
     assert "Its questions are only decisions the people in the call hold" in chat
-    assert "your own work (a Sheet row, a ranking, a draft) is done before the call and listed as done" in chat
+    assert (
+        "your own work (a Sheet row, a ranking, a draft) is done before the call and listed as done" in chat
+    )
     assert "a blocker on someone else is status, with who and since when" in chat
     assert "Open holds only what Tom holds" in chat and '(`task.answer`, `"by": "valor"`)' in chat
     product = " ".join(tasks.role_text("product").split())
@@ -1638,6 +1674,7 @@ def test_only_decisions_the_person_holds_reach_a_call_or_the_board():
     flat = " ".join(persona.render(REPO / "persona").split())
     assert "A question your own findings answer, or show does not arise, is not asked." in flat
 
+
 def test_stakes_json_is_read_in_place_and_from_handled_and_only_as_an_object(tmp_path):
     v = tmp_path / ".valor"
     v.mkdir()
@@ -1647,7 +1684,9 @@ def test_stakes_json_is_read_in_place_and_from_handled_and_only_as_an_object(tmp
     assert first.stakes == again.stakes == {"stakes": "stored data", "review_rounds": 1}
     (v / "stakes.json").write_text("[1]")
     bad = signals.collect(tmp_path, "t2")
-    assert bad.stakes is None and len(bad.unreadable) == 1 and "stakes.json is unreadable" in bad.unreadable[0]
+    assert (
+        bad.stakes is None and len(bad.unreadable) == 1 and "stakes.json is unreadable" in bad.unreadable[0]
+    )
     assert signals.collect(tmp_path, "t3").stakes is None
 
 
@@ -1741,11 +1780,22 @@ def test_a_chat_roles_entry_matches_its_chat_as_chats_normalises_it():
             "kind": "plain",
             "suite": "true",
             "chats": ["slack:t0abc/c0123", "telegram:-1001"],
-            "chat_roles": {"slack:t0abc/c0123": " product ", "telegram:-1001": "engineer", "email": "teammate"},
+            "chat_roles": {
+                "slack:t0abc/c0123": " product ",
+                "telegram:-1001": "engineer",
+                "email": "teammate",
+            },
         }
     )
-    assert spec.chat_roles == {"slack:T0ABC/C0123": "product", "telegram:-1001": "engineer", "email": "teammate"}
-    assert workspace.Spec.from_dict({"name": "p", "repo": "r", "kind": "plain", "suite": "true"}).chat_roles == {}
+    assert spec.chat_roles == {
+        "slack:T0ABC/C0123": "product",
+        "telegram:-1001": "engineer",
+        "email": "teammate",
+    }
+    assert (
+        workspace.Spec.from_dict({"name": "p", "repo": "r", "kind": "plain", "suite": "true"}).chat_roles
+        == {}
+    )
 
 
 def test_each_role_file_renders_and_the_example_spec_names_only_roles_that_exist():
@@ -1812,7 +1862,12 @@ def test_task_start_s_context_is_in_every_turn_of_the_task_it_starts(dsn, tmp_pa
             )  # fmt: skip
             start = chat_tasks.performers(await tasks.brief(conn, session_id), dsn)[0]
         made = []
-        for extra in ({"context": f"  {room}\n"}, {}, {"context": " \n "}, {"context": room, "in": f"slack:{dev}"}):
+        for extra in (
+            {"context": f"  {room}\n"},
+            {},
+            {"context": " \n "},
+            {"context": room, "in": f"slack:{dev}"},
+        ):
             action = broker.Action("task.start", "work", {"instruction": "Reword the greeting", **extra})
             made.append((await start.perform(action, f"cx-{uuid.uuid4()}"))["task_id"])
         async with await db.connect(dsn) as conn:
@@ -1856,7 +1911,9 @@ def test_task_start_in_another_chat_starts_under_that_chats_session_and_reads_it
         start = chat_tasks.performers(b, dsn)[0]
         made = []
         for n in (1, 2):
-            action = broker.Action("task.start", "work", {"instruction": f"Build {n}", "in": f"slack:{dev.lower()}"})
+            action = broker.Action(
+                "task.start", "work", {"instruction": f"Build {n}", "in": f"slack:{dev.lower()}"}
+            )
             made.append((await start.perform(action, f"in-{uuid.uuid4()}"))["task_id"])
         with pytest.raises(ValueError, match="not one of this project's chats"):
             await start.perform(
@@ -1915,7 +1972,11 @@ def test_a_chat_session_starts_answers_and_stops_its_tasks_which_report_only_to_
     assert found == {"task_id": child}
     (started,) = [r["payload"] for r in child_rows if r["type"] == "task.started"]
     assert started["provenance"]["by"] == "Robin"
-    reported = [(p["kind"], p["child_id"]) for p in bridges.typed(parent_rows, "child.reported") if p.get("from") == child]
+    reported = [
+        (p["kind"], p["child_id"])
+        for p in bridges.typed(parent_rows, "child.reported")
+        if p.get("from") == child
+    ]
     assert reported == [("question", child), ("credential", None)]
     assert not [r for r in child_rows if r["type"] == "notice.requested"]
     (answered,) = [r["payload"] for r in child_rows if r["type"] == "question.answered"]
@@ -1942,7 +2003,9 @@ def test_only_a_chat_session_is_offered_or_may_request_a_send(dsn, team):
         objective = await new_task(dsn, routine="sentry")
         run_ = await new_task(dsn, parent_id=objective, routine="sentry", max_effect_class="act")
         sdlc = await new_task(dsn, max_effect_class="act")
-        mail = broker.Action("email.send", "x@florist.test", {"text": "We're live.", "to": ["x@florist.test"]})
+        mail = broker.Action(
+            "email.send", "x@florist.test", {"text": "We're live.", "to": ["x@florist.test"]}
+        )
         slack = broker.Action("slack.send_message", "T0ABC/U1", {"text": "hi"})
         async with await db.connect(dsn) as conn:
             briefs = [await tasks.brief(conn, t) for t in (session_id, run_, sdlc)]
@@ -2122,7 +2185,9 @@ def test_in_a_slack_dev_channel_every_message_wakes_the_session_and_tom_is_tom(d
 
         first, said, b, rows = run(go())
         room = intake.room("slack", dev)
-    assert [x["as"] for x in said] == ["steer", "steer"] and {x["task_id"] for x in said} == {first["task_id"]}
+    assert [x["as"] for x in said] == ["steer", "steer"] and {x["task_id"] for x in said} == {
+        first["task_id"]
+    }
     assert b.chat == {"channel": "slack", "chat_id": dev} and room == "Engineering on the florist site."
     steered = [r["payload"]["provenance"]["by"] for r in rows if r["type"] == "message.steered"]
     assert steered == ["Kim", "tom", "Kim"]
@@ -2207,7 +2272,9 @@ def test_a_collected_row_postgres_refuses_whole_is_reduced_to_what_it_stores(dsn
 
     async def go():
         task = await new_task(dsn)
-        refused = session._collected("t", State.BUILD, signals.Signals(done="a\u0000b"), "candidate", None, [], [])
+        refused = session._collected(
+            "t", State.BUILD, signals.Signals(done="a\u0000b"), "candidate", None, [], []
+        )
         async with await db.connect(dsn) as conn:
             return await session._reduce(conn, task, refused, True, "a NUL")
 

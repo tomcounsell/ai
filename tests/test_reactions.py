@@ -254,6 +254,27 @@ def test_a_message_gets_a_handling_pick_then_noted_when_there_is_none(dsn, team)
     assert rows[0][1]["why"].startswith("handling, the classifier's pick: read as a question or idea")
 
 
+def test_a_voice_memo_is_judged_by_its_transcript(dsn, team):
+    """A memo's words are in its transcript, not its text (Tom's Slack memo
+    of 2026-11-09 got a shrug for an empty message)."""
+    memo = {
+        "name": "audio_message.m4a",
+        "mime": "audio/mp4",
+        "bytes": 1,
+        "path": "/m",
+        "transcript": "ship it Friday",
+    }
+
+    async def go():
+        m = await said(dsn, "valor", attachments=[memo])
+        port = Port(handling="thumbs_up")
+        await react_all(dsn, port, m)
+        return port.asked
+
+    ((_, _, inputs),) = run(go())
+    assert inputs["message"] == "valor\n(voice memo: ship it Friday)"
+
+
 def test_every_message_a_turn_read_gets_its_own_done(dsn, team):
     """Three messages, one turn: each owes a done, told what the turn sent
     for it (a reply to it, a reply in the chat to another, or none), and

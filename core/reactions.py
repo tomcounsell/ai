@@ -441,7 +441,7 @@ async def pending(conn) -> list[dict[str, Any]]:
 
 async def inputs(conn, item: dict[str, Any]) -> dict[str, str]:
     """A classifier question's inputs for a due reaction: the message's
-    text, its reply chain oldest first, what it was bound as, and for a
+    text with each voice memo's transcript, its reply chain oldest first, what it was bound as, and for a
     done what the turn did and sent and the handling on it."""
     rid = item["row"]["received_id"]
     received = await (
@@ -458,7 +458,9 @@ async def inputs(conn, item: dict[str, Any]) -> dict[str, str]:
     ).fetchone()
     p = received[0] if received else {}
     thread = "\n".join(str(m.get("text") or "") for m in p.get("thread") or [] if isinstance(m, dict))
-    got = {"message": str(p.get("text") or ""), "thread": thread, "bound_as": bound[0] if bound else ""}
+    heard = [f"(voice memo: {a['transcript']})" for a in p.get("attachments") or [] if a.get("transcript")]
+    message = "\n".join(t for t in (str(p.get("text") or ""), *heard) if t)
+    got = {"message": message, "thread": thread, "bound_as": bound[0] if bound else ""}
     if item["stage"] == "handling":
         return got
     shown = await current_for(conn, [rid])
