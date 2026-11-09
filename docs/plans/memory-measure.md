@@ -10,65 +10,73 @@ created: 2026-11-09
 
 **Ask.** Tom, valor team chat, 2026-11-08 to 11-09: measure popoto's
 long-term, episodic and seasonal memory (seasonal: "Both a and b", calendar
-recurrence and topics resurfacing after months); "Yes to both" to building
-the test set and importing the old May-Oct memories.
+recurrence and topics resurfacing after months); "Yes to both" to the test
+set and to importing the old May-Oct memories.
 
-**Premise, checked.** The import path exists (docs/plans/memory-import.md,
-#3660): `scripts/memory_import_prep.py` then `python -m core memory import`,
-one `memory.imported` row per old `memory_id`, made a record by ingest.
-Every other Mac has an `import.jsonl` from its install
-(`~/valor-retired/cutover-*`); the Cowboy has none, and `valor-record
-memory` on the Cowboy finds no record of origin `imported`. Imported rows
-carry no date: `at` is the import time. Tom's 2026-10-21 rules stand: human
-and agent records only, not superseded, no session summaries, knowledge
-skipped, not-worth-recalling dropped, deduplicated.
+**Premise, checked.** The import path exists (docs/plans/memory-import.md):
+prep, then `python -m core memory import` (one `memory.imported` row per old
+`memory_id`), made a record by ingest, keyed `<ledger id>.<n>`. The other
+three Macs have an `import.jsonl` (`~/valor-retired/cutover-*`); the Cowboy
+has none and holds no record of origin `imported`. Imported rows carry no
+date. Tom's 2026-10-21 rules stand for what is imported.
 
 ## What is built
 
-1. **Dates.** `scripts/cutover_export_memory.py` gains a mode reading a
-   Redis dump restored into a throwaway Redis (never a live one): each
-   exported line gains `occurred_at` and `dated_by`, from, in order: the
-   matching `TelegramMessage`'s date (same chat, same text); for an
-   `extraction-tg_<chat>_N` record, the latest message date of that batch;
-   for a doc-derived record, the `KnowledgeDocument`'s file date; else none.
-   Prep carries both fields into `import.jsonl` and counts dated and
-   undated per project in `report.md`.
-2. **Import and ingest.** The row's payload carries `occurred_at`; ingest
-   uses it as the record's time when present (`core/memory.py` `_unit`).
-   `import` appends a line whose `memory_id` is already on the stream only
-   when the line brings a date the earlier row lacked; ingest keys an
-   imported record by its `memory_id`, so the later row replaces the
-   earlier record and a rerun appends nothing.
-3. **Run, per Mac, for its own projects.** On each Mac: `python -m core
-   backup`, and `pg_dump -n memory` beside it in `backup_dir`; prep over
-   that Mac's export and every other Mac's (so cross-Mac duplicates
-   collapse); Valor reads `report.md`; `memory import`; `memory ingest`. The
-   Cowboy takes valor; the others re-run to add dates, or import for the
-   first time where their rows are missing. Each runs over ssh as that
-   Mac's user, the commands rollout.md step 7 already names.
-4. **The measurement, private.** `~/Desktop/Valor/memory-bench/`: a corpus
-   (all four dumps' Memory records, superseded and knowledge included, each
-   with project, client, `occurred_at`), and `questions.json`: about 150,
-   30-40 each of long-term, episodic, seasonal-calendar,
-   seasonal-resurfacing and confinement, each with `asked_on`, project, and
-   gold record ids (confinement: the other client's records that must not
-   appear). Drafted by `claude -p` from the corpus, each gold id checked by
-   Valor against the corpus.
-5. **popoto adapter** (popoto PR): `tests/benchmarks/datasets/dated.py`,
-   dataset `dated`, reading `--fixture PATH`; an item's history is its
-   project's records dated before `asked_on`; `question_type` is the
-   category. Run with `--output ~/Desktop/Valor/memory-bench/results/`,
-   `--retrieval-mode lexical` and `hybrid`. Committed fixture is made up.
+1. **Dates.** `scripts/cutover_export_memory.py` reads a dump restored into
+   a throwaway Redis (never a live one) and adds `occurred_at` and
+   `dated_by` to each line, first source that answers: the matching
+   `TelegramMessage` (same chat, same text); an `extraction-tg_<chat>_N`
+   batch's latest message; the `KnowledgeDocument`'s file date; a date in
+   `metadata` or `reference`; then upper bounds, `dated_by` ending
+   `(no later than)`: the superseding record's date, the earliest outcome
+   `ts`. `report.md` counts exact, bounded and undated per project.
+2. **Confinement evidence.** Prep also derives each record's project from
+   evidence independent of its mapping: the Telegram chat id against the
+   private specs' chats, or the `extraction-tg_<name>_` label.
+   `report.md` lists every record where the two disagree, with the count;
+   Valor reads it before any import, by hand.
+3. **Re-dating without duplicates.** `import` appends a second row for a
+   `memory_id` only when it brings an `occurred_at` the first lacked.
+   Ingest of such a row finds the first `memory.imported` row of that
+   `memory_id` on the ledger and re-saves that record, under the first
+   row's key `<first id>.0`, with the new `meta.occurred_at`: no new key,
+   so marks and confinements naming it still resolve, and a rebuild gives
+   the same result. Recall's bound stays the ledger id (`recall.py`
+   `candidates`); in live recall the date changes only the label, which
+   gains `occurred <date> (<dated_by>)`, and the cross-ledger order.
+4. **Run, per Mac, its own projects**, over ssh as that Mac's user (the
+   commands rollout.md step 7 names): `python -m core backup` and
+   `pg_dump -n memory` into `backup_dir`; prep over all four exports
+   together, so cross-Mac duplicates collapse; Valor reads `report.md`;
+   `memory import`; `memory ingest`; a second `pg_dump -n memory`, the
+   bench's input.
+5. **Questions, private** (`~/Desktop/Valor/memory-bench/`):
+   `questions-v1.json`, about 150, 30-40 each of long-term, episodic,
+   seasonal-calendar, seasonal-resurfacing, confinement; each with
+   `asked_on`, ledger, project, client and gold record refs, every gold a
+   record that survived the import (long-term: the current decision).
+   Confinement gold comes from item 2's evidence, not prep's mapping.
+   Drafted by `claude -p`, each gold checked by Valor against the dump.
 6. **Brief score** (this repo): `python -m core memory bench QUESTIONS
-   CORPUS OUT` loads the corpus into a scratch `memory` schema in the
-   workspace cluster and, per question, runs recall's own `candidates` and
-   ranking (`memory/recall.py`) with the question's project, client and
-   `asked_on`; reports gold-in-Brief and leaks per type. Confinement is
-   scored here only: popoto has no client scope.
-7. **Monthly.** `routines/memory-bench/routine.toml`, runner `task`, on the
-   Cowboy, the 1st of each month: re-export the current store's records,
-   add new calendar questions, run 5 and 6, compare with the last result
-   in the private folder.
+   DUMPS... OUT --dsn SCRATCH`. It restores the four post-import dumps into
+   `SCRATCH`, its own database in the workspace cluster (never
+   `memory_dsn`; `memory.records.use(SCRATCH)`, `reset()` before and
+   after), and renumbers each record's `ledger_id` by time (`occurred_at`,
+   else the row time; keys unchanged). Undated imported records rank
+   before every question, as in live recall, where they precede every
+   later task; a bounded one ranks at its bound. Per question: cutoff the
+   first rank after `asked_on`, then recall's own `candidates` and ranking.
+   Reports gold@10, gold-in-Brief, and any other client's record in the
+   Brief, per type.
+7. **popoto adapter** (popoto PR): dataset `dated`
+   (`tests/benchmarks/datasets/dated.py`) reading `--fixture`, history the
+   project's records dated before `asked_on`, `question_type` the type;
+   lexical and hybrid, `--output` the private folder. A second run adds the
+   superseded records as distractors, labelled so. Committed fixture made up.
+8. **Monthly.** `routines/memory-bench/routine.toml`, runner `task`, the
+   Cowboy, the 1st: fresh dumps, items 6 and 7 on `questions-v1` (fixed,
+   compared with last month) and new calendar questions as the next set,
+   scored apart. Each result file names its question set and its sha256.
 
 ## Not here
 
@@ -77,22 +85,24 @@ gate, hook, validator, review round, approval step, isolation, sandbox rule,
 denial, allowlist, refusal, capability removal, or verification layer is
 added, the change names the mission item it serves and the incident that
 already happened without it; missing either, it is not added. This plan
-adds none.
+adds none: Valor's reading of `report.md` is by hand.
 
 - Any client name, question, answer or result in this repo or popoto.
-- Yearly questions ("last December"): not enough history until autumn 2027.
-- Changing recall itself; the baseline is what a memory change is judged by.
+- Yearly questions: not enough history until autumn 2027.
+- Changing recall itself: the baseline judges a later change.
 
 ## Tests
 
-- Export: a line dated by message, by batch, by doc, and undated.
-- Ingest: an imported row with `occurred_at` gives that record time; a
-  second row for the same `memory_id` replaces, never adds; rerun appends
-  nothing; a project not served here appends nothing.
-- Bench: a record dated after `asked_on` is never a candidate; client B's
-  record never in client A's Brief, and a standard of working is; gold in
-  and out of the Brief counted right.
-- popoto: `dated` fixture run, history bounded by `asked_on`.
+- Export: dated by message, batch, doc, metadata, bound by superseder and
+  by outcome, undated; prep lists a chat-id/project mismatch.
+- Ingest: a re-dating row on a store already holding the undated record
+  leaves one record, under the first key, dated; render and search over it
+  sort and label it; a mark on it still applies; rerun appends nothing.
+- Bench: a record dated after `asked_on` is never a candidate, an undated
+  one always is; client B's record never in client A's Brief, a standard
+  is; gold in and out of the Brief counted; after a run the backend is
+  reset and the installed `memory_dsn` store is unchanged.
+- popoto: `dated` fixture, history bounded by `asked_on`.
 - Full suite under 5 minutes; `tests/test_bloat.py` passes.
 
 ## Done
