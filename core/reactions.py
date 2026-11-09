@@ -398,10 +398,12 @@ def due(rows: list[dict[str, Any]], stopped: bool) -> tuple[str, dict[str, Any],
     stage, the row it is read from (a reaction or `reaction.owed` payload),
     and the label it gets unjudged when a refusal sets it (`_instead`);
     None when nothing is. A refused done is replaced (stage `noted`, then
-    `kept`); an owed done comes first, then a stopped task's done, then an
+    `kept`); nothing is owed once the chat says the message is gone; an owed done comes first, then a stopped task's done, then an
     owed `stalled` (a refused one replaced by a `handling`), then a
     `handling` for a message with nothing owed."""
     failed = {r["payload"].get("reaction_id") for r in rows if r["type"] == "reaction.failed"}
+    if any(r["payload"].get("gone") for r in rows if r["type"] == "reaction.failed"):
+        return None
     asked = [r["payload"] for r in rows if r["type"] == "reaction.requested"]
     stages = {p.get("stage") for p in asked}
     refused = {p.get("stage"): p for p in asked if p.get("reaction_id") in failed}
@@ -566,15 +568,25 @@ def current(rows: list[dict]) -> dict[str, dict[str, Any]]:
     return out
 
 
+GONE = "gone from the chat: its sender probably deleted it, often a message sent unfinished"
+
+
 def shown(rows: list[dict]) -> dict[str, str]:
     """By `received_id`, what a session reads of the reaction on the
-    message now (`current`), and what set it."""
-    return {
+    message now (`current`), and what set it; `GONE` for a message the
+    chat says is no longer there."""
+    out = {
         rid: f"reacted {emoji_of(p)} (read)"
         if p.get("stage") == "seen"
         else f"reacted {emoji_of(p)}: {why(p)}"
         for rid, p in current(rows).items()
     }
+    out |= {
+        r["payload"].get("received_id"): GONE
+        for r in rows
+        if r["type"] == "reaction.failed" and r["payload"].get("gone")
+    }
+    return out
 
 
 async def _rows_for(conn, received_ids: list[str]) -> list[dict]:

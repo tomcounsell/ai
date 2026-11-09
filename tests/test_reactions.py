@@ -486,6 +486,32 @@ def test_a_refused_done_is_replaced_by_noted_then_by_writing_hand(dsn, team):
     )
 
 
+def test_a_message_deleted_after_a_turn_read_it_gets_no_more_reactions_and_the_session_is_told(dsn, team):
+    """Tom's "i" of 2026-11-09, sent unfinished and deleted: its handling
+    was refused as gone (Slack's `message_not_found`), and the 👍, 📝 and ✍
+    that followed each failed the same way. Gone, it is owed nothing more,
+    and the next turn reads that it is gone."""
+
+    async def go():
+        await new_session(dsn)
+        m = await said(dsn, "valor, i")
+        task = m["task_id"]
+        await react_all(dsn, Port(handling="shrug"), m)
+        await worked(dsn, task)
+        async with bridges.outbox(dsn, bridges.FakeBridge("telegram")) as box:
+            for d in await box._reactions():
+                if d.received_id == m["received_id"]:
+                    gone = d.stage != "seen"
+                    await box.reacted(d, "message_not_found" if gone else None, gone=gone)
+        port = Port(completed="thumbs_up")
+        after = await react_all(dsn, port, m)
+        return m, after, port.asked, session.chat_prompt(await bridges.rows(dsn, task))
+
+    m, after, asked, prompt = run(go())
+    assert after == [] and asked == []
+    assert f"- Message {m['message_id']} is {reactions.GONE}" in prompt
+
+
 def test_a_refused_noted_done_goes_straight_to_writing_hand(dsn, team):
     async def go():
         m = await said(dsn, "valor, hm")
@@ -682,8 +708,8 @@ class Box:
     def __init__(self):
         self.results = []
 
-    async def reacted(self, item, error=None):
-        self.results.append((item.reaction_id, error))
+    async def reacted(self, item, error=None, gone=False):
+        self.results.append((item.reaction_id, error) + (("gone",) if gone else ()))
 
 
 class SlackWire:
@@ -721,6 +747,23 @@ def test_slack_adds_the_name_and_removes_each_differing_earlier_one():
     assert calls == [("add", "tada"), ("remove", "eyes"), ("remove", "hourglass_flowing_sand"),
                      ("add", "+1"), ("remove", "eyes"), ("add", "eyes")]  # fmt: skip
     assert [e for _, e in results] == [None, None, None]
+
+
+def test_slack_marks_a_deleted_message_gone_and_another_refusal_not():
+    from bridges.slack.wire import Refused
+
+    async def go():
+        s, box = slack_sender(), Box()
+        for error in ("message_not_found", "invalid_name"):
+
+            async def refuse(channel, ts, name, error=error):
+                raise Refused(error)
+
+            s.wire.react = refuse
+            await s.react(item("+1", "thumbs_up", "done"), box)
+        return box.results
+
+    assert run(go()) == [("r1", "message_not_found", "gone"), ("r1", "invalid_name")]
 
 
 class Client:

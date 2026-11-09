@@ -685,8 +685,11 @@ class Outbox:
         except (broker.Refused, tasks.TaskStopped) as exc:
             return broker.Outcome(item.effect_id, "refused", error=str(exc) or type(exc).__name__)
 
-    async def reacted(self, item: ReactionDue, error: str | None = None, *, superseded: bool = False) -> None:
-        """The reaction's one result: `reaction.failed` with `error`, else
+    async def reacted(
+        self, item: ReactionDue, error: str | None = None, *, superseded: bool = False, gone: bool = False
+    ) -> None:
+        """The reaction's one result: `reaction.failed` with `error` (and
+        `gone` when the chat says the message is no longer there), else
         `reaction.placed`. A second result (another bridge, a retry) is
         skipped by the index. A reaction left in doubt (a flood wait, a lost
         connection) gets no result here, so it is yielded again."""
@@ -696,6 +699,8 @@ class Outbox:
             payload["error"] = error
         if superseded:
             payload["superseded"] = True
+        if gone:
+            payload["gone"] = True
         try:
             async with self.conn.transaction():
                 await ledger.append(self.conn, item.task_id, kind, payload)

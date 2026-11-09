@@ -357,8 +357,8 @@ def chat_prompt(rows: list[dict]) -> str:
     """What reached a chat session since its last finished turn began,
     oldest first: each message as `intake.chat_line` renders it, with the
     reaction on it; the reaction now on a message an earlier turn read,
-    when it was set since, such as the done the last turn earned (quiet, it
-    wakes nothing); and each task's report under its task id."""
+    when it was set since, such as the done the last turn earned, or that
+    the message is gone from the chat (quiet, these wake nothing); and each task's report under its task id."""
     from core import intake
 
     f = machine.fold(rows)
@@ -380,7 +380,9 @@ def chat_prompt(rows: list[dict]) -> str:
         p = r["payload"]
         if r["type"] == "message.heard" and r["id"] < upto:
             continue
-        if (
+        if r["type"] == "reaction.failed" and p.get("gone") and p.get("received_id") in read:
+            lines.append(f"- Message {read[p['received_id']]} is {reactions.GONE}")
+        elif (
             r["type"] == "reaction.requested"
             and p.get("stage") != "seen"
             and p.get("received_id") in read

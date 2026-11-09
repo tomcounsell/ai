@@ -409,7 +409,7 @@ stages placed (`ReactionDue.previous`) that differs from it, so the message
 carries one, and a done that repeats its handling keeps it.
 `already_reacted` and `no_reaction` count as done. Slack's refusal
 (`missing_scope` until the app is reinstalled with `reactions:write`) is
-written as `reaction.failed`; a 429 or a lost connection leaves the
+written as `reaction.failed`; `message_not_found` (a message deleted after it arrived, often one sent unfinished) is written `gone`, after which the message is owed no more reactions and the session's next turn reads that it is gone; a 429 or a lost connection leaves the
 reaction for the next wake. A reaction below a later one of
 its message (a 👀 once that is placed, any other once it is requested) is
 closed `superseded` by the outbox and never added.

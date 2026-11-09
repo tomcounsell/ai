@@ -351,7 +351,8 @@ class Sender:
             await outbox.reacted(item, str(e))
             return
         except Refused as e:
-            await outbox.reacted(item, e.error)
+            # A message deleted after it arrived, often one sent unfinished.
+            await outbox.reacted(item, e.error, gone=e.error == "message_not_found")
             return
         except WireError as e:
             key = f"reaction:{item.reaction_id}"
