@@ -173,6 +173,13 @@ class TelethonWire:
     async def connect(self) -> None:
         from telethon import errors
 
+        # Telethon's teardown of the previous connection, a no-op on a fresh
+        # client: a connect after a drop otherwise leaves the dropped
+        # connection's update and keepalive loops running beside the new
+        # ones, and they drop each new connection and fight over its update
+        # state (the Captain, 2026-11-08). A message the old loop was still
+        # handling is cancelled with it; the gap fill after connect retakes it.
+        await self.client.disconnect()
         try:
             await self.client.connect()
             authorized = await self.client.is_user_authorized()
