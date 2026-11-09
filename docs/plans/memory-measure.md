@@ -73,7 +73,7 @@ date. Tom's 2026-10-21 rules stand for what is imported.
    episodic and resurfacing gold are exact-dated records only.
    Drafted by `claude -p`, each gold checked by Valor against the dump.
 6. **Brief score** (this repo): `python -m core memory bench QUESTIONS
-   DUMPS... OUT --dsn SCRATCH`. It restores the post-import dumps (four
+   DUMPS... --out OUT --scratch SCRATCH`. It restores the post-import dumps (four
    while each Mac has its own schema, one once the store is shared) into
    `SCRATCH`, its own database in the workspace cluster (never
    `memory_dsn`; `memory.records.use(SCRATCH)`, `reset()` before and
