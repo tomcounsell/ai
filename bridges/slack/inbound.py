@@ -1,7 +1,7 @@
 """From one Slack `message` event, or Tom's reaction on Valor's post, to
 the fields of the port's `Inbound`.
 
-The bridge decides nothing here: text is Slack's `text` as stored, Tom is
+The bridge decides nothing here: text is Slack's `text` as stored, with any forward quoted, Tom is
 a `<team>/<user>` id the kernel compares, and a file is named by its
 sha256, never by anything the sender chose.
 
@@ -92,6 +92,28 @@ def named(text: str, own: str) -> str:
     return text.replace(f"<@{own}>", f"<@{own}|valor>") if own else text
 
 
+def shared(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """The messages forwarded in `msg`: Slack puts each in `attachments`
+    with `is_share`, its text and files there, and leaves `text` empty."""
+    return [a for a in msg.get("attachments") or [] if a.get("is_share")]
+
+
+def said(msg: dict[str, Any], own: str) -> str:
+    """The message's words: its `text`, then each forwarded message quoted
+    under the line naming who wrote it."""
+    parts = [msg.get("text") or ""]
+    for a in shared(msg):
+        who = a.get("author_name") or (f"<@{a['author_id']}>" if a.get("author_id") else "someone")
+        quoted = "\n".join(f"> {line}" for line in (a.get("text") or a.get("fallback") or "").splitlines())
+        parts.append(f"Forwarded from {who}:\n{quoted}")
+    return named("\n\n".join(p for p in parts if p), own)
+
+
+def files_of(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """The message's files, then those of each message it forwards."""
+    return [*(msg.get("files") or []), *(f for a in shared(msg) for f in a.get("files") or [])]
+
+
 def chat_of(team: str, channel: str, msg: dict[str, Any], *, dm: bool) -> str:
     """The port's `chat_id`: the other person's id for a DM, else
     `<team>/<channel>`."""
@@ -154,8 +176,8 @@ async def thread(wire: SlackWire, channel: str, msg: dict[str, Any]) -> list[dic
     return [
         {
             "id": m["ts"],
-            "text": named(m.get("text", ""), wire.user_id),
-            "attachments": [skipped(f, "earlier message") for f in m.get("files") or []],
+            "text": said(m, wire.user_id),
+            "attachments": [skipped(f, "earlier message") for f in files_of(m)],
         }
         for m in first + rest
     ]
@@ -167,7 +189,7 @@ async def build(
     """The `Inbound` fields for one message in `chat` (Slack channel
     `channel`)."""
     files = []
-    for f in msg.get("files") or []:
+    for f in files_of(msg):
         try:
             files.append(await attachment(wire, f, inbound_dir))
         except NotConnected:
@@ -184,7 +206,7 @@ async def build(
         "sender_id": person(wire.team_id, msg),
         "sender_name": await wire.user_name(msg["user"]),
         "sent_at": datetime.fromtimestamp(float(msg["ts"]), UTC).isoformat(),
-        "text": named(msg.get("text") or "", wire.user_id),
+        "text": said(msg, wire.user_id),
         "reply_to": top,
         "thread": await thread(wire, channel, msg),
         "topic_id": top,

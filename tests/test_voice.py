@@ -470,6 +470,33 @@ def test_slack_audio_is_transcribed_an_image_is_not(tmp_path, heard):
     assert "transcript" not in i and len(heard.heard) == 1
 
 
+def test_a_slack_forward_is_quoted_and_its_audio_transcribed(tmp_path, heard):
+    """A forward (Slack's shape, 2026-11-05): `text` empty, the forwarded
+    message's words and files in an `is_share` attachment."""
+    b, _, got = slack_bridge(tmp_path)
+    clip = {
+        "id": "F1",
+        "name": "memo.m4a",
+        "mimetype": "audio/mp4",
+        "url_private_download": "https://slack.com/a",
+    }
+    forward = {
+        **slack_msg("1792000001.000100"),
+        "attachments": [
+            {"is_share": True, "is_msg_unfurl": True, "author_name": "Tom Counsell",
+             "text": "Check out Granola's dictation\nand copy the design", "files": [clip]},
+            {"title": "granola.ai", "text": "a link preview, not a forward"},
+        ],
+    }  # fmt: skip
+    run(b._receive("T0ABC/C0TEAM", "C0TEAM", forward, dm=False, wire=b.wires["T0ABC"]))
+    [inbound] = got
+    assert inbound.text == (
+        "Forwarded from Tom Counsell:\n> Check out Granola's dictation\n> and copy the design"
+    )
+    [a] = inbound.attachments
+    assert a["name"] == "memo.m4a" and a["transcript"].startswith("words of ")
+
+
 def test_slack_acks_a_slow_voice_note_once_it_is_recorded(tmp_path):
     go_on = threading.Event()
 

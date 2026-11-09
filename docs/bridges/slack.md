@@ -226,10 +226,10 @@ and one on someone else's post, is acked and dropped.
 | `message_id` | The message's `ts` |
 | `sender_id` | `<team>/<user>`, the team being the message's `user_team`, else its `team`, else that of the workspace it came from, uppercased. One function builds it, live, in gap fill, and in send, so a live event and its history copy are one person |
 | `sender_name` | `users.info`'s real name, cached in memory |
-| `text` | Slack's `text` as stored (entities and wrapped links included), except that a mention of Valor's own user, `<@U..>`, is written `<@U..|valor>`, so the kernel's mention rule sees it in a mentions-only chat (the thread's texts likewise) |
+| `text` | Slack's `text` as stored (entities and wrapped links included), then each forwarded message (an `is_share` attachment, where Slack puts a forward's words, leaving `text` empty) as `Forwarded from <author>:` and its text quoted; except that a mention of Valor's own user, `<@U..>`, is written `<@U..|valor>`, so the kernel's mention rule sees it in a mentions-only chat (the thread's texts likewise) |
 | `reply_to`, `topic_id` | The thread root (`thread_ts`) of a reply; none for a top-level message |
 | `thread` | The root and the replies before this one, the last 50 in all, Valor's own posts included, nothing downloaded |
-| `attachments` | Each file fetched from `url_private_download` into `inbound_dir/slack/`, named by its sha256, as `{name, mime, bytes, path}`; a file Slack will not give is `{name, mime, bytes, skipped}` with the reason; an `audio/*` file (a clip, a voice memo) also has `transcript` from the voice process, or `transcript_failed` with the reason, as on Telegram ([telegram.md](telegram.md), Voice notes) |
+| `attachments` | Each file of the message, then of each message it forwards, fetched from `url_private_download` into `inbound_dir/slack/`, named by its sha256, as `{name, mime, bytes, path}`; a file Slack will not give is `{name, mime, bytes, skipped}` with the reason; an `audio/*` file (a clip, a voice memo) also has `transcript` from the voice process, or `transcript_failed` with the reason, as on Telegram ([telegram.md](telegram.md), Voice notes) |
 
 `sender_id` is what Slack's authenticated socket asserts, so a Slack
 record is `verified` the way a Telegram user id is.

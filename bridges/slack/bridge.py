@@ -146,7 +146,7 @@ class SlackBridge:
             or (parse_qs(urlsplit(m.get("permalink") or "").query).get("thread_ts") or [None])[0]
         )
         user = m.get("user") or ""
-        files = m.get("files") or []
+        files = inbound.files_of(m)
         return {
             "id": m["ts"],
             "sent_at": datetime.fromtimestamp(float(m["ts"]), UTC).isoformat(),
@@ -154,7 +154,7 @@ class SlackBridge:
             "sender_name": (await wire.user_name(user) if user else "") or m.get("username", ""),
             "out": bool(user) and user == wire.user_id,
             "reply_to": thread if thread != m["ts"] else None,
-            "text": m.get("text") or "",
+            "text": inbound.said(m, ""),
             "media": {"kind": "document", "name": files[0].get("name", "")} if files else None,
         }
 
