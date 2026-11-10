@@ -713,77 +713,79 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
     project = b.project or {}
     command = project.get("suite") or "true"
     started = time.monotonic()
-    check_dir = workspace.fresh_dir(lay.checks / f"test-{role}-{sha[:12]}")
-    checkout = check_dir / "repo"
+    async with workspace.fresh(lay.checks / f"test-{role}-{sha[:12]}") as check_dir:
+        checkout = check_dir / "repo"
 
-    def out(step: str) -> Path:
-        return lay.checks / f"{check_dir.name}.{step}.out"
+        def out(step: str) -> Path:
+            return lay.checks / f"{check_dir.name}.{step}.out"
 
-    mark = f"test-{ctx.task_id}-{role}"
-    payload: dict[str, Any] = {
-        "commit": sha,
-        "role": role,
-        "command": command,
-        "digest": digest,
-        "exit": None,
-        "tests": None,
-        "junit": None,
-        "duration_s": 0.0,
-        "tail": "",
-        "peak_footprint": 0,
-        "setup": None,
-        "cause": None,
-        "why": None,
-    }
-    if lint:
-        payload["lint"] = None
-
-    def done(**kw) -> dict[str, Any]:
-        payload.update(kw, duration_s=round(time.monotonic() - started, 1))
-        return payload
-
-    try:
-        await asyncio.to_thread(worktree, b.mirror, sha, checkout)
-    except git.GitError as exc:
-        # The mirror holds the commit, so a checkout that fails is the kernel's.
-        return done(cause="kernel", why=f"no checkout of {sha[:12]} from the mirror: {exc}")
-    services = workspace.check_services(lay, check_dir, project, ctx.task_id)
-    try:
-        # A failed start has already cleaned up inside `check_services`.
-        env = await asyncio.to_thread(services.__enter__)
-    except Exception as exc:  # noqa: BLE001  a service step failing is the kernel's, never the commit's
-        return done(cause="kernel", why=f"the check's services did not start: {exc}")
-    try:
-        names = list(project.get("services") or ())
-        ports = [int((project.get("ports") or {})[n]) for n in names]
-        harness = workspace.check_harness(lay, check_dir, ports, env, services=True)
-        commands = list(project.get("setup") or ())
-        setup = await _setup(checkout, harness, commands, f"{mark}-setup", stop, out)
-        payload["setup"] = setup
-        if not setup["ok"]:
-            last = setup["commands"][-1]
-            return done(
-                exit=last["exit"], tail=last["tail"], cause="commit",
-                why=f"setup failed at {role}: {last['command']} exited {last['exit']}",
-            )  # fmt: skip
-        junit = check_dir / JUNIT
-        argv = workspace.sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c",
-                                   command.replace("{junit}", str(junit)))  # fmt: skip
-        run_env = {**workspace.turn_environment(harness), runs.TURN_ENV: mark}
-        code, tail, peak = await _race(
-            argv, cwd=checkout, env=run_env, mark=mark, stop=stop, out=out("suite")
-        )
+        mark = f"test-{ctx.task_id}-{role}"
+        payload: dict[str, Any] = {
+            "commit": sha,
+            "role": role,
+            "command": command,
+            "digest": digest,
+            "exit": None,
+            "tests": None,
+            "junit": None,
+            "duration_s": 0.0,
+            "tail": "",
+            "peak_footprint": 0,
+            "setup": None,
+            "cause": None,
+            "why": None,
+        }
         if lint:
-            lint_out = lay.checks / f"{check_dir.name}.lint.out"
-            payload["lint"] = await _lint(project, checkout, harness, f"{mark}-lint", stop, lint_out)
-    finally:
-        await asyncio.to_thread(services.__exit__, None, None, None)
-    tests, why = await asyncio.to_thread(read_junit, lay.checks, check_dir.name)
-    cause = None
-    reason = None
-    if tests is None and code not in (0, 1):
-        cause, reason = "commit", f"no JUnit report ({why}) and the suite exited {code} at {role}"
-    return done(exit=code, tests=tests, junit=why, tail=tail, peak_footprint=peak, cause=cause, why=reason)
+            payload["lint"] = None
+
+        def done(**kw) -> dict[str, Any]:
+            payload.update(kw, duration_s=round(time.monotonic() - started, 1))
+            return payload
+
+        try:
+            await asyncio.to_thread(worktree, b.mirror, sha, checkout)
+        except git.GitError as exc:
+            # The mirror holds the commit, so a checkout that fails is the kernel's.
+            return done(cause="kernel", why=f"no checkout of {sha[:12]} from the mirror: {exc}")
+        services = workspace.check_services(lay, check_dir, project, ctx.task_id)
+        try:
+            # A failed start has already cleaned up inside `check_services`.
+            env = await asyncio.to_thread(services.__enter__)
+        except Exception as exc:  # noqa: BLE001  a service step failing is the kernel's, never the commit's
+            return done(cause="kernel", why=f"the check's services did not start: {exc}")
+        try:
+            names = list(project.get("services") or ())
+            ports = [int((project.get("ports") or {})[n]) for n in names]
+            harness = workspace.check_harness(lay, check_dir, ports, env, services=True)
+            commands = list(project.get("setup") or ())
+            setup = await _setup(checkout, harness, commands, f"{mark}-setup", stop, out)
+            payload["setup"] = setup
+            if not setup["ok"]:
+                last = setup["commands"][-1]
+                return done(
+                    exit=last["exit"], tail=last["tail"], cause="commit",
+                    why=f"setup failed at {role}: {last['command']} exited {last['exit']}",
+                )  # fmt: skip
+            junit = check_dir / JUNIT
+            argv = workspace.sandboxed(Path(harness["sandbox_profile"]), mark, "/bin/bash", "-c",
+                                       command.replace("{junit}", str(junit)))  # fmt: skip
+            run_env = {**workspace.turn_environment(harness), runs.TURN_ENV: mark}
+            code, tail, peak = await _race(
+                argv, cwd=checkout, env=run_env, mark=mark, stop=stop, out=out("suite")
+            )
+            if lint:
+                lint_out = lay.checks / f"{check_dir.name}.lint.out"
+                payload["lint"] = await _lint(project, checkout, harness, f"{mark}-lint", stop, lint_out)
+        finally:
+            await asyncio.to_thread(services.__exit__, None, None, None)
+        tests, why = await asyncio.to_thread(read_junit, lay.checks, check_dir.name)
+        cause = None
+        reason = None
+        if tests is None and code not in (0, 1):
+            cause, reason = "commit", f"no JUnit report ({why}) and the suite exited {code} at {role}"
+        return done(
+            exit=code, tests=tests, junit=why, tail=tail, peak_footprint=peak, cause=cause, why=reason
+        )
 
 
 # -- base and head runs -------------------------------------------------------------------

@@ -184,63 +184,67 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None, seat: str | N
             }
         lay = workspace.Layout(Path(b.mirror).parent)
         plan_sha = f.plan["sha256"]
-        check_dir = workspace.fresh_dir(lay.checks / f"critique-{plan_sha[:12]}")
-        checkout = check_dir / "repo"
-        try:
-            checks.worktree(b.mirror, f.plan["commit"], checkout)
-            diff = git.trusted(b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
-                               b.base_sha, f.plan["commit"])  # fmt: skip
-        except git.GitError as exc:
-            return {"status": "failed", "state": state, "turn": {"result": f"critique checkout: {exc}"}}
-        try:
-            files = critique_inputs(checkout, rows, f, b, diff)
-        except (OSError, ValueError) as exc:
-            return {"status": "failed", "state": state, "turn": {"result": f"critique inputs: {exc}"}}
-        harness = workspace.check_harness(lay, check_dir, [], b.harness.get("env", {}), services=False)
-        harness_name, seat_model = resolve_seat(seat or SEATS["critique"])
-        model = model_ or seat_model
-        if not await ctx.alive():
-            return {"status": "lock lost"}
-        try:
-            ended = await runs.run_turn(
-                ctx.gateway,
-                ctx.task_id,
-                fresh_for(prompt(files), str(checkout), model, harness, harness_name),
-                dsn=ctx.dsn,
-                state=State.CRITIQUE.value,
-                fresh="critique",
-            )
-        except tasks.TaskStopped:
-            return {"status": "stopped"}
-        async with await db.connect(ctx.dsn) as conn:
-            now = await tasks.status(conn, ctx.task_id)
-        if ended["outcome"] == "stopped":
-            return {"status": "stopped", "state": now, "turn": ended}
-        if ended["outcome"] != "done" or ended["result"].get("is_error"):
-            return {"status": "failed", "state": now, "turn": ended}
-        data, why = final_verdict(ended["result"].get("text"))
-        if data is None:
-            return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
-        if not await ctx.alive():
-            return {"status": "lock lost"}
-        try:
-            verdict, findings, raised = _verdict_fields(data)
-            async with await db.connect(ctx.dsn) as conn:
-                await verdicts.record_critique(
-                    conn,
+        async with workspace.fresh(lay.checks / f"critique-{plan_sha[:12]}") as check_dir:
+            checkout = check_dir / "repo"
+            try:
+                checks.worktree(b.mirror, f.plan["commit"], checkout)
+                diff = git.trusted(b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                                   b.base_sha, f.plan["commit"])  # fmt: skip
+            except git.GitError as exc:
+                return {"status": "failed", "state": state, "turn": {"result": f"critique checkout: {exc}"}}
+            try:
+                files = critique_inputs(checkout, rows, f, b, diff)
+            except (OSError, ValueError) as exc:
+                return {"status": "failed", "state": state, "turn": {"result": f"critique inputs: {exc}"}}
+            harness = workspace.check_harness(lay, check_dir, [], b.harness.get("env", {}), services=False)
+            harness_name, seat_model = resolve_seat(seat or SEATS["critique"])
+            model = model_ or seat_model
+            if not await ctx.alive():
+                return {"status": "lock lost"}
+            try:
+                ended = await runs.run_turn(
+                    ctx.gateway,
                     ctx.task_id,
-                    verdict,
-                    findings=findings,
-                    raised=raised,
-                    leg="session",
-                    model=model,
-                    usd_micros=int(ended.get("metered_usd_micros") or 0),
-                    turn_id=ended["turn_id"],
-                    plan_sha256=plan_sha,
+                    fresh_for(prompt(files), str(checkout), model, harness, harness_name),
+                    dsn=ctx.dsn,
+                    state=State.CRITIQUE.value,
+                    fresh="critique",
                 )
-        except (ValueError, verdicts.VerdictRefused) as exc:
-            return {"status": "failed", "state": now, "turn": {**ended, "result": f"verdict refused: {exc}"}}
-        return {"status": "moved"}
+            except tasks.TaskStopped:
+                return {"status": "stopped"}
+            async with await db.connect(ctx.dsn) as conn:
+                now = await tasks.status(conn, ctx.task_id)
+            if ended["outcome"] == "stopped":
+                return {"status": "stopped", "state": now, "turn": ended}
+            if ended["outcome"] != "done" or ended["result"].get("is_error"):
+                return {"status": "failed", "state": now, "turn": ended}
+            data, why = final_verdict(ended["result"].get("text"))
+            if data is None:
+                return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
+            if not await ctx.alive():
+                return {"status": "lock lost"}
+            try:
+                verdict, findings, raised = _verdict_fields(data)
+                async with await db.connect(ctx.dsn) as conn:
+                    await verdicts.record_critique(
+                        conn,
+                        ctx.task_id,
+                        verdict,
+                        findings=findings,
+                        raised=raised,
+                        leg="session",
+                        model=model,
+                        usd_micros=int(ended.get("metered_usd_micros") or 0),
+                        turn_id=ended["turn_id"],
+                        plan_sha256=plan_sha,
+                    )
+            except (ValueError, verdicts.VerdictRefused) as exc:
+                return {
+                    "status": "failed",
+                    "state": now,
+                    "turn": {**ended, "result": f"verdict refused: {exc}"},
+                }
+            return {"status": "moved"}
 
     return run
 
@@ -336,47 +340,50 @@ def advise(fresh_for: FreshFor):
         if why is not None:
             return await record(error=why)
         lay = workspace.Layout(Path(b.mirror).parent)
-        check_dir = workspace.fresh_dir(lay.checks / f"advice-{turn_id}")
-        checkout = check_dir / "repo"
-        try:
-            await asyncio.to_thread(checks.worktree, b.mirror, head, checkout)
-            diff = await asyncio.to_thread(
-                git.trusted, b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
-                git.fork_point(b.mirror, b.base_sha, f.rebase_tip, head), head,
-            )  # fmt: skip
-            files = _advice_files(rows, f, b, asked, diff, left)
-            await asyncio.to_thread(workspace.write_inputs, checkout, files)
-        except (git.GitError, OSError, ValueError) as exc:
-            return await record(error=f"the advisor's checkout: {exc}")
-        harness = workspace.check_harness(lay, check_dir, [], b.harness.get("env", {}), services=False)
-        if not await alive():
-            return {"status": "lock lost"}
-        try:
-            ended = await runs.run_turn(
-                gateway,
-                task_id,
-                fresh_for(prompt(list(files)), str(checkout), model, harness, harness_name),
-                dsn=dsn,
-                state=asked["state"],
-                fresh="advice",
-            )
-        except tasks.TaskStopped:
-            return {"status": "stopped"}
-        if ended["outcome"] == "stopped":
-            return {"status": "stopped"}
-        result = ended["result"]
-        spent = {"advisor_turn_id": ended["turn_id"], "usd_micros": int(ended.get("metered_usd_micros") or 0)}
-        if ended["outcome"] != "done" or result.get("is_error"):
-            return await record(
-                **spent,
-                error=f"the advisor's turn failed (outcome {ended['outcome']}, exit {ended.get('returncode')})",
-            )
-        if result.get("text") is None and result.get("unrecorded"):
-            return await record(**spent, error=result["unrecorded"])
-        answer = (result.get("text") or "").strip()
-        if not answer:
-            return await record(**spent, error="the advisor's final message was empty")
-        return await record(**spent, answer=answer)
+        async with workspace.fresh(lay.checks / f"advice-{turn_id}") as check_dir:
+            checkout = check_dir / "repo"
+            try:
+                await asyncio.to_thread(checks.worktree, b.mirror, head, checkout)
+                diff = await asyncio.to_thread(
+                    git.trusted, b.mirror, "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                    git.fork_point(b.mirror, b.base_sha, f.rebase_tip, head), head,
+                )  # fmt: skip
+                files = _advice_files(rows, f, b, asked, diff, left)
+                await asyncio.to_thread(workspace.write_inputs, checkout, files)
+            except (git.GitError, OSError, ValueError) as exc:
+                return await record(error=f"the advisor's checkout: {exc}")
+            harness = workspace.check_harness(lay, check_dir, [], b.harness.get("env", {}), services=False)
+            if not await alive():
+                return {"status": "lock lost"}
+            try:
+                ended = await runs.run_turn(
+                    gateway,
+                    task_id,
+                    fresh_for(prompt(list(files)), str(checkout), model, harness, harness_name),
+                    dsn=dsn,
+                    state=asked["state"],
+                    fresh="advice",
+                )
+            except tasks.TaskStopped:
+                return {"status": "stopped"}
+            if ended["outcome"] == "stopped":
+                return {"status": "stopped"}
+            result = ended["result"]
+            spent = {
+                "advisor_turn_id": ended["turn_id"],
+                "usd_micros": int(ended.get("metered_usd_micros") or 0),
+            }
+            if ended["outcome"] != "done" or result.get("is_error"):
+                return await record(
+                    **spent,
+                    error=f"the advisor's turn failed (outcome {ended['outcome']}, exit {ended.get('returncode')})",
+                )
+            if result.get("text") is None and result.get("unrecorded"):
+                return await record(**spent, error=result["unrecorded"])
+            answer = (result.get("text") or "").strip()
+            if not answer:
+                return await record(**spent, error="the advisor's final message was empty")
+            return await record(**spent, answer=answer)
 
     return run
 
@@ -617,76 +624,80 @@ async def _docs_turn(
     there is nothing to keep (a failed or stopped turn, no valid verdict)."""
     c = f.candidate
     lay = workspace.Layout(Path(b.mirror).parent)
-    check_dir = workspace.fresh_dir(lay.checks / f"docs-{c.sha[:12]}")
-    checkout = check_dir / "repo"
-    try:
-        docs_clone(b.mirror, c.sha, checkout, f"{ctx.task_id}-{c.sha[:12]}")
-        files = docs_inputs(checkout, rows, f, b, b.mirror)
-    except (git.GitError, OSError, ValueError) as exc:
-        return {"status": "failed", "state": state, "turn": {"result": f"docs checkout: {exc}"}}
-    env = {**b.harness.get("env", {}), **DOCS_IDENTITY}
-    harness = workspace.check_harness(lay, check_dir, [], env, services=False)
-    harness["env"].update(DOCS_IDENTITY)
-    if not await ctx.alive():
-        return {"status": "lock lost"}
-    try:
-        ended = await runs.run_turn(
-            ctx.gateway,
-            ctx.task_id,
-            fresh_for(prompt(files), str(checkout), model, harness, harness_name),
-            dsn=ctx.dsn,
-            state=State.CHECKS.value,
-            fresh="docs",
-        )
-    except tasks.TaskStopped:
-        return {"status": "stopped"}
-    async with await db.connect(ctx.dsn) as conn:
-        now = await tasks.status(conn, ctx.task_id)
-    if ended["outcome"] == "stopped":
-        return {"status": "stopped", "state": now, "turn": ended}
-    if ended["outcome"] != "done" or ended["result"].get("is_error"):
-        return {"status": "failed", "state": now, "turn": ended}
-    data, why = final_verdict(ended["result"].get("text"))
-    if data is None:
-        return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
-    try:
-        said, findings, head = _docs_fields(data)
-    except Malformed as exc:
-        return {"status": "failed", "state": now, "turn": {**ended, "result": f"verdict refused: {exc}"}}
-    turn_id = ended["turn_id"]
-    kept, dropped, refused = c.sha, [], None
-    if head is not None and head != c.sha:
-        raw = f"refs/valor/docs-raw/{turn_id}"
+    async with workspace.fresh(lay.checks / f"docs-{c.sha[:12]}") as check_dir:
+        checkout = check_dir / "repo"
         try:
-            # In `git.threaded`, so a stop kills the fetch.
-            head = await git.threaded(
-                workspace.fetch_into_mirror, b.mirror, checkout, head, raw, harness["sandbox_profile"],
-                f"docs-fetch-{ctx.task_id}",
-            )  # fmt: skip
-        except workspace.FetchRefused as exc:
-            refused = str(exc)
-        else:
-            try:
-                kept, dropped, refused = kept_prefix(b.mirror, c.sha, head)
-            finally:
-                git.trusted(b.mirror, "update-ref", "-d", raw)
-    git.trusted(b.mirror, "update-ref", f"refs/valor/docs/{turn_id}", kept)
-    payload = {
-        "candidate": c.sha, "turn_id": turn_id, "kept": kept, "dropped": dropped, "refused": refused,
-        "verdict": said, "findings": verdicts._findings(findings), "model": model,
-        "usd_micros": int(ended.get("metered_usd_micros") or 0),
-    }  # fmt: skip
-    if not await ctx.alive():
-        return {"status": "lock lost"}
-    async with await db.connect(ctx.dsn) as conn, conn.transaction():
-        await ledger.lock(conn, f"task:{ctx.task_id}")
-        if await tasks.is_stopped(conn, ctx.task_id):
+            docs_clone(b.mirror, c.sha, checkout, f"{ctx.task_id}-{c.sha[:12]}")
+            files = docs_inputs(checkout, rows, f, b, b.mirror)
+        except (git.GitError, OSError, ValueError) as exc:
+            return {"status": "failed", "state": state, "turn": {"result": f"docs checkout: {exc}"}}
+        env = {**b.harness.get("env", {}), **DOCS_IDENTITY}
+        harness = workspace.check_harness(lay, check_dir, [], env, services=False)
+        harness["env"].update(DOCS_IDENTITY)
+        if not await ctx.alive():
+            return {"status": "lock lost"}
+        try:
+            ended = await runs.run_turn(
+                ctx.gateway,
+                ctx.task_id,
+                fresh_for(prompt(files), str(checkout), model, harness, harness_name),
+                dsn=ctx.dsn,
+                state=State.CHECKS.value,
+                fresh="docs",
+            )
+        except tasks.TaskStopped:
             return {"status": "stopped"}
+        async with await db.connect(ctx.dsn) as conn:
+            now = await tasks.status(conn, ctx.task_id)
+        if ended["outcome"] == "stopped":
+            return {"status": "stopped", "state": now, "turn": ended}
+        if ended["outcome"] != "done" or ended["result"].get("is_error"):
+            return {"status": "failed", "state": now, "turn": ended}
+        data, why = final_verdict(ended["result"].get("text"))
+        if data is None:
+            return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
         try:
-            await verdicts._append(conn, ctx.task_id, DOCS_KEPT, payload)
-        except verdicts.VerdictRefused as exc:
+            said, findings, head = _docs_fields(data)
+        except Malformed as exc:
             return {"status": "failed", "state": now, "turn": {**ended, "result": f"verdict refused: {exc}"}}
-    return {"kept": payload}
+        turn_id = ended["turn_id"]
+        kept, dropped, refused = c.sha, [], None
+        if head is not None and head != c.sha:
+            raw = f"refs/valor/docs-raw/{turn_id}"
+            try:
+                # In `git.threaded`, so a stop kills the fetch.
+                head = await git.threaded(
+                    workspace.fetch_into_mirror, b.mirror, checkout, head, raw, harness["sandbox_profile"],
+                    f"docs-fetch-{ctx.task_id}",
+                )  # fmt: skip
+            except workspace.FetchRefused as exc:
+                refused = str(exc)
+            else:
+                try:
+                    kept, dropped, refused = kept_prefix(b.mirror, c.sha, head)
+                finally:
+                    git.trusted(b.mirror, "update-ref", "-d", raw)
+        git.trusted(b.mirror, "update-ref", f"refs/valor/docs/{turn_id}", kept)
+        payload = {
+            "candidate": c.sha, "turn_id": turn_id, "kept": kept, "dropped": dropped, "refused": refused,
+            "verdict": said, "findings": verdicts._findings(findings), "model": model,
+            "usd_micros": int(ended.get("metered_usd_micros") or 0),
+        }  # fmt: skip
+        if not await ctx.alive():
+            return {"status": "lock lost"}
+        async with await db.connect(ctx.dsn) as conn, conn.transaction():
+            await ledger.lock(conn, f"task:{ctx.task_id}")
+            if await tasks.is_stopped(conn, ctx.task_id):
+                return {"status": "stopped"}
+            try:
+                await verdicts._append(conn, ctx.task_id, DOCS_KEPT, payload)
+            except verdicts.VerdictRefused as exc:
+                return {
+                    "status": "failed",
+                    "state": now,
+                    "turn": {**ended, "result": f"verdict refused: {exc}"},
+                }
+        return {"kept": payload}
 
 
 # -- review ----------------------------------------------------------------------------------
@@ -893,142 +904,146 @@ def review_runner(fresh_for: FreshFor, model: str | None = None, seat: str = SEA
         # both inside fresh services.
         harness_name, seat_model = resolve_seat(seat)
         model = model_ or seat_model
-        check_dir = workspace.fresh_dir(lay.checks / f"review-{candidate[:12]}")
-        checkout = check_dir / "repo"
+        async with workspace.fresh(lay.checks / f"review-{candidate[:12]}") as check_dir:
+            checkout = check_dir / "repo"
 
-        async def commits_own(why: str) -> dict[str, Any]:
-            # The commit's own doing: every rerun would meet it again, so
-            # review says `changes` with the reason and the join moves on.
-            if not registered:
-                return failed(why)
+            async def commits_own(why: str) -> dict[str, Any]:
+                # The commit's own doing: every rerun would meet it again, so
+                # review says `changes` with the reason and the join moves on.
+                if not registered:
+                    return failed(why)
+                if not await ctx.alive():
+                    return {"status": "lock lost"}
+                try:
+                    async with await db.connect(ctx.dsn) as conn:
+                        await verdicts.record_check(
+                            conn, ctx.task_id, machine.Check.REVIEW, "changes",
+                            findings=[{"kind": "commit", "text": why}], leg="kernel",
+                        )  # fmt: skip
+                except verdicts.VerdictRefused as refused:
+                    return failed(f"verdict refused: {refused}")
+                return {"status": "moved"}
+
+            try:
+                await asyncio.to_thread(checks.worktree, b.mirror, candidate, checkout)
+            except git.GitError as exc:
+                return failed(f"review checkout: {exc}")
+            services = workspace.check_services(lay, check_dir, project, ctx.task_id)
+            try:
+                env = await asyncio.to_thread(services.__enter__)
+            except Exception as exc:  # noqa: BLE001  a service step failing is the kernel's
+                return failed(f"the review's services did not start: {exc}")
+            try:
+                names = list(project.get("services") or ())
+                ports = [int((project.get("ports") or {})[n]) for n in names]
+                harness = workspace.check_harness(lay, check_dir, ports, env, services=True)
+                setup_harness = workspace.setup_harness(lay, check_dir, ports, harness)
+                commands = list(project.get("setup") or ())
+                if not await ctx.alive():
+                    return {"status": "lock lost"}
+                try:
+                    async with checks.stop_heard(ctx) as stop:
+                        # A stop written before the LISTEN is read here.
+                        async with await db.connect(ctx.dsn) as conn:
+                            if await tasks.is_stopped(conn, ctx.task_id):
+                                return {"status": "stopped"}
+                        setup = await checks._setup(
+                            checkout, setup_harness, commands, f"review-{ctx.task_id}-setup", stop,
+                            lambda step: lay.checks / f"{check_dir.name}.{step}.out",
+                        )  # fmt: skip
+                except checks._Stopped:
+                    return {"status": "stopped"}
+                seen = {"setup_exit": setup["commands"][-1]["exit"] if commands else None}
+                try:
+                    inputs = review_inputs(rows, f, b, seen)
+                except (OSError, ValueError, git.GitError) as exc:
+                    return failed(f"review inputs: {exc}")
+                try:
+                    await asyncio.to_thread(workspace.write_inputs, checkout, inputs)
+                except ValueError as exc:
+                    return failed(f"review inputs: {exc}")
+                except OSError as exc:
+                    return await commits_own(f"the checkout after setup: {exc}")
+                files = list(inputs)
+                if not await ctx.alive():
+                    return {"status": "lock lost"}
+                try:
+                    ended = await runs.run_turn(
+                        ctx.gateway,
+                        ctx.task_id,
+                        fresh_for(prompt(files), str(checkout), model, harness, harness_name),
+                        dsn=ctx.dsn,
+                        state=f.state.value,
+                        fresh="review",
+                    )
+                except tasks.TaskStopped:
+                    return {"status": "stopped"}
+            finally:
+                await asyncio.to_thread(services.__exit__, None, None, None)
+            async with await db.connect(ctx.dsn) as conn:
+                now = await tasks.status(conn, ctx.task_id)
+            if ended["outcome"] == "stopped":
+                return {"status": "stopped", "state": now, "turn": ended}
+            if ended["outcome"] != "done" or ended["result"].get("is_error"):
+                return {"status": "failed", "state": now, "turn": ended}
+
+            # The verdict and its shape.
+            data, why = final_verdict(ended["result"].get("text"))
+            if data is None:
+                return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
+            try:
+                fields = _review_fields(data)
+            except Malformed as exc:
+                return {
+                    "status": "failed",
+                    "state": now,
+                    "turn": {**ended, "result": f"verdict refused: {exc}"},
+                }
+            usd = int(ended.get("metered_usd_micros") or 0)
             if not await ctx.alive():
                 return {"status": "lock lost"}
-            try:
-                async with await db.connect(ctx.dsn) as conn:
-                    await verdicts.record_check(
-                        conn, ctx.task_id, machine.Check.REVIEW, "changes",
-                        findings=[{"kind": "commit", "text": why}], leg="kernel",
-                    )  # fmt: skip
-            except verdicts.VerdictRefused as refused:
-                return failed(f"verdict refused: {refused}")
-            return {"status": "moved"}
 
-        try:
-            await asyncio.to_thread(checks.worktree, b.mirror, candidate, checkout)
-        except git.GitError as exc:
-            return failed(f"review checkout: {exc}")
-        services = workspace.check_services(lay, check_dir, project, ctx.task_id)
-        try:
-            env = await asyncio.to_thread(services.__enter__)
-        except Exception as exc:  # noqa: BLE001  a service step failing is the kernel's
-            return failed(f"the review's services did not start: {exc}")
-        try:
-            names = list(project.get("services") or ())
-            ports = [int((project.get("ports") or {})[n]) for n in names]
-            harness = workspace.check_harness(lay, check_dir, ports, env, services=True)
-            setup_harness = workspace.setup_harness(lay, check_dir, ports, harness)
-            commands = list(project.get("setup") or ())
-            if not await ctx.alive():
-                return {"status": "lock lost"}
-            try:
-                async with checks.stop_heard(ctx) as stop:
-                    # A stop written before the LISTEN is read here.
+            # The record.
+            if registered:
+                try:
+                    async with await db.connect(ctx.dsn) as conn:
+                        await verdicts.record_check(
+                            conn, ctx.task_id, machine.Check.REVIEW, fields["verdict"], findings=fields["findings"],
+                            predicted_failure=fields["predicted_failure"], requirements=fields["requirements"],
+                            leg="session", turn_id=ended["turn_id"], model=model, usd_micros=usd,
+                        )  # fmt: skip
+                except verdicts.VerdictRefused as exc:
                     async with await db.connect(ctx.dsn) as conn:
                         if await tasks.is_stopped(conn, ctx.task_id):
                             return {"status": "stopped"}
-                    setup = await checks._setup(
-                        checkout, setup_harness, commands, f"review-{ctx.task_id}-setup", stop,
-                        lambda step: lay.checks / f"{check_dir.name}.{step}.out",
-                    )  # fmt: skip
-            except checks._Stopped:
-                return {"status": "stopped"}
-            seen = {"setup_exit": setup["commands"][-1]["exit"] if commands else None}
-            try:
-                inputs = review_inputs(rows, f, b, seen)
-            except (OSError, ValueError, git.GitError) as exc:
-                return failed(f"review inputs: {exc}")
-            try:
-                await asyncio.to_thread(workspace.write_inputs, checkout, inputs)
-            except ValueError as exc:
-                return failed(f"review inputs: {exc}")
-            except OSError as exc:
-                return await commits_own(f"the checkout after setup: {exc}")
-            files = list(inputs)
-            if not await ctx.alive():
-                return {"status": "lock lost"}
-            try:
-                ended = await runs.run_turn(
-                    ctx.gateway,
-                    ctx.task_id,
-                    fresh_for(prompt(files), str(checkout), model, harness, harness_name),
-                    dsn=ctx.dsn,
-                    state=f.state.value,
-                    fresh="review",
-                )
-            except tasks.TaskStopped:
-                return {"status": "stopped"}
-        finally:
-            await asyncio.to_thread(services.__exit__, None, None, None)
-        async with await db.connect(ctx.dsn) as conn:
-            now = await tasks.status(conn, ctx.task_id)
-        if ended["outcome"] == "stopped":
-            return {"status": "stopped", "state": now, "turn": ended}
-        if ended["outcome"] != "done" or ended["result"].get("is_error"):
-            return {"status": "failed", "state": now, "turn": ended}
-
-        # The verdict and its shape.
-        data, why = final_verdict(ended["result"].get("text"))
-        if data is None:
-            return {"status": "failed", "state": now, "turn": {**ended, "result": f"no verdict: {why}"}}
-        try:
-            fields = _review_fields(data)
-        except Malformed as exc:
-            return {"status": "failed", "state": now, "turn": {**ended, "result": f"verdict refused: {exc}"}}
-        usd = int(ended.get("metered_usd_micros") or 0)
-        if not await ctx.alive():
-            return {"status": "lock lost"}
-
-        # The record.
-        if registered:
-            try:
-                async with await db.connect(ctx.dsn) as conn:
-                    await verdicts.record_check(
-                        conn, ctx.task_id, machine.Check.REVIEW, fields["verdict"], findings=fields["findings"],
-                        predicted_failure=fields["predicted_failure"], requirements=fields["requirements"],
-                        leg="session", turn_id=ended["turn_id"], model=model, usd_micros=usd,
-                    )  # fmt: skip
-            except verdicts.VerdictRefused as exc:
-                async with await db.connect(ctx.dsn) as conn:
-                    if await tasks.is_stopped(conn, ctx.task_id):
-                        return {"status": "stopped"}
-                return {
-                    "status": "failed",
-                    "state": now,
-                    "turn": {**ended, "result": f"verdict refused: {exc}"},
+                    return {
+                        "status": "failed",
+                        "state": now,
+                        "turn": {**ended, "result": f"verdict refused: {exc}"},
+                    }
+                return {"status": "moved"}
+            async with await db.connect(ctx.dsn) as conn, conn.transaction():
+                await ledger.lock(conn, f"task:{ctx.task_id}")
+                if await tasks.is_stopped(conn, ctx.task_id):
+                    return {"status": "stopped"}
+                compared = {
+                    "seat": seat,
+                    "model": model,
+                    "candidate": candidate,
+                    "verdict": fields["verdict"],
+                    "findings": verdicts._findings(fields["findings"]),
+                    "predicted_failure": fields["predicted_failure"],
+                    "turn_id": ended["turn_id"],
+                    "usd_micros": usd,
                 }
-            return {"status": "moved"}
-        async with await db.connect(ctx.dsn) as conn, conn.transaction():
-            await ledger.lock(conn, f"task:{ctx.task_id}")
-            if await tasks.is_stopped(conn, ctx.task_id):
-                return {"status": "stopped"}
-            compared = {
-                "seat": seat,
-                "model": model,
-                "candidate": candidate,
-                "verdict": fields["verdict"],
-                "findings": verdicts._findings(fields["findings"]),
-                "predicted_failure": fields["predicted_failure"],
-                "turn_id": ended["turn_id"],
-                "usd_micros": usd,
-            }
-            try:
-                await verdicts._append(conn, ctx.task_id, REVIEW_COMPARED, compared)
-            except verdicts.VerdictRefused as exc:
-                return {
-                    "status": "failed",
-                    "state": now,
-                    "turn": {**ended, "result": f"verdict refused: {exc}"},
-                }
-        return {"status": "compared", "state": now}
+                try:
+                    await verdicts._append(conn, ctx.task_id, REVIEW_COMPARED, compared)
+                except verdicts.VerdictRefused as exc:
+                    return {
+                        "status": "failed",
+                        "state": now,
+                        "turn": {**ended, "result": f"verdict refused: {exc}"},
+                    }
+            return {"status": "compared", "state": now}
 
     return run

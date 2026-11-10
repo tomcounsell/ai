@@ -24,7 +24,7 @@ workspace still reads. Package caches are the Mac's own (`~/.cache/uv`, uv's Pyt
 | `kernel.git/` | the kernel mirror, borrowing the cache's objects as `origin.git/` does: seeded with the base, and fed each plan commit, candidate, and docs head (a docs session's kept head under `refs/valor/docs/`); the merge predicate and the merge read it |
 | `home/` | `pgpass` and the profiles: `turn.sb` and `service.sb` |
 | `tmp/` | the working session's `TMPDIR`: emptied before each turn starts and removed once it ends (`core/runs.py`), so a turn's scratch never outlives it; a fresh session's is its `checks/<name>/tmp/` |
-| `state/work/`, `checks/` | the working session's Claude Code config; each fresh session's checkout and `claude/`; each suite run's checkout |
+| `state/work/`, `checks/` | the working session's Claude Code config; each fresh session's checkout and `claude/`; each suite run's checkout. A check's `checks/<name>/` lasts as long as its run (`workspace.fresh`); its `checks/<name>.<step>.out` logs stay until the workspace goes |
 | `pg/`, `redis/`, `ports.json` | the task's services, below, and their ports, recorded when chosen |
 | `setup/`, `turns/` | each setup command's whole output, and each turn's whole stdout and stderr |
 

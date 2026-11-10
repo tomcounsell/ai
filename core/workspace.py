@@ -18,6 +18,8 @@ starts, from a project spec the kernel reads (never the candidate).
         tmp/               the working session's TMPDIR, emptied when each
                            turn ends (`core.runs`)
         checks/<name>/     a fresh session's repo/, tmp/ (its TMPDIR), claude/
+                           for one run, removed when it ends (`fresh`);
+                           its <name>.<step>.out logs stay beside it
         pg/data            the task's Postgres cluster (TCP on loopback only)
         redis/             the task's redis-server, when the project asks
         ports.json         the task's service ports, written when they are
@@ -38,6 +40,7 @@ the sending side run inside the turn's own sandbox, the receiving side with
 fsck.
 """
 
+import asyncio
 import atexit
 import contextlib
 import ctypes
@@ -60,7 +63,7 @@ import threading
 import time
 import tomllib
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -1484,6 +1487,24 @@ def fresh_dir(check_dir: Path) -> Path:
     for d in (check_dir / "tmp", check_dir / "claude", check_dir / "pi", check_dir / "codex"):
         d.mkdir(parents=True)
     return check_dir
+
+
+@contextlib.asynccontextmanager
+async def fresh(check_dir: Path) -> AsyncIterator[Path]:
+    """A fresh session's directory for one run (`fresh_dir`), removed when
+    the run ends however it ends, so a workspace does not keep a checkout
+    and venv for every check run. Both are done in a worker thread, off the
+    event loop. The run's `<name>.<step>.out` logs beside it stay. A removal
+    that fails is logged and the run's result stands; the next run's
+    `fresh_dir` clears what is left."""
+    await asyncio.to_thread(fresh_dir, check_dir)
+    try:
+        yield check_dir
+    finally:
+        try:
+            await asyncio.to_thread(rmtree, check_dir)
+        except OSError as exc:
+            print(f"{check_dir}: not removed after its run: {exc!r}", file=sys.stderr, flush=True)
 
 
 def check_harness(
