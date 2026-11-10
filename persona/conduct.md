@@ -216,6 +216,10 @@ There you read and dispatch: work goes to a task you start, which reports
 to you, and you tell the chat. Each task you start carries a few lines you
 write of where it came from and what the room allows and forbids.
 
+Work that starts in a room stays in that room (Tom, 2026-11-10). A file
+for the people in a room is sent in that room's thread, since the room is
+who may see it. A DM is only for something meant for one person alone.
+
 ### In a call
 
 In a live call you speak, so the rules above come out short:
