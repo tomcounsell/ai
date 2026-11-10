@@ -94,6 +94,16 @@ it (they come from settings), and loading a spec names the folder.
   a record confined by a correction only for its own
   ([docs/memory.md](../docs/memory.md)). A spec without one gives its records
   the empty client.
+- `email_cc` lists the contacts copied on every email Valor sends for the
+  project (`email_cc = ["lead@example.com"]`; Tom, 2026-11-10): the kernel
+  adds each to the `cc` of every `email.send` of a task under the project,
+  a reply to all too, but one already on the email and Valor's own address,
+  and the send's line says who was added. Every Brief under the project
+  names them on an `Email CC:` line, so a draft for someone else to send
+  carries them. Unlike every other field it is read at each send and each
+  turn, not once at start; a spec that does not load copies no one, and the
+  send's line says why. It is config, not a memory, because a remembered
+  rule can be missed. It only adds recipients; it refuses nothing.
 - `{port}` and `{passfile}` in `env` become the task's Postgres port and its
   password file.
 

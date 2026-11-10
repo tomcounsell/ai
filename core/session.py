@@ -30,8 +30,9 @@ one. A signal that means nothing in the state, a plan not committed, or a
 candidate on a tree with uncommitted changes goes to `errors`, and the next
 prompt says so. The merge is the kernel's to request: a turn's request for
 one never reaches the broker. An `email.send` naming `reply_to` is made
-the reply to all of that received email before it is requested, so the
-request names its final recipients.
+the reply to all of that received email before it is requested, and every
+`email.send` of a task under a project gets the project's `email_cc`
+copied (`_copy`), so the request names its final recipients.
 
 Every question is a `question.asked` row and its answer a
 `question.answered` row with Tom's provenance, and his feedback a
@@ -988,6 +989,22 @@ async def _reply_all(conn, action: broker.Action) -> tuple[broker.Action, str | 
     return broker.Action("email.send", ",".join(sorted(payload["to"])), payload), None
 
 
+async def _copy(conn, task_id: str, brief: tasks.Brief | None, action: broker.Action):
+    """An `email.send` with its project's `email_cc` copied (`mail.copied`),
+    the spec read now by name: the action, the addresses added, and why
+    none could be when the spec does not load (the send goes unchanged)."""
+    b = brief or await tasks.brief(conn, task_id)
+    name = (b.project or {}).get("name")
+    if not name:
+        return action, [], None
+    try:
+        spec = workspace.Spec.load(name)
+    except workspace.Refused as exc:
+        return action, [], str(exc)
+    payload, added = mail.copied(action.payload, spec.email_cc, settings.email_address)
+    return broker.Action(action.action_type, action.target, payload), added, None
+
+
 async def record(
     conn,
     task_id: str,
@@ -1034,6 +1051,10 @@ async def record(
                 if said:
                     effects.append({**entry, "error": said})
                     continue
+            copy = {}
+            if action.action_type == "email.send":
+                action, added, why = await _copy(conn, task_id, brief, action)
+                copy = {"copied": added} if added else {"not_copying": why} if why else {}
             outcome = await broker.request(
                 conn,
                 performers or broker.Performers(),
@@ -1041,7 +1062,13 @@ async def record(
                 action,
                 request_id=f"{turn_id}/{entry['file']}",
             )
-            entry = {**entry, "effect_id": outcome.effect_id, "kind": outcome.kind, "error": outcome.error}
+            entry = {
+                **entry,
+                **copy,
+                "effect_id": outcome.effect_id,
+                "kind": outcome.kind,
+                "error": outcome.error,
+            }
         effects.append(entry)
     did = await reactions.did(conn, task_id, turn_id, effects)
     async with conn.transaction():
@@ -1651,5 +1678,12 @@ def _effects_report(
             "failed": f"failed: {e['error']}",
         }.get(kind, kind)
         place = (places or {}).get(e["file"])
-        lines.append(f"- {e['file']} (effect {e['effect_id']}): {said}" + (f", {place}" if place else ""))
+        copy = (
+            f"; the project's email_cc added to its cc: {', '.join(e['copied'])}" if e.get("copied")
+            else f"; the project's email_cc not added: {e['not_copying']}" if e.get("not_copying")
+            else ""
+        )  # fmt: skip
+        lines.append(
+            f"- {e['file']} (effect {e['effect_id']}): {said}" + (f", {place}" if place else "") + copy
+        )
     return "\n".join(lines)

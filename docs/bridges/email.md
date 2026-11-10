@@ -186,7 +186,12 @@ through `mail.reply_all`: the original sender in `To`, every other
 `To` and `Cc` address in `Cc`, minus Valor's own, lowercased and without
 repeats, with a `Re:` subject, `In-Reply-To`, and the whole `References`
 chain. A `reply_to` that names no received email is
-an error to the turn and requests nothing. Tom sees the recipient list in
+an error to the turn and requests nothing. Every `email.send` of a task
+under a project, a reply-all or not, then gets the project's `email_cc`
+(`projects/README.md`) added to `Cc` through `mail.copied`: in the spec's
+order, never one already in `To` or `Cc` and never Valor's own; the spec
+is read at the send, and one that does not load sends unchanged and says so
+on the send's line. Tom sees the recipient list in
 the send's report. The bridge sends to
 the addresses in the payload and to no others.
 
@@ -302,8 +307,8 @@ and reports read the operator as the kernel does.
 | `bridges/email/imap.py` | The watch: search, receive, and IDLE (`IDLE_REISSUE_S`) |
 | `bridges/email/smtp.py` | `perform` and `lookup` |
 | `bridges/email/stop.py` | `Ends`: a stop shuts a blocked connection down so its thread returns |
-| `core/mail.py` | `reply_all`, the message builder, and its encoded size |
-| `core/session.py` | A `reply_to` request filled in as reply-all |
+| `core/mail.py` | `reply_all`, `copied` (a project's `email_cc`), the message builder, and its encoded size |
+| `core/session.py` | A `reply_to` request filled in as reply-all; the project's `email_cc` added (`_copy`) |
 
 The bridge imports only `core.bridge`, `core.intake`, `core.broker`,
 `core.settings`, `core.db`, `core.credentials`, `core.notices`, and

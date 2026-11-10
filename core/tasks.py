@@ -359,6 +359,17 @@ def channel_text(offered: list[str], name: str = "channel.md") -> str:
     return (Path(settings.stages_dir) / name).read_text().strip().replace("{effects}", effects)
 
 
+def email_cc(name: str | None) -> tuple[str, ...]:
+    """The project's `email_cc` but Valor's own address, read now; none for
+    no project or a spec that does not load (its send says why,
+    `session._copy`)."""
+    try:
+        listed = workspace.Spec.load(name).email_cc if name else ()
+    except workspace.Refused:
+        return ()
+    return tuple(a for a in listed if a != settings.email_address.lower())
+
+
 def role_text(name: str) -> str:
     """The guidance of the role Valor plays in a chat (`intake.role`); a
     role with no file raises `FileNotFoundError`."""
@@ -380,7 +391,8 @@ async def dispatch(
     """The text a turn receives: the persona first (`persona/`, rendered
     now from the kernel's own checkout, never from the workspace), then the
     Brief: the task's commitments (with the `Context:` its starting chat
-    session wrote, when it has one) plus every
+    session wrote, when it has one, and its project's `Email CC:`, read
+    now, when it lists one) plus every
     correction in force, rendered from the ledger now, then what memory
     recalls for it (`core.memory.recall`; none for a fresh session), and the
     memory index of each other chat session of its project (`core.record.memories`; none
@@ -426,6 +438,12 @@ async def dispatch(
         listed = repos((b.project or {}).get("name"))
         if listed:
             head += f"\nRepos: {listed}"
+    cc = email_cc((b.project or {}).get("name"))
+    if cc:
+        head += (
+            f"\nEmail CC: {', '.join(cc)} (the project's email_cc, added to the cc of every email.send "
+            "under this project; a draft for someone else to send names them on its Cc line)"
+        )
     head += f"\nEffect ceiling: {b.max_effect_class}"
     if b.workspace and not fresh:
         head += f"\nWorkspace: {b.workspace}"

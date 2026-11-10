@@ -134,7 +134,12 @@ class Spec:
 
     `calendar` (`{id = "...", since = DATE}`) names the Google Calendar the
     `hours` routine writes Valor's working time on this project to, from
-    `since` on (`routines/hours`); `since` is kept as `YYYY-MM-DD`."""
+    `since` on (`routines/hours`); `since` is kept as `YYYY-MM-DD`.
+
+    `email_cc` names the contacts copied on every email Valor sends for the
+    project (lowercased; Tom, 2026-11-10). It is the one field read live,
+    by name, at each send and each Brief (`session._copy`, `tasks.dispatch`),
+    so a running session copies the list as it is now."""
 
     name: str
     repo: str
@@ -161,6 +166,7 @@ class Spec:
     knowledge_base: str | None = None
     client: str | None = None
     calendar: dict[str, str] | None = None
+    email_cc: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Spec:
@@ -255,6 +261,11 @@ class Spec:
             ):
                 raise Refused('calendar is {id = "<calendar id>", since = <date>}')
             calendar = {"id": calendar["id"], "since": calendar["since"].isoformat()}
+        email_cc = raw.get("email_cc") or []
+        if not isinstance(email_cc, list) or not all(
+            isinstance(a, str) and a.strip().count("@") == 1 for a in email_cc
+        ):
+            raise Refused('email_cc is a list of email addresses: ["name@example.com", ...]')
         return cls(
             name=raw["name"],
             repo=raw["repo"],
@@ -281,6 +292,7 @@ class Spec:
             knowledge_base=kb,
             client=client,
             calendar=calendar,
+            email_cc=tuple(a.strip().lower() for a in email_cc),
         )
 
     def takes(self, chat: str) -> str | None:

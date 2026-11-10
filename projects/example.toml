@@ -22,6 +22,8 @@ chats = [
     "slack:T0EXAMPLE1/*",
 ]
 mentions = ["telegram:-1009000000011"]
+# Copied on every email Valor sends for the project.
+email_cc = ["lead@example.com"]
 board = "slack:T0EXAMPLE1/C0EXAMPLE2"
 rooms."telegram:-1009000000010" = "Engineering on the example app."
 rooms."telegram:-1009000000011" = "The client's team chat."

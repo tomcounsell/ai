@@ -1,5 +1,5 @@
-"""Email in the kernel: the reply-all a turn's `email.send` may ask for, and
-the message an `email.send` payload becomes.
+"""Email in the kernel: the reply-all a turn's `email.send` may ask for, the
+project's contacts it copies, and the message an `email.send` payload becomes.
 
 `email_message` is the one builder: the email bridge's performer sends
 what it builds, and `email_encoded_bytes` measures what it builds, so the
@@ -125,3 +125,21 @@ def reply_all(row: dict[str, Any], own: str) -> dict[str, Any]:
         "in_reply_to": row["message_id"],
         "references": [t["id"] for t in row.get("thread") or []] + [row["message_id"]],
     }
+
+
+def copied(payload: dict[str, Any], cc: tuple[str, ...], own: str) -> tuple[dict[str, Any], list[str]]:
+    """`payload` with each of `cc` (a project's `email_cc`) appended to its
+    `cc`, in order, but those already in `to` or `cc` (in any case) and
+    Valor's own address (`own`), and the addresses added. A payload whose
+    `to` or `cc` is not a list of strings is returned as it is, for the
+    bridge to refuse."""
+    to, have = payload.get("to"), payload.get("cc") or []
+    if (
+        not isinstance(to, list)
+        or not isinstance(have, list)
+        or not all(isinstance(a, str) for a in [*to, *have])
+    ):
+        return payload, []
+    present = {a.strip().lower() for a in [*to, *have]} | {own.lower()}
+    added = [a for i, a in enumerate(cc) if a not in present and a not in cc[:i]]
+    return ({**payload, "cc": [*have, *added]}, added) if added else (payload, [])
