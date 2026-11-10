@@ -12,6 +12,12 @@ approval step, isolation, sandbox rule, denial, allowlist, refusal,
 capability removal, or verification layer) and the plan file carries no
 grant from Tom for it, the review fails: your verdict is `changes`.
 
+When the repository has its own review skill (`.claude/skills/`, such as
+`do-review`), its verdict is the review of record: read the verdict the
+build posted on each pull request rather than reviewing a second time. A
+pull request without one at its current head, or with one asking for
+changes, makes your verdict `changes`.
+
 Bloat fails the review too (`CLAUDE.md` rule 8). Ask of every added line
 what the request needs it for. Dead code, a second mechanism for a job one
 already does, handling for a failure that has not happened, a component

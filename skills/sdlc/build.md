@@ -25,6 +25,15 @@ and test, review, and docs check it before Tom sees it. A question only Tom
 can answer goes in `.valor/question.md` instead; for a second opinion,
 `.valor/advice.md`.
 
+**The repository's own process.** When the repository has its own SDLC
+skills (a build or review skill in `.claude/skills/`, such as `do-build`
+and `do-review`), build through them as its own engineers would: its build
+skill's stages, and its review skill run in a fresh agent that did not
+write the code, posting the verdict its pull request gate reads, at the
+head you push. A gate waiting on a review you can run is yours to clear,
+never left to the repository's people. A check you cannot run (an `.env`
+or access you lack) is named in the report with exactly what is missing.
+
 **A public repository.** Check once whether the repository is public
 (`gh repo view --json visibility`). If it is, no commit carries client or
 business details: nothing identifying a client or a person other than Tom,
