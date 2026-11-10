@@ -205,7 +205,9 @@ Any other DM, and a channel no project lists, is not received.
 Valor's own posts (the event's `user` is the token's own id) are dropped,
 live and in gap fill; so are bot messages and Slackbot's (`USLACKBOT`,
 which carry no `bot_id`), and every subtype but none,
-`file_share`, `thread_broadcast`, and `me_message`.
+`file_share`, `thread_broadcast`, and `me_message`. They reach a session only as the
+`posted` of the next message someone else writes there (The record,
+below).
 
 **Tom's reactions.** A `reaction_added` by one of
 `VALOR_OPERATOR_SLACK_IDS` on Valor's own post, in a chat this bridge
@@ -229,6 +231,7 @@ and one on someone else's post, is acked and dropped.
 | `text` | Slack's `text` as stored (entities and wrapped links included), then each forwarded message (an `is_share` attachment, where Slack puts a forward's words, leaving `text` empty) as `Forwarded from <author>:` and its text quoted; except that a mention of Valor's own user, `<@U..>`, is written `<@U..|valor>`, so the kernel's mention rule sees it in a mentions-only chat (the thread's texts likewise) |
 | `reply_to`, `topic_id` | The thread root (`thread_ts`) of a reply; none for a top-level message |
 | `thread` | The root and the replies before this one, the last 50 in all, Valor's own posts included, nothing downloaded |
+| `posted`, `posted_failed` | Valor's own posts in the conversation after the last message anyone else wrote, oldest first, the newest 10 (`POSTED`), each `{id, sent_at, text, files}` (file names, nothing downloaded), whichever session or Mac sent them: for a reply, from the thread already read; for a top-level message, one `conversations.history` page ending at it. A history read that fails leaves `posted` empty and `posted_failed` naming why; the message is still received |
 | `attachments` | Each file of the message, then of each message it forwards, fetched from `url_private_download` into `inbound_dir/slack/`, named by its sha256, as `{name, mime, bytes, path}`; a file Slack will not give is `{name, mime, bytes, skipped}` with the reason; an `audio/*` file (a clip, a voice memo) also has `transcript` from the voice process, or `transcript_failed` with the reason, as on Telegram ([telegram.md](telegram.md), Voice notes) |
 
 `sender_id` is what Slack's authenticated socket asserts, so a Slack

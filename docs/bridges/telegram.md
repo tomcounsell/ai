@@ -68,6 +68,7 @@ interpretation.
 | `topic_id` | The Telegram forum topic, when the message is in one; for Slack, the thread root of a reply |
 | `attachments` | Files the bridge downloaded, each `{name, mime, bytes, path}`, or `{name, mime, bytes, skipped}` with the reason it could not fetch the file; an `audio/*` file also has `transcript`, or `transcript_failed` with the reason |
 | `headers` | Channel facts with no field above: for Telegram, `grouped_id` of an album; for email, the raw headers |
+| `posted`, `posted_failed` | Slack only: Valor's own posts in the conversation since anyone else's last message, oldest first, whichever session or Mac sent them, or why they could not be read ([slack.md](slack.md), The record). The session reads them under the message (`intake.chat_line`), less its own sends |
 
 `receive` appends one `message.received` row to the ledger on the bridge's
 channel stream (the same pattern as the `corrections` stream: `task_id` names
