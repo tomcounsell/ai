@@ -97,7 +97,8 @@ def test_bench_replays_each_question_on_the_store_as_it_stood(dsn, specs, tmp_pa
     finally:
         with psycopg.connect(owner, autocommit=True) as conn:
             conn.execute(f'DROP DATABASE IF EXISTS "{scratch_name}"')
-    result = json.loads(next(out.glob("v-test-*.json")).read_text())
+    (scores,) = out.glob("v-test-????-??-??.json")
+    result = json.loads(scores.read_text())
     rows = {q["id"]: q for q in result["questions"]}
     assert rows["june"]["with_undated"]["at10"] and rows["june"]["dated_only"]["at10"]
     assert rows["june"]["with_undated"]["leaked"] == []
