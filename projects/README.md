@@ -32,7 +32,8 @@ it (they come from settings), and loading a spec names the folder.
   the setup commands, the suite and lint commands, and the environment.
 - The suite command is the kernel's, never the candidate's: a command the
   candidate chose could be `true`. A spec is read once at start and copied
-  into the task's Brief, so editing it never changes a running task.
+  into the task's Brief, so editing it never changes a running task; only
+  `email_cc` is read live, at each send and each turn (below).
 - Without `merge_url` the merge lands on the task's own bare origin. With
   it, the merge lands on that URL; the kernel records it, and the target
   branch, in the task's Brief at start, and no turn changes either. The

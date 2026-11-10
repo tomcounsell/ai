@@ -602,7 +602,10 @@ A chat session's Brief also carries its chat's `Room:` description there
 (`skills/sdlc/roles/<role>.md`, from the spec's `chat_roles`; `intake.role`)
 after `converse.md`, and, when its spec lists
 `projects`, a `Repos:` line naming each repository (`tasks.repos`), so
-both survive compaction as the persona does.
+both survive compaction as the persona does. Every Brief, a chat
+session's or a task's, whose project's spec lists `email_cc` carries an
+`Email CC:` line naming them, read from the spec at each turn
+(`tasks.email_cc`), so a draft for someone else to send names them too.
 
 **What the kernel renders.** `core/persona.py` renders `persona/` on every
 dispatch, from the kernel's own checkout (`settings.persona_dir`, never the
