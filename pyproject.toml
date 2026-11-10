@@ -52,5 +52,5 @@ paths = ["core", "harnesses", "bridges", "routines", "tools", "ui", "api", "memo
 min_confidence = 60
 ignore_names = [
     "handle_*", "*DeclHandler", "Meta", "words", "validity", "graph", "isolation_level",
-    "created_at", "error_cost", "on_abstain", "consumer", "serves",
+    "created_at", "error_cost", "on_abstain", "consumer", "serves", "posted_failed",
 ]

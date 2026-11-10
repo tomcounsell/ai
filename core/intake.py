@@ -144,6 +144,11 @@ class Inbound:
     # {name, mime, bytes, path} or {..., skipped}; audio also has transcript or transcript_failed
     attachments: list[dict] = field(default_factory=list)
     headers: dict[str, str | list[str]] = field(default_factory=dict)
+    # Slack: Valor's own posts in the conversation after anyone else's last
+    # message, {id, sent_at, text, files}, oldest first, whichever session or
+    # Mac sent them; or why they could not be read
+    posted: list[dict] = field(default_factory=list)
+    posted_failed: str | None = None
 
 
 @dataclass(frozen=True)
@@ -752,8 +757,10 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
         "kind",
         "text",
         "attachments",
+        "posted_failed",
     )
     under = await _replying_to(conn, replied, post)
+    posted = await _not_its_own(conn, task_id, p)
     await ledger.append(
         conn,
         task_id,
@@ -761,6 +768,7 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
         {
             **{k: p.get(k) for k in keep},
             "thread_tag": thread_tag(p),
+            **({"posted": posted} if posted else {}),
             **({"replying_to": under} if under else {}),
             "provenance": ledger.provenance(by, channel, False),
         },
@@ -771,6 +779,22 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
             if machine.fold(await ledger.read(conn, t)).state not in tasks.TERMINAL:
                 await tasks.stop(conn, t, reason=f"Tom said stop ({p['message_id']})", by="tom", via=channel)
     return as_
+
+
+async def _not_its_own(conn, task_id: str, p: dict[str, Any]) -> list[dict]:
+    """The message's `posted`, less the posts this ledger records as the
+    session's own sends: it has those already."""
+    posted = p.get("posted") or []
+    if not posted:
+        return []
+    own = await (
+        await conn.execute(
+            f"SELECT e->>'message_id' {_SENT}AND task_id = %s AND e->>'channel' = %s AND e->>'chat_id' = %s "
+            "AND e->>'message_id' = ANY(%s)",
+            (task_id, p["channel"], p["chat_id"], [m.get("id") for m in posted]),
+        )
+    ).fetchall()
+    return [m for m in posted if m.get("id") not in {r[0] for r in own}]
 
 
 # How much of the post a reply is under the session reads with it.
@@ -965,7 +989,26 @@ def chat_line(m: dict[str, Any], reaction: str | None = None) -> str:
             "\n".join("  > " + line for line in str(under.get("text") or "").splitlines()) or "  > (no text)"
         )
         post = f"\n  under {whose}:\n{quoted}"
-    return f"[{when}] {who} ({ids}): {said}" + post + (f"\n{files}" if files else "")
+    return f"[{when}] {who} ({ids}): {said}" + post + (f"\n{files}" if files else "") + _posted(m)
+
+
+def _posted(m: dict[str, Any]) -> str:
+    """Under a message, Valor's own posts in the chat just before it that
+    the session may not have sent itself, or why they could not be read."""
+    if m.get("posted_failed"):
+        return f"\n  (your posts here before it could not be read: {m['posted_failed']})"
+    if not m.get("posted"):
+        return ""
+    lines = ["", "  before it, you posted here (from this session, another, or another Mac):"]
+    for post in m["posted"]:
+        try:
+            when = datetime.fromisoformat(str(post.get("sent_at"))).astimezone(UTC).strftime("%H:%M UTC")
+        except ValueError:
+            when = "an unknown time"
+        lines.append(f"  [{when}] message {post.get('id')}:")
+        lines += ["  > " + line for line in str(post.get("text") or "").splitlines()] or ["  > (no text)"]
+        lines += [f"  > (file: {name})" for name in post.get("files") or []]
+    return "\n".join(lines)
 
 
 _FILLER = frozenset(

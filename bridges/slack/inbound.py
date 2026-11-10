@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bridges.slack.wire import NotConnected, Skipped, SlackWire
+from bridges.slack.wire import NotConnected, Skipped, SlackWire, WireError
 
 log = logging.getLogger("valor.slack")
 
@@ -29,6 +29,7 @@ SUBTYPES = {None, "file_share", "thread_broadcast", "me_message"}
 # Slackbot's user id: its DM posts (reminders, notices) carry no `bot_id`.
 SLACKBOT = "USLACKBOT"
 THREAD = 50  # the root and the replies before this one, at most
+POSTED = 10  # Valor's own posts carried with a message, at most
 
 
 def person(team: str, msg: dict[str, Any]) -> str:
@@ -157,20 +158,22 @@ async def attachment(wire: SlackWire, f: dict[str, Any], inbound_dir: Path) -> d
     }
 
 
-async def thread(wire: SlackWire, channel: str, msg: dict[str, Any]) -> list[dict[str, Any]]:
-    """The thread before this reply, oldest first: the root and the last
-    replies, `THREAD` in all, Valor's own posts included; nothing
-    downloaded."""
-    top = root(msg)
-    if top is None:
-        return []
+async def _before(wire: SlackWire, channel: str, msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every message of this reply's thread before it, oldest first."""
     before: list[dict[str, Any]] = []
     cursor = None
     while True:
-        page, cursor = await wire.replies(channel, top, cursor=cursor)
+        page, cursor = await wire.replies(channel, root(msg), cursor=cursor)
         before += [m for m in page if m["ts"] < msg["ts"]]
         if cursor is None or (page and page[-1]["ts"] >= msg["ts"]):
             break
+    return before
+
+
+def thread(wire: SlackWire, top: str, before: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The thread before this reply, oldest first: the root and the last
+    replies, `THREAD` in all, Valor's own posts included; nothing
+    downloaded."""
     first = [m for m in before if m["ts"] == top]
     rest = [m for m in before if m["ts"] != top][-(THREAD - len(first)) :]
     return [
@@ -180,6 +183,26 @@ async def thread(wire: SlackWire, channel: str, msg: dict[str, Any]) -> list[dic
             "attachments": [skipped(f, "earlier message") for f in files_of(m)],
         }
         for m in first + rest
+    ]
+
+
+def posts(wire: SlackWire, before: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Valor's own posts at the end of `before` (oldest first), after the
+    last message anyone else wrote, `POSTED` at most: what the session the
+    message reaches may not have sent itself (Tom, 2026-11-10)."""
+    run: list[dict[str, Any]] = []
+    for m in reversed(before):
+        if m.get("user") != wire.user_id:
+            break
+        run.append(m)
+    return [
+        {
+            "id": m["ts"],
+            "sent_at": datetime.fromtimestamp(float(m["ts"]), UTC).isoformat(),
+            "text": said(m, wire.user_id),
+            "files": [f.get("name") or f.get("title") or "file" for f in files_of(m)],
+        }
+        for m in reversed(run[:POSTED])
     ]
 
 
@@ -198,6 +221,15 @@ async def build(
             log.info("file %s of %s skipped: %s", f.get("id"), msg["ts"], e)
             files.append(skipped(f, f"download failed: {type(e).__name__}"))
     top = root(msg)
+    before, failed = [], None
+    if top is not None:
+        before = await _before(wire, channel, msg)
+    else:
+        try:  # context, like a file: a failed read is named, not retaken
+            page, _ = await wire.history(channel, latest=msg["ts"], limit=POSTED)
+            before = list(reversed(page))
+        except WireError as e:
+            failed = f"{type(e).__name__}: {e}"
     return {
         "channel": "slack",
         "chat_id": chat,
@@ -208,8 +240,10 @@ async def build(
         "sent_at": datetime.fromtimestamp(float(msg["ts"]), UTC).isoformat(),
         "text": said(msg, wire.user_id),
         "reply_to": top,
-        "thread": await thread(wire, channel, msg),
+        "thread": thread(wire, top, before) if top else [],
         "topic_id": top,
         "attachments": files,
         "headers": {},
+        "posted": posts(wire, before),
+        "posted_failed": failed,
     }

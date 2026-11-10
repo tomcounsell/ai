@@ -405,6 +405,9 @@ class SlackWire:
     async def replies(self, channel, ts, cursor=None):
         return [{"ts": ts, "text": "<@UVALOR> look"}], None
 
+    async def history(self, channel, *, latest, limit):
+        return [], None
+
     async def ack(self, envelope_id):
         self.acked.append(envelope_id)
 

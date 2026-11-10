@@ -55,6 +55,9 @@ class Wire:
         return "Tom"
 
     async def history(self, channel, *, oldest=None, inclusive=False, cursor=None, limit=None, latest=None):
+        if latest is not None and oldest is None:  # a receive's read of Valor's posts before it
+            self.calls.append(("posted", channel))
+            return [], None
         self.calls.append(("history", channel))
         if self.history_fails:
             raise self.history_fails
@@ -210,7 +213,8 @@ def test_a_workspace_that_reconnects_fills_only_its_own_chats(tmp_path):
         await wa.on_message("E1", msg(channel="C0A", text="still here"))
 
     run(hello())
-    assert ("history", "C0B") in wb.calls and not [c for c in wa.calls if c != "connect"]
+    # A's receive reads only Valor's posts before its message, on A's own wire.
+    assert ("history", "C0B") in wb.calls and wa.calls[1:] == [("posted", "C0A")]
     assert [m.chat_id for m in got] == ["T0AAA/C0A"] and wa.acked == ["E1"]
 
 
