@@ -48,5 +48,5 @@ under `tmp_path` and a spec loaded from a temporary projects dir:
 3. The client's project with no `op-token.<client>` file keeps the kernel's
    value.
 
-Full suite, merge, roll out to the four Macs, then on the Captain a Mastery
+Full suite, merge, roll out to the four Macs, then on the Captain the client's
 turn's `op vault list` shows the client's two vaults (names not committed).
