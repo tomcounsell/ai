@@ -36,7 +36,8 @@ so a routine's checks run the project's setup as the kernel's do), and the
 settings that were set when it was printed:
 Postgres (`VALOR_PG*`, `VALOR_DB*`), and the three
 that must match the kernel's so a routine's turns share Tom's turn slots and
-resolve the same paths (`VALOR_MACHINE`, `VALOR_WORK`, `VALOR_PROJECTS`). It
+resolve the same paths (`VALOR_MACHINE`, `VALOR_WORK`, `VALOR_PROJECTS`), and
+Tom's addresses (`VALOR_OPERATOR_EMAIL`), which match no project's invites. It
 names no script and carries no secret. launchd starts a job missed during sleep once
 on wake and coalesces several missed intervals into one run, so a laptop
 that sleeps through a schedule gets one late run, never a burst.

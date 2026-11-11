@@ -176,7 +176,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    bridge's audio; about 1.7 GB resident once used), `core backup` (into `~/valor-backups`, made first, or `VALOR_BACKUP_DIR` on an external disk),
    `ui` (`com.valor.ui`, the dashboard; stop a hand-started one on port
    8790 first, `lsof -ti tcp:8790 | xargs kill`, or the job crash-loops),
-   and `core routine NAME` for each routine, `update`, `sentry` and `hours` included (a `task` routine starts work only on the Mac its project is placed on, and `hours` writes only the calendars of the projects placed on its Mac, so each is installed on every Mac): `$PY -m ... --plist > $LA/<label>.plist`
+   and `core routine NAME` for each routine, `update`, `sentry`, `hours` and `invites` included (a `task` routine starts work only on the Mac its project is placed on, `hours` writes only the calendars of the projects placed on its Mac, and `invites` handles only the invites of those projects, so each is installed on every Mac): `$PY -m ... --plist > $LA/<label>.plist`
    with `VALOR_MACHINE` set, then `launchctl enable $D/<label>; launchctl bootstrap $D $LA/<label>.plist`.
    `core serve`'s also needs `VALOR_OPERATOR_CHANNEL=slack` and
    `VALOR_OPERATOR_CHAT=<team>/<Tom's id>` (Tom's Slack DM, as the private

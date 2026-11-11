@@ -54,6 +54,8 @@ PLIST_ENV = (
     "VALOR_MACHINE",
     "VALOR_WORK",
     "VALOR_PROJECTS",
+    # Tom's addresses, which match no project's invites (routines/invites).
+    "VALOR_OPERATOR_EMAIL",
 )
 
 
