@@ -40,7 +40,7 @@ opening one if needed. `hours` drives Valor's calendar through gws.
      project matched is the event's; none, or two or more, is `valor`, its
      wake saying "matched no project" or "matched <a> and <b>: neither's
      context was brought" and asking which. Only events whose project is
-     placed on this Mac (`Spec.here()`) are handled, so one Mac does each.
+     placed on this Mac (`Spec.placed_here`) are handled, so one Mac does each.
    - **Accept:** Valor's `responseStatus` `needsAction` is patched to
      `accepted` on the series (`recurringEventId`, else the id) with
      `sendUpdates=all` (Google emails the organizer; Tom's standing ask). A
