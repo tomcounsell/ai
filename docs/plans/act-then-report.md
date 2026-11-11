@@ -125,3 +125,23 @@ Round 1 (2026-11-11): NEEDS REVISION, 3 blockers, 3 concerns; all six
 verified against the code and adopted above (performers kept for recovery,
 route in the gateway with its factory, `act` verb, reaction pattern,
 timeout and default key, incident test).
+
+Round 2 (2026-11-11): NEEDS REVISION, 4 blockers, 1 concern (FULL roster,
+3 independent critics).
+1. Recovery claim false (all three): `serve.recover` reconciles only
+   `kernel_types=("push_branch","merge")` (`core/serve.py:252`, `:351`,
+   call `:1316`). Keep `chat_tasks` in the factory because the act route
+   builds from it; drop the recovery hazard and its test (rule 8), or add
+   the `task.*` types to that call as a named step.
+2. Rerun is not the standing answer: `_prior` on an intent with no outcome
+   yields `refused: in flight` (`core/broker.py:578`). `valor-record act`
+   prints that as "outcome unknown; read `valor-record task`", not a refusal.
+3. The collect-time refusal is governance by the paragraph's letter
+   ("refusal"); the merge refusal is no exemption. Needs Tom's grant line
+   here and a `core/guards.py` entry, or drop the refusal and test 5.
+4. Prompts: `converse.md` asks for `task.*` effects in ~15 places and
+   `roles/product.md:67`, `roles/teammate.md:24` too; all become
+   `valor-record act`, tested by a grep for effect-file `task.*`. Item 4's
+   `TaskStart.usage` edit is dead text once `{effects}` drops it: one home.
+Concern: 127 lines is not one page; cut history, line-number prose, the
+extra incident times.
