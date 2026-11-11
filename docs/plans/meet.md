@@ -38,7 +38,9 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    meeting code, the asking chat's project, room and `max_effect_class`
    (`act`), marker
    `{"call": {"asked_by": {channel, chat_id, reply_to, topic_id}, "prep",
-   "effect_key"}}`), writes in the same transaction the first `call`
+   "starts"?, "effect_key"}}`; `starts`, an invited call's start, makes
+   the waits for others and for admission count from it,
+   [invite-calls.md](invite-calls.md)), writes in the same transaction the first `call`
    report (the URL) to the asking session, spawns `python -m
    bridges.meet join`, and returns `{url, session_id}`. The link is posted
    only by the asking turn that report wakes, never from the effect's

@@ -350,11 +350,16 @@ class Spec:
                 continue
         return found
 
+    @property
+    def placed_here(self) -> bool:
+        """Whether the project is placed on this Mac (a spec with no
+        `machine` is the default machine's)."""
+        return (self.machine or settings.default_machine) == settings.machine
+
     @classmethod
     def here(cls) -> list[Spec]:
-        """`all`, less the specs placed on another machine: this Mac's
-        projects (a spec with no `machine` is the default machine's)."""
-        return [s for s in cls.all() if (s.machine or settings.default_machine) == settings.machine]
+        """`all`, less the specs placed on another machine: this Mac's projects."""
+        return [s for s in cls.all() if s.placed_here]
 
     @classmethod
     def load(cls, name_or_path: str) -> Spec:

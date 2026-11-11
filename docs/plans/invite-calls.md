@@ -25,9 +25,9 @@ opening one if needed. `hours` drives Valor's calendar through gws.
 1. **Spec fields** (`core/workspace.py`, `projects/README.md`). `invites`:
    addresses or `@domains` whose invites are the project's. `call_chat`:
    the group chat an invited call goes to; else `board`; else the spec's
-   first group chat (`meet.group_chat`). Mastery's private spec gets
-   `invites = ["@pursue-mastery.com"]` (its call chat is then `board`,
-   #mastery-dev). Email routing is unchanged.
+   first group chat (`channels.group`). The private spec of the client
+   whose invite came first lists its domain (its call chat is then its
+   `board`). Email routing is unchanged.
 2. **The `invites` routine** (`routines/invites/`, `interval = 300`,
    ceiling `act`, every Mac). Each run lists Valor's primary calendar, now
    to 14 days ahead, single events (gws, as `hours` does). For each event
@@ -65,8 +65,8 @@ opening one if needed. `hours` drives Valor's calendar through gws.
    memory, open decisions, the priority queue, what changed since the
    invite) into `call-prep.md` in the workspace; post one top-level line
    ("Joining <title> at <time>: <link>"), and `wake.md` timed for start
-   minus 1 minute with `post: <that effect file>`; when that is already
-   past (a late wake, or a long prep), request `meet.join` in the same turn. Any turn
+   minus 1 minute (`30s` when that is under a minute away or past) with
+   `post: <that effect file>`, since `reply_to` needs the post's id. Any turn
    of that session that finds its invite post sent and no call yet for that
    link (a reply to the post drops the wake, so the next turn may be the
    reply's) requests `meet.join` with the link, `reply_to` that post's id,
@@ -115,7 +115,9 @@ Critique may return the plan once; review may return the work once.
 - **Spec:** both fields load. **Call:** with `starts`, a call joined before
   start with no one else there is still in it 5 minutes after start and
   leaves 10 after. **Persona:** `call.live_config` carries the PM bullet.
-  **Eval:** a turn woken by a reply to its invite post, no call yet, joins.
+  **Turn:** the repository has no turn-eval harness, so the invited-call
+  turns (prep, post, `wake.md`, `meet.join` with `reply_to` and `starts`)
+  are first shown by the live check below.
 - **Live**, on the Cowboy before rollout: an event Valor makes on its own
   calendar with a Meet link and no other attendee is woken and joined. No
   real invite is answered until the routine is live. Named unverified in

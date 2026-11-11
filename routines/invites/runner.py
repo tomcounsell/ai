@@ -129,7 +129,7 @@ def runner(
     async def run(ctx: Context) -> Ran:
         gws_ = gws or settings.gws
         specs = projects()
-        here = {s.name: s for s in specs if (s.machine or settings.default_machine) == settings.machine}
+        here = {s.name: s for s in specs if s.placed_here}
         listed = await _gws(gws_, "list", {
             "calendarId": "primary", "timeMin": ctx.now.isoformat(),
             "timeMax": (ctx.now + timedelta(days=DAYS)).isoformat(),

@@ -94,7 +94,7 @@ changes nothing. `python -m core routines` lists every routine with its last
 run and its period spending; a run stopped after its firing is listed
 `stopped`, whatever outcome the firing recorded.
 
-The five routines the kernel holds:
+The six routines the kernel holds:
 
 - **expiry** (04:00 daily): `routines.due` folds the ledger and lists the
   guards and routines past their ninety days. The list is the run's summary,
