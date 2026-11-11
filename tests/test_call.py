@@ -607,7 +607,9 @@ def test_a_typed_line_asks_for_a_reply_answered_in_the_chat_never_aloud(dsn, tea
     async def go():
         c = await in_call(dsn, team)
         c.the.chat(LOGAN, "Valor, where is the invoice?")
-        await asyncio.sleep(0.1)
+        assert await until(
+            lambda: ("[typed by Logan] Valor, where is the invoice?", True) in c.session.contents()
+        )
         await push(
             c.session,
             audio(),
@@ -620,7 +622,7 @@ def test_a_typed_line_asks_for_a_reply_answered_in_the_chat_never_aloud(dsn, tea
         )  # after its post: neither said nor posted
         await settle(c.the)
         c.the.chat(TOMS, "And the deck?")
-        await asyncio.sleep(0.1)
+        assert await until(lambda: (f"[typed by {TOM}] And the deck?", True) in c.session.contents())
         await push(c.session, audio(), said("In Drive."), done())  # answered aloud: posted instead
         await settle(c.the)
         await finish(c)
@@ -649,7 +651,9 @@ def test_a_typed_line_is_answered_in_the_chat_past_a_tool_call_until_someone_spe
     async def go():
         c = await in_call(dsn, team, worker=_answers("Monday."))
         c.the.chat(LOGAN, "Valor, when is the launch?")
-        await asyncio.sleep(0.1)
+        assert await until(
+            lambda: ("[typed by Logan] Valor, when is the launch?", True) in c.session.contents()
+        )
         await push(c.session, tool("ask", question="When is the launch?"), done())
         await push(c.session, audio(), said("I will check."), done())
         await settle(c.the)
