@@ -142,3 +142,21 @@ def test_the_brief_names_the_list_for_a_project_with_one(dsn, projects):
 
     assert "Email CC: lead@client.test, boss@home.test (" in asyncio.run(go("cc"))
     assert "Email CC:" not in asyncio.run(go("plain"))
+
+
+def test_the_brief_says_how_to_reach_the_clients_own_vaults(dsn, projects, tmp_path):
+    """A project whose client has `op-token.<client>` is told in its Brief
+    which variable signs `op` in to the client's vaults; others are not."""
+    (projects / "own.toml").write_text(SPEC.format(name="own") + 'client = "acme"\n')
+    (tmp_path / "keys").mkdir()
+    (tmp_path / "keys" / "op-token.acme").write_text("acme-op\n")
+
+    async def go(project):
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="x", project={"name": project}))
+            return (await tasks.dispatch(conn, task))["text"]
+
+    with bridges.configure(pg_passfile=str(tmp_path / "keys" / "pgpass")):
+        own, plain = asyncio.run(go("own")), asyncio.run(go("plain"))
+    assert 'run it with OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN_ACME"' in own
+    assert "acme-op" not in own and "1Password:" not in plain

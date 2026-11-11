@@ -29,7 +29,6 @@ Installed into every turn's `bin/` (`core/workspace.py` `WORKSPACE_TOOLS`, befor
 
 ## Turn environment
 
-- `client-op.sh`: sourced by Claude Code ahead of each Bash command (`CLAUDE_ENV_FILE`) of a turn whose project's client has its own 1Password service account (`core/__main__.py` `_client_env`); it sets `OP_SERVICE_ACCOUNT_TOKEN` from `VALOR_CLIENT_OP_TOKEN`, after the shell's `~/.zshenv` has exported the vault's ([docs/machine.md](../docs/machine.md)).
 
 ## Voice
 

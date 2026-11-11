@@ -394,58 +394,47 @@ def test_each_turn_installs_the_tools_and_names_its_chat(tmp_path, monkeypatch):
     assert sorted(p.name for p in (tmp_path / "bin").iterdir()) == sorted(workspace.WORKSPACE_TOOLS)
 
 
-def test_a_clients_turns_sign_in_to_1password_with_its_own_token(tmp_path, monkeypatch):
-    """`op-token.<client>` beside `claude-token` is the
-    `OP_SERVICE_ACCOUNT_TOKEN` of every turn of that client's projects, over
-    Valor's; another client's, no client's, and a spec that cannot be read
-    keep Valor's, and with no file the client's keep it too."""
+def test_a_clients_turns_also_carry_its_own_1password_token(tmp_path, monkeypatch):
+    """`op-token.<client>` beside `claude-token` is
+    `OP_SERVICE_ACCOUNT_TOKEN_<CLIENT>` in every turn of that client's
+    projects, and Valor's `OP_SERVICE_ACCOUNT_TOKEN` stays; another
+    client's, no client's, and a spec that cannot be read get no client
+    token, nor the client's with no file. A shell started as Claude Code
+    starts one (zsh, which reads ~/.zshenv, here one sourcing the vault
+    `.env`) still has both."""
     monkeypatch.setenv("OP_SERVICE_ACCOUNT_TOKEN", "valor-op")
     (tmp_path / "bin").mkdir()
     mirror = str(tmp_path / "t" / "kernel.git")
-    projects, keys = tmp_path / "projects", tmp_path / "keys"
-    projects.mkdir()
-    keys.mkdir()
-    for name, client in (("acme", "acme"), ("acme-be", "acme"), ("other", "globex"), ("bare", None)):
-        text = bridges.VALOR_SPEC.replace("valor", name)
-        (projects / f"{name}.toml").write_text(text + (f'client = "{client}"\n' if client else ""))
-
-    def op(project, **brief):
-        with bridges.configure(projects_dir=str(projects), pg_passfile=str(keys / "pgpass")):
-            return turn_env(tmp_path, project={"name": project}, **brief)["OP_SERVICE_ACCOUNT_TOKEN"]
-
-    assert op("acme", mirror=mirror) == "valor-op"  # no file yet
-    (keys / "op-token.acme").write_text("acme-op\n")
-    assert op("acme", mirror=mirror) == op("acme-be", mirror=mirror) == "acme-op"
-    assert op("acme", chat={"channel": "slack", "chat_id": "T0ABC/C0F"}) == "acme-op"  # a chat session
-    assert op("other", mirror=mirror) == op("bare", mirror=mirror) == op("gone", mirror=mirror) == "valor-op"
-    with bridges.configure(projects_dir=str(projects), pg_passfile=str(keys / "pgpass")):
-        assert turn_env(tmp_path, mirror=mirror)["OP_SERVICE_ACCOUNT_TOKEN"] == "valor-op"  # no project
-
-
-def test_a_clients_token_outlives_a_zshenv_that_sources_the_vault(tmp_path, monkeypatch):
-    """A Bash command of the client's turn, started as Claude Code starts one
-    (zsh, which reads ~/.zshenv, then `CLAUDE_ENV_FILE` ahead of the
-    command), sees the client's token though ~/.zshenv exports the vault's."""
-    monkeypatch.setenv("OP_SERVICE_ACCOUNT_TOKEN", "valor-op")
     projects, keys, home = tmp_path / "projects", tmp_path / "keys", tmp_path / "home"
     for d in (projects, keys, home):
         d.mkdir()
-    (projects / "acme.toml").write_text(bridges.VALOR_SPEC.replace("valor", "acme") + 'client = "acme"\n')
-    (keys / "op-token.acme").write_text("acme-op\n")
+    for name, client in (("acme", "acme-co"), ("acme-be", "acme-co"), ("other", "globex"), ("bare", None)):
+        text = bridges.VALOR_SPEC.replace("valor", name)
+        (projects / f"{name}.toml").write_text(text + (f'client = "{client}"\n' if client else ""))
+
+    def env(project=None, **brief):
+        with bridges.configure(projects_dir=str(projects), pg_passfile=str(keys / "pgpass")):
+            return turn_env(tmp_path, **({"project": {"name": project}} if project else {}), **brief)
+
+    def clients(e):
+        return {k: v for k, v in e.items() if k.startswith("OP_SERVICE_ACCOUNT_TOKEN_")}
+
+    assert clients(env("acme", mirror=mirror)) == {}  # no file yet
+    (keys / "op-token.acme-co").write_text("acme-op\n")
+    own = {"OP_SERVICE_ACCOUNT_TOKEN_ACME_CO": "acme-op"}
+    task, chat = env("acme", mirror=mirror), env("acme-be", chat={"channel": "slack", "chat_id": "T0ABC/C0F"})
+    assert clients(task) == clients(chat) == own
+    assert task["OP_SERVICE_ACCOUNT_TOKEN"] == chat["OP_SERVICE_ACCOUNT_TOKEN"] == "valor-op"
+    for other in (env("other", mirror=mirror), env("bare", mirror=mirror), env("gone", mirror=mirror),
+                  env(mirror=mirror)):  # fmt: skip
+        assert clients(other) == {} and other["OP_SERVICE_ACCOUNT_TOKEN"] == "valor-op"
     (home / "vault.env").write_text("OP_SERVICE_ACCOUNT_TOKEN=valor-op\n")
     (home / ".zshenv").write_text(f"set -a; source {home / 'vault.env'}; set +a\n")
-    with bridges.configure(projects_dir=str(projects), pg_passfile=str(keys / "pgpass")):
-        env = turn_env(tmp_path, project={"name": "acme"})
-    command, zenv = 'echo "$OP_SERVICE_ACCOUNT_TOKEN"', {**env, "ZDOTDIR": str(home)}
-
-    def zsh(script):
-        return subprocess.run(
-            ["/bin/zsh", "-c", script], env=zenv, capture_output=True, text=True, check=True
-        )
-
-    bare = zsh(command)
-    seen = zsh(f"{Path(env['CLAUDE_ENV_FILE']).read_text()}\n{command}")
-    assert bare.stdout == "valor-op\n" and seen.stdout == "acme-op\n"
+    seen = subprocess.run(
+        ["/bin/zsh", "-c", 'echo "$OP_SERVICE_ACCOUNT_TOKEN $OP_SERVICE_ACCOUNT_TOKEN_ACME_CO"'],
+        env={**task, "ZDOTDIR": str(home)}, capture_output=True, text=True, check=True,
+    )  # fmt: skip
+    assert seen.stdout == "valor-op acme-op\n"
 
 
 def test_two_installs_at_once_both_succeed(tmp_path):

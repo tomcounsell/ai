@@ -6,6 +6,7 @@ stored field, so a stop at any instant leaves nothing to reconcile between
 the two.
 """
 
+import re
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime
@@ -370,6 +371,23 @@ def email_cc(name: str | None) -> tuple[str, ...]:
     return tuple(a for a in listed if a != settings.email_address.lower())
 
 
+def client_op(name: str | None) -> tuple[str, str] | None:
+    """The project's client's own 1Password service account, from
+    `op-token.<client>` beside `claude-token` in the kernel key directory:
+    the variable a turn has it in, `OP_SERVICE_ACCOUNT_TOKEN_<CLIENT>`, and
+    the token. None for no project, no client, no file, or a spec that does
+    not load. Valor's own `OP_SERVICE_ACCOUNT_TOKEN` is never replaced."""
+    try:
+        client = workspace.Spec.load(name).client if name else None
+    except workspace.Refused:
+        return None
+    path = Path(settings.claude_token_file).with_name(f"op-token.{client}")
+    if not (client and path.is_file()):
+        return None
+    var = "OP_SERVICE_ACCOUNT_TOKEN_" + re.sub(r"[^A-Z0-9]", "_", client.upper())
+    return var, path.read_text().strip()
+
+
 def role_text(name: str) -> str:
     """The guidance of the role Valor plays in a chat (`intake.role`); a
     role with no file raises `FileNotFoundError`."""
@@ -443,6 +461,13 @@ async def dispatch(
         head += (
             f"\nEmail CC: {', '.join(cc)} (the project's email_cc, added to the cc of every email.send "
             "under this project; a draft for someone else to send names them on its Cc line)"
+        )
+    own_op = client_op((b.project or {}).get("name"))
+    if own_op:
+        head += (
+            f"\n1Password: plain `op` signs in to Valor's vaults; for the client's own, run it with "
+            f'OP_SERVICE_ACCOUNT_TOKEN="${own_op[0]}", e.g. '
+            f'`OP_SERVICE_ACCOUNT_TOKEN="${own_op[0]}" op run --env-file=.env.tpl -- ...`'
         )
     head += f"\nEffect ceiling: {b.max_effect_class}"
     if b.workspace and not fresh:

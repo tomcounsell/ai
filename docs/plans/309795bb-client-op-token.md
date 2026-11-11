@@ -9,8 +9,12 @@ holds it, never iCloud. The file is already in place on that Mac.
 The same rule as `claude-token.<client>` beside `claude-token`
 (`core/gateway.py` `_claude`): a project whose spec names a `client`, with
 `op-token.<client>` in the kernel key directory (beside `claude-token`), has
-that file's contents set as `OP_SERVICE_ACCOUNT_TOKEN` in each turn's
-environment, in place of Valor's.
+that file's contents set as `OP_SERVICE_ACCOUNT_TOKEN_<CLIENT>` in each
+turn's environment, beside Valor's own `OP_SERVICE_ACCOUNT_TOKEN`, which stays
+(Tom, 2026-11-11: a client turn needs both accounts). The turn's Brief says to
+run `op` with `OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN_<CLIENT>"`
+for the client's vaults (`tasks.client_op`, shared by both). A name the vault
+`.env` lacks survives the `~/.zshenv` that exports that file in every shell.
 
 - Where: `core/__main__.py` `_turn_for`, which already adds per-turn,
   unrecorded variables to the harness env (`_reading_env`). A new
@@ -42,11 +46,13 @@ client's turns and removes nothing from anyone's.
 In `tests/test_chat_history.py`'s `turn_env` style, with the key directory
 under `tmp_path` and a spec loaded from a temporary projects dir:
 1. A turn of a project whose client has `op-token.<client>` gets that value
-   as `OP_SERVICE_ACCOUNT_TOKEN`, over one in the kernel's environment.
-2. A turn of a project with another client (and one with no client) keeps
-   the kernel's value and never the client's.
-3. The client's project with no `op-token.<client>` file keeps the kernel's
-   value.
+   as `OP_SERVICE_ACCOUNT_TOKEN_<CLIENT>`, and keeps the kernel's
+   `OP_SERVICE_ACCOUNT_TOKEN`; a zsh reading a `~/.zshenv` that sources the
+   vault `.env` still has both.
+2. A turn of a project with another client (and one with no client) gets no
+   client token.
+3. The client's project with no `op-token.<client>` file gets none.
+4. The Brief names the variable for a client's project, never the token.
 
 Full suite, merge, roll out to the four Macs, then on the Captain the client's
 turn's `op vault list` shows the client's two vaults (names not committed).

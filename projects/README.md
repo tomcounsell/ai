@@ -96,8 +96,8 @@ it (they come from settings), and loading a spec names the folder.
   ([docs/memory.md](../docs/memory.md)). A spec without one gives its records
   the empty client. A client's own credentials on its Mac go with it too:
   `claude-token.<client>` bills its frontier turns to the client's Claude
-  account, and `op-token.<client>` is its turns' 1Password service account
-  in place of Valor's ([docs/machine.md](../docs/machine.md)).
+  account, and `op-token.<client>` is its turns' own 1Password service account,
+  `OP_SERVICE_ACCOUNT_TOKEN_<CLIENT>` beside Valor's ([docs/machine.md](../docs/machine.md)).
 - `email_cc` lists the contacts copied on every email Valor sends for the
   project (`email_cc = ["lead@example.com"]`; Tom, 2026-11-10): the kernel
   adds each to the `cc` of every `email.send` of a task under the project,
