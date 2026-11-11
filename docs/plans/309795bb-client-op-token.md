@@ -18,13 +18,12 @@ for the client's vaults (`tasks.client_op`, shared by both). A name the vault
 
 - Where: `core/__main__.py` `_turn_for`, which already adds per-turn,
   unrecorded variables to the harness env (`_reading_env`). A new
-  `_client_env(b)` beside it: `Spec.load(b.project["name"]).client` (the
-  Brief's `project` dict carries no `client`; loading the spec is what
-  `_reading_env` already does), then reads `op-token.<client>` from
-  `Path(settings.claude_token_file).parent` when it is a file. The harness env
-  is applied last in `workspace.environment`, so it outranks the kernel's own
-  `os.environ` and the repository's `.env`. Chat sessions and tasks both run
-  through `_turn_for`, so both get it.
+  `_client_env(b)` beside it calls `tasks.client_op`, which loads
+  `Spec.load(name).client` (the Brief's `project` dict carries no `client`;
+  loading the spec is what `_reading_env` already does), then reads
+  `op-token.<client>` beside `settings.claude_token_file` when it is a file.
+  Chat sessions and tasks both run through `_turn_for`, so both get it;
+  `tasks.dispatch` uses the same function to name the variable in the Brief.
 - Not written into the provisioned harness (`harness_env`), since that is
   stored in the ledger with the Brief; the token is read per turn and held
   only in the turn's process environment.
