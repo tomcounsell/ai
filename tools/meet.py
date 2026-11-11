@@ -24,10 +24,11 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core import broker, call, db, tasks
+from core import broker, call, channels, db, tasks
 from core.settings import settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,15 +36,8 @@ MEET_URL = re.compile(r"https://meet\.google\.com/([a-z]+-[a-z]+-[a-z]+)/?(?:\?.
 
 
 def group_chat(chat: dict[str, str] | None) -> bool:
-    """A Telegram group (a negative id) or a Slack channel (`<team>/C..`
-    or `/G..`); never a DM."""
-    if not chat:
-        return False
-    if chat["channel"] == "telegram":
-        return chat["chat_id"].startswith("-")
-    if chat["channel"] == "slack":
-        return chat["chat_id"].partition("/")[2][:1] in ("C", "G")
-    return False
+    """A group chat (`channels.group`); never a DM."""
+    return bool(chat) and channels.group(chat["channel"], chat["chat_id"])
 
 
 async def create_space() -> tuple[str, str]:
@@ -77,7 +71,8 @@ class MeetJoin:
         '`meet.join`: target "new" for a new Meet, or a Meet link; payload `{"reply_to": "<the thread it was '
         "asked in: on Slack its root ts, or the asking message's own ts when it was top-level; on Telegram the "
         'asking message\'s id>", "topic_id": null, "prep": "<your notes on the topic or project, from the '
-        'thread, the project and its open decisions, kept short>"}`; Valor joins the call ready '
+        'thread, the project and its open decisions, kept short>", "starts": null}`, `starts` being an '
+        "invited call's start (ISO), from which its waits for others count; Valor joins the call ready "
         "on that topic, and your next prompt carries its link to post in that thread."
     )
 
@@ -88,8 +83,17 @@ class MeetJoin:
         if action.target != "new" and not MEET_URL.fullmatch(action.target):
             return 'the target is "new" or a Meet link (https://meet.google.com/abc-defg-hij)'
         p = action.payload
-        if not all(p.get(k) is None or isinstance(p[k], str) for k in ("reply_to", "topic_id", "prep")):
-            return "reply_to, topic_id and prep must each be a string or null"
+        if not all(
+            p.get(k) is None or isinstance(p[k], str) for k in ("reply_to", "topic_id", "prep", "starts")
+        ):
+            return "reply_to, topic_id, prep and starts must each be a string or null"
+        if p.get("starts") is not None:
+            try:
+                zoned = datetime.fromisoformat(p["starts"]).tzinfo is not None
+            except ValueError:
+                zoned = False
+            if not zoned:
+                return "starts is an ISO time with its zone, such as 2026-11-12T14:00:00Z"
         return None
 
     async def perform(self, action: broker.Action, key: str) -> dict[str, Any]:
@@ -129,7 +133,8 @@ class MeetJoin:
         p = action.payload
         async with conn.transaction():
             session_id = await call.begin(conn, self.brief, url=url, code=code, reply_to=p.get("reply_to"),
-                                          topic_id=p.get("topic_id"), prep=p.get("prep") or "", effect_key=key)  # fmt: skip
+                                          topic_id=p.get("topic_id"), prep=p.get("prep") or "", effect_key=key,
+                                          starts=p.get("starts"))  # fmt: skip
         return session_id, url
 
     async def lookup(self, action: broker.Action, key: str) -> dict[str, Any] | None:

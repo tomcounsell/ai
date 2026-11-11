@@ -100,6 +100,16 @@ CHANNELS: dict[str, Channel] = {
 }
 
 
+def group(channel: str, chat_id: str) -> bool:
+    """A Telegram group (a negative id) or a Slack channel (`<team>/C..`
+    or `/G..`); never a DM."""
+    if channel == "telegram":
+        return chat_id.startswith("-")
+    if channel == "slack":
+        return chat_id.partition("/")[2][:1] in ("C", "G")
+    return False
+
+
 def get(name: str) -> Channel | None:
     return CHANNELS.get(name)
 

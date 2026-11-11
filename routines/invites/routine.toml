@@ -1,0 +1,14 @@
+name = "invites"
+runner = "invites"
+ceiling = "act"
+model = "light"
+mission_item = "Tom's ask (rule 2): Valor accepts Google Calendar invites with a Meet link and joins each call on time, prepared"
+need = [
+    "Tom, 2026-11-11 (Slack, Valor team chat): auto-accept invites and join on time, with the same meeting preparation done in the moments before joining",
+    "Tom's invite for 2026-11-12 sat unanswered: no code read invites, and a call was joined only when asked in a chat",
+]
+created = 2026-11-11
+instruction = "Accept each Google Calendar invite with a Meet link on Valor's calendar whose project is placed on this Mac, and wake that project's call chat minutes before each starts."
+
+[schedule]
+interval = 300

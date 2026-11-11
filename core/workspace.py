@@ -142,7 +142,12 @@ class Spec:
     `email_cc` names the contacts copied on every email Valor sends for the
     project (lowercased; Tom, 2026-11-10). It is the one field read live,
     by name, at each send and each Brief (`session._copy`, `tasks.dispatch`),
-    so a running session copies the list as it is now."""
+    so a running session copies the list as it is now.
+
+    `invites` names the addresses and `@domains` whose Google Calendar
+    invites are the project's, and `call_chat` the group chat an invited
+    call goes to; without it, `board`, else the first group chat it lists
+    (`routines/invites`, docs/plans/invite-calls.md)."""
 
     name: str
     repo: str
@@ -170,6 +175,8 @@ class Spec:
     client: str | None = None
     calendar: dict[str, str] | None = None
     email_cc: tuple[str, ...] = ()
+    invites: tuple[str, ...] = ()
+    call_chat: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Spec:
@@ -269,6 +276,25 @@ class Spec:
             isinstance(a, str) and a.strip().count("@") == 1 for a in email_cc
         ):
             raise Refused('email_cc is a list of email addresses: ["name@example.com", ...]')
+        invites = raw.get("invites") or []
+        if not isinstance(invites, list) or not all(
+            isinstance(a, str) and a.strip().count("@") == 1 and not a.strip().endswith("@") for a in invites
+        ):
+            raise Refused(
+                'invites is a list of addresses or domains: ["name@example.com", "@example.com", ...]'
+            )
+        call_chat = raw.get("call_chat")
+        if call_chat is not None:
+            channel, _, ident = call_chat.partition(":") if isinstance(call_chat, str) else ("", "", "")
+            row = channels.get(channel)
+            call_chat = f"{channel}:{row.normal(ident)}" if row is not None and ident else None
+            if call_chat not in normal or not channels.group(*call_chat.split(":", 1)):
+                raise Refused(
+                    f"call_chat names {raw['call_chat']!r}, which is not one of the spec's group chats"
+                )
+        else:
+            groups = [c for c in normal if channels.group(*c.split(":", 1))]
+            call_chat = board or (groups[0] if groups else None)
         return cls(
             name=raw["name"],
             repo=raw["repo"],
@@ -296,6 +322,8 @@ class Spec:
             client=client,
             calendar=calendar,
             email_cc=tuple(a.strip().lower() for a in email_cc),
+            invites=tuple(a.strip().lower() for a in invites),
+            call_chat=call_chat,
         )
 
     def takes(self, chat: str) -> str | None:

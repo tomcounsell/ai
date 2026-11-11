@@ -220,6 +220,19 @@ def test_meet_join_refuses_a_target_that_is_no_meet(dsn, team):
     assert bad.kind == "refused" and "Meet link" in bad.error
 
 
+def test_meet_join_keeps_an_invited_calls_start_and_refuses_one_without_a_zone(dsn, team):
+    async def go():
+        brief = await asking_session(dsn, team)
+        naive = await join(dsn, brief, [], target=URL, request_id="t1/a.json", starts="2026-11-12T14:00:00")
+        out = await join(dsn, brief, [], target=URL, request_id="t1/b.json", starts="2026-11-12T14:00:00Z")
+        async with await db.connect(dsn) as conn:
+            return naive, await call.marker(conn, out.result["session_id"])
+
+    naive, info = run(go())
+    assert naive.kind == "refused" and "zone" in naive.error
+    assert info["starts"] == "2026-11-12T14:00:00Z" and info["url"] == URL
+
+
 # -- the call session -------------------------------------------------------------
 
 

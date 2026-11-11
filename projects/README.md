@@ -108,6 +108,15 @@ it (they come from settings), and loading a spec names the folder.
   turn, not once at start; a spec that does not load copies no one, and the
   send's line says why. It is config, not a memory, because a remembered
   rule can be missed. It only adds recipients; it refuses nothing.
+- `invites` lists the addresses and `@domains` whose Google Calendar
+  invites with a Meet link are the project's (`invites =
+  ["@example.com"]`; Tom, 2026-11-11): the `invites` routine accepts them
+  and wakes the project's call chat minutes before each call, which preps
+  and joins it (docs/plans/invite-calls.md). An address beats a domain;
+  Yudame's own (Valor's, its domain, Tom's) never match; an invite matching
+  none or two projects goes to `valor`. `call_chat` names the group chat
+  those calls go to; without it, `board`, else the first group chat in
+  `chats`.
 - `{port}` and `{passfile}` in `env` become the task's Postgres port and its
   password file.
 

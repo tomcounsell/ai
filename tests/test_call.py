@@ -21,7 +21,7 @@ import dataclasses
 import json
 import shutil
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1524,3 +1524,37 @@ def test_google_key_over_ssh_without_the_vault_says_missing_rather_than_failing(
         assert credentials.op_read("op://Yudame Secrets/k1/credential", vault) is None
     finally:
         vault.chmod(0o600)
+
+
+def test_an_invited_call_joined_before_its_start_waits_for_the_others_from_the_start(
+    dsn, team, quick, monkeypatch
+):
+    # docs/plans/invite-calls.md: ALONE_S and LOBBY_S count from `starts`.
+    monkeypatch.setattr(call, "ALONE_S", 0.3)
+
+    async def go():
+        page = Page()
+        page.people = [{"id": "devices/9", "name": "Valor Engels", "me": True}]
+        _brief, session_id = await a_call(dsn, team)
+        async with await db.connect(dsn) as conn:
+            info = await call.marker(conn, session_id)
+        info["starts"] = (datetime.now(UTC) + timedelta(seconds=1.5)).isoformat()
+
+        async def ready():
+            return True
+
+        the = call.Call(session_id, info, page, dsn=dsn, gemini=Gemini(), worker=None,
+                        worker_ready=ready, project=team.project, store=str(team.profile.parent / "store"))  # fmt: skip
+        running = asyncio.create_task(the.run())
+        await asyncio.sleep(1.0)
+        still = not running.done()
+        return still, await asyncio.wait_for(running, 10)
+
+    still, reason = run(go())
+    assert still and reason == "no one else came"
+
+
+def test_every_call_is_joined_as_the_projects_manager():
+    # Tom, 2026-11-11: the persona's "In a call" carries it into the call's instruction.
+    text = call.live_config("acme", "", None).system_instruction
+    assert "as the project's manager" in text and "priority" in text

@@ -705,6 +705,7 @@ async def _routine_project(
 def _routine_runners() -> dict:
     from routines.conditions import runner as conditions
     from routines.hours import runner as hours
+    from routines.invites import runner as invites
     from routines.verify import runner as verify
 
     # No business data source is granted yet (Stripe, Google Analytics), so
@@ -716,6 +717,7 @@ def _routine_runners() -> dict:
         "conditions": conditions.runner({}, credential=settings.github_keyfile),
         "verify": verify.run,
         "hours": hours.runner(),
+        "invites": invites.runner(),
         "update": update_runner,
         "task": routines.task_runner,
     }

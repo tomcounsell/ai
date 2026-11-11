@@ -119,7 +119,7 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    `prep`, requesting `meet.join` in the thread, the summary file, stopping
    a call. `docs/rollout.md`: the profile's sign-in per Mac.
 
-**No-Gos.** Joining unasked; calls from DMs; Zoom, Teams; video; two calls
+**No-Gos.** Joining unasked (an invite is an ask: [invite-calls.md](invite-calls.md)); calls from DMs; Zoom, Teams; video; two calls
 at once on one Mac.
 
 **Risks.** Meet page changes; crosstalk mislabels; Google challenges the profile.

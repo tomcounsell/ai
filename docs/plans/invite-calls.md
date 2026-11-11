@@ -28,7 +28,7 @@ opening one if needed. `hours` drives Valor's calendar through gws.
    first group chat (`meet.group_chat`). Mastery's private spec gets
    `invites = ["@pursue-mastery.com"]` (its call chat is then `board`,
    #mastery-dev). Email routing is unchanged.
-2. **The `invites` routine** (`routines/invites/`, `interval = 60`,
+2. **The `invites` routine** (`routines/invites/`, `interval = 300`,
    ceiling `act`, every Mac). Each run lists Valor's primary calendar, now
    to 14 days ahead, single events (gws, as `hours` does). For each event
    with a `hangoutLink`, not cancelled, where Valor is an attendee or the
@@ -46,7 +46,7 @@ opening one if needed. `hours` drives Valor's calendar through gws.
      `sendUpdates=all` (Google emails the organizer; Tom's standing ask). A
      declined or tentative answer is left. A `calendar.accepted` row on the
      objective records it; a series already recorded is not patched again.
-   - **Wake:** from 4 minutes before start until the event's end, once per
+   - **Wake:** from 12 minutes before start until the event's end, once per
      `invite:<event id>:<start>`, recorded as a `calendar.woke` row on the
      routine's own objective and skipped when one is there, so a chat
      session that ended between runs is never woken twice; a moved invite
@@ -56,17 +56,17 @@ opening one if needed. `hours` drives Valor's calendar through gws.
      characters, as data), and the match line. Returns `nothing_due` with
      no task.
    - **Timing.** Agreed defaults were 2-minute runs and a wake 10 minutes
-     before. Both are changed, keeping the default's aim (in the call at
-     the start): a call leaves after `ALONE_S` (600 s) with no one else
-     there and gives up after `LOBBY_S` (600 s) unadmitted
-     (`core/call.py`), so joining 10 minutes early could leave at the start.
-     Runs every minute; wake at start minus 4; join at start minus 1.
+     before. Runs are every 5 minutes, so a wake lands 7 to 12 minutes
+     before start, giving the prep turn its minutes; the join is placed at
+     start minus 1 by `wake.md`. Joining early costs nothing, as `ALONE_S`
+     and `LOBBY_S` count from `starts` (item 4).
 3. **The turns it wakes** (`skills/sdlc/converse.md`, **Calls**, a paragraph
    for an invited call). Prep as for any call, fresh (the thread, record,
    memory, open decisions, the priority queue, what changed since the
    invite) into `call-prep.md` in the workspace; post one top-level line
    ("Joining <title> at <time>: <link>"), and `wake.md` timed for start
-   minus 1 minute (30 s at least) with `post: <that effect file>`. Any turn
+   minus 1 minute with `post: <that effect file>`; when that is already
+   past (a late wake, or a long prep), request `meet.join` in the same turn. Any turn
    of that session that finds its invite post sent and no call yet for that
    link (a reply to the post drops the wake, so the next turn may be the
    reply's) requests `meet.join` with the link, `reply_to` that post's id,
@@ -108,7 +108,8 @@ Critique may return the plan once; review may return the work once.
 - **Accept:** once (a second run patches nothing); declined and tentative
   left; a recurring instance patches its series with `sendUpdates=all`; no
   Meet link, cancelled, and neither attending nor organizing are ignored.
-- **Wake:** only from 4 minutes before start to the end; once; again after
+- **Wake:** only from 12 minutes before start to the end; a run 1 minute
+  before or after start still wakes, with `starts` the event's start; once; again after
   a move; not again when the chat session ended between two runs; to
   `call_chat`, then `board`, then the first group chat.
 - **Spec:** both fields load. **Call:** with `starts`, a call joined before

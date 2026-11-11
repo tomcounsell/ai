@@ -194,6 +194,7 @@ async def begin(
     topic_id: str | None,
     prep: str,
     effect_key: str,
+    starts: str | None = None,
 ) -> str:
     """Start the call session and write its first report, the link, inside
     the caller's transaction. Returns the session's id."""
@@ -212,6 +213,8 @@ async def begin(
     )
     asked_by = {**chat, "reply_to": reply_to, "topic_id": topic_id, "session": asking.id}
     call = {"url": url, "code": code, "machine": settings.machine, "asked_by": asked_by, "prep": prep}
+    if starts:
+        call["starts"] = starts
     await tasks.start(conn, brief, marker={"sdlc": 1, "call": call, "effect_key": effect_key}, by="valor",
                       via="meet.join")  # fmt: skip
     where = f"reply_to {reply_to}" + (f", topic_id {topic_id}" if topic_id else "")
@@ -868,6 +871,12 @@ class Call:
         self.id, self.info, self.page, self.dsn, self.gemini = session_id, info, page, dsn, gemini
         self.worker, self.worker_ready, self.project = worker, worker_ready, project
         self.socket, self.clock = socket, clock
+        # An invited call joined before its start waits for the others, and
+        # to be let in, from the start (docs/plans/invite-calls.md).
+        starts = info.get("starts")
+        self.early = (
+            max(0.0, (datetime.fromisoformat(starts) - datetime.now(UTC)).total_seconds()) if starts else 0.0
+        )
         self.store = Path(store or settings.meetings_store)
         self.declared = broker.Performers(*bridge.declared_performers())
         self.bound = broker.Performers(
@@ -1539,7 +1548,7 @@ class Call:
             alone = None if others else alone or now
             if seen and alone is not None and now - alone >= EMPTY_S:
                 self.leave("everyone else had left")
-            elif not seen and now - start >= ALONE_S:
+            elif not seen and now - start >= ALONE_S + self.early:
                 self.leave("no one else came")
             up = self.socket is None or self.socket.up
             down = None if up else down or now
@@ -1593,7 +1602,7 @@ class Call:
             if status in ("removed", "denied", "ended"):
                 return "Valor was not let in" if status != "ended" else "the call had ended"
             waited = self.clock() - start
-            if status == "lobby" and waited >= LOBBY_S:
+            if status == "lobby" and waited >= LOBBY_S + self.early:
                 return "no one let Valor in"
             if status not in ("lobby",) and waited >= JOIN_S:
                 return "Valor could not get through Meet's join screen"
