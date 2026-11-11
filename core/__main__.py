@@ -267,6 +267,8 @@ def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
         # session provisioned before either changed has them too.
         workspace.install_tools(lay.root.parent / "bin")
         harness = {**harness, "env": {**harness.get("env", {}), **_reading_env(b)}}
+    if b.project:
+        harness = {**harness, "env": {**harness.get("env", {}), **_client_env(b)}}
     if b.chat:
         harness = {**harness, "chat_channel": b.chat["channel"]}
     return _harnesses()[b.harness_name].workspace_turn(
@@ -292,6 +294,21 @@ def _reading_env(b: tasks.Brief) -> dict[str, str]:
     except workspace.Refused:
         chats = ()
     return {**env, "VALOR_CHAT": chats[0]} if chats else env
+
+
+def _client_env(b: tasks.Brief) -> dict[str, str]:
+    """The project's client's own 1Password service account,
+    `op-token.<client>` beside `claude-token` in the kernel key directory, as
+    the turn's `OP_SERVICE_ACCOUNT_TOKEN` in place of Valor's; read each
+    turn, never recorded. Empty with no client, no file, or no readable spec."""
+    try:
+        client = workspace.Spec.load(b.project["name"]).client
+    except workspace.Refused:
+        return {}
+    path = Path(settings.claude_token_file).with_name(f"op-token.{client}")
+    if not (client and path.is_file()):
+        return {}
+    return {"OP_SERVICE_ACCOUNT_TOKEN": path.read_text().strip()}
 
 
 def _fresh_for(prompt: str, checkout: str, model: str, harness: dict, harness_name: str = "claude_code"):

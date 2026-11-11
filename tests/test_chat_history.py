@@ -394,6 +394,34 @@ def test_each_turn_installs_the_tools_and_names_its_chat(tmp_path, monkeypatch):
     assert sorted(p.name for p in (tmp_path / "bin").iterdir()) == sorted(workspace.WORKSPACE_TOOLS)
 
 
+def test_a_clients_turns_sign_in_to_1password_with_its_own_token(tmp_path, monkeypatch):
+    """`op-token.<client>` beside `claude-token` is the
+    `OP_SERVICE_ACCOUNT_TOKEN` of every turn of that client's projects, over
+    Valor's; another client's, no client's, and a spec that cannot be read
+    keep Valor's, and with no file the client's keep it too."""
+    monkeypatch.setenv("OP_SERVICE_ACCOUNT_TOKEN", "valor-op")
+    (tmp_path / "bin").mkdir()
+    mirror = str(tmp_path / "t" / "kernel.git")
+    projects, keys = tmp_path / "projects", tmp_path / "keys"
+    projects.mkdir()
+    keys.mkdir()
+    for name, client in (("acme", "acme"), ("acme-be", "acme"), ("other", "globex"), ("bare", None)):
+        text = bridges.VALOR_SPEC.replace("valor", name)
+        (projects / f"{name}.toml").write_text(text + (f'client = "{client}"\n' if client else ""))
+
+    def op(project, **brief):
+        with bridges.configure(projects_dir=str(projects), pg_passfile=str(keys / "pgpass")):
+            return turn_env(tmp_path, project={"name": project}, **brief)["OP_SERVICE_ACCOUNT_TOKEN"]
+
+    assert op("acme", mirror=mirror) == "valor-op"  # no file yet
+    (keys / "op-token.acme").write_text("acme-op\n")
+    assert op("acme", mirror=mirror) == op("acme-be", mirror=mirror) == "acme-op"
+    assert op("acme", chat={"channel": "slack", "chat_id": "T0ABC/C0F"}) == "acme-op"  # a chat session
+    assert op("other", mirror=mirror) == op("bare", mirror=mirror) == op("gone", mirror=mirror) == "valor-op"
+    with bridges.configure(projects_dir=str(projects), pg_passfile=str(keys / "pgpass")):
+        assert turn_env(tmp_path, mirror=mirror)["OP_SERVICE_ACCOUNT_TOKEN"] == "valor-op"  # no project
+
+
 def test_two_installs_at_once_both_succeed(tmp_path):
     errors = []
 
