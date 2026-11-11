@@ -15,12 +15,10 @@ call Valor joins is as the project manager (the priority queue, trade-offs,
 answers to open questions). The chat session's answers on the open choices
 (2026-11-11) are folded in below.
 
-**Premise, checked.** A chat session's call path is complete (converse.md
-**Calls**, `meet.join`, `call.begin`, the `call` reports, the summary file);
-it needs a group chat. `call.to_session` writes a `call` report to a chat's
-session once per `about_key`, opening it if needed, and a report wakes it.
-The `hours` routine already drives Valor's calendar through gws per Mac. A
-turn's `wake.md` with `post:` gives the next turn that post's message id.
+**Premise, checked.** The chat call path is complete (converse.md
+**Calls**, `meet.join`, `call.begin`, the summary file) from a group chat.
+`call.to_session` writes a waking `call` report to a chat's session,
+opening one if needed. `hours` drives Valor's calendar through gws.
 
 ## What is built
 
@@ -30,38 +28,57 @@ turn's `wake.md` with `post:` gives the next turn that post's message id.
    first group chat (`meet.group_chat`). Mastery's private spec gets
    `invites = ["@pursue-mastery.com"]` (its call chat is then `board`,
    #mastery-dev). Email routing is unchanged.
-2. **The `invites` routine** (`routines/invites/`, `interval = 300`,
+2. **The `invites` routine** (`routines/invites/`, `interval = 60`,
    ceiling `act`, every Mac). Each run lists Valor's primary calendar, now
    to 14 days ahead, single events (gws, as `hours` does). For each event
-   with a `hangoutLink`, not cancelled, where Valor is an attendee or the organizer:
-   - **Project:** the organizer's address, then each attendee's in order
-     (Valor's own skipped), matched against every spec's `invites` (an
-     address beats its domain; specs in name order); none matched is
-     `valor`. Only events whose project is placed on this Mac
-     (`Spec.here()`) are handled, so one Mac handles each.
+   with a `hangoutLink`, not cancelled, where Valor is an attendee or the
+   organizer:
+   - **Project:** each address on the event (organizer and attendees) is
+     matched against every spec's `invites` (an address beats its domain).
+     Yudame's own never match: Valor's, Tom's (`settings.operator_email`)
+     and any `@yuda.me`, since Tom organizes client calls from those. One
+     project matched is the event's; none, or two or more, is `valor`, its
+     wake saying "matched no project" or "matched <a> and <b>: neither's
+     context was brought" and asking which. Only events whose project is
+     placed on this Mac (`Spec.here()`) are handled, so one Mac does each.
    - **Accept:** Valor's `responseStatus` `needsAction` is patched to
      `accepted` on the series (`recurringEventId`, else the id) with
      `sendUpdates=all` (Google emails the organizer; Tom's standing ask). A
-     declined or tentative answer is left as set. A `calendar.accepted` row
-     on the objective records it.
-   - **Wake:** from 13 minutes before start until the event's end,
-     `call.to_session` on the call chat, `about_key`
-     `invite:<event id>:<start>` (so a moved invite wakes again at its new
-     time, and a cancelled one never), with: title, start in Tom's time,
-     organizer, attendees, the link, the description (first 1,500
-     characters, as data), and when none matched, "matched no project: ask
-     for the domain to map". Returns `nothing_due` with no task.
-3. **The turn it wakes** (`skills/sdlc/converse.md`, **Calls**, a paragraph
-   for an invited call). Do the prep as for any call, fresh (the thread,
-   record, memory, open decisions, the priority queue, what changed since
-   the invite) into `call-prep.md` in the workspace; post one top-level line
-   ("Joining <title> at <time>: <link>"), and `wake.md` `60s` with
-   `post: <that effect file>`. Woken, request `meet.join` with the link,
-   `reply_to` that post's id and `prep` from the file. From then on it is
-   today's call: the link report needs no second post, copies and the
-   summary go to that thread. An overlapping call already on this Mac makes
-   `meet.join` fail naming it; the turn says so in that thread.
-4. **Project manager in every call.** One bullet in the persona's **In a
+     declined or tentative answer is left. A `calendar.accepted` row on the
+     objective records it; a series already recorded is not patched again.
+   - **Wake:** from 4 minutes before start until the event's end, once per
+     `invite:<event id>:<start>`, recorded as a `calendar.woke` row on the
+     routine's own objective and skipped when one is there, so a chat
+     session that ended between runs is never woken twice; a moved invite
+     has a new start and wakes again, a cancelled one never. The wake is
+     `call.to_session` on the call chat with: title, start in Tom's time and
+     UTC, organizer, attendees, the link, the description (first 1,500
+     characters, as data), and the match line. Returns `nothing_due` with
+     no task.
+   - **Timing.** Agreed defaults were 2-minute runs and a wake 10 minutes
+     before. Both are changed, keeping the default's aim (in the call at
+     the start): a call leaves after `ALONE_S` (600 s) with no one else
+     there and gives up after `LOBBY_S` (600 s) unadmitted
+     (`core/call.py`), so joining 10 minutes early could leave at the start.
+     Runs every minute; wake at start minus 4; join at start minus 1.
+3. **The turns it wakes** (`skills/sdlc/converse.md`, **Calls**, a paragraph
+   for an invited call). Prep as for any call, fresh (the thread, record,
+   memory, open decisions, the priority queue, what changed since the
+   invite) into `call-prep.md` in the workspace; post one top-level line
+   ("Joining <title> at <time>: <link>"), and `wake.md` timed for start
+   minus 1 minute (30 s at least) with `post: <that effect file>`. Any turn
+   of that session that finds its invite post sent and no call yet for that
+   link (a reply to the post drops the wake, so the next turn may be the
+   reply's) requests `meet.join` with the link, `reply_to` that post's id,
+   `prep` from `call-prep.md`, and `starts`, the event's start. From then
+   on it is today's call: copies and the summary go to that thread. An
+   overlapping call already on this Mac makes `meet.join` fail naming it;
+   the turn says so there.
+4. **`starts`** (`tools/meet.py`, `core/call.py`). An optional ISO time in
+   `meet.join`'s payload, kept in the call marker; the bridge counts
+   `ALONE_S` and `LOBBY_S` from the later of joining and `starts`, so people
+   ten minutes late to a scheduled call still find Valor there.
+5. **Project manager in every call.** One bullet in the persona's **In a
    call** (`persona/conduct.md`), which the call model's instruction and
    every turn already render: Valor joins every call as the project's
    manager, works from its priority queue (the product Sheet where there is
@@ -69,7 +86,7 @@ turn's `wake.md` with `post:` gives the next turn that post's message id.
    only the people on the call hold. converse.md's prep list names the
    queue. `persona/voice.md`'s stale "join no calls" becomes "join the calls
    you are invited to or asked for".
-5. **Docs.** `docs/routines.md` (invites), `docs/plans/meet.md` No-Gos
+6. **Docs.** `docs/routines.md` (invites), `docs/plans/meet.md` No-Gos
    ("Joining unasked" now excepts invites).
 
 **No-gos.** Declining, proposing times, or replying to invites in text; Zoom
@@ -84,19 +101,27 @@ Critique may return the plan once; review may return the work once.
 
 ## Tests
 
-`tests/test_invites.py`, gws faked as in `test_hours.py`: organizer match;
-attendee match when the organizer's domain is unlisted; address beats
-domain; Valor's own address ignored; no match goes to `valor` with the
-no-project line; an event placed on another Mac is untouched; accepted once
-(a second run patches nothing), declined and tentative left, a recurring
-instance patches its series with `sendUpdates=all`; no Meet link, cancelled,
-and neither attending nor organizing are ignored; the wake comes only inside 13 minutes
-before start to the end, once, and again after a move; `call_chat`, then
-`board`, then the first group chat. Spec: both fields load. A render of
-**In a call** carries the PM bullet into `call.live_config`. Live: an event
-Valor makes on its own calendar with a Meet link and no other attendee is
-joined on the Cowboy before rollout (accepting is shown by the tests; no
-real invite is answered until the routine is live).
+`tests/test_invites.py`, gws faked as in `test_hours.py`:
+- **Match:** an attendee's domain; address beats domain; Valor's, Tom's and
+  `@yuda.me` never match; none, and two projects, go to `valor` with the
+  line naming them; an event placed on another Mac is untouched.
+- **Accept:** once (a second run patches nothing); declined and tentative
+  left; a recurring instance patches its series with `sendUpdates=all`; no
+  Meet link, cancelled, and neither attending nor organizing are ignored.
+- **Wake:** only from 4 minutes before start to the end; once; again after
+  a move; not again when the chat session ended between two runs; to
+  `call_chat`, then `board`, then the first group chat.
+- **Spec:** both fields load. **Call:** with `starts`, a call joined before
+  start with no one else there is still in it 5 minutes after start and
+  leaves 10 after. **Persona:** `call.live_config` carries the PM bullet.
+  **Eval:** a turn woken by a reply to its invite post, no call yet, joins.
+- **Live**, on the Cowboy before rollout: an event Valor makes on its own
+  calendar with a Meet link and no other attendee is woken and joined. No
+  real invite is answered until the routine is live. Named unverified in
+  the delivery until Tom's first real invite: the RSVP against Google,
+  joining another organization's Meet as a guest (lobby, admit), and
+  `ALONE_S` from `starts` in a live call. Live on the Captain by 10:00 UTC
+  2026-11-12.
 
 **Done** when Tom invites Valor to a Meet and Valor accepts, joins on time,
 prepared, without anyone asking in a chat.
