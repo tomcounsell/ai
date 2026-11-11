@@ -2,7 +2,7 @@
 status: Planning
 type: bug
 appetite: Small
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/3686
 ---
 
 # A chat session sees what its action did before it writes the reply
