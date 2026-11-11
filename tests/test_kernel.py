@@ -2280,3 +2280,19 @@ def test_a_collected_row_postgres_refuses_whole_is_reduced_to_what_it_stores(dsn
 
     row = run(go())
     assert row["done"] is None and row["verdict"] == "idle" and "done.md dropped" in row["errors"][-1]
+
+
+def test_a_repositorys_own_local_pass_is_the_builds_not_its_people():
+    """A client's head of engineering (2026-11-11): Valor's pull requests
+    stopped at "Approved (pending local checks)", so the client's team ran the
+    local pass and its review gate stayed red. The build and the patch run it
+    with the client's credentials, and the review treats pending-local alone
+    as changes."""
+    build = " ".join((REPO / "skills/sdlc/build.md").read_text().split())
+    assert "A verdict pending local checks is not the end: run the repository's local pass yourself" in build
+    assert "with the client's credentials your turn carries" in build
+    assert "only after you tried it, with the error" in build
+    patch = " ".join((REPO / "skills/sdlc/patch.md").read_text().split())
+    assert "then its local pass run by you with the client's credentials, each posted at the new head" in patch
+    review = " ".join((REPO / "skills/sdlc/review.md").read_text().split())
+    assert "a verdict pending local checks with no approving follow-up is `changes` too" in review

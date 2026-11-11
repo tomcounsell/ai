@@ -16,7 +16,9 @@ When the repository has its own review skill (`.claude/skills/`, such as
 `do-review`), its verdict is the review of record: read the verdict the
 build posted on each pull request rather than reviewing a second time. A
 pull request without one at its current head, or with one asking for
-changes, makes your verdict `changes`.
+changes, makes your verdict `changes`. The review of record is that review
+plus the local-checks follow-up its gate reads at the same head: a verdict
+pending local checks with no approving follow-up is `changes` too.
 
 Bloat fails the review too (`CLAUDE.md` rule 8). Ask of every added line
 what the request needs it for. Dead code, a second mechanism for a job one

@@ -13,6 +13,11 @@ That is a new candidate, and test, review, and docs check it again. A
 question only Tom can answer goes in `.valor/question.md` instead; for a
 second opinion, `.valor/advice.md`.
 
+**The repository's own process.** A patch that pushes a new head to a
+repository with its own SDLC skills goes through them as build says: its
+review in a fresh agent, then its local pass run by you with the client's
+credentials, each posted at the new head for its gate.
+
 **Feedback on a delivery.** When your prompt opens with feedback on what
 you delivered, revise it and end the way that delivery did. A deck,
 document, video or other file made for someone is named in the report by
