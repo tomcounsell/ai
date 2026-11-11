@@ -300,7 +300,10 @@ def _client_env(b: tasks.Brief) -> dict[str, str]:
     """The project's client's own 1Password service account,
     `op-token.<client>` beside `claude-token` in the kernel key directory, as
     the turn's `OP_SERVICE_ACCOUNT_TOKEN` in place of Valor's; read each
-    turn, never recorded. Empty with no client, no file, or no readable spec."""
+    turn, never recorded. A shell's startup files may export the vault
+    `.env`'s token over it (the Macs' ~/.zshenv does), so Claude Code
+    restores it ahead of each Bash command (`CLAUDE_ENV_FILE`,
+    `tools/client-op.sh`). Empty with no client, no file, or no readable spec."""
     try:
         client = workspace.Spec.load(b.project["name"]).client
     except workspace.Refused:
@@ -308,7 +311,9 @@ def _client_env(b: tasks.Brief) -> dict[str, str]:
     path = Path(settings.claude_token_file).with_name(f"op-token.{client}")
     if not (client and path.is_file()):
         return {}
-    return {"OP_SERVICE_ACCOUNT_TOKEN": path.read_text().strip()}
+    token = path.read_text().strip()
+    return {"OP_SERVICE_ACCOUNT_TOKEN": token, "VALOR_CLIENT_OP_TOKEN": token,
+            "CLAUDE_ENV_FILE": str(workspace.TOOLS_DIR / "client-op.sh")}  # fmt: skip
 
 
 def _fresh_for(prompt: str, checkout: str, model: str, harness: dict, harness_name: str = "claude_code"):

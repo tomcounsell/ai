@@ -422,6 +422,32 @@ def test_a_clients_turns_sign_in_to_1password_with_its_own_token(tmp_path, monke
         assert turn_env(tmp_path, mirror=mirror)["OP_SERVICE_ACCOUNT_TOKEN"] == "valor-op"  # no project
 
 
+def test_a_clients_token_outlives_a_zshenv_that_sources_the_vault(tmp_path, monkeypatch):
+    """A Bash command of the client's turn, started as Claude Code starts one
+    (zsh, which reads ~/.zshenv, then `CLAUDE_ENV_FILE` ahead of the
+    command), sees the client's token though ~/.zshenv exports the vault's."""
+    monkeypatch.setenv("OP_SERVICE_ACCOUNT_TOKEN", "valor-op")
+    projects, keys, home = tmp_path / "projects", tmp_path / "keys", tmp_path / "home"
+    for d in (projects, keys, home):
+        d.mkdir()
+    (projects / "acme.toml").write_text(bridges.VALOR_SPEC.replace("valor", "acme") + 'client = "acme"\n')
+    (keys / "op-token.acme").write_text("acme-op\n")
+    (home / "vault.env").write_text("OP_SERVICE_ACCOUNT_TOKEN=valor-op\n")
+    (home / ".zshenv").write_text(f"set -a; source {home / 'vault.env'}; set +a\n")
+    with bridges.configure(projects_dir=str(projects), pg_passfile=str(keys / "pgpass")):
+        env = turn_env(tmp_path, project={"name": "acme"})
+    command, zenv = 'echo "$OP_SERVICE_ACCOUNT_TOKEN"', {**env, "ZDOTDIR": str(home)}
+
+    def zsh(script):
+        return subprocess.run(
+            ["/bin/zsh", "-c", script], env=zenv, capture_output=True, text=True, check=True
+        )
+
+    bare = zsh(command)
+    seen = zsh(f"{Path(env['CLAUDE_ENV_FILE']).read_text()}\n{command}")
+    assert bare.stdout == "valor-op\n" and seen.stdout == "acme-op\n"
+
+
 def test_two_installs_at_once_both_succeed(tmp_path):
     errors = []
 
