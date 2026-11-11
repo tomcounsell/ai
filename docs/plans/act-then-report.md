@@ -3,6 +3,8 @@ status: Planning
 type: bug
 appetite: Small
 tracking: https://github.com/tomcounsell/ai/issues/3686
+revision_applied: true
+revision_applied_at: 2026-11-11T12:00:00Z
 ---
 
 # A chat session sees what its action did before it writes the reply
@@ -31,56 +33,95 @@ chat session cannot keep it for work it hands to a task.
 
 ## What will be built
 
-1. **In-turn task actions** through the route a turn already has into the
-   kernel: the gateway's `/t/<turn token>/record/<verb>` (`core/gateway.py`
-   `record`, `core/record.py`). A `POST record/task` with `{"action_type",
-   "target", "payload", "key"}` calls `broker.request` with
-   `chat_tasks.performers(brief)` for the grant's task, `request_id =
-   f"{turn_id}/{key}"`, and answers with the outcome (`kind`, `error`,
-   `result`, `effect_id`). Same intent and outcome rows, same performers,
-   same `lookup` reconcile; only the moment changes.
-2. **`valor-record task start|answer|steer|stop`** (`tools/valor_record.py`)
-   prints that outcome; a refusal or failure exits non-zero with the error.
-3. **The end-of-turn path stops carrying them.** A chat session's collected
-   performers no longer include `chat_tasks` (`core/__main__.py:250`), so a
-   `task.*` file left in `.valor/effects/` is refused with the broker's
-   existing `NO_PERFORMER`, and the next prompt says so. One mechanism, not
-   two. Sends stay end-of-turn effects.
-4. **`skills/sdlc/converse.md`**: act with `valor-record task …`, read its
-   outcome, then write the send that reports it; a failed action is
-   reported as failed, in the same turn. The `task.*` usage lines move from
-   the `{effects}` list to the `valor-record` section; `roles/product.md`
-   and `roles/teammate.md` name the command where they name the effect.
+1. **`POST /t/<token>/record/act`, answered in the gateway.** `record.answer`
+   gives a WRITES handler no turn id and no performers (`core/record.py:542`),
+   and core/ may not import tools/ (`core/__main__.py:165`), so the route
+   lives in `Gateway.record` (`core/gateway.py:471`): `Gateway` takes
+   `performers: router.PerformersFactory`, passed at `core/serve.py:1321`
+   and `core/__main__.py:497`. For `act` it opens its own connection in a
+   thread (as `record.answer` does), builds
+   `performers(await tasks.brief(conn, grant.task_id))`, and calls
+   `broker.request(conn, built, grant.task_id, Action(action_type, target,
+   payload), request_id=f"{grant.turn_id}/{key}")`. It answers `kind`,
+   `error`, `result`, `effect_id`. Same intent and outcome rows, performers
+   and `lookup` reconcile; only the moment changes.
+2. **`valor-record act start|answer|steer|stop`** (`tools/valor_record.py`),
+   its own subcommand and its own write branch (not `fact_write`, which
+   sends every write to `/facts`, `:242`). `act`, not `task`: `valor-record
+   task ID` is the ledger read `converse.md` uses. `--key` defaults to a hash
+   of action type, target and payload, so a rerun is `_prior`'s
+   (`core/broker.py:583`) same request id and digest: the standing answer,
+   no second task. A refusal or failure prints the error and exits
+   non-zero; a timeout or dropped connection prints "outcome unknown; rerun
+   the same command" and exits non-zero (today it says "the kernel is not
+   answering", `:260`, though the gateway thread may still commit).
+3. **The end-of-turn path stops carrying them.** `chat_tasks` stays in
+   `_performers` (`core/__main__.py:250`): recovery reconciles and
+   recollects through that factory (`core/serve.py:242`, `:358`), and an
+   in-turn intent left by a killed turn must still settle. Instead
+   `session.record` (`core/session.py:1043`) answers a chat session's
+   `task.*` effect file with `{**entry, "error": "act with valor-record
+   act"}` before `broker.request`, beside the merge refusal at `:1045`; the
+   next prompt reports it as it reports that one. The `{effects}` list
+   (`offered()` at `core/session.py:179`, `:226`) drops the `task.*` usage
+   lines. One mechanism per concern: sends stay end-of-turn effects.
+4. **Prompts.** `skills/sdlc/converse.md`: act with `valor-record act …`,
+   read its outcome, then write the send that reports it; a failed action
+   is reported as failed, in the same turn. The `task.*` usage text moves
+   to the `valor-record` section, and `TaskStart.usage`'s "Your next prompt
+   names it" (`tools/chat_tasks.py:89`) becomes "the command prints its
+   id". `skills/sdlc/roles/product.md` and `skills/sdlc/roles/teammate.md`
+   name the command where they name the effect.
+5. **Reactions.** `core/reactions.py` `COMMANDS` gains
+   `valor-record act (start|answer|steer)` -> `"task"`, so the handed-to-task
+   reaction still fires (`EFFECTS` saw only effect files, `:142`). The
+   effects report (`_effects_report`, `core/session.py:1658`) stays
+   end-of-turn only: the turn already read its in-turn outcomes.
 
 ## Timing hazards
 
-- The record route runs its answer in a thread on its own loop and
-  connection. `broker.request` takes `task:<session>` under lock; the
-  builder confirms nothing holds that lock while the session's turn runs
+- `broker.request` takes `task:<session>` under lock in its own connection;
+  the builder confirms nothing holds that lock while the turn runs
   (collect takes it only after `turn.ended`).
-- A turn killed after the intent and before the reply: the intent settles
-  through `lookup` as today; the next prompt names the started task.
+- A turn killed after the intent and before the reply: `serve.recover`
+  reconciles it through `chat_tasks`' `lookup`, still in the factory.
 
 ## Tests (`tests/`)
 
-- A chat turn's in-turn `task.start` returns the child's id, and the
-  child's `task.started` row exists before the turn ends.
-- A start refused or failed in-turn returns its error to the caller, and
-  writes no child.
-- A `task.start` effect file collected from a chat turn is refused
-  (`NO_PERFORMER`); a send in the same turn is still released.
-- The same `key` twice in one turn starts one task.
-- `converse.md` names `valor-record task` and no longer lists `task.*` as
-  effect files.
+- In-turn `act start` returns the child's id; the child's `task.started`
+  row exists before the turn ends.
+- The incident: `act start` with `in` a chat outside the project's chats
+  (`ValueError`, `tools/chat_tasks.py:121`) comes back `kind="failed"`
+  with that error; `valor-record` exits non-zero; no `task.started` row.
+- The same command twice in one turn starts one task.
+- A dangling in-turn `task.start` intent plus `serve.recover` writes an
+  outcome.
+- A chat turn's `task.start` effect file is answered with the error and
+  not performed; a send in the same turn is still released.
+- `valor-record task ID` and `valor-record act start …` both parse.
+- A chat turn whose Bash ran `valor-record act start` gets `task` activity.
+- `converse.md` names `valor-record act` and its `{effects}` list has no
+  `task.*` line.
 
 ## No-gos
 
 - No new check on what the reply says. The order changes; nothing reads
-  the text.
+  the text. Left as is: a stale `task.*` file written after a reply that
+  claimed the work started is refused after that reply has gone; the next
+  prompt says so.
 - Not here: waking a session on an outcome (by design, `core/session.py`
   docstring), gap fill's budget, session size.
 
 ## Governance
 
 None added: an existing action runs earlier through an existing route and
-an existing performer, and its end-of-turn copy is removed.
+an existing performer. The collect-time refusal is the old path's removal
+(rule 4), written as the merge refusal already is, not a check over a path
+that stays.
+
+## Critique Results
+
+Round 1 (2026-11-11): NEEDS REVISION, 3 blockers, 3 concerns; all six
+verified against the code and adopted above (performers kept for recovery,
+route in the gateway with its factory, `act` verb, reaction pattern,
+timeout and default key, incident test).
