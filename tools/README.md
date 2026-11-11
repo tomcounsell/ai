@@ -27,9 +27,6 @@ Installed into every turn's `bin/` (`core/workspace.py` `WORKSPACE_TOOLS`, befor
 - `valor_record.py`, as `valor-record`: `chats`, `messages [CHAT] [--search TEXT]`, `tasks`, `task ID`, `call CODE` (a Meet call's transcript), `hours [--since D] [--until D]` (the blocks of time Valor worked on the project, as the `hours` routine writes them to its calendar), `waits` (what is waiting now: each task's open question and each post a chat session awaits a reply to, with how long, in Tom's working hours too) read the turn's own project's record (messages and their bindings, tasks, effects), `memory WORDS` searches its memory as recall reads it, and `facts`, `sources`, `fact`, `entity`, `link` and `source` read and write the project's facts over time (docs/memory.md, Facts), from the kernel at `$VALOR_RECORD_URL` (`core/record.py`). Standard library and Python 3.9. A read, but the fact writes, which POST to the kernel.
 - `valor_read.py`, as `valor-telegram` and `valor-slack` (`read`): `read [CHAT] [--search TEXT]` reads or searches a chat's history through its running bridge, with Valor's own account. Standard library and Python 3.9, the turn's `python3`. No send: sends stay broker effects.
 
-## Turn environment
-
-
 ## Voice
 
 `voice.py`, the launchd job `com.valor.voice` (`python -m tools.voice run | fetch | --plist`), on `127.0.0.1:settings.voice_port` (8714). One process holds Parakeet for every bridge on the Mac, since it peaks near 1.7 GB resident.
