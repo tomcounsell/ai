@@ -536,9 +536,11 @@ INSTRUCTIONS = (
     "relationship (pricing, terms, its people) is one line: it is for Tom. Never say an id aloud.\n"
     "- When Tom settles open decisions (one idea may settle several), read his answer back in a sentence and "
     "call `settle` with the ids it settles. Only Tom settles decisions; a correction is a new `settle`.\n"
-    "- Call `leave` only when Tom asks you to leave.\n\n"
+    "- Call `leave` when anyone in the call asks you to leave, or when everyone has wrapped up and said "
+    "goodbye. Never leave because the meeting's scheduled time has passed: stay while people are still "
+    "talking.\n\n"
     "How you work, from your persona:\n\n{conduct}\n\n"
-    "Why you are in this call, from your notes before it:\n{prep}"
+    "Why you are in this call, from your notes before it:\n{prep}{so_far}"
 )
 TOOLS = [
     {"name": "ask", "description": "Ask your worker to look something up; the answer is posted in the call's "
@@ -552,12 +554,12 @@ TOOLS = [
      "`task id/question id` it settles.", "parameters": {"type": "object", "properties": {
          "ids": {"type": "array", "items": {"type": "string"}}, "readback": {"type": "string"}},
          "required": ["ids", "readback"]}},
-    {"name": "leave", "description": "Leave the call, when Tom asks you to.",
+    {"name": "leave", "description": "Leave the call: when someone asks you to, or everyone has said goodbye.",
      "parameters": {"type": "object", "properties": {}}},
 ]  # fmt: skip
 
 
-def live_config(project: str, prep: str, handle: str | None) -> Any:
+def live_config(project: str, prep: str, handle: str | None, so_far: str = "") -> Any:
     """The Live session's settings: Valor's voice, transcripts both ways,
     proactive audio (it may stay silent), no cutting Valor off (Live's own
     barge-in stopped him for side talk, 2026-11-05: the call cuts him off
@@ -569,7 +571,8 @@ def live_config(project: str, prep: str, handle: str | None) -> Any:
     persona's "In a call" section, read as the call starts. What Valor
     hears is transcribed as English unless clearly another language (an
     unclear phrase came out as Portuguese, 2026-11-06); the reply's
-    language is the model's, which the persona section keeps English."""
+    language is the model's, which the persona section keeps English.
+    A fresh session in a call under way is told `so_far` (`Call.so_far`)."""
     from google.genai import types
 
     return types.LiveConnectConfig(
@@ -584,6 +587,7 @@ def live_config(project: str, prep: str, handle: str | None) -> Any:
             project=project or "Valor",
             conduct=persona.section(settings.persona_dir, "In a call"),
             prep=prep.strip() or "(no notes)",
+            so_far=f"\n\nThe call so far:\n{so_far}" if so_far else "",
         ),
         tools=[types.Tool(function_declarations=[types.FunctionDeclaration(**t) for t in TOOLS])],
         input_audio_transcription=types.AudioTranscriptionConfig(language_codes=["en-US"]),
@@ -824,6 +828,9 @@ MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
 # sound he did not go on from; the one he meant ran 0.5 s and on.
 BARGE_S = 0.4
 UNANSWERED_S = 2.0  # with one other person, this long with no answer to them asks for one
+# Characters of the call so far told to a fresh session: at about four a
+# token, a quarter of the window compression keeps.
+CALL_SO_FAR = CALL_CONTEXT
 STALL_S = 6.0  # this much speech, then this long quiet, with nothing back from Live resumes the session
 CUT_S = 3.0  # the rest of what cut Valor off ("Valor, stop. Wait a moment.") asks nothing
 
@@ -1135,11 +1142,14 @@ class Call:
 
     async def live(self) -> None:
         """The Live session for the whole call: resumed with its handle
-        when Live says it is going away or the connection drops; after
-        `RECONNECTS` failed tries, one line in the chat and the call leaves."""
+        when Live says it is going away or the connection drops. A handle
+        Live refuses (not found or expired, an hour into Tom's call,
+        2026-11-12) opens a fresh session told the call so far; after
+        `RECONNECTS` failed fresh tries, one line in the chat and the call leaves."""
         failed = 0
         while not self.leaving.is_set():
-            config = live_config(self.project or "", self.info.get("prep") or "", self.handle)
+            so_far = "" if self.handle else self.so_far()
+            config = live_config(self.project or "", self.info.get("prep") or "", self.handle, so_far)
             opened = False
             try:
                 async with self.gemini.connect(config) as session:
@@ -1161,8 +1171,12 @@ class Call:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001  a lost session is resumed, or the call leaves
-                failed = 0 if opened else failed + 1
-                _log(f"call {self.id}: the Live session {'dropped' if opened else 'failed to open'}: {exc!r}")
+                refused = not opened and self.handle is not None
+                failed = 0 if opened else failed + (not refused)
+                _log(f"call {self.id}: the Live session {'dropped' if opened else 'failed to open'}: {exc!r}"
+                     f"{'; opening a fresh one' if refused else ''}")  # fmt: skip
+                if refused:
+                    self.handle = None
             finally:
                 self.session = None
                 if self.reply is not None:
@@ -1173,6 +1187,20 @@ class Call:
                 self.leave("Valor lost its voice connection")
             elif failed:
                 await asyncio.sleep(1)
+
+    def so_far(self) -> str:
+        """What a fresh session in a call under way is told: that Valor is
+        in it, who is here, and the newest of the transcript, at most
+        `CALL_SO_FAR` characters; empty before anything was said."""
+        if not self.lines:
+            return ""
+        tail = "\n".join(self.lines)
+        if len(tail) > CALL_SO_FAR:
+            tail = tail[-CALL_SO_FAR:]
+            tail = tail.partition("\n")[2] or tail
+        here = self._here(sorted(self.names.get(i, "someone") for i in self.present))
+        return ("You are already in this call and have greeted everyone: do not greet them again; carry on "
+                f"from here.\n{here}\n{tail}")  # fmt: skip
 
     async def _receive(self, session) -> None:
         while not self.leaving.is_set():

@@ -50,8 +50,13 @@ against a new Meet with a second device of Valor's account
   of quiet after it, is resumed (a long turn, however little Live sends
   during it, is not; nor is a short utterance), the old session closed
   before the next opens; a resume Google refuses as still connected (1008)
-  is retried like any failed open. Two failed reconnects post one line and
-  leave. "Valor, leave" from Tom is matched in Live's transcript. A call that fails, or any of its lanes
+  is retried like any failed open. A handle Live refuses (not found or
+  expired) opens a fresh session, told that Valor is already in the call,
+  who is here, and the newest of the transcript (`CALL_SO_FAR` characters).
+  Two failed fresh opens post one line and leave. Nothing ends a call at a
+  set time: Valor stays while anyone else is in it. "Valor, leave" from Tom
+  is matched in Live's transcript; anyone else asking, or everyone saying
+  goodbye, is the model's `leave`. A call that fails, or any of its lanes
   (the mixer, Live, the posts), ends and writes its traceback to
   `meet.log`.
 - **The page** (`bridges/meet/`): headless Chrome on the call profile

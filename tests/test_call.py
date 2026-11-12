@@ -765,6 +765,11 @@ def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
         "Logan wants the launch date." in config.system_instruction
         and "[typed by NAME]" in config.system_instruction
     )
+    # Tom, 2026-11-12: anyone may ask Valor to leave, goodbyes all round end it, a scheduled end does not.
+    text = " ".join(config.system_instruction.split())
+    assert "Call `leave` when anyone in the call asks you to leave" in text and "said goodbye" in text
+    assert "Never leave because the meeting's scheduled time has passed" in text
+    assert "Tom" not in config.tools[0].function_declarations[-1].description
 
 
 def test_the_call_speaks_by_the_personas_in_a_call_section_and_in_english(tmp_path, monkeypatch):
@@ -900,6 +905,81 @@ def test_a_dropped_session_that_reconnects_carries_on(dsn, team, quick):
     c, done_ = run(go())
     assert c.gemini.configs[1].session_resumption.handle == "h7" and call.LOST_LINE not in c.page.posts
     assert [e["result"]["spoken_text"] for e in done_ if e["type"] == "meet.say"] == ["Still here."]
+
+
+def test_a_refused_handle_opens_a_fresh_session_told_the_call_so_far(dsn, team, quick):
+    """Tom's invited call (2026-11-12): an hour in, a resumed session dropped
+    ("Requested entity already exists") and its handle was refused twice
+    ("session not found or expired"), so the call left. A refused handle
+    is now a fresh session, told who is here and what was said."""
+
+    async def go():
+        c = await in_call(dsn, team)
+        c.page.people = c.page.people[:2]  # Logan alone with Valor
+        for _ in range(8):
+            c.the.hear(LOGAN, loud(0.05), 48_000)
+            await asyncio.sleep(0.05)
+        await push(c.session, heard("Valor, what ships first?"))
+        await push(c.session, audio(), said("The import ships first."), done())
+        await settle(c.the)
+        assert await until(lambda: any("The import ships first." in line for line in c.the.lines))
+        c.gemini.fail = 1  # the handle is refused once
+        await push(c.session, resume("h7"), ConnectionError("1008 Requested entity already exists"))
+        assert await until(lambda: len(c.gemini.sessions) == 2 and c.the.session is c.gemini.sessions[1])
+        await push(c.gemini.sessions[1], audio(), said("Still here."), done())
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id)
+
+    c, done_ = run(go())
+    first, refused, fresh = c.gemini.configs
+    assert refused.session_resumption.handle == "h7" and fresh.session_resumption.handle is None
+    told = fresh.system_instruction
+    assert "Valor, what ships first?" in told and "The import ships first." in told
+    assert "Only Logan is here with you" in told and "do not greet them again" in told
+    assert "The call so far" not in first.system_instruction
+    assert call.LOST_LINE not in c.page.posts
+    assert [e["result"]["spoken_text"] for e in done_ if e["type"] == "meet.say"][-1] == "Still here."
+
+
+def test_a_refused_handle_then_two_failed_fresh_opens_post_one_line_and_leave(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        c.gemini.fail = 5
+        await push(c.session, resume("h7"), ConnectionError("dropped"))
+        return c, await asyncio.wait_for(c.running, 15)
+
+    c, reason = run(go())
+    assert reason == "Valor lost its voice connection" and c.page.posts.count(call.LOST_LINE) == 1
+    assert [x.session_resumption.handle for x in c.gemini.configs] == [None, "h7", None, None]
+
+
+def test_the_call_so_far_is_its_newest_lines_within_its_bound(dsn, team, monkeypatch):
+    async def go():
+        _, the = await a_call_of(dsn, team, Page(), Gemini())
+        return the
+
+    the = run(go())
+    assert the.so_far() == ""  # nothing said yet: a plain fresh session
+    monkeypatch.setattr(call, "CALL_SO_FAR", 100)
+    the.lines = [f"[00:{i:02d}] Logan (spoke): line {i:02d} of the call" for i in range(20)]
+    tail = the.so_far().split("\n")[2:]
+    assert tail[-1] == the.lines[-1] and len("\n".join(tail)) <= 100 and tail[0] in the.lines
+
+
+def test_valor_leaves_when_live_calls_leave_for_anyone(dsn, team, quick):
+    """Tom, 2026-11-12: leave when someone asks, or everyone wraps up. The
+    model decides from the conversation; Logan is not Tom."""
+
+    async def go():
+        c = await in_call(dsn, team)
+        for _ in range(8):
+            c.the.hear(LOGAN, loud(0.05), 48_000)
+            await asyncio.sleep(0.05)
+        await push(c.session, heard("Thanks everyone, that's all for today. Bye!"), tool("leave"))
+        return await asyncio.wait_for(c.running, 10)
+
+    assert run(go()) == "Valor was asked to leave"
 
 
 # -- the say and the post, as the bridge checks them ------------------------------------

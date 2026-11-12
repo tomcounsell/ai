@@ -75,8 +75,16 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
     folder = Path(settings.tts_model_dir).expanduser()
     kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
-    seen: dict = {"gaps": {}, "chat": [], "frames": [], "unheard_s": 0.0, "log": []}
-    speakers, log = call.Call._speakers, call._log
+    seen: dict = {"gaps": {}, "chat": [], "frames": [], "unheard_s": 0.0, "log": [], "refused": False}
+    speakers, log, connect = call.Call._speakers, call._log, call.Gemini.connect
+
+    def refusing(self, config):  # the first resume's handle refused, as in Tom's call (2026-11-12)
+        if config.session_resumption.handle and not seen["refused"]:
+            seen["refused"] = True
+            raise RuntimeError("1008 BidiGenerateContent session not found or expired (forced by the test)")
+        return connect(self, config)
+
+    monkeypatch.setattr(call.Gemini, "connect", refusing)
 
     async def measured(self, loud, seconds):  # the most speech sent with nothing back from Live
         await speakers(self, loud, seconds)
@@ -159,7 +167,8 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                     await asyncio.sleep(30)
                 seen["gaps"]["after_reconnect"] = await a.ask(kokoro, "Valor, are you still there?")
                 await asyncio.sleep(8)
-                await a.ask(kokoro, "Valor, please leave the call now.", wait=False)
+                # A wrap-up to everyone, which the operator's "Valor, leave" match misses: the model leaves.
+                await a.ask(kokoro, "Thanks everyone, that's all for today, we're done. Goodbye!", wait=False)
                 reason = await asyncio.wait_for(calling, 300)
             finally:
                 await a.close()
@@ -183,10 +192,11 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     ]
     gaps = seen["gaps"]
     stalls = [line for line in seen["log"] if "after speech; resuming" in line]
+    fresh = [line for line in seen["log"] if "opening a fresh one" in line]
     print(json.dumps({"gaps": gaps, "typed": seen["typed"], "looked_up": seen["looked_up"],
                       "side_talk_frames": seen["side_talk_frames"], "barge": seen["barge_at"], "over": seen["over_at"],
                       "says": says, "charged_turns": len(resumed), "reason": reason, "report": report,
-                      "unheard_s": round(seen["unheard_s"], 1), "stalls": stalls}, indent=1))  # fmt: skip
+                      "unheard_s": round(seen["unheard_s"], 1), "stalls": stalls, "fresh": fresh}, indent=1))  # fmt: skip
     # No stall-resume in a healthy call, a half-minute monologue included.
     assert not stalls
     # Answered when addressed, and to "Hello" with one other person there.
@@ -199,11 +209,10 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     # Silence in side talk; cut off by the person asking, not by side talk.
     assert seen["side_talk_frames"] == 0
     assert seen["barge_at"]["cut"] and not seen["over_at"]["cut"]
-    # "Valor, leave" from the operator, past a resumption, and Gemini's summary file.
-    assert reason in (
-        "Tom asked Valor to leave",
-        "Valor was asked to leave",
-    )  # Live's tool when it heard "Valer"
+    # A refused resume opened a fresh session, and Valor answered after it.
+    assert seen["refused"] and len(fresh) == 1 and gaps["after_reconnect"] < 30
+    # Everyone's goodbye is the model's leave, past the fresh session, and Gemini's summary file.
+    assert reason == "Valor was asked to leave"
     assert "Gemini's summary of the call is" in report
 
 
