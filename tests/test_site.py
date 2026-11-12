@@ -123,7 +123,7 @@ PRIVATE = {
     "chat id": re.compile(r"-100\d{6,}"),
     "token": re.compile(r"\bsk-[A-Za-z0-9]{20,}|\bghp_[A-Za-z0-9]{36}|\bops_[A-Za-z0-9]{20,}"),
     "email": re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
-    "bank": re.compile(r"mercury", re.I),
+    "bank": re.compile(r"mercury", re.IGNORECASE),
 }
 
 
