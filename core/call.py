@@ -829,7 +829,7 @@ MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
 BARGE_S = 0.4
 UNANSWERED_S = 2.0  # with one other person, this long with no answer to them asks for one
 # Characters of the call so far told to a fresh session: at about four a
-# token, a quarter of the window compression keeps.
+# token, a quarter of the context that triggers compression.
 CALL_SO_FAR = CALL_CONTEXT
 STALL_S = 6.0  # this much speech, then this long quiet, with nothing back from Live resumes the session
 CUT_S = 3.0  # the rest of what cut Valor off ("Valor, stop. Wait a moment.") asks nothing

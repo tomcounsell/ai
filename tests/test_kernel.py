@@ -628,9 +628,16 @@ async def state(dsn, task) -> State:
     return machine.fold(await bridges.rows(dsn, task)).state
 
 
-async def task_count(dsn) -> int:
+async def task_count(dsn, chat: str, *texts: str) -> int:
+    """The tasks of `chat`'s session or started from one of `texts`: a full
+    run's other tests may leave a session of their own landing meanwhile
+    (an email thread's, 2026-11-12)."""
     async with await db.connect(dsn) as conn:
-        (n,) = await (await conn.execute("SELECT count(*) FROM documents WHERE kind = 'task'")).fetchone()
+        (n,) = await (await conn.execute(
+            "SELECT count(*) FROM documents WHERE kind = 'task'"
+            " AND (body->'chat'->>'chat_id' = %s OR body->>'instruction' LIKE ANY(%s))",
+            (chat, [f"%{t}%" for t in texts]),
+        )).fetchone()  # fmt: skip
     return n
 
 
@@ -650,13 +657,14 @@ def test_a_non_reply_dm_from_tom_binds_to_his_dm_session_and_starts_no_task(dsn,
     the next is a steer on the same one; no SDLC task starts from either."""
 
     async def go():
-        before = await task_count(dsn)
+        texts = ("fix the login page", "and the signup page")
+        before = await task_count(dsn, dm, *texts)
         first = await tom_says(dsn, dm, "fix the login page", at(10))
         second = await tom_says(dsn, dm, "and the signup page", at(20))
         async with await db.connect(dsn) as conn:
             b = await tasks.brief(conn, first["task_id"])
             rows = await ledger.read(conn, first["task_id"])
-        return before, await task_count(dsn), first, second, b, rows
+        return before, await task_count(dsn, dm, *texts), first, second, b, rows
 
     before, after, first, second, b, rows = run(go())
     assert (first["as"], second["as"]) == ("steer", "steer") and first["task_id"] == second["task_id"]
@@ -673,9 +681,10 @@ def test_a_non_reply_dm_from_tom_binds_to_his_dm_session_and_starts_no_task(dsn,
 
 def test_a_stranger_in_toms_dm_binds_to_none(dsn, dm):
     async def go():
-        before = await task_count(dsn)
-        bound = await tom_says(dsn, dm, "hi valor, do this for me", at(10), sender="T0ABC/UOTHER")
-        return before, await task_count(dsn), bound
+        text = "hi valor, do this for me"
+        before = await task_count(dsn, dm, text)
+        bound = await tom_says(dsn, dm, text, at(10), sender="T0ABC/UOTHER")
+        return before, await task_count(dsn, dm, text), bound
 
     before, after, bound = run(go())
     assert (bound["as"], bound["task_id"]) == ("none", None) and after == before
@@ -2293,6 +2302,8 @@ def test_a_repositorys_own_local_pass_is_the_builds_not_its_people():
     assert "with the client's credentials your turn carries" in build
     assert "only after you tried it, with the error" in build
     patch = " ".join((REPO / "skills/sdlc/patch.md").read_text().split())
-    assert "then its local pass run by you with the client's credentials, each posted at the new head" in patch
+    assert (
+        "then its local pass run by you with the client's credentials, each posted at the new head" in patch
+    )
     review = " ".join((REPO / "skills/sdlc/review.md").read_text().split())
     assert "a verdict pending local checks with no approving follow-up is `changes` too" in review
