@@ -1,4 +1,4 @@
-# Valor call abc-defg-hij - Notes
+# Launch plan - Logan, Valor - Notes
 
 ## Summary
 

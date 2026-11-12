@@ -33,7 +33,7 @@ it (they come from settings), and loading a spec names the folder.
 - The suite command is the kernel's, never the candidate's: a command the
   candidate chose could be `true`. A spec is read once at start and copied
   into the task's Brief, so editing it never changes a running task; only
-  `email_cc` is read live, at each send and each turn (below).
+  `email_cc` and `links` are read live (below).
 - Without `merge_url` the merge lands on the task's own bare origin. With
   it, the merge lands on that URL; the kernel records it, and the target
   branch, in the task's Brief at start, and no turn changes either. The
@@ -117,6 +117,11 @@ it (they come from settings), and loading a spec names the folder.
   none or two projects goes to `valor`. `call_chat` names the group chat
   those calls go to; without it, `board`, else the first group chat in
   `chats`.
+- `links` maps a reference prefix to its URL prefix (`links = { "ENG-" =
+  "https://linear.app/<workspace>/issue/ENG-" }`; Tom, 2026-11-12): in a
+  call's saved summary, the prefix and its digits become a link to the URL
+  plus the digits, as PR and issue numbers link to the project's GitHub
+  `repo`. Read when the call is saved.
 - `{port}` and `{passfile}` in `env` become the task's Postgres port and its
   password file.
 

@@ -147,7 +147,12 @@ class Spec:
     `invites` names the addresses and `@domains` whose Google Calendar
     invites are the project's, and `call_chat` the group chat an invited
     call goes to; without it, `board`, else the first group chat it lists
-    (`routines/invites`, docs/plans/invite-calls.md)."""
+    (`routines/invites`, docs/plans/invite-calls.md).
+
+    `links` maps a reference prefix to its URL prefix (`{"ENG-" =
+    "https://linear.app/<workspace>/issue/ENG-"}`): in a call's saved
+    summary, the prefix and its digits link to the URL plus the digits
+    (`call.linked`)."""
 
     name: str
     repo: str
@@ -177,6 +182,7 @@ class Spec:
     email_cc: tuple[str, ...] = ()
     invites: tuple[str, ...] = ()
     call_chat: str | None = None
+    links: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Spec:
@@ -295,6 +301,12 @@ class Spec:
         else:
             groups = [c for c in normal if channels.group(*c.split(":", 1))]
             call_chat = board or (groups[0] if groups else None)
+        links = raw.get("links") or {}
+        if not isinstance(links, dict) or not all(
+            isinstance(k, str) and k and isinstance(v, str) and v.startswith("https://")
+            for k, v in links.items()
+        ):
+            raise Refused('links maps a reference prefix to its URL prefix: {"ENG-" = "https://.../ENG-"}')
         return cls(
             name=raw["name"],
             repo=raw["repo"],
@@ -324,6 +336,7 @@ class Spec:
             email_cc=tuple(a.strip().lower() for a in email_cc),
             invites=tuple(a.strip().lower() for a in invites),
             call_chat=call_chat,
+            links=dict(links),
         )
 
     def takes(self, chat: str) -> str | None:

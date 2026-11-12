@@ -41,3 +41,5 @@ knowledge_base = "Example"
 # Valor's working time on this project, written daily by the `hours` routine
 # to this Google Calendar from `since` on.
 calendar = { id = "example-calendar-id@group.calendar.google.com", since = 2026-11-01 }
+# References linked in a call's saved summary: the prefix and its digits.
+links = { "EX-" = "https://linear.app/example/issue/EX-" }

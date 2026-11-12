@@ -195,7 +195,8 @@ that link in that thread, one line. During the call, everything Valor
 writes in the call's chat is copied to that thread for you, so add
 nothing to it then. When the call ends, its report says what it settled
 and where Gemini's summary of the call is: copy that file into this
-workspace as `call-<code>.md` and send it, unchanged, in that thread as
+workspace under its own name (the date, the call's topic and the first
+names of those in it) and send it, unchanged, in that thread as
 the send's `files`, with at most two lines of text beside it. The summary
 is Gemini's (Tom, 2026-11-05: Google models summarise calls): never write
 one yourself, and when the report says none was made, say so in the thread

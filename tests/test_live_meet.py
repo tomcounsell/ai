@@ -354,7 +354,12 @@ def test_the_asking_chat_sends_geminis_summary_unchanged_as_one_file_with_at_mos
 
     work = tmp_path / "work"
     (work / ".valor").mkdir(parents=True)
-    summary_file = tmp_path / "store" / "2026-10-31 1000 Valor call abc-defg-hij" / "call-abc-defg-hij.md"
+    summary_file = (
+        tmp_path
+        / "store"
+        / "2026-10-31 1000 Launch plan - Logan, Valor"
+        / "2026-10-31 Launch plan - Logan, Valor.md"
+    )
     summary_file.parent.mkdir(parents=True)
     summary_file.write_text(SUMMARY)
     offered = "\n".join(f"  - {d.usage}" for d in DECLARED.values() if d.usage)
@@ -362,8 +367,8 @@ def test_the_asking_chat_sends_geminis_summary_unchanged_as_one_file_with_at_mos
     report = (
         "# In the chat since your last turn\n\n- Your task 6daae76a50c5 reports (call):\n"
         "  The call https://meet.google.com/abc-defg-hij ended: everyone else had left.\n"
-        f"  Gemini's summary of the call is {summary_file}. Copy it into your workspace as call-abc-defg-hij.md "
-        "and send it, unchanged, in the thread it was asked in (reply_to 1790000000.000100) as the send's "
+        f"  Gemini's summary of the call is {summary_file}. Copy it into your workspace under its own "
+        "name and send it, unchanged, in the thread it was asked in (reply_to 1790000000.000100) as the send's "
         "`files`, with at most two lines of text beside it.\n\nYou are in the northwind team chat on Slack "
         f"(chat id T0ABC/C0NORTH). Your workspace is {work}."
     )
@@ -380,7 +385,7 @@ def test_the_asking_chat_sends_geminis_summary_unchanged_as_one_file_with_at_mos
     assert send["target"] == "T0ABC/C0NORTH" and send["payload"]["reply_to"] == "1790000000.000100"
     (f,) = send["payload"]["files"]
     sent = Path(f["path"])
-    assert sent.name == "call-abc-defg-hij.md" and str(sent).startswith(str(work))
+    assert sent.name == "2026-10-31 Launch plan - Logan, Valor.md" and str(sent).startswith(str(work))
     assert sent.read_text() == SUMMARY
     text = send["payload"].get("text") or ""
     assert len([line for line in text.splitlines() if line.strip()]) <= 2 and len(text) < 400

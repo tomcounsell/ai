@@ -307,8 +307,8 @@ async def end(
         code, thread = call.get("code"), f"reply_to {(call.get('asked_by') or {}).get('reply_to')}"
         if summary and summary.get("path"):
             lines.append(
-                f"Gemini's summary of the call is {summary['path']}. Copy it into your workspace as "
-                f"call-{code}.md and send it, unchanged, in the thread it was asked in ({thread}) as the "
+                f"Gemini's summary of the call is {summary['path']}. Copy it into your workspace under its "
+                f"own name and send it, unchanged, in the thread it was asked in ({thread}) as the "
                 "send's `files`, with at most two lines of text beside it. The recording, transcript and "
                 "notes are in Yudame Tools' meetings on this Mac, which back them up to Drive."
             )
@@ -605,16 +605,20 @@ def note(text: str) -> dict[str, Any]:
 
 
 SUMMARY = (
-    "This is the recording of a Google Meet call Valor Engels (an AI coworker) was in, and its transcript "
-    "(heard, said and typed lines, each with its minute). Write the notes on it, using only what was said:\n"
+    "This is the recording of a Google Meet call Valor Engels (an AI coworker) was in, Valor's notes from "
+    "before it, and its transcript (heard, said and typed lines, each with its minute). Write the notes on it, "
+    "using only what was said:\n"
+    "- topic: what the call was about, in two to five words, as its title;\n"
     "- summary: a short paragraph;\n- decisions: each decision made;\n"
     "- actions: each thing someone said they would do, with its owner (the person who said it) or null;\n"
     "- markdown: the full summary as a Markdown document: who joined, what was discussed, what was settled, "
-    "what Valor answered and promised, and what is still open.\n\nThe transcript:\n"
+    "what Valor answered and promised, and what is still open.\n\nValor's notes from before the call:\n{prep}"
+    "\n\nThe transcript:\n"
 )
 SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {
+        "topic": {"type": "string"},
         "summary": {"type": "string"},
         "decisions": {"type": "array", "items": {"type": "string"}},
         "actions": {"type": "array", "items": {"type": "object", "properties": {
@@ -640,10 +644,13 @@ class Gemini:
     def connect(self, config):
         return self.client.aio.live.connect(model=settings.call_model, config=config)
 
-    async def summarise(self, audio: Path, transcript: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def summarise(
+        self, audio: Path, transcript: str, prep: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """The notes on a call from its recording, uploaded through the
         Files API (a request's own bytes stop near 20 MB) and deleted after,
-        and its transcript; with the response's usage."""
+        its prep (an invite's title, the asking chat's topic) and its
+        transcript; with the response's usage."""
         from google.genai import types
 
         files = self.client.aio.files
@@ -654,7 +661,7 @@ class Gemini:
                 up = await files.get(name=up.name)
             got = await self.client.aio.models.generate_content(
                 model=settings.summary_model,
-                contents=[up, SUMMARY + transcript],
+                contents=[up, SUMMARY.format(prep=prep.strip() or "(none)") + transcript],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json", response_schema=SUMMARY_SCHEMA
                 ),
@@ -739,6 +746,48 @@ def meta_json(title: str, start: datetime, end: datetime, zone: str, segments: l
 def folder_name(title: str, start: datetime) -> str:
     """`MeetingStore.folderName`: "2026-11-05 1000 <title>" in the Mac's zone."""
     return f"{start.astimezone().strftime('%Y-%m-%d %H%M')} {title.replace('/', '-').replace(':', '-')}"
+
+
+def title(topic: str | None, names: list[str]) -> str:
+    """A call's title: "<topic> - <first names>", its topic at most 60
+    characters (else "Valor call"), and no character a file name or the
+    store's folder name cannot hold."""
+    clean = lambda t: " ".join(re.sub(r"[/:\\]", " ", t).split())
+    return f"{clean(topic or '')[:60].strip() or 'Valor call'} - {clean(', '.join(names))}"
+
+
+GITHUB = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+?)(?:\.git)?/?")
+# Left as they are: a Markdown link, an autolink, a bare URL, a code span.
+LINKED = r"\[[^\]]*\]\([^)]*\)|<[^>\s]+>|https?://\S+|`[^`]*`"
+
+
+def linked(text: str, repo: str | None, links: dict[str, str]) -> str:
+    """References in `text` as Markdown links: "PR 12", "PR #12" and
+    "pull request 12" to the GitHub `repo`'s pull, "issue 12" to its issue,
+    and each of `links`' prefixes and its digits ("ENG-633") to its URL
+    plus the digits. A bare "#12" stays as it is ("#1 priority")."""
+    found = GITHUB.fullmatch(repo or "")
+    parts = [f"(?P<keep>{LINKED})"]
+    if found:
+        parts += [
+            r"(?P<pull>\b(?:PR|[Pp]ull [Rr]equest) ?#?(?P<pn>\d+)\b)",
+            r"(?P<issue>\b[Ii]ssue ?#?(?P<in>\d+)\b)",
+        ]
+    order = list(links)
+    parts += [rf"(?<![\w-])(?P<x{i}>{re.escape(p)}(?P<x{i}n>\d+)\b)" for i, p in enumerate(order)]
+    base = f"https://github.com/{found[1]}" if found else ""
+
+    def one(m: re.Match) -> str:
+        if m["keep"]:
+            return m[0]
+        if found and m["pull"]:
+            return f"[{m[0]}]({base}/pull/{m['pn']})"
+        if found and m["issue"]:
+            return f"[{m[0]}]({base}/issues/{m['in']})"
+        i = next(i for i in range(len(order)) if m[f"x{i}"])
+        return f"[{m[0]}]({links[order[i]]}{m[f'x{i}n']})"
+
+    return re.sub("|".join(parts), one, text)
 
 
 def keep(staging: Path, store: Path, name: str) -> Path:
@@ -888,6 +937,7 @@ class Call:
         self.buffers: dict[str, np.ndarray] = {}
         self.mine = np.zeros(0, np.float32)  # Valor's own speech, for the recording
         self.names: dict[str, str] = {}
+        self.first_names: list[str] = []  # who was in the call, for its title
         self.present: set[str] = set()  # who else is in the call now
         self.me: str | None = None
         self.speaking: str | None = None  # who the session was last told is speaking
@@ -1536,6 +1586,9 @@ class Call:
                 )
                 if p["id"] not in seen:
                     seen.add(p["id"])
+                    first = (p["name"] or "").split()[:1]
+                    if first and p["name"] != mine and first[0] not in self.first_names:
+                        self.first_names += first
                     async with await db.connect(self.dsn) as conn:
                         await ledger.append(
                             conn, self.id, "call.participant", {"id": p["id"], "name": p["name"]}
@@ -1644,7 +1697,7 @@ class Call:
                     "route": "gemini", "estimated_input": est, "max_tokens": 16_000,
                     "estimate_usd_micros": spending.gemini_worst_case(price, est, 16_000),
                     "unpriced": price["unpriced"]})  # fmt: skip
-            notes, usage = await self.gemini.summarise(audio, transcript)
+            notes, usage = await self.gemini.summarise(audio, transcript, self.info.get("prep") or "")
             async with await db.connect(self.dsn) as conn:
                 await spending.charge(conn, self.id, call_id, spending.gemini_cost(usage, price),
                                       {"model": settings.summary_model, "usage": usage})  # fmt: skip
@@ -1654,9 +1707,13 @@ class Call:
             return {
                 "error": f"{type(exc).__name__}: {str(exc)[:300]}; the call's files are kept in {staging}"
             }
-        title, code = self._title(), self.info["code"]
+        title, code = self._title(notes.get("topic")), self.info["code"]
+        day = self.started_at.astimezone().strftime("%Y-%m-%d")
+        repo, links = self._links()
         segments = sorted(self.segments, key=lambda s: s["start"])
-        summary = {"summary": notes["summary"], "decisions": list(notes["decisions"]),
+        # Linked in summary.json, which the app rewrites notes.md from; its
+        # decisions and actions it escapes, so they stay as they are.
+        summary = {"summary": linked(notes["summary"], repo, links), "decisions": list(notes["decisions"]),
                    "actions": [{k: v for k, v in a.items() if k in ("task", "owner") and v} for a in notes["actions"]]}  # fmt: skip
         files = {
             "meta.json": meta_json(title, self.started_at, datetime.now(UTC), _zone(), segments),
@@ -1664,15 +1721,30 @@ class Call:
             "transcript.md": transcript_md(title, segments),
             "summary.json": json.dumps(summary),
             "notes.md": notes_md(title, summary),
-            f"call-{code}.md": _unescaped(notes["markdown"]).rstrip() + "\n",
         }
+        doc = re.sub(r"\A\s*# [^\n]*\n?", "", _unescaped(notes["markdown"]))
+        files[f"{day} {title}.md"] = (
+            f"# {day} {title}\n\nGoogle Meet {code}\n\n{linked(doc.strip(), repo, links)}\n"
+        )
         for name, text in files.items():
             (staging / name).write_text(text)
         folder = keep(staging, self.store, folder_name(title, self.started_at))
-        return {"path": str(folder / f"call-{code}.md")}
+        return {"path": str(folder / f"{day} {title}.md")}
 
-    def _title(self) -> str:
-        return f"Valor call {self.info['code']}"
+    def _title(self, topic: str | None) -> str:
+        """The call's topic, then the first names of those in it, Valor's last."""
+        mine = persona.identity(settings.persona_dir)["name"].split()[0]
+        return title(topic, [n for n in self.first_names if n != mine] + [mine])
+
+    def _links(self) -> tuple[str | None, dict[str, str]]:
+        """The call's project's repository and reference links, read now; none
+        when it has no project or its spec does not load."""
+        try:
+            spec = workspace.Spec.load(self.project) if self.project else None
+        except workspace.Refused as exc:
+            _log(f"call {self.id}: no links in the summary: {exc}")
+            spec = None
+        return (spec.repo, spec.links) if spec else (None, {})
 
     async def run(self) -> str:
         """The call, from joining to its end; the reason it ended."""

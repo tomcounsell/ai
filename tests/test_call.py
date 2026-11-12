@@ -134,9 +134,11 @@ class Gemini:
         self.sessions: list[Session] = []
         self.configs: list = []
         self.fail = 0
-        self.notes = notes or {"summary": "Shipping is Monday.", "decisions": ["Ship Monday"],
-                               "actions": [{"task": "Book QA", "owner": "Logan"}], "markdown": "# The call\n\nShip."}  # fmt: skip
+        self.notes = notes or {"topic": "Launch plan", "summary": "Shipping is Monday, after PR 12.",
+                               "decisions": ["Ship Monday"], "actions": [{"task": "Book QA", "owner": "Logan"}],
+                               "markdown": "# The call\n\nShip PR #12 and ENG-633."}  # fmt: skip
         self.summarised: list[tuple[Path, str, bytes]] = []
+        self.preps: list[str] = []
 
     @contextlib.asynccontextmanager
     async def connect(self, config):
@@ -148,8 +150,9 @@ class Gemini:
         self.sessions.append(session)
         yield session
 
-    async def summarise(self, audio, transcript):
+    async def summarise(self, audio, transcript, prep):
         self.summarised.append((audio, transcript, audio.read_bytes()[:12]))
+        self.preps.append(prep)
         if isinstance(self.notes, Exception):
             raise self.notes
         return self.notes, {"prompt_token_count": 1000, "response_token_count": 200,
@@ -919,7 +922,7 @@ def test_a_say_names_its_turn_and_a_post_keeps_its_text_limits():
 def test_the_store_files_are_what_yudame_tools_writes():
     """Fixtures written by Yudame Tools' own encoders (MeetingStore.save,
     the transcript and summary encoders, NoteFormat and TranscriptMerge)."""
-    title = "Valor call abc-defg-hij"
+    title = "Launch plan - Logan, Valor"
     segments = [
         {"speaker": "Logan", "start": 0.5, "end": 2.0, "text": "Valor, when do we ship?", "channel": "call"},
         {"speaker": "Valor Engels", "start": 3.1, "end": 4.2, "text": "We ship Monday.", "channel": "mic"},
@@ -951,6 +954,12 @@ def test_after_the_call_gemini_summarises_the_recording_and_the_folder_appears_i
         await asyncio.sleep(call.QUIET_S)
         store = c.the.store
         during = list(store.iterdir()) if store.exists() else []
+        # Read at the save: the spec's repository and links, edited during the call.
+        spec = Path(settings.projects_dir) / f"{team.project}.toml"
+        spec.write_text(
+            spec.read_text().replace('repo = "unused"', 'repo = "https://github.com/acme/app.git"')
+            + 'links = { "ENG-" = "https://linear.app/acme/issue/ENG-" }\n'
+        )
         await finish(c)
         rows = await bridges.rows(dsn, c.brief.id)
         return c, during, store, rows, await bridges.rows(dsn, c.the.id)
@@ -958,6 +967,10 @@ def test_after_the_call_gemini_summarises_the_recording_and_the_folder_appears_i
     c, during, store, rows, call_rows = run(go())
     assert during == []
     (folder,) = store.iterdir()
+    title = "Launch plan - Logan, Tom, Valor"
+    day = c.the.started_at.astimezone().strftime("%Y-%m-%d")
+    assert folder.name == f"{c.the.started_at.astimezone().strftime('%Y-%m-%d %H%M')} {title}"
+    doc = folder / f"{day} {title}.md"
     assert sorted(p.name for p in folder.iterdir()) == sorted(
         [
             "audio.m4a",
@@ -966,28 +979,95 @@ def test_after_the_call_gemini_summarises_the_recording_and_the_folder_appears_i
             "transcript.md",
             "summary.json",
             "notes.md",
-            f"call-{CODE}.md",
+            doc.name,
         ]
     )
     assert not [p for p in store.parent.iterdir() if p.name.startswith(".valor-call-")]
     meta = json.loads((folder / "meta.json").read_text())
     assert meta["recording"] is False and meta["soundChecked"] and not meta["summaryPending"]
-    assert meta["speakers"] == ["Logan", "Valor Engels"]
+    assert meta["speakers"] == ["Logan", "Valor Engels"] and meta["title"] == title
+    assert (folder / "transcript.md").read_text().startswith(f"# {title} - Transcript")
+    pr = "[PR 12](https://github.com/acme/app/pull/12)"
+    assert json.loads((folder / "summary.json").read_text())["summary"] == f"Shipping is Monday, after {pr}."
+    notes = (folder / "notes.md").read_text()
+    assert notes.startswith(f"# {title} - Notes") and pr in notes
+    assert c.gemini.preps == ["The launch: two decisions open."]
     (got,) = c.gemini.summarised
     _, transcript, head = got
     assert head[4:8] == b"ftyp"  # an m4a
     assert "Logan (spoke): Valor, when do we ship?" in transcript and "Valor (spoke): Monday." in transcript
-    assert (folder / f"call-{CODE}.md").read_text() == "# The call\n\nShip.\n"
+    assert doc.read_text() == (
+        f"# {day} {title}\n\nGoogle Meet {CODE}\n\nShip [PR #12](https://github.com/acme/app/pull/12) and "
+        "[ENG-633](https://linear.app/acme/issue/ENG-633).\n"
+    )
     (ended,) = [
         r["payload"]
         for r in rows
         if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended")
     ]
-    assert str(folder / f"call-{CODE}.md") in ended["text"] and "unchanged" in ended["text"]
+    assert str(doc) in ended["text"] and "unchanged" in ended["text"]
     assert any(
         r["type"] == "gateway.charged" and r["payload"].get("model") == "gemini-3.1-pro-preview"
         for r in call_rows
     )
+
+
+def test_a_call_is_titled_by_its_topic_and_the_first_names_of_those_in_it(dsn, team, quick):
+    async def go():
+        page = Page()
+        page.people += [{"id": "devices/3", "name": "", "me": False},
+                        {"id": "devices/4", "name": "Valor Engels", "me": False},
+                        {"id": "devices/5", "name": "Logan Reyes", "me": False},
+                        {"id": "devices/6", "name": "Mara Ode", "me": False}]  # fmt: skip
+        c = await in_call(dsn, team, page=page, gemini=Gemini(notes={
+            "topic": "Q4: launch/rollout\nplan", "summary": "s", "decisions": [], "actions": [], "markdown": "m"}))  # fmt: skip
+        await until(lambda: "Mara" in c.the.first_names)
+        await push(c.session, heard("Hello?"), done())
+        await settle(c.the)
+        await finish(c)
+        return c.the.store
+
+    (folder,) = run(go()).iterdir()
+    assert folder.name.endswith(" Q4 launch rollout plan - Logan, Tom, Mara, Valor")
+    assert call.title(None, ["Valor"]) == "Valor call - Valor"
+    assert call.title("x" * 80, ["Valor"]) == "x" * 60 + " - Valor"
+
+
+def test_references_become_links_and_nothing_else_does():
+    repo, links = "https://github.com/acme/app.git", {"ENG-": "https://linear.app/acme/issue/ENG-"}
+    pull, issue = "https://github.com/acme/app/pull/", "https://github.com/acme/app/issues/"
+    got = call.linked("PR 12, PR #13, pull request 14, issue 7, issue #8 and ENG-633.", repo, links)
+    assert got == (f"[PR 12]({pull}12), [PR #13]({pull}13), [pull request 14]({pull}14), [issue 7]({issue}7), "
+                   f"[issue #8]({issue}8) and [ENG-633](https://linear.app/acme/issue/ENG-633).")  # fmt: skip
+    kept = (
+        "#1 priority, [PR 12](https://x.test/12), <https://x.test/PR3>, https://x.test/a#12, `PR 5`, XENG-1"
+    )
+    assert call.linked(kept, repo, links) == kept
+    assert call.linked("PR 12 and ENG-1", "https://gitlab.com/acme/app", {}) == "PR 12 and ENG-1"
+    assert call.linked("PR 12", None, {}) == "PR 12"
+
+
+def test_the_spec_loads_links_and_refuses_a_malformed_one():
+    from core import workspace
+
+    base = {"name": "x", "repo": "r", "kind": "plain", "suite": "true"}
+    links = {"ENG-": "https://linear.app/acme/issue/ENG-"}
+    assert workspace.Spec.from_dict({**base, "links": links}).links == links
+    assert workspace.Spec.from_dict(base).links == {}
+    for bad in ({"ENG-": 3}, {"ENG-": "linear.app/x"}, ["ENG-"]):
+        with pytest.raises(workspace.Refused, match="links"):
+            workspace.Spec.from_dict({**base, "links": bad})
+
+
+def test_a_call_whose_spec_does_not_load_links_nothing(dsn, team):
+    async def go():
+        _, the = await a_call_of(dsn, team, Page(), Gemini())
+        (Path(settings.projects_dir) / f"{team.project}.toml").write_text("not = [toml")
+        broken = the._links()
+        the.project = None
+        return broken, the._links()
+
+    assert run(go()) == ((None, {}), (None, {}))
 
 
 def test_a_failed_summary_is_named_in_the_report_and_no_other_is_written(dsn, team, quick):
@@ -1034,10 +1114,12 @@ def test_the_summary_uploads_the_recording_and_sends_it_with_the_transcript(tmp_
     gemini.client = SimpleNamespace(aio=SimpleNamespace(files=files, models=models))
     audio_file = tmp_path / "audio.m4a"
     audio_file.write_bytes(b"x")
-    notes, usage = run(gemini.summarise(audio_file, "[0:01] Logan (spoke): hi"))
+    notes, usage = run(gemini.summarise(audio_file, "[0:01] Logan (spoke): hi", "The launch."))
     assert files.file == str(audio_file) and files.deleted == ["files/1"]
     assert models.model == "gemini-3.1-pro-preview" and models.contents[0].name == "files/1"
-    assert models.contents[1].endswith("[0:01] Logan (spoke): hi")
+    assert models.contents[1].endswith(
+        "before the call:\nThe launch.\n\nThe transcript:\n[0:01] Logan (spoke): hi"
+    )
     assert notes["markdown"] == "m" and usage == {"prompt_token_count": 10}
 
 

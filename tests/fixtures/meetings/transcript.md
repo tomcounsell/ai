@@ -1,4 +1,4 @@
-# Valor call abc-defg-hij - Transcript
+# Launch plan - Logan, Valor - Transcript
 
 **Logan** (0:00): Valor, when do we ship?
 

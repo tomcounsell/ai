@@ -69,7 +69,12 @@ against a new Meet with a second device of Valor's account
   goes to Gemini (`settings.summary_model`, through the Files API) with
   the transcript; the call is moved whole into Yudame Tools' meetings
   (`settings.meetings_store`) in the app's own files, which the app backs
-  up to Drive, and `call-<code>.md`, Gemini's summary, beside them. The
+  up to Drive, and Gemini's summary beside them. The call's title is its
+  topic (Gemini's, from the prep and what was said) and the first names
+  of those in it, Valor's last: the folder, the files' headings, and the
+  summary, `<date> <title>.md`, which names the Meet code under its
+  heading. PR and issue numbers in the summary link to the project's
+  GitHub repository, and its spec's `links` prefixes to theirs. The
   asking session sends that file unchanged in the thread with at most two
   lines beside it. `valor-record call <code>` reads the transcript.
 
