@@ -1,5 +1,5 @@
 ---
-status: Planned
+status: Built
 type: bug
 owner: Valor
 created: 2026-11-12
