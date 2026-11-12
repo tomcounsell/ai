@@ -194,8 +194,11 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                 drop.set()  # the session drops; its handle is refused; a fresh one carries on
                 await asyncio.sleep(10)
                 seen["gaps"]["after_fresh"] = await a.ask(kokoro, "Valor, are you still with us?")
+                during = []  # a call that goes on is talked in, as a real one is
                 while time.time() - started < LONG_S:
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(min(240, max(0, LONG_S - (time.time() - started))))
+                    during.append(await a.ask(kokoro, "Valor, quick check, are you still on the call?"))
+                seen["gaps"]["during"] = max(during, default=0.0)
                 seen["gaps"]["after_reconnect"] = await a.ask(kokoro, "Valor, are you still there?")
                 await asyncio.sleep(8)
                 # A wrap-up to everyone, which the operator's "Valor, leave" match misses: the model leaves.
