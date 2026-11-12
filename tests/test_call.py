@@ -384,6 +384,7 @@ def test_the_person_answered_speaking_over_valor_cuts_him_off_and_side_talk_does
         await talk(c.the, LOGAN, 0.5)
         await push(c.session, heard("Valor, tell me about the launch."))
         await push(c.session, audio(1.0), said("one two three four five six"), audio(1.0), done())
+        assert await until(lambda: c.the.out is not None)  # the say released: the reply is playing
         await talk(c.the, TOMS, 0.6)  # side talk
         side = c.page.stops
         await talk(c.the, LOGAN, 0.25)  # a sound from the person answered, not taken further
@@ -423,6 +424,7 @@ def test_valor_answers_who_spoke_last_when_his_reply_begins_before_their_words_a
         await push(c.session, audio(1.0))  # the reply, ahead of the question's transcript
         await push(c.session, heard("Valor, tell me about the launch."))
         await push(c.session, said("one two three four five six"), audio(1.0), done())
+        assert await until(lambda: c.the.out is not None)  # the say released: the reply is playing
         await talk(c.the, TOMS, 0.6)  # side talk over the reply
         side = c.page.stops
         await talk(c.the, LOGAN, 0.6)  # the person answered
