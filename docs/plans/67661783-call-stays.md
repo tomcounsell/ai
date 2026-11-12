@@ -64,9 +64,10 @@ No new check, gate or timer. Docs: `docs/bridges/meet.md`'s Live paragraph and l
 - The existing regex tests stay as they are: from anyone else, "Valor, leave" in the transcript alone does not
   leave.
 
-**Live** (`tests/test_live_meet.py` on the Captain, through `_call`): already runs past one session's life
-(`LONG_S`). It gains two things. First, a forced refusal: the test's Gemini wrapper refuses the first resume's
-handle, and the call must carry on and still answer afterwards. Second, at the end, the asking device says a
+**Live** (`tests/test_live_meet.py` on the Captain, through `_call`): runs `LONG_S`, 12 minutes unless
+`VALOR_LIVE_LONG_S` stretches it past Live's own go-away, with the asking device checking in every four minutes.
+It gains two things. First, a forced refusal: the test's Gemini wrapper drops the session once a handle exists
+and refuses the first resume's handle, and the call must open one fresh session and still answer afterwards. Second, at the end, the asking device says a
 wrap-up to everyone that the `LEAVE` regex does not match ("Thanks everyone, that's all for today, goodbye"; the
 devices carry the operator's name, so a "Valor ... leave" phrase would end the call through the regex). The
 call must end with exactly "Valor was asked to leave", the model's `leave`.
