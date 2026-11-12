@@ -29,8 +29,8 @@ reasons to leave (`watch`) are removal, denial, the meeting ending, no one comin
    call has begun carries the call so far. `live_config` gets a new section after the prep, "The call so far",
    with three parts: a line saying the call is under way and Valor has already joined and greeted, so it does
    not greet again; who is here now (the same text `_here` gives, so "only one person is here" still holds);
-   and the tail of `self.lines`, cut to `CALL_SO_FAR` characters. `CALL_SO_FAR` is `CALL_CONTEXT // 4 * 4`,
-   about a quarter of the window at about 4 characters per token, so the instruction stays well under the
+   and the tail of `self.lines`, cut to `CALL_SO_FAR` characters. `CALL_SO_FAR` is `CALL_CONTEXT` characters,
+   about a quarter of the compression trigger at about 4 characters per token, so the instruction stays well under the
    compression window. The prep is kept as it is. A session that drops mid-call and then has its handle
    refused, exactly what happened at 14:59, takes the same path.
 2. **Why "already exists".** The log between the 14:56:15 resume and the 14:59:08 drop has no stall resume
