@@ -16,54 +16,62 @@ changes in yudame/yudame-tools.
 
 1. **The topic.** `SUMMARY_SCHEMA` gains `topic`: what the call was about, two to five words, as
    a title. `Gemini.summarise(audio, transcript, prep)` puts the call's prep (which carries an
-   invite's title and the asking chat's topic) in the prompt before the transcript, so the
-   model names the topic from the prep and what was said. Empty or missing: "Valor call".
-2. **The names.** First names (first word of each Meet display name, the "(another device)"
-   suffix and "someone" dropped, deduplicated) of everyone seen in the call, in the order they
-   appeared, then Valor's (`persona.identity` name's first word).
-3. **The title.** `_title()` becomes `"<topic> - <names>"`. It is meta.json's `title`, the
-   heading of transcript.md and notes.md, and the folder (`folder_name`, unchanged: the
-   store's "YYYY-MM-DD HHMM <title>", so date sorting holds). The summary document the chat
-   posts is renamed from `call-<code>.md` to `"<YYYY-MM-DD> <title>.md"`; its heading is
-   `# <YYYY-MM-DD> <title>` (replacing the model's own first H1, if any) followed by a line
-   `Google Meet <code>`, so the code stays findable. `end()` tells the chat session to copy
-   the file under its own name, not `call-<code>.md`. The ledger still keys the call by code
-   (`valor-record call <code>`), which nothing here changes.
-4. **The links, one deterministic linker** (`linked(text, repo, links, escape)`), applied when
-   the files are written to the summary document and notes.md's summary, decisions and
-   actions (notes.md escapes the text around each link, as today). Not in the transcript.
-   Chosen over telling the model: it is testable, never invents a URL, and catches what the
-   model writes either way.
-   - The call's project spec, read live at the save (`Spec.load(self.project)`; a spec that
-     does not load means no links): `repo`, when on github.com (`.git` dropped).
-   - `PR 12`, `PR #12`, `pull request 12` → `<repo>/pull/12`; `issue 12` → `<repo>/issues/12`;
-     a bare `#12` → `<repo>/issues/12` (GitHub redirects an issue URL to the PR). The matched
-     words are the link's text.
+   invite's title and the asking chat's topic) in the prompt before the transcript. `_title()`
+   cleans it: newlines to spaces, `/`, `:` and `\` dropped, whitespace collapsed, at most 60
+   characters; empty or missing gives "Valor call".
+2. **The names.** `watch()` (keyed by Meet's participant id, the one keyspace that marks
+   Valor's other device) records each new participant's first name (first word of the display
+   name) in order of first appearance, skipping a blank name, a name equal to Valor's own
+   (another device of his account) and a first name already listed; Valor's first name
+   (`persona.identity`) ends the list. `people()`'s device-keyed names are not used.
+3. **The title.** `_title()` is `"<topic> - <names>"`: meta.json's `title`, the heading of
+   transcript.md and notes.md, and the folder (`folder_name`, unchanged: "YYYY-MM-DD HHMM
+   <title>" in the Mac's zone, so date sorting holds). The summary document is renamed from
+   `call-<code>.md` to `"<YYYY-MM-DD> <title>.md"`, the date in the Mac's zone as the folder's
+   (`started_at.astimezone()`), so the two agree near midnight UTC. Its heading is
+   `# <YYYY-MM-DD> <title>` (replacing the model's first H1, if any), then a line
+   `Google Meet <code>`, so the code stays findable; the ledger still keys the call by code
+   (`valor-record call <code>`). `end()`, `skills/sdlc/converse.md` (Calls) and
+   `docs/bridges/meet.md` tell the chat session to send the file under its own name.
+4. **The links, one deterministic linker** `linked(text, repo, links)`, applied to the summary
+   document and to the `summary` paragraph before it is written to summary.json (notes.md is
+   built from that field, raw, as Yudame Tools' `NoteFormat.markdown` writes it; the app
+   rewrites notes.md from summary.json on any edit, so links live in summary.json). Decisions
+   and actions are left unlinked: the app escapes them, so a link there would show as literal
+   brackets. Not in the transcript. Chosen over telling the model: testable, never invents a
+   URL, catches what the model writes either way.
+   - The call's project spec, read live at the save (`Spec.load(self.project)`); no project, or
+     a spec that does not load, links nothing. `repo`, when on github.com (`.git` dropped).
+   - Only prefixed references: `PR 12`, `PR #12`, `pull request 12` → `<repo>/pull/12`;
+     `issue 12`, `issue #12` → `<repo>/issues/12`. A bare `#12` is left alone ("#1 priority").
+     The matched words are the link's text.
    - A new spec field `links = {"ENG-" = "https://linear.app/<workspace>/issue/ENG-"}`: each
-     prefix followed by digits becomes a link to the URL plus those digits (Linear ids and any
-     other numbered reference whose URL form is known). A table of strings, documented in
+     prefix followed by digits links to the URL plus those digits (Linear ids and any other
+     numbered reference whose URL form is known). A table of strings, documented in
      `projects/README.md` and `projects/example.toml`.
    - Text already inside a Markdown link, an autolink, a bare URL or a code span is untouched.
 
 ## Tests (`tests/test_call.py`, made-up names and repos)
 
-- The end-to-end save test: with two people named "Logan Reyes" and "Mara Ode" and the fake
-  model's topic "Launch plan", the folder is `<date> <time> Launch plan - Logan, Mara, Valor`,
-  meta/notes/transcript headings carry that title, the summary file is
-  `<date> Launch plan - Logan, Mara, Valor.md` with that heading and `Google Meet <code>`, and
-  the ended report names that file. The fake model's prompt carries the prep.
-- No topic from the model: "Valor call - …". A device with no name and Valor's other device
-  are left out of the names; a repeated first name appears once.
-- The linker: `PR 12`, `PR #12`, `issue 7`, bare `#7`, `ENG-633` under a `links` prefix become
-  the right links; an existing link, a URL containing `#12`, and a code span are untouched; a
-  non-GitHub repo and a missing spec link nothing; in notes.md the text around a link stays
-  escaped. A PR number in the model's summary is a link in the saved file.
+- The end-to-end save: participants "Logan Reyes" and "Mara Ode", the fake model's topic
+  "Launch plan" and a summary mentioning `PR 12`: the folder is `<date> <time> Launch plan -
+  Logan, Mara, Valor`; meta/notes/transcript carry that title; the summary file is `<date>
+  Launch plan - Logan, Mara, Valor.md` with that heading and `Google Meet <code>`; summary.json's
+  `summary` and notes.md carry the PR link; the ended report names the file; the model's prompt
+  carries the prep.
+- A topic with `/`, `:` and a newline saves under the cleaned title; no topic gives "Valor call
+  - …"; a blank name, Valor's other device and a repeated first name are left out.
+- The linker: `PR 12`, `PR #12`, `issue 7`, `ENG-633` under a `links` prefix link right; a bare
+  `#1 priority`, an existing link, a URL containing `#12` and a code span are untouched; a
+  non-GitHub repo, no project and an unloadable spec link nothing.
 - The spec: `links` loads; a non-string value is refused like any malformed field.
-- Existing tests naming `call-<code>.md` move to the new name.
+- Moved to the new names: `tests/test_live_meet.py` (folder and file), the format test
+  (`test_call.py:922`) and `tests/fixtures/meetings/{notes,transcript}.md` with a new-style title.
 
 ## Out of scope
 
-Yudame Tools' code; renaming calls already saved; linking in the transcript; any new check.
+Yudame Tools' code; renaming calls already saved; linking the transcript, decisions or actions;
+any new check.
 
 ## Then
 
