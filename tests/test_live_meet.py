@@ -15,6 +15,7 @@ the two compare. The worker is a stub turn.
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -39,7 +40,9 @@ pytestmark = [
         reason="a live Meet call: VALOR_LIVE=1 and VALOR_MEET_LIVE=1",
     ),
 ]
-LONG_S = 12 * 60  # past a Live connection's life, so the session is resumed
+# The call's length. Live's own go-away came 57 minutes into Tom's call
+# (2026-11-12), so a run past one session's life sets VALOR_LIVE_LONG_S.
+LONG_S = int(os.environ.get("VALOR_LIVE_LONG_S", "720"))
 # Half a minute of one person talking: a healthy Live sent nothing back for
 # longer than the stall inside a turn like it, and was resumed (Tom's call, 2026-11-06).
 MONOLOGUE = (
@@ -78,11 +81,35 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     seen: dict = {"gaps": {}, "chat": [], "frames": [], "unheard_s": 0.0, "log": [], "refused": False}
     speakers, log, connect = call.Call._speakers, call._log, call.Gemini.connect
 
-    def refusing(self, config):  # the first resume's handle refused, as in Tom's call (2026-11-12)
+    drop = asyncio.Event()
+
+    def dropping(receive):  # the session drops when `drop` is set, as Tom's did an hour in
+        async def dropped():
+            it = receive().__aiter__()
+            while True:
+                nxt, stop = asyncio.ensure_future(it.__anext__()), asyncio.ensure_future(drop.wait())
+                await asyncio.wait({nxt, stop}, return_when=asyncio.FIRST_COMPLETED)
+                if stop.done():
+                    nxt.cancel()
+                    drop.clear()
+                    raise ConnectionError("1008 Requested entity already exists (forced by the test)")
+                stop.cancel()
+                try:
+                    m = nxt.result()
+                except StopAsyncIteration:
+                    return
+                yield m
+
+        return dropped
+
+    @contextlib.asynccontextmanager
+    async def refusing(self, config):  # the first resume's handle refused, as in Tom's call (2026-11-12)
         if config.session_resumption.handle and not seen["refused"]:
             seen["refused"] = True
             raise RuntimeError("1008 BidiGenerateContent session not found or expired (forced by the test)")
-        return connect(self, config)
+        async with connect(self, config) as session:
+            session.receive = dropping(session.receive)
+            yield session
 
     monkeypatch.setattr(call.Gemini, "connect", refusing)
 
@@ -163,6 +190,10 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                 await b.leave()
                 await asyncio.sleep(6)
                 await a.ask(kokoro, MONOLOGUE)  # its answer may come late: the wait below takes it
+                await asyncio.sleep(10)
+                drop.set()  # the session drops; its handle is refused; a fresh one carries on
+                await asyncio.sleep(10)
+                seen["gaps"]["after_fresh"] = await a.ask(kokoro, "Valor, are you still with us?")
                 while time.time() - started < LONG_S:
                     await asyncio.sleep(30)
                 seen["gaps"]["after_reconnect"] = await a.ask(kokoro, "Valor, are you still there?")
@@ -193,10 +224,12 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     gaps = seen["gaps"]
     stalls = [line for line in seen["log"] if "after speech; resuming" in line]
     fresh = [line for line in seen["log"] if "opening a fresh one" in line]
+    reopened = [line for line in seen["log"] if "is open (resumed)" in line]
     print(json.dumps({"gaps": gaps, "typed": seen["typed"], "looked_up": seen["looked_up"],
                       "side_talk_frames": seen["side_talk_frames"], "barge": seen["barge_at"], "over": seen["over_at"],
                       "says": says, "charged_turns": len(resumed), "reason": reason, "report": report,
-                      "unheard_s": round(seen["unheard_s"], 1), "stalls": stalls, "fresh": fresh}, indent=1))  # fmt: skip
+                      "unheard_s": round(seen["unheard_s"], 1), "stalls": stalls, "fresh": fresh,
+                      "resumed": reopened, "long_s": LONG_S}, indent=1))  # fmt: skip
     # No stall-resume in a healthy call, a half-minute monologue included.
     assert not stalls
     # Answered when addressed, and to "Hello" with one other person there.
@@ -210,7 +243,7 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     assert seen["side_talk_frames"] == 0
     assert seen["barge_at"]["cut"] and not seen["over_at"]["cut"]
     # A refused resume opened a fresh session, and Valor answered after it.
-    assert seen["refused"] and len(fresh) == 1 and gaps["after_reconnect"] < 30
+    assert seen["refused"] and len(fresh) == 1 and gaps["after_fresh"] < 30
     # Everyone's goodbye is the model's leave, past the fresh session, and Gemini's summary file.
     assert reason == "Valor was asked to leave"
     assert "Gemini's summary of the call is" in report
