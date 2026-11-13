@@ -2,191 +2,112 @@
 
 Task a46012997a42.
 
-## Incident, 2026-11-13
+**Incident, 2026-11-13.** The 04:00 nightly upgraded postgresql@18 while it was running and deleted the old keg.
 
-The 04:00 nightly (`com.valor.brew-nightly`) upgraded postgresql@18 while it was running and deleted the old keg. On all four Macs, any connection that loaded the plpgsql trigger then failed (`UndefinedFile`, "could not load library"). From that point every ledger INSERT from the bridges, steps and gateway failed.
+- **What failed.** Every new connection that loaded the plpgsql trigger failed (`UndefinedFile`, "could not load library"). From then on, no ledger write succeeded on any of the four Macs.
+- **How long.** From 21:00 UTC on 12 Nov until 02:13 on the Captain, 09:08 on the Cowboy, and 09:21 on the Pirate and the Bald (the last two restarted by this task).
+- **Why nothing recovered.** Every failure site retries forever, and Postgres's LaunchAgent restarts it only on a crash.
+- **The restart cancelled turns.** When Postgres was restarted, the kernel's reconnect (`serve.py:1348/1357`, outside any `try`) crashed on "starting up", and that cancelled the running turns.
+- **No message was lost.** The bridges exited on their dead lock connection, launchd restarted them, and gap fill retook every message. `telegram.log` on the Pirate and the Bald shows the fresh starts at 16:22 and 16:23 local.
 
-| Mac | Down from | Down until | How it ended |
-|---|---|---|---|
-| Captain | 12 Nov 21:00 UTC | 02:13 UTC | |
-| Cowboy | 12 Nov 21:00 UTC | 09:08 UTC | |
-| Pirate | 12 Nov 21:00 UTC | 09:21 UTC | this task restarted it |
-| Bald | 12 Nov 21:00 UTC | 09:22 UTC | this task restarted it |
-
-Why nothing recovered:
-- **Retries never escalate.** Every failure site logs and retries forever.
-- **Postgres never crashed.** Its LaunchAgent restarts it only on a crash.
-- **Sentry emailed once.**
-- **Reports need the ledger.** Every report path writes to the ledger, so nothing could report.
-- **The reconnect crashed the kernel.** It ran outside any `try` (`serve.py:1348/1357`), died on "starting up", and the crash cancelled running turns.
-
-The bridges lost no message. Slack and Telegram retake by gap fill, and email stays unseen until it's taken. On the Pirate and the Bald, about a minute after the restart:
-- the Slack and Telegram bridges exited, because `due()` raised on the dead lock connection and `bridge.serve` exits;
-- launchd started them again: `telegram.log` shows a fresh start ("libssl detected") at 16:22:21 and 16:23:34 local.
-
-**Stakes.** This changes the resident kernel and the nightly update on four Macs that run unattended for weeks.
+**Stakes.** This changes the resident kernel and the nightly update on four Macs that are unattended for weeks.
 
 ## Build
 
-### 1. `core/health.py`
+1. **`core/health.py`.**
+   - **`probe(dsn)`** opens a new connection and runs `DO $$BEGIN END$$`, which loads plpgsql. It does not use an old backend or `pg_isready`: both passed throughout the incident.
+   - **`curable(exc)`** is true for SQLSTATE 58P01, for XX000 "could not load library", and for a refused or lost connection. It is false for 57P03 "starting up", which the kernel waits out.
+   - **`restart_postgres()`** acts only when `<pg_data_dir>/postmaster.pid` is absent or more than 10 minutes old. That file is the server's own start record, so the spacing holds across kernel restarts and is shared with a remote fix. The restart goes in three steps:
+     1. `pg_ctl -D <pg_data_dir> -m fast stop -t 60`. A fast stop ends client sessions. The default smart stop would wait forever on the bridges and the kernel.
+     2. If the fast stop fails, `-m immediate`.
+     3. `launchctl kickstart` on the LaunchAgent whose program runs that data dir, or bootstrap it if it isn't loaded. Its program is the `opt/` path, so the server starts on the new keg.
 
-- **`probe(dsn)`.** Opens a **new** connection and runs `DO $$BEGIN END$$`, which loads plpgsql. An old backend that loaded plpgsql before the keg was deleted keeps working, and `pg_isready` passed all through the incident, so neither is a usable check.
-- **`curable(exc)`.** True for SQLSTATE 58P01, for XX000 "could not load library", and for a refused or lost connection. False for 57P03 "starting up", which is waited out.
-- **`restart_postgres()`.**
-  - Finds the LaunchAgent whose program runs `settings.pg_data_dir`.
-  - Runs `launchctl kickstart -k` on it, or bootstraps it if it isn't loaded, with a 120 s timeout. It uses launchd directly because `brew services` waits on brew's lock.
-  - The plist runs the keg's `opt/` path, so a restart picks up the new keg.
-  - **Spacing.** It acts only when `<pg_data_dir>/postmaster.pid` is absent or more than 10 minutes old. That file is the server's own start record. It holds the spacing across kernel restarts and while the ledger is down, and it is shared with a peer's remote fix, so two fixers never restart the server within 10 minutes of each other.
+     It does not use `brew services`, which waits on brew's lock.
+2. **The kernel heals itself (`serve`).**
+   - **What triggers a restart.** `probe` runs at start and on every `serve_tick_s` wake. A curable exception from `tick`, `_step`'s handler, or the job and reaction callbacks also starts a 60 s clock. Once probes have failed for 60 s, the kernel calls `restart_postgres()`.
+   - **Start-up on a broken database.** The first connect, the kernel lock and `recover()` wait in that same loop instead of raising to launchd. Reconnects of `conn` and `listener` back off and never leave `serve`.
+   - **Live work keeps its locks.** `router.step`'s `alive()` reconnects and re-takes `run:<task>`. `_Services` and `slot.held` re-take their locks the same way. A step reports `lock lost` only when that lock is refused.
+   - **After a restart: `db.restarted {cause, down_since}`.** Then a no-kill pass (`recover(after_restart=True)`) runs:
+     - it never reaps, and never charges a gateway call at its estimate;
+     - it ends a turn `interrupted` only when `runs`' process search (the one `reap` uses, without signalling) finds none of the turn's processes;
+     - any other holder of a run, such as `python -m core run`, re-takes its lock on its next write.
 
-### 2. The kernel heals itself (`serve`)
+     Handles that could not be re-claimed are dropped from `services` and `swept`. Interrupted turns then resume or report through the existing paths.
+3. **A Python move drains.**
+   - When the resolved `.venv/bin/python` changes, the kernel sets the rollout's hold (`restart_due`) and waits for running jobs. It then writes `kernel.restarting {reason: python}` and raises `rollout.Restart`.
+   - The next start's `recover` kicks every bridge and the UI.
+   - The vault script's `kickstart -k` block is deleted.
+4. **`python -m core health [--fix]`** prints JSON:
+   - the probe result;
+   - a pid for each loaded `com.valor.kernel*` job;
+   - free disk.
 
-- **Healing a broken database.** At start, and on every `serve_tick_s` wake, the kernel runs `probe`. The new connection on each wake catches a quiet Mac whose old `conn` still works.
-- **Failure sites feed the same clock.** A curable exception from any of these starts the 60 s clock too:
-  - `tick`;
-  - `_step`'s handler;
-  - `_start`'s job callback;
-  - `react`'s callback.
-- **The restart.** After 60 s of failing probes, the kernel calls `restart_postgres()`.
-- **Start-up on a broken database.** The first connect, the kernel lock and `recover()` wait inside one loop until the server is healthy, through the same probe, the same 60 s clock and the same restart. They do not raise to launchd.
-- **Reconnects.** `conn` and `listener` back off and retry, and never leave `serve`.
-- **Live work keeps its locks.**
-  - `router.step`'s `alive()` reconnects a dead holder and re-takes `run:<task>`. It reports `lock lost` only when that lock is refused. Nothing else steps a task the kernel is running.
-  - `_Services` re-claims `services:<task>` the same way.
-  - `slot.held` re-takes its turn slot the same way.
+   `--fix` calls `restart_postgres()` when the probe fails curably. It kickstarts only jobs that have no pid.
+5. **The `watch` routine**, a deterministic runner (no agent turn), runs every 30 minutes. `VALOR_WATCH` sets the targets: the Cowboy watches the Captain, the Pirate and the Bald; the Captain watches the Cowboy.
+   - **Probe.** Each target is read with `ssh -o BatchMode=yes -o ConnectTimeout=10 <host> …python -m core health`.
+   - **Healthy.** `~/.config/brew-nightly/hold-<host>` is deleted on both Macs.
+   - **Broken.** The hold is written on both Macs. If the target was also broken at the previous watch, `health --fix` runs.
+   - **Unreachable.** No hold is set.
+   - **What it writes.** One `routine.ran` per run (as every routine does), plus a `watch.*` row only when a target's state changes: `held`, `fixed`, `failed` or `unreachable`.
+6. **Telling Tom.** A fix that worked is only recorded. A target still broken after its fix, or unreachable for 24 h, reaches Tom once:
+   - the Cowboy sends a `notices.request` on stream `watch` to the operator chat's session;
+   - when the Captain is reporting on the Cowboy, it uses `sentry_sdk.capture_message(level="fatal")`.
+7. **Vault script.** This sits outside the repo. Valor edits it by 2026-11-14, on top of whatever bdfbd371345e has landed. The edit:
+   - skips upgrade and cleanup while any `hold-*` file exists;
+   - holds the Cowboy's upgrade until 05:00;
+   - keeps `brew cleanup` off the Python keg the running kernel started on, so a draining kernel never loses its imports. bdfbd371345e's rule for running services covers this too, if it lands first.
 
-  A turn that is running keeps running.
-- **After a restart, interrupted work is recovered.** Once writes work again, the kernel:
-  - writes `db.restarted {cause, down_since}`;
-  - drops `services` and `swept` handles that could not be re-claimed;
-  - runs `recover(skip=<tasks with a live job>)`.
-
-  For any other task, `recover` reaps the turn that has no end, writes `turn.ended interrupted`, and collects it. The existing paths then resume or report it. A live job is never reaped.
-- **Bridges.** No change: they exit and launchd restarts them, as above. The tests pin this down.
-
-### 3. A Python move drains
-
-- **The trigger.** On a wake, the resolved `.venv/bin/python` differs from the one at start.
-- **What the kernel does:**
-  1. It sets the rollout's hold (`restart_due`).
-  2. It waits for the running jobs.
-  3. It writes `kernel.restarting {reason: python}` and raises `rollout.Restart`.
-- **The next start.** `recover` kicks every bridge and the UI.
-- **Why this is enough.** The venv points at `/opt/homebrew/opt/python@3.14`, so a patch move keeps it valid. A minor move would be a new formula (`python@3.15`), which only a deliberate change installs. That case is listed as a residual risk.
-- **The vault script.** Its `kickstart -k` block is deleted.
-
-### 4. `python -m core health [--fix]`
-
-- **What it reports.** It reads this Mac's kernel plist env and prints JSON:
-  - the probe result;
-  - the pid of `com.valor.kernel` and of each loaded `com.valor.kernel.*` job;
-  - free disk.
-- **What `--fix` does.**
-  - When the probe fails curably, it calls `restart_postgres()`, with the same spacing.
-  - It kickstarts only jobs that have no pid.
-
-### 5. The `watch` routine, every 30 minutes
-
-**Who watches whom** (`VALOR_WATCH`):
-
-| Mac | Watches |
-|---|---|
-| Cowboy | Captain, Pirate, Bald |
-| Captain | Cowboy |
-| Pirate | none |
-| Bald | none |
-
-**What it runs on each target:** `ssh -o BatchMode=yes -o ConnectTimeout=10 <host> …python -m core health`.
-
-| Result | What happens |
-|---|---|
-| Healthy | Delete `~/.config/brew-nightly/hold-<host>` on both Macs. |
-| Broken | Write that file on both Macs and record `watch.held`. |
-| Broken at two watches in a row | Run `health --fix`. |
-| Unreachable | Record it. No hold. |
-
-### 6. Telling Tom
-
-- **A fix that worked:** recorded only (`watch.fixed`).
-- **A target still broken after the fix, or unreachable for 24 h:**
-  - if the watcher is the Cowboy, it sends one `notices.request` on stream `watch` to the operator chat's session, which is Valor's normal voice in Tom's DM;
-  - if the watcher is the Captain, the target is the Cowboy, and the Cowboy's session may be what's down, so the Captain sends `sentry_sdk.capture_message(level="fatal")` instead.
-
-### 7. The vault script (outside the repo; this task edits it, owner Valor, by 2026-11-14)
-
-- Reread fresh before the edit, on top of whatever bdfbd371345e has landed. bdfbd371345e is the separate task that stops the upgrade itself.
-- Skips upgrade and cleanup while any `hold-*` file exists, and logs which ones.
-- On the Cowboy (by hostname), waits until 05:00 before upgrading. The shared plist stays at 04:00.
-
-## Choices (from two workers' assessment: code facts, failure modes)
-
-- **Kept from Tom's design:**
-  - self-heal comes first and needs no network;
-  - the Cowboy is the backstop for a kernel that is dead;
-  - the stagger and the holds make the Cowboy a canary.
-- **Changed:**
-  - the watch reads probes, not "new Sentry errors", because an arbitrary error has no automatic fix and the nightly `sentry` routine triages them already;
-  - the remote fix waits one watch and shares the `postmaster.pid` spacing;
-  - each Mac has at most one watcher;
-  - a Mac that can't be reached never holds an update;
-  - a hold lifts once its Mac is healthy.
-- **Rejected:**
-  - Sentry heartbeats, which only notice and would add a second notice path;
-  - an agent deciding fixes, which is slow and nondeterministic;
-  - holds in iCloud, which lag;
-  - `brew pin`, which is the prevention task's job;
-  - a cap on restarts, since restarting a server that is already broken costs nothing.
-- **Residual:**
-  - **Full disk, a Postgres that won't start, a crash loop:** fixed once, then reported.
-  - **Cowboy and Captain both down:** reported to Sentry.
-  - **Python minor move:** the venv breaks and the kernel crash-loops. The watch sees no pid, fixes once, then reports it; the fix is a `uv sync` by hand.
+**Choices.**
+- **Probes, not Sentry errors.** The watch decides from probes; an arbitrary Sentry error has no automatic fix.
+- **One watcher per Mac,** and a remote fix waits one watch and shares the spacing, so it never races self-heal.
+- **Rejected:** Sentry heartbeats (they notice but fix nothing), an agent deciding fixes, and holds in iCloud.
+- **Residual cases.** A full disk, a server that won't start, a crash loop, and a Python minor move (3.14 to 3.15: the venv breaks and needs `uv sync`) each get one fix attempt and are then reported. If the Cowboy and the Captain are both down, Sentry is the only report.
 
 ## Governance
 
-**What is governed.** The two holds: the Cowboy skipping its update while a peer is broken, and a broken Mac skipping its own update.
+The two holds are governance:
+- the Cowboy skipping its update while a peer is broken;
+- a broken Mac skipping its own update.
 
-**Grant.** Tom, valor team chat, #see-issue-63, 2026-11-13, items 4 and 5 of his design. His words:
-- "what if the cowboy machine updated last? … The cowboy is the one that has tailscale access to help the others"
+**Grant.** Tom, valor team chat, #see-issue-63, 2026-11-13, items 4 and 5 of his design:
+- "what if the cowboy machine updated last? … The cowboy is the one that has tailscale access to help the others";
 - "i'm also trying to prevent getting me involved at all."
 
-**Incident.** 2026-11-13: the 04:00 upgrade broke every Mac's database for 5 to 12 h.
+**Incident.** On 2026-11-13 the upgrade broke every Mac's database for 5 to 12 hours.
 
-**Mission item.** 6 (attention), under the constraint "reliable stop, recovery, and correction".
+**Mission item.** 6, under the constraint "reliable stop, recovery, and correction".
 
-**Ledger.**
-- The guard is `nightly.hold` in `guards.SEEDED`. It expires 90 days after merge.
-- It fires when the watch writes or keeps a hold. That writes a `watch.held` row on the watcher, naming the host. The script itself has no ledger.
-- Until the script edit in Build 7 lands, the holds do nothing.
+**Ledger.** Guard `nightly.hold` goes in `guards.SEEDED`, expiring 90 days after merge. It fires as `watch.held`.
 
-**Not governance.** Nothing else here limits anything. The probe, the restart, the reconnects, the re-taken locks, the drain, `health` and the ssh reads are recovery on paths that already exist.
+Nothing else here limits anything: it is all recovery on paths that already exist.
 
-## Out of scope
-
-- Stopping the upgrade itself (bdfbd371345e).
-- Task-workspace Postgres clusters.
-- Slack reactions past Slack's retries.
+**Out of scope.** Preventing the upgrade (bdfbd371345e), task-workspace clusters, and Slack reactions past Slack's retries.
 
 ## Tests
 
-| File | Test |
-|---|---|
-| `test_health.py` | `curable` per SQLSTATE: 58P01, XX000 library, refused and lost are true; 57P03, a unique violation and a syntax error are false. |
-| `test_health.py` | `restart_postgres` finds the label by data dir, then kickstarts or bootstraps it (stub `launchctl`). It skips when `postmaster.pid` is younger than 10 min. |
-| `test_health.py` | `--fix` kicks only jobs that have no pid. |
-| `test_serve.py` | A quiet Mac: `tick` succeeds on its old `conn` while new connections fail with the plpgsql `UndefinedFile`. The probe triggers one restart. |
-| `test_serve.py` | The same trigger from a step job's ledger write, and from a job callback. |
-| `test_serve.py` | Start-up against a database that fails curably: one restart, the kernel comes up and recovers, and `serve` stays in its loop. |
-| `test_serve.py` | After a real `pg_terminate_backend` of every kernel connection: a running step re-takes its run, services and slot locks and finishes. An open `turn.started` with no live job gets `turn.ended interrupted`, and the task is stepped again. The next message is bound and answered. |
-| `test_serve.py` | A healthy database is never restarted, and neither is one that only reports "starting up". |
-| `test_serve.py` | A Python move waits for the running job, then restarts. The next start kicks every bridge. |
-| `test_bridges_restart.py` | Slack and Telegram fakes: the backends are terminated mid-run; `bridge.serve` exits; on restart, the message whose receive failed is taken in by gap fill. |
-| `test_watch.py` | Through a stub `ssh`: healthy, first broken, second broken (fix), still broken (report), unreachable (no hold), 24 h unreachable (one report), the Captain's report goes to Sentry. |
+- **`test_health.py`**
+  - `curable` for each SQLSTATE above.
+  - Stop and start order with stub `pg_ctl` and `launchctl`, including the fall back to immediate.
+  - The `postmaster.pid` spacing.
+  - `--fix` kicks only jobs that have no pid.
+- **`test_serve.py`**
+  - **Quiet Mac:** the old `conn` works while new connections fail with the real plpgsql `UndefinedFile`. Exactly one restart.
+  - **The same failure from a step's ledger write:** exactly one restart.
+  - **Start-up against a curably failing database:** one restart, and the kernel comes up.
+  - **After `pg_terminate_backend` of every session:**
+    - a running kernel step re-takes its locks and finishes;
+    - a turn held by another process (`core run`) is not reaped or charged;
+    - an open `turn.started` with no processes ends `interrupted` and is stepped again;
+    - the next message is bound and answered.
+  - **No restart:** a healthy database, or one that is only "starting up", is never restarted.
+  - **Python move:** the kernel drains, then restarts.
+- **`test_bridges_restart.py`.** Slack and Telegram fakes with their backends terminated: `bridge.serve` exits, and after the restart the failed message is taken in.
+- **`test_watch.py`.** Every outcome through a stub `ssh`, and rows written only on a change of state.
+- **Existing suites.** Rollout and reap stay green.
+- **Live proof.** On the Cowboy, with no other turn running:
+  1. `restart_postgres` with live clients, timed.
+  2. Boot out Postgres and send a Slack DM.
+  3. Show `db.restarted` and Valor's reply.
+  4. Run `watch` once.
 
-**Existing suites.** The rollout and reap suites stay green.
-
-**Live (after rollout).** On the Cowboy, when no other turn runs:
-1. Boot out Postgres.
-2. Send a Slack DM while it is down.
-3. Show `db.restarted` and Valor's reply.
-4. Run `watch` once.
-
-This proves the refused-connection path only. The plpgsql path is proved by the unit test with the real SQLSTATE.
+  This proves the refused-connection path. The plpgsql path is proven by the unit test.
