@@ -457,7 +457,11 @@ on restart it charges calls whose holder died at their estimate, ends turns with
 kills, reaps and ends itself the same way), records a turn that ended and was never collected (a
 collection that fails is logged and retried as a job before the task's next step), settles kernel
 effects left between intent and outcome, stops services a killed kernel left up (not those a live
-kernel keeps), and ends the rollout of each of its own merges the running commit contains. A
+kernel keeps), and ends the rollout of each of its own merges the running commit contains. When the database
+itself fails what a restart cures, the kernel restarts it and stays up (`core/health.py`,
+[machine.md](machine.md), launchd); afterward every session lock is gone, so its live jobs
+re-take theirs and recovery runs without killing: no reap, no charge at an estimate, and a
+turn ends `interrupted` only when none of its processes runs. A
 provisioning a killed kernel left unfinished is redone by provisioning, not by recovery: it reaps
 what the dead attempt left running, clears its directory, and makes it again. Serves reliable stop
 and recovery, and Mission item 1: Tom never coordinates the gaps between steps.

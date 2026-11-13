@@ -19,7 +19,7 @@ reads it from `settings.routines_dir` and never from a task's workspace.
 
 | Key | Holds | Serves |
 |---|---|---|
-| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`, `hours`, `update`, `task`) | Mac native (launchd for scheduling) |
+| `name`, `runner` | the directory name, and which of the kernel's runners does the work (`expiry`, `conditions`, `verify`, `hours`, `invites`, `update`, `watch`, `task`) | Mac native (launchd for scheduling) |
 | `ceiling`, `model` | the effect class every run's tree is capped at, and the model seat | Bounded authority, metered spending |
 | `mission_item`, `need` | the mission item it serves and the demonstrated need, shown on the status page and never enforced | Mission item 5 |
 | `created`, `instruction` | the date, and the text a run is given | Mission item 5 |
@@ -37,7 +37,9 @@ settings that were set when it was printed:
 Postgres (`VALOR_PG*`, `VALOR_DB*`), and the three
 that must match the kernel's so a routine's turns share Tom's turn slots and
 resolve the same paths (`VALOR_MACHINE`, `VALOR_WORK`, `VALOR_PROJECTS`), and
-Tom's addresses (`VALOR_OPERATOR_EMAIL`), which match no project's invites. It
+Tom's addresses (`VALOR_OPERATOR_EMAIL`), which match no project's invites,
+the Macs `watch` reads (`VALOR_WATCH`) and the operator chat its reports go
+to (`VALOR_OPERATOR_CHANNEL`, `VALOR_OPERATOR_CHAT`, `VALOR_OPERATOR_SLACK_IDS`). It
 names no script and carries no secret. launchd starts a job missed during sleep once
 on wake and coalesces several missed intervals into one run, so a laptop
 that sleeps through a schedule gets one late run, never a burst.
@@ -140,6 +142,21 @@ The six routines the kernel holds:
   A client's placement moves to another Mac only after its last run on the
   old one, with `since` set to the move date: the new Mac's record holds
   none of the last week's turns, and its run would delete their events.
+- **watch** (every 30 minutes, ceiling `act`; installed where
+  `VALOR_WATCH` names targets: on the Cowboy the other three Macs, on the
+  Captain the Cowboy; [the plan](plans/a4601299-db-self-recovery.md)):
+  reads each target's `python -m core health` over ssh (`BatchMode`, a
+  10 s connect timeout), with no turn and no model. Healthy, it deletes
+  `~/.config/brew-nightly/hold-<host>` on both Macs; broken, it writes
+  that hold on both, so neither takes the nightly Homebrew upgrade (the
+  `nightly.hold` guard), and when the target was already broken at the
+  last run it runs `health --fix` there, which restarts a curably failing
+  database and starts services that are not running, killing nothing.
+  Unreachable holds nothing. A row (`watch.held`, `fixed`, `failed`,
+  `unreachable`, `healthy`) is written only when a target's state changes.
+  A fix that worked is only recorded; a target still broken after its fix,
+  or unreachable for 24 h, is reported once to the operator chat's session,
+  or as a fatal Sentry event on a Mac with no such session.
 - **update** (03:00 daily, ceiling `act`): asks the resident kernel to roll
   this Mac to its branch's tip (`intake.request_update`, `by: routine`), as
   `python -m core update` does, and starts no task. It also starts `uv cache prune`

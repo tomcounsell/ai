@@ -205,8 +205,10 @@ launchd starts everything that starts on its own. There is no other
 scheduler, supervisor, or watchdog on the machine.
 
 - **LaunchAgents with `KeepAlive`**: the machine cluster, the kernel
-  process, and each bridge. launchd restarts one that exits. The one
-  other restart is the kernel's, of a bridge a merge left on old code:
+  process, and each bridge. launchd restarts one that exits. The other
+  restarts are the kernel's: of the machine cluster when it fails what a
+  restart cures, and of every service after a Python move (both in the
+  next item), and of a bridge a merge left on old code:
   each bridge holds its lock on a connection named
   `valor-<channel>@<commit>`, the commit it started at (`@none` when it
   could not read it). When a kernel start ends one of its own rollouts
