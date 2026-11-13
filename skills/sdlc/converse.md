@@ -187,9 +187,9 @@ top-level; on Telegram the asking message's id, and its `topic_id` in a
 forum topic) and `prep`: your notes, what the call is about, what is
 known and open, what you would recommend, kept short. Each recommendation
 carries the concrete case behind it (what happened, when, where it is
-recorded), or says there is no case yet; the queue's order carries the
-ranking rule that put it there (**One ordered queue** and **Value for
-effort**), so Valor in the call can say why. Its questions are
+recorded, observed, reported or assumed), or says there is no case yet.
+The ranking rule needs no prep: the call carries your persona's "How
+product decisions are made" itself. Its questions are
 only decisions the people in the call hold, each with what is being
 decided, why now and what it changes; your own work (a Sheet row, a
 ranking, a draft) is done before the call and listed as done, and a

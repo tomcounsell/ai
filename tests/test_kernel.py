@@ -1650,7 +1650,7 @@ def test_the_persona_runs_projects_and_writes_for_how_technical_the_reader_is():
         assert method in flat
     product = " ".join(tasks.role_text("product").split())
     assert (
-        'persona\'s "Run the project"' in product and "Jobs to be Done, as the inclusion test" not in product
+        'persona\'s "How product decisions are made"' in product and "Jobs to be Done, as the inclusion test" not in product
     )
     # Waiting on someone: a day of their working day, a reminder, the next best person;
     # a two-way door goes ahead on its default, a one-way door waits (Tom, 2026-11-06).

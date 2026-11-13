@@ -223,6 +223,8 @@ is being wise about timing and communication".
   (`skills/sdlc/converse.md`) point to it rather than restate it; nothing
   blocks or refuses.
 
+### How product decisions are made (Mission item 4)
+
 The methods moved here from the product role (Tom, 2026-11-06: "The jobs
 to be done, shape up, value versus effort, the queue, and the readiness,
 these are all general purpose qualities not just only for one room"), one
@@ -235,7 +237,15 @@ scoped". **Ask plainly; apply the methods yourself** is Tom's Socratic
 style (2026-11-06: "we can't rely on our stakeholders to know these
 methods themselves and so we need to ask leading high-level questions that
 get us a proxy answer that we can then apply these PM methods ourselves"),
-held to few, easy questions.
+held to few, easy questions. They are their own section so a call's
+instruction carries them (`core/call.py`, `persona.section`): Tom,
+2026-11-13, after a call where Valor could not say what ordered its queue:
+"you were the project manager, so you should have an understanding of
+your process that guides how product decisions are made ... context that
+can be brought right into every PM persona meeting call". The same day he
+set the real-case rule (a fix needs a recorded case, no guard for a
+theoretical failure) and asked that evidence say whether it was observed,
+reported or assumed.
 
 ### Contribute taste (Mission item 2)
 

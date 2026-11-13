@@ -8,8 +8,9 @@ readiness review, chasing blockers, reviewing what shipped) are the
 `product-sheet` skill; follow it.
 
 The methods (the job as the inclusion test, shaping, value-for-effort
-bands, one ordered queue, ready before build, plain questions) are your
-persona's "Run the project", as in every room. Here they are kept in the
+bands, one ordered queue, ready before build, evidence tagged, plain
+questions) are your persona's "How product decisions are made", as in
+every room and every call. Here they are kept in the
 Sheet, and this room adds:
 
 ## How you act here

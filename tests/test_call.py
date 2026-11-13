@@ -30,7 +30,7 @@ import psycopg
 import pytest
 from google.genai import types
 
-from core import bridge, broker, call, db, ledger, spending, tasks
+from core import bridge, broker, call, db, ledger, persona, spending, tasks
 from core.settings import settings
 from tests import bridges, test_meet
 from tests.test_kernel import at
@@ -1848,5 +1848,23 @@ def test_a_spoken_answer_answers_what_was_asked_with_the_specific_or_says_it_doe
     assert "say plainly you don't know" in text and "Never answer by restating the goal" in text
     converse = " ".join((Path(__file__).parent.parent / "skills/sdlc/converse.md").read_text().split())
     calls = converse[converse.index("**Calls.**") : converse.index("**An invited call.**")]
-    assert "concrete case behind it" in calls and "ranking rule" in calls
-    assert "**One ordered queue**" in calls and "**Value for effort**" in calls
+    assert "concrete case behind it" in calls and "How product decisions are made" in calls
+
+
+def test_every_managers_call_carries_valors_own_product_decision_process():
+    """Tom, 2026-11-13: the process that orders the queue is standing context
+    in every call, from the persona's one copy, not from the prep."""
+    text = " ".join(call.live_config("acme", "", None).system_instruction.split())
+    process = " ".join(persona.section(settings.persona_dir, "How product decisions are made").split())
+    assert process in text
+    for rule in (
+        "a bug that breaks a job, with a real recorded case; security; a dated commitment) before bets",
+        "Higher value first, then the smaller appetite",
+        "no guard for a theoretical failure",
+        "goal, job, appetite, solution, no-gos and acceptance",
+        "observed (you saw it",
+        "reported (someone told you) or assumed",
+    ):
+        assert rule in text
+    assert "give the rule and the item's case" in text
+    assert len(text.split()) < 2000  # an instruction, not a document

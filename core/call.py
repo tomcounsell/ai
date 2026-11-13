@@ -550,7 +550,7 @@ INSTRUCTIONS = (
     "- Call `leave` when anyone in the call asks you to leave, or when everyone has wrapped up and said "
     "goodbye. Never leave because the meeting's scheduled time has passed: stay while people are still "
     "talking.\n\n"
-    "How you work, from your persona:\n\n{conduct}\n\n"
+    "How you work, from your persona:\n\n{conduct}\n\n{process}\n\n"
     "Why you are in this call, from your notes before it:\n{prep}{so_far}"
 )
 TOOLS = [
@@ -579,7 +579,9 @@ def live_config(project: str, prep: str, handle: str | None, so_far: str = "") -
     start and end of speech is kept: at its lowest it missed a short
     "Hello.", and 500 ms to end a turn gained nothing measurable in a live
     call (the live tests, 2026-11-05). The instruction carries the
-    persona's "In a call" section, read as the call starts. What Valor
+    persona's "In a call" section and its "How product decisions are
+    made" (Valor's own process as the project's manager, Tom, 2026-11-13),
+    read as the call starts. What Valor
     hears is transcribed as English unless clearly another language (an
     unclear phrase came out as Portuguese, 2026-11-06); the reply's
     language is the model's, which the persona section keeps English.
@@ -597,6 +599,7 @@ def live_config(project: str, prep: str, handle: str | None, so_far: str = "") -
             name=persona.identity(settings.persona_dir)["name"],
             project=project or "Valor",
             conduct=persona.section(settings.persona_dir, "In a call"),
+            process=persona.section(settings.persona_dir, "How product decisions are made"),
             prep=prep.strip() or "(no notes)",
             so_far=f"\n\nThe call so far:\n{so_far}" if so_far else "",
         ),

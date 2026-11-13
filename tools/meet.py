@@ -71,7 +71,7 @@ class MeetJoin:
         '`meet.join`: target "new" for a new Meet, or a Meet link; payload `{"reply_to": "<the thread it was '
         "asked in: on Slack its root ts, or the asking message's own ts when it was top-level; on Telegram the "
         'asking message\'s id>", "topic_id": null, "prep": "<your notes on the topic or project, as your '
-        'Calls section says: each recommendation with its case, the ranking rule behind the order>", "starts": null}`, `starts` being an '
+        'Calls section says: each recommendation with its case>", "starts": null}`, `starts` being an '
         "invited call's start (ISO), from which its waits for others count; Valor joins the call ready "
         "on that topic, and your next prompt carries its link to post in that thread."
     )
