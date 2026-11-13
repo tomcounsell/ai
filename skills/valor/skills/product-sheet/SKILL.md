@@ -39,7 +39,9 @@ draft (`Set by` them).
 ## Ranking
 
 `python3 sheet.py order SHEET` sorts the Queue and numbers the ready rows,
-printing every row that moved. The order: `approved` and `building` first;
+printing every row that moved. Each cell moves whole with its row: formulas
+(a `source` =HYPERLINK), notes, typed dates and links; other cell
+formatting stays by position. The order: `approved` and `building` first;
 then `ready`, the mandatory lane before bets, mandatory by `due` (none
 last), bets by value then the smaller appetite; then `shaped`, `shaping`,
 `raw`; `shipped` and `reviewed` last. Ties keep their place, so a

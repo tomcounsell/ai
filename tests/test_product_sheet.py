@@ -74,61 +74,185 @@ def test_due_gives_every_open_blocker_with_the_days_it_has_waited():
     ]  # fmt: skip
 
 
-def test_order_writes_the_whole_queue_back_and_prints_what_moved(monkeypatch, capsys):
-    stored = [[*row("P-1", "raw").values()], [*row("P-2", "ready").values()]]
+def cell(text="", note="", **extra):
+    """A grid cell as `spreadsheets get` returns it: an empty one is {}."""
+    out = {"userEnteredValue": {"stringValue": text}, "formattedValue": text} if text else {}
+    return {**out, **({"note": note} if note else {}), **extra}
+
+
+def grid(*rows):
+    """The Queue as the API's sparse rowData: trailing empty cells left out, a blank row {}."""
+    data = []
+    for r in rows:
+        cells = [c if isinstance(c, dict) else cell(c) for c in r]
+        while cells and not cells[-1]:
+            cells.pop()
+        data.append({"values": cells} if cells else {})
+    return {"sheets": [{"properties": {"sheetId": 7}, "data": [{"rowData": data}]}]}
+
+
+def order(monkeypatch, *rows):
+    """Run `order` over `rows`; its updateCells write (the rows and range of its two requests,
+    which are the same, and their fields joined), and the calls made."""
     calls = []
 
     def fake(cmd, **kw):
         calls.append(cmd)
-        out = {"values": stored} if "get" in cmd else {}
-        return subprocess.CompletedProcess(cmd, 0, json.dumps(out), "")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(grid(*rows) if "get" in cmd else {}), "")
 
     monkeypatch.setattr(sheet.subprocess, "run", fake)
     assert sheet.main(["order", "SHEET"]) == 0
-    (update,) = [c for c in calls if "update" in c]
-    params, body = (
-        json.loads(update[update.index("--params") + 1]),
-        json.loads(update[update.index("--json") + 1]),
+    (update,) = [c for c in calls if "batchUpdate" in c]
+    first, second = [r["updateCells"] for r in json.loads(update[update.index("--json") + 1])["requests"]]
+    assert (first["range"], first["rows"]) == (second["range"], second["rows"])
+    return {
+        **first,
+        "fields": ",".join((first["fields"], second["fields"])),
+        "split": (first["fields"], second["fields"]),
+    }, calls
+
+
+def ids(update):
+    return [r["values"][0].get("userEnteredValue", {}).get("stringValue", "") for r in update["rows"]]
+
+
+def test_order_writes_the_whole_queue_back_and_prints_what_moved(monkeypatch, capsys):
+    update, _ = order(monkeypatch, [*row("P-1", "raw").values()], [*row("P-2", "ready").values()])
+    assert update["range"] == {
+        "sheetId": 7,
+        "startRowIndex": 1,
+        "endRowIndex": 3,
+        "startColumnIndex": 0,
+        "endColumnIndex": 26,
+    }
+    assert update["split"] == sheet.MOVED
+    # A whole-cell link is written apart from rich-text runs, which would drop it.
+    assert (
+        "textFormatRuns" in update["split"][0] and "userEnteredFormat.textFormat.link" in update["split"][1]
     )
-    assert params["range"] == "Queue!A2:Z3"
-    assert [r[0] for r in body["values"]] == ["P-2", "P-1"] and [r[2] for r in body["values"]] == ["1", ""]
+    assert ids(update) == ["P-2", "P-1"]
+    assert [r["values"][2] for r in update["rows"]] == [{"userEnteredValue": {"numberValue": 1}}, {}]
     moved = json.loads(capsys.readouterr().out)
     assert [(m["id"], m["from"], m["to"]) for m in moved] == [("P-2", 2, 1), ("P-1", 1, 2)]
 
 
-def test_order_writes_over_a_blank_row_so_no_stale_row_stays_below(monkeypatch, capsys):
-    stored = [[*row("P-1", "raw").values()], [""] * 14, [*row("P-2", "ready").values()]]
-    calls = []
-
-    def fake(cmd, **kw):
-        calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, json.dumps({"values": stored} if "get" in cmd else {}), "")
-
-    monkeypatch.setattr(sheet.subprocess, "run", fake)
-    assert sheet.main(["order", "SHEET"]) == 0
-    (update,) = [c for c in calls if "update" in c]
-    params, body = (
-        json.loads(update[update.index("--params") + 1]),
-        json.loads(update[update.index("--json") + 1]),
+def test_order_reads_the_queue_cells_with_what_moves_with_a_row(monkeypatch, capsys):
+    _, calls = order(monkeypatch, [*row("P-1", "raw").values()])
+    (get,) = [c for c in calls if "get" in c]
+    params = json.loads(get[get.index("--params") + 1])
+    assert (
+        params["ranges"] == "Queue!A2:Z"
+        and all(f in params["fields"] for f in sheet.MOVED)
+        and "formattedValue" in params["fields"]
     )
-    assert params["range"] == "Queue!A2:Z4"
-    assert [r[0] for r in body["values"]] == ["P-2", "P-1", ""] and not any(body["values"][2])
+
+
+def test_order_writes_over_a_blank_row_so_no_stale_row_stays_below(monkeypatch, capsys):
+    update, _ = order(monkeypatch, [*row("P-1", "raw").values()], [""] * 14, [*row("P-2", "ready").values()])
+    assert update["range"]["endRowIndex"] == 4
+    assert ids(update) == ["P-2", "P-1", ""] and update["rows"][2]["values"] == [{}] * 26
 
 
 def test_order_moves_a_column_people_added_with_its_row(monkeypatch, capsys):
-    stored = [[*row("P-1", "raw").values(), "a call", "note one"], [*row("P-2", "ready").values()]]
-    calls = []
+    update, _ = order(
+        monkeypatch, [*row("P-1", "raw").values(), "", "a call", "note one"], [*row("P-2", "ready").values()]
+    )
+    assert ids(update) == ["P-2", "P-1"]
+    assert update["rows"][0]["values"][14:16] == [{}, {}]
+    assert update["rows"][1]["values"][14:16] == [
+        {"userEnteredValue": {"stringValue": t}} for t in ("a call", "note one")
+    ]
+    assert all(len(r["values"]) == 26 for r in update["rows"])
 
-    def fake(cmd, **kw):
-        calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, json.dumps({"values": stored} if "get" in cmd else {}), "")
 
-    monkeypatch.setattr(sheet.subprocess, "run", fake)
-    assert sheet.main(["order", "SHEET"]) == 0
-    (update,) = [c for c in calls if "update" in c]
-    body = json.loads(update[update.index("--json") + 1])
-    assert [(r[0], r[13], r[14]) for r in body["values"]] == [("P-2", "", ""), ("P-1", "a call", "note one")]
-    assert all(len(r) == 26 for r in body["values"])
+def test_order_moves_a_source_link_formula_and_its_note_with_the_row(monkeypatch, capsys):
+    link = {"userEnteredValue": {"formulaValue": '=HYPERLINK("https://notion.example/p/1","Card one")'},
+            "formattedValue": "Card one", "note": "Merged from 2 cards"}  # fmt: skip
+    update, _ = order(monkeypatch, [*row("P-1", "raw").values(), link], [*row("P-2", "ready").values()])
+    assert ids(update) == ["P-2", "P-1"]
+    assert update["rows"][1]["values"][13] == {k: v for k, v in link.items() if k != "formattedValue"}
+    # The row that moves onto the noted cell has no note there, so the write clears it.
+    assert update["rows"][0]["values"][13] == {}
+
+
+def test_order_clears_a_longer_rows_trailing_cells_and_note_when_a_short_row_lands_on_it(monkeypatch, capsys):
+    short = [*row("P-1", "ready").values()][:9]
+    longer = [*row("P-2", "raw").values(), "src", "said", cell("x", note="old note")]
+    update, _ = order(monkeypatch, longer, short)
+    assert ids(update) == ["P-1", "P-2"] and update["range"]["endColumnIndex"] == 26
+    assert update["rows"][0]["values"][9:] == [{}] * 17
+    assert update["rows"][1]["values"][15]["note"] == "old note"
+
+
+def test_order_moves_rich_text_and_whole_cell_links_with_the_row(monkeypatch, capsys):
+    runs = cell(
+        "see the doc", textFormatRuns=[{"startIndex": 4, "format": {"link": {"uri": "https://doc.example"}}}]
+    )
+    pasted = cell(
+        "https://github.com/o/r/issues/9",
+        userEnteredFormat={"textFormat": {"link": {"uri": "https://github.com/o/r/issues/9"}}},
+    )
+    first = [*row("P-1", "raw").values()]
+    first[10], first[11] = pasted, runs
+    update, _ = order(monkeypatch, first, [*row("P-2", "ready").values()])
+    assert ids(update) == ["P-2", "P-1"]
+    assert update["rows"][1]["values"][10]["userEnteredFormat"] == pasted["userEnteredFormat"]
+    assert update["rows"][1]["values"][11]["textFormatRuns"] == runs["textFormatRuns"]
+    assert update["rows"][0]["values"][10] == {} and update["rows"][0]["values"][11] == {}
+
+
+def test_order_writes_a_link_that_reads_back_only_as_hyperlink_as_the_cells_link(monkeypatch, capsys):
+    first = [*row("P-1", "raw").values()]
+    first[10] = cell("issue six", hyperlink="https://github.com/o/r/issues/6")
+    first.append(
+        cell(
+            "Card",
+            hyperlink="https://notion.example",
+            userEnteredValue={"formulaValue": '=HYPERLINK("https://notion.example","Card")'},
+        )
+    )
+    update, _ = order(monkeypatch, first, [*row("P-2", "ready").values()])
+    assert update["rows"][1]["values"][10] == {
+        "userEnteredValue": {"stringValue": "issue six"},
+        "userEnteredFormat": {"textFormat": {"link": {"uri": "https://github.com/o/r/issues/6"}}},
+    }
+    # A formula's link is the formula's own; nothing is added to it.
+    assert update["rows"][1]["values"][13] == {
+        "userEnteredValue": {"formulaValue": '=HYPERLINK("https://notion.example","Card")'}
+    }
+
+
+def test_order_keeps_a_typed_date_with_its_row(monkeypatch, capsys):
+    date = {"numberFormat": {"type": "DATE", "pattern": "yyyy-mm-dd"}}
+    due = {
+        "userEnteredValue": {"numberValue": 46340},
+        "formattedValue": "2026-11-14",
+        "userEnteredFormat": date,
+    }
+    first = [*row("P-1", "raw").values()]
+    first[7] = due
+    update, _ = order(monkeypatch, first, [*row("P-2", "ready").values()])
+    assert update["rows"][1]["values"][7] == {
+        "userEnteredValue": {"numberValue": 46340},
+        "userEnteredFormat": date,
+    }
+    assert "userEnteredFormat.numberFormat" in update["fields"] and update["rows"][0]["values"][7] == {}
+
+
+def test_order_keeps_a_row_holding_only_a_note_and_reports_id_less_rows_by_position(monkeypatch, capsys):
+    only_note = [""] * 13 + [cell(note="a merged card")]
+    update, _ = order(monkeypatch, only_note, [*row("P-1", "ready").values()], list(only_note))
+    assert ids(update) == ["P-1", "", ""]
+    assert [r["values"][13].get("note") for r in update["rows"]] == [None, "a merged card", "a merged card"]
+    moved = json.loads(capsys.readouterr().out)
+    assert [(m["id"], m["from"], m["to"]) for m in moved] == [("P-1", 2, 1), ("", 1, 2)]
+
+
+def test_order_clears_the_rank_of_a_row_no_longer_ready(monkeypatch, capsys):
+    stale = [*row("P-1", "raw").values()]
+    stale[2] = {"userEnteredValue": {"numberValue": 3}, "formattedValue": "3"}
+    update, _ = order(monkeypatch, stale)
+    assert update["rows"][0]["values"][2] == {}
 
 
 def test_the_doc_renders_every_placeholder():

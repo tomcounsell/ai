@@ -16,7 +16,8 @@ the Sheet's Columns tab from the Doc's table in place of the old Guide tab,
 links the Doc on the Goal tab, and shares the folder; `seed` appends each
 open GitHub issue no row links yet as a raw row; `read` prints the Queue as
 JSON; `order` sorts the Queue by the ranking rule and numbers the ready
-rows, printing each row that moved; `due` lists the blockers to chase and
+rows, moving each cell whole (formulas, notes and links go with their row),
+and prints each row that moved; `due` lists the blockers to chase and
 the shipped items to review today, and every open blocker with the days it
 has waited; `lookup` finds the items someone means, from an id or their
 own loose description, each with its Pitches and Blocked rows. It prints
@@ -180,6 +181,72 @@ def values(sheet: str, tab: str) -> list[list[str]]:
         "sheets", "spreadsheets", "values", "get", params={"spreadsheetId": sheet, "range": f"{tab}!A2:Z"}
     )
     return got.get("values", [])
+
+
+# What `order` moves with a row: the value, notes, links and the number format (a typed date stays
+# a date); other cell formatting stays by position. Two writes, since writing textFormatRuns in the
+# same request as a whole-cell link drops the link.
+MOVED = (
+    "userEnteredValue,note,textFormatRuns,chipRuns",
+    "userEnteredFormat.textFormat.link,userEnteredFormat.numberFormat",
+)
+
+
+def grid(sheet: str, tab: str) -> tuple[int, list[list[dict]]]:
+    """The tab's id and its cells under the header, each row padded to A:Z
+    (the API leaves out trailing empty cells and returns a blank row as {})."""
+    got = gws("sheets", "spreadsheets", "get", params={"spreadsheetId": sheet, "ranges": f"{tab}!A2:Z",
+              "fields": f"sheets(properties.sheetId,data.rowData.values(formattedValue,hyperlink,{','.join(MOVED)}))"})["sheets"][0]  # fmt: skip
+    found = got.get("data", [{}])[0].get("rowData", [])
+    return got["properties"]["sheetId"], [[*r.get("values", [])[:26], *[{}] * (26 - len(r.get("values", [])))] for r in found]  # fmt: skip
+
+
+def moving(cell: dict) -> dict:
+    """A cell as `order` writes it. A link set over a plain-text cell can read back only as the
+    read-only `hyperlink`, so it is written as the cell's link."""
+    out = {k: v for k, v in cell.items() if k not in ("formattedValue", "hyperlink")}
+    plain = "formulaValue" not in out.get("userEnteredValue", {}) and "textFormatRuns" not in out
+    if "hyperlink" in cell and plain and "link" not in out.get("userEnteredFormat", {}).get("textFormat", {}):
+        form = out.get("userEnteredFormat", {})
+        out["userEnteredFormat"] = {
+            **form,
+            "textFormat": {**form.get("textFormat", {}), "link": {"uri": cell["hyperlink"]}},
+        }
+    return out
+
+
+def reorder(sheet: str) -> list[dict]:
+    """`order`: the Queue rewritten in ranking order cell by cell, so each
+    cell's formula, typed value, note and links move with its row. A row is
+    blank only with no value and no note in any cell; blank rows go last,
+    as empty cells over whatever stood there."""
+    tab, found = grid(sheet, "Queue")
+    before = [
+        {**dict(zip(QUEUE, [c.get("formattedValue", "") for c in cells])), "_cells": cells, "_at": i}
+        for i, cells in enumerate(found)
+        if any("userEnteredValue" in c or "note" in c for c in cells)
+    ]
+    after = ordered(before)
+    rank, written = QUEUE.index("rank"), []
+    for r in after:
+        cells = [moving(c) for c in r["_cells"]]
+        cells[rank] = {k: v for k, v in cells[rank].items() if k == "note"}
+        if r["rank"]:
+            cells[rank]["userEnteredValue"] = {"numberValue": int(r["rank"])}
+        written.append({"values": cells})
+    written += [{"values": [{}] * 26}] * (len(found) - len(after))
+    block = {
+        "sheetId": tab,
+        "startRowIndex": 1,
+        "endRowIndex": len(found) + 1,
+        "startColumnIndex": 0,
+        "endColumnIndex": 26,
+    }
+    if written:
+        gws("sheets", "spreadsheets", "batchUpdate", params={"spreadsheetId": sheet},
+            body={"requests": [{"updateCells": {"range": block, "rows": written, "fields": f}} for f in MOVED]})  # fmt: skip
+    return [{"id": r["id"], "item": r["item"], "rank": r["rank"], "from": r["_at"] + 1, "to": i + 1}
+            for i, r in enumerate(after) if r["_at"] != i]  # fmt: skip
 
 
 def rows(found: list[list[str]], columns: list[str]) -> list[dict[str, str]]:
@@ -357,19 +424,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "read":
         out = rows(values(args.sheet, "Queue"), QUEUE)
     elif args.command == "order":
-        found = values(args.sheet, "Queue")
-        before = rows(found, QUEUE)
-        after = ordered(before)
-        # Every row read is written back, blank ones moved to the end, so no old row survives below.
-        # Each row is padded to the full A:Z width read, so a moved row clears what stood there before.
-        written = [[*[r[c] for c in QUEUE], *r.get("_rest", [])] for r in after]
-        written = [[*w, *[""] * (26 - len(w))] for w in written] + [[""] * 26] * (len(found) - len(after))
-        gws("sheets", "spreadsheets", "values", "update",
-            params={"spreadsheetId": args.sheet, "range": f"Queue!A2:Z{len(found) + 1}", "valueInputOption": "RAW"},
-            body={"values": written})  # fmt: skip
-        place = {r["id"]: i for i, r in enumerate(before)}
-        out = [{"id": r["id"], "item": r["item"], "rank": r["rank"], "from": place[r["id"]] + 1, "to": i + 1}
-               for i, r in enumerate(after) if place[r["id"]] != i]  # fmt: skip
+        out = reorder(args.sheet)
     else:
         out = due(
             rows(values(args.sheet, "Blocked"), BLOCKED), rows(values(args.sheet, "Queue"), QUEUE), args.today
