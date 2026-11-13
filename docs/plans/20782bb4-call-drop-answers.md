@@ -11,69 +11,87 @@ was back at 10:39:15. `~/Library/Logs/Valor/meet.log`: the call's `orders`
 lane raised `psycopg.OperationalError: server closed the connection
 unexpectedly` from `listener.notifies()` (`core/call.py` `orders`), `_lane`
 ended the call, the summary's and the end's `db.connect` failed with "No such
-file or directory" (server still down), so the process exited without writing
-its end. The kernel's `sweep` found `meet:call:<session>` free (the holder
-connection was gone too) and wrote "Valor's call process stopped" at 10:40.
+file or directory" (server still down), and the process exited without writing
+its end. The locks were on `holder` in `core/__main__.py` `_call`, whose
+session the restart also dropped, so the kernel's `sweep` found
+`meet:call:<session>` free and wrote "Valor's call process stopped" at 10:40.
 Commit 52ac19204 fixed the same restart for a running turn (`runs._heard`);
 the call process was missed.
 
-**Fix, in `core/call.py`, reusing 52ac19204's pattern.**
-- `orders`: a listening session the database drops is listened again on a new
-  one once the database answers (`runs._relisten`, moved to `core/db.py` as
-  `db.listen(dsn, channels)` so both use one helper). After relistening it
-  takes `meet:call:<session>` and `run:<session>` again on that connection and
-  catches up a stop (`tasks.is_stopped`) and any `message.steered` row of the
-  call newer than the last it posted. If the locks are taken or `call.ended`
-  is already written (the sweep won the race), the call leaves with that as
-  its reason, and writes no second end.
-- The call's short-lived connections (`_heard`, `watch`, `_open`/`_charge`,
-  `open_decisions`, `_effect`, `summarise`, the end in `run`) go through one
-  `Call._connect()` that waits for the database while it refuses connections
-  (sleep `db.RELISTEN_S`, the constant moved with the helper). So no lane dies
-  on a restart and the end is always written with its real reason.
+**Fix.**
+- **The locks.** `router.alive()`'s pattern (`core/router.py:139`: probe the
+  holder; dropped, take the lock again on a fresh session; refused, another
+  holder has it) moves to `core/db.py` as `db.Held(dsn, keys)`, with `take()`
+  and `alive()`. `router.run` uses it for `run:<task>` (behaviour unchanged);
+  `_call` uses it for `meet:call:<session>` and `run:<session>` in place of
+  its bare `holder`, and passes it to `Call` as `held` (default `None`, so
+  tests that build `Call` without locks still can; the new tests pass one).
+  The holder lives in `Call.held`; after a restart `alive()` replaces its
+  connection.
+- **The listener.** `orders` relistens on a dropped session (`runs._relisten`,
+  moved to `db.listen(dsn, channels)`, one helper for both). After
+  relistening: `held.alive()`; refused (the sweep won, or another process),
+  the call leaves with "another process took over the call" and its end is
+  not written twice (`end` already returns False once `call.ended` exists).
+  Then it catches up a stop (`tasks.is_stopped`) and each `message.steered`
+  row of the call after the last one it posted.
+- **The short connections.** `_heard`, `watch`'s participant row,
+  `_open`/`_charge`, `open_decisions`, `_effect`, `summarise` and the end in
+  `run` connect through `Call._connect()`, which retries a refused connection
+  every `db.RELISTEN_S` for at most `DB_WAIT_S = 180` (the restart took 61 s;
+  `health.py` restarts at most every ten minutes), then raises as now. This
+  stalls the awaiting lane for the outage, by intent: `_heard` sits in the
+  Live receive loop, so Valor neither hears new lines into the record nor
+  speaks for up to that minute, and `watch` stops checking who left. Bounded,
+  a database that stays down still ends the call (and the sweep writes it),
+  as today; unbounded would leave a call no one can see. Live keeps its own
+  socket, so the session resumes where it was.
 - Out: retrying a statement whose connection drops mid-flight (only
-  `_effect` already does, by request id); the Gemini Live session (not on the
-  database); the worker's turn (already covered by 52ac19204).
+  `_effect` already does, by request id); the worker's turn (52ac19204).
 
 ## 2. Vague spoken answers
 
 **Cause.** The Live instruction (`core/call.py` `INSTRUCTIONS`) carries the
-persona's "In a call" section and the `prep` the asking chat session wrote.
-Neither tells the voice to answer the question asked with the specific, and
-the prep guidance (`skills/sdlc/converse.md` **Calls**, `tools/meet.py`
-`MeetJoin.usage`: "what you would recommend, kept short") asks for
-recommendations without the evidence or the ranking rule. So asked for an
-example or the criteria, the voice had only the recommendation and repeated
-it, and repeated the prep's unevidenced "breaks real work".
+persona's "In a call" section and the asking session's `prep`; the worker's
+prompt (`core/__main__.py` `_call` `worker`) is "Asked in the call: …", the
+last 40 lines and the prep. None tells the voice or the worker to answer the
+question asked with the specific. The prep guidance in
+`skills/sdlc/converse.md` **Calls** asks for "what you would recommend, kept
+short", with no case behind it and no ranking rule (`tools/meet.py`
+`MeetJoin.usage` says "your notes on the topic or project, … kept short").
+So, asked for an example or the criteria, the voice had only the
+recommendation and repeated it, with the prep's unevidenced "breaks real work".
 
 **Fix, wording only.**
 - `persona/conduct.md` "In a call": a bullet **Answer what was asked**: give
-  the specific it asks for (the example, the number, the rule) from your notes
+  the specific asked for (the example, the number, the rule) from your notes
   or the call; a claim names its evidence (the case and its date); when your
   notes don't hold it, say plainly you don't know and `ask` your worker; never
   answer by restating the goal or a recommendation.
-- `skills/sdlc/converse.md` **Calls** (the one place for prep): `prep` carries,
-  for each recommendation, the concrete case behind it (what happened, when,
-  where it is recorded) or "no case yet"; and the ranking rule that orders the
-  queue (mandatory work first: a bug that breaks a job, security, a dated
-  commitment; then value high/medium/low; then the smaller appetite).
-  `MeetJoin.usage` points to it instead of describing prep itself.
+- The worker's prompt in `_call`: one sentence: answer exactly what was asked,
+  with the specific and where it is recorded, or say it isn't known.
+- `skills/sdlc/converse.md` **Calls**, the one place for prep: for each
+  recommendation, the concrete case behind it (what happened, when, where
+  recorded) or "no case yet"; and the order of the queue with the ranking
+  rule it follows, cited from the persona's **One ordered queue** and **Value
+  for effort**, not restated. `MeetJoin.usage` points to converse's Calls.
 
 ## Tests
 
-- `tests/test_call.py`: a call under way when every database session is
-  terminated (`terminate_all`, as in 52ac19204's test) and connections are
-  refused for a few seconds keeps running; `meet:call:<session>` is held
-  again afterwards, so `call.sweep` ends nothing; a stop written after the
-  restart still ends it with "the call was stopped"; a steer written after is
-  posted; the end is written with the call's own reason.
-- Same, the sweep wins first: the call leaves and the session has one
-  `call.ended`.
-- `tests/test_health.py`'s turn test keeps passing on the moved helper.
-- `tests/test_call.py`, documented behaviour: `live_config(...)`'s instruction
-  tells the voice to answer what was asked with the specific and to say when
-  it doesn't know; converse.md's Calls asks prep for a case per
-  recommendation and states the ranking rule.
+- `tests/test_call.py`, a call with a `db.Held`, under way: `terminate_all`
+  (from `tests/test_health.py`) drops every session, and `core.call.db.connect`
+  is stubbed to raise `OperationalError` for its next N calls (the server
+  down). The call keeps running; afterwards `meet:call:<session>` is held again
+  (a fresh `pg_try_advisory_lock` on it fails) and `call.sweep` ends nothing;
+  a stop written after the restart ends it with "the call was stopped"; a
+  steer written during the outage is posted; one `call.ended`, with the call's
+  own reason.
+- Same, another session takes `meet:call:<session>` during the outage: the
+  call leaves and the session has one `call.ended`.
+- `tests/test_health.py`'s turn test and router tests pass on the moved helpers.
+- Documented behaviour: `live_config(...)`'s instruction carries "Answer what
+  was asked"; converse.md's Calls asks prep for a case per recommendation and
+  the ranking rule.
 - Full suite under 5 minutes.
 
 Stakes: a live call's process and its database connections; reversible.
