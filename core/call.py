@@ -32,7 +32,8 @@ database, which drops the session holding them, takes them again, and the
 call stays). It joins through the page
 (`bridges/meet`), mixes what everyone says into one Gemini Live session
 (docs/plans/gemini-live.md), which decides when Valor is addressed and
-speaks, posts and asks its worker through tools, and speaks and posts
+speaks, posts, asks its worker and reads the project's backlog Sheet
+(`backlog`, where its spec names one) through tools, and speaks and posts
 through the broker on its own session. After the call Gemini summarises
 its recording, kept in Yudame Tools' meeting store.
 """
@@ -45,6 +46,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import traceback
@@ -68,6 +70,12 @@ NEVER_STARTED_S = 90
 DB_WAIT_S = 180.0
 SIGN_IN = "cd ~/src/ai && .venv/bin/python -m core meet-sign-in"
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# The product Sheet's tool (skills/valor/skills/product-sheet/SKILL.md), and
+# the Sheet a spec's `rooms` name; each names one (2026-11-13).
+SHEET_PY = Path(__file__).resolve().parent.parent / "skills/valor/skills/product-sheet/sheet.py"
+SHEET_URL = re.compile(r"docs\.google\.com/spreadsheets/d/([\w-]+)")
+# What `backlog` says of each Queue row when it reads the whole queue.
+OVERVIEW = ("id", "lane", "rank", "item", "value", "appetite", "due", "status", "blocked by")
 
 
 def is_call(brief: tasks.Brief) -> bool:
@@ -541,7 +549,7 @@ INSTRUCTIONS = (
     "never aloud.\n"
     "- For anything you would have to look up (code, records, documents, figures), call `ask` and say you "
     "will check: your worker, who reads the project's code, records and chats, answers in the call's chat, "
-    "and you get a note. Never guess a fact.\n"
+    "and you get a note. Never guess a fact.\n{backlog}"
     "- When someone asks what is open, call `open_decisions` and go through what is theirs to decide as "
     '"In a call" below says, and let them choose. With anyone but Tom in the call, a decision about a client '
     "relationship (pricing, terms, its people) is one line: it is for Tom. Never say an id aloud.\n"
@@ -568,9 +576,22 @@ TOOLS = [
     {"name": "leave", "description": "Leave the call: when someone asks you to, or everyone has said goodbye.",
      "parameters": {"type": "object", "properties": {}}},
 ]  # fmt: skip
+# Offered when the call's project has a backlog Sheet (Tom, 2026-11-13).
+BACKLOG_LINE = (
+    "- When someone asks about the backlog or an item on it (what is in it, the top priority, an item's size, "
+    "value, due date, status, blocker, pitch or evidence), call `backlog` at once: with `about` set to how they "
+    "described the item, in their own words, or with nothing for the whole queue in ranked order. Answer from "
+    "what it returns, in their terms: what the item does for them, never its id or its title as the Sheet "
+    "words it. When several items fit, say in a few words what each is and ask which they mean. `ask` your "
+    "worker only for what the Sheet does not hold.\n"
+)
+BACKLOG = {"name": "backlog", "description": "Read the project's backlog Sheet. With `about`: the items that "
+           "fit how someone described one (or an id), best first, each with all its values, its pitch and its "
+           "blockers. Without: the whole queue in ranked order.", "parameters": {"type": "object",
+           "properties": {"about": {"type": "string"}}}}  # fmt: skip
 
 
-def live_config(project: str, prep: str, handle: str | None, so_far: str = "") -> Any:
+def live_config(project: str, prep: str, handle: str | None, so_far: str = "", sheet: bool = False) -> Any:
     """The Live session's settings: Valor's voice, transcripts both ways,
     proactive audio (it may stay silent), no cutting Valor off (Live's own
     barge-in stopped him for side talk, 2026-11-05: the call cuts him off
@@ -585,7 +606,8 @@ def live_config(project: str, prep: str, handle: str | None, so_far: str = "") -
     hears is transcribed as English unless clearly another language (an
     unclear phrase came out as Portuguese, 2026-11-06); the reply's
     language is the model's, which the persona section keeps English.
-    A fresh session in a call under way is told `so_far` (`Call.so_far`)."""
+    A fresh session in a call under way is told `so_far` (`Call.so_far`).
+    With a `sheet`, Valor has `backlog` and is told when to use it."""
     from google.genai import types
 
     return types.LiveConnectConfig(
@@ -602,8 +624,15 @@ def live_config(project: str, prep: str, handle: str | None, so_far: str = "") -
             process=persona.section(settings.persona_dir, "How product decisions are made"),
             prep=prep.strip() or "(no notes)",
             so_far=f"\n\nThe call so far:\n{so_far}" if so_far else "",
+            backlog=BACKLOG_LINE if sheet else "",
         ),
-        tools=[types.Tool(function_declarations=[types.FunctionDeclaration(**t) for t in TOOLS])],
+        tools=[
+            types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(**t) for t in [*TOOLS, *([BACKLOG] if sheet else [])]
+                ]
+            )
+        ],
         input_audio_transcription=types.AudioTranscriptionConfig(language_codes=["en-US"]),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         proactivity=types.ProactivityConfig(proactive_audio=True),
@@ -942,6 +971,7 @@ class Call:
         self.id, self.info, self.page, self.dsn, self.gemini = session_id, info, page, dsn, gemini
         self.held = held  # the call's locks (`core/__main__.py` `_call`), taken again after a restart
         self.worker, self.worker_ready, self.project = worker, worker_ready, project
+        self.sheet: str | None = None  # the project's backlog Sheet, read as the call starts (`live`)
         self.socket, self.clock = socket, clock
         # An invited call joined before its start waits for the others, and
         # to be let in, from the start (docs/plans/invite-calls.md).
@@ -1163,9 +1193,15 @@ class Call:
         2026-11-12) opens a fresh session told the call so far; after
         `RECONNECTS` failed fresh tries, one line in the chat and the call leaves."""
         failed = 0
+        spec = self._spec("no backlog Sheet")
+        self.sheet = next(
+            (m[1] for t in (spec.rooms.values() if spec else []) if (m := SHEET_URL.search(t))), None
+        )
         while not self.leaving.is_set():
             so_far = "" if self.handle else self.so_far()
-            config = live_config(self.project or "", self.info.get("prep") or "", self.handle, so_far)
+            config = live_config(
+                self.project or "", self.info.get("prep") or "", self.handle, so_far, bool(self.sheet)
+            )
             opened = False
             try:
                 async with self.gemini.connect(config) as session:
@@ -1431,6 +1467,8 @@ class Call:
                 self.typed_posted = True
                 self.posts.put_nowait(Post(reply.id, str(args["text"]).strip(), True))
                 result = "posted"
+            elif fc.name == "backlog" and self.sheet:
+                result = await self._backlog(str(args.get("about") or "").strip())
             elif fc.name == "open_decisions":
                 async with await self._connect() as conn:
                     result = await decisions(conn, self.project)
@@ -1450,6 +1488,23 @@ class Call:
             out.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result}))
         if out:
             await session.send_tool_response(function_responses=out)
+
+    async def _backlog(self, about: str) -> str:
+        """`sheet.py lookup` on what was described, or the whole Queue in
+        its order (`OVERVIEW`'s columns), as compact JSON; run apart from
+        the call's loop, which keeps mixing and playing meanwhile."""
+        argv = ["lookup", self.sheet, about] if about else ["read", self.sheet]
+        run = await asyncio.create_subprocess_exec(
+            sys.executable, str(SHEET_PY), *argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        out, err = await run.communicate()
+        if run.returncode != 0:
+            _log(f"call {self.id}: the backlog read failed: {err.decode().strip()}")
+            return f"the Sheet could not be read: {err.decode().strip()[-300:]}"
+        found = json.loads(out)
+        return json.dumps(
+            found if about else [{k: r.get(k, "") for k in OVERVIEW} for r in found], separators=(",", ":")
+        )
 
     # -- metering --
 
@@ -1842,14 +1897,19 @@ class Call:
         mine = persona.identity(settings.persona_dir)["name"].split()[0]
         return title(topic, [n for n in self.first_names if n != mine] + [mine])
 
+    def _spec(self, without: str) -> workspace.Spec | None:
+        """The call's project's spec, read now; None, logging `without`,
+        when it has no project or its spec does not load."""
+        try:
+            return workspace.Spec.load(self.project) if self.project else None
+        except workspace.Refused as exc:
+            _log(f"call {self.id}: {without}: {exc}")
+            return None
+
     def _links(self) -> tuple[str | None, dict[str, str]]:
         """The call's project's repository and reference links, read now; none
         when it has no project or its spec does not load."""
-        try:
-            spec = workspace.Spec.load(self.project) if self.project else None
-        except workspace.Refused as exc:
-            _log(f"call {self.id}: no links in the summary: {exc}")
-            spec = None
+        spec = self._spec("no links in the summary")
         return (spec.repo, spec.links) if spec else (None, {})
 
     async def run(self) -> str:

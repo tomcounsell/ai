@@ -6,6 +6,7 @@
     python3 sheet.py read SHEET_ID
     python3 sheet.py order SHEET_ID
     python3 sheet.py due SHEET_ID [--today YYYY-MM-DD]
+    python3 sheet.py lookup SHEET_ID "<how someone described it, or P-004>"
 
 `new` makes the Drive folder "<Product> product", copies the template into
 it as "<Product> product backlog", and does `doc`; `doc` renders `doc.md`
@@ -17,8 +18,9 @@ open GitHub issue no row links yet as a raw row; `read` prints the Queue as
 JSON; `order` sorts the Queue by the ranking rule and numbers the ready
 rows, printing each row that moved; `due` lists the blockers to chase and
 the shipped items to review today, and every open blocker with the days it
-has waited. It prints JSON and changes nothing it
-does not name."""
+has waited; `lookup` finds the items someone means, from an id or their
+own loose description, each with its Pitches and Blocked rows. It prints
+JSON and changes nothing it does not name."""
 
 from __future__ import annotations
 
@@ -36,6 +38,8 @@ TEMPLATE = "1aL39ddaSXTGan43epPbDemccTrLynwyhCoYQ5rYOzkE"
 
 QUEUE = ["id", "lane", "rank", "item", "goal", "value", "appetite", "due", "status",
          "blocked by", "issue", "dev thread", "review on", "source"]  # fmt: skip
+PITCHES = ["id", "item", "job", "problem", "evidence", "solution", "rabbit holes", "no-gos", "acceptance",
+           "builder questions", "hook", "readiness"]  # fmt: skip
 BLOCKED = ["item", "blocker", "kind", "owner", "asked on", "chase on", "chased", "status"]
 # In flight first, then the ranked ready rows, then the rest by how far shaped.
 STAGES = ["approved", "building", "ready", "shaped", "shaping", "raw", "shipped", "reviewed"]
@@ -247,6 +251,66 @@ def due(blocked: list[dict[str, str]], queue: list[dict[str, str]], today: date)
     }
 
 
+# The pitch text a loose description is matched against, besides the title.
+DESCRIBED = ["job", "problem", "evidence", "solution"]
+MATCHES = 5
+ID = re.compile(r"p-?(\d+)", re.IGNORECASE)
+# Words that say nothing about which item is meant (a single letter neither: "what's" is "what", "s").
+FILLER = {"a", "an", "and", "are", "as", "at", "be", "bug", "by", "can", "do", "does", "for", "from", "had",
+          "has", "have", "i", "in", "is", "it", "item", "its", "me", "my", "of", "on", "one", "or", "our",
+          "said", "says", "should", "so", "that", "the", "their", "them", "there", "these", "thing", "this",
+          "those", "to", "us", "was", "we", "were", "what", "when", "where", "which", "who", "why", "will",
+          "with", "you", "your",
+          # and the values asked about, which say nothing about which item
+          "appetite", "size", "value", "due", "date", "status", "pitch", "blocker", "blocked", "priority"}  # fmt: skip
+
+
+def _word(text: str) -> str:
+    """A word with its common ending off, so "restarted" meets "restart"."""
+    for end, put in (("ies", "y"), ("ing", ""), ("ed", ""), ("s", "")):
+        if len(text) > len(end) + 3 and text.endswith(end):
+            return text[: -len(end)] + put
+    return text
+
+
+def _words(text: str) -> set[str]:
+    return {_word(w) for w in re.findall(r"\w+", text.lower()) if len(w) > 1 and w not in FILLER}
+
+
+def lookup(query: str, queue: list[dict], pitches: list[dict], blocked: list[dict]) -> list[dict]:
+    """The Queue items `query` means, each with its Pitches row (or None)
+    and its Blocked rows. An id ("P-4", "p-004") finds that item. Otherwise
+    the query is how someone described it: each of its words scores 2 when in
+    the item's title, else 1 when in its pitch's job, problem, evidence or
+    solution; the best `MATCHES` with any score, highest first (ties in Sheet
+    order, which is the ranking), each with its `score`."""
+
+    def number(text: str) -> int | None:
+        m = ID.fullmatch(text.strip())
+        return int(m.group(1)) if m else None
+
+    pitch = {number(p["id"]): p for p in pitches if number(p["id"]) is not None}
+
+    def full(r: dict) -> dict:
+        n = number(r["id"])
+        return {**{k: v for k, v in r.items() if k != "_rest"},
+                "pitch": {k: v for k, v in pitch[n].items() if k != "_rest"} if n in pitch else None,
+                "blocked": [{k: v for k, v in b.items() if k != "_rest"} for b in blocked if number(b["item"]) == n]}  # fmt: skip
+
+    if (n := number(query)) is not None:
+        return [full(r) for r in queue if number(r["id"]) == n]
+    asked = _words(query)
+    scored = []
+    for r in queue:
+        title = _words(r["item"])
+        told = _words(" ".join((pitch.get(number(r["id"])) or {}).get(c, "") for c in DESCRIBED))
+        score = sum(2 if w in title else 1 if w in told else 0 for w in asked)
+        if score:
+            scored.append((score, r))
+    scored.sort(key=lambda s: -s[0])  # stable: ties keep the Sheet's order
+    return [{**full(r), "score": score} for score, r in scored[:MATCHES]]
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="command", required=True)
@@ -258,8 +322,9 @@ def main(argv: list[str] | None = None) -> int:
     seed = sub.add_parser("seed")
     seed.add_argument("sheet")
     seed.add_argument("repo")
-    for name in ("read", "order", "due"):
+    for name in ("read", "order", "due", "lookup"):
         sub.add_parser(name).add_argument("sheet")
+    sub.choices["lookup"].add_argument("query")
     sub.choices["due"].add_argument(
         "--today", type=date.fromisoformat, default=datetime.now().astimezone().date()
     )
@@ -282,6 +347,13 @@ def main(argv: list[str] | None = None) -> int:
                 params={"spreadsheetId": args.sheet, "range": "Queue!A1", "valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
                 body={"values": new_rows})  # fmt: skip
         out = [dict(zip(QUEUE, r)) for r in new_rows]
+    elif args.command == "lookup":
+        # One read of the three tabs: 0.8 s warm, 2.1 s cold on a real Sheet (2026-11-13), so no cache.
+        tabs = {"Queue": QUEUE, "Pitches": PITCHES, "Blocked": BLOCKED}
+        got = gws("sheets", "spreadsheets", "values", "batchGet",
+                  params={"spreadsheetId": args.sheet, "ranges": [f"{t}!A2:Z" for t in tabs]})  # fmt: skip
+        found = [rows(v.get("values", []), c) for v, c in zip(got["valueRanges"], tabs.values())]
+        out = {"matches": lookup(args.query, *found)}
     elif args.command == "read":
         out = rows(values(args.sheet, "Queue"), QUEUE)
     elif args.command == "order":

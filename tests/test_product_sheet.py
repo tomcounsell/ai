@@ -278,7 +278,9 @@ def test_seed_appends_unlinked_open_issues_as_raw_rows_numbered_after_the_highes
     ]  # fmt: skip
     assert all(len(r) == len(sheet.QUEUE) and not r[2] for r in body["values"])
     gh = next(c for c in drive.calls if c[0] == "gh")
-    assert gh[:3] == ["gh", "issue", "list"] and "--state" in gh  # `gh issue list` returns issues only, never pull requests
+    assert (
+        gh[:3] == ["gh", "issue", "list"] and "--state" in gh
+    )  # `gh issue list` returns issues only, never pull requests
 
 
 def test_seed_with_nothing_new_appends_nothing(monkeypatch, capsys):
@@ -286,3 +288,95 @@ def test_seed_with_nothing_new_appends_nothing(monkeypatch, capsys):
     run(monkeypatch, drive, ["seed", "SHEET", "acme/app"])
     assert not drive.made("sheets", "spreadsheets", "values", "append")
     assert json.loads(capsys.readouterr().out) == []
+
+
+# -- lookup: the questions asked of Valor about the backlog (#valor-product and its call, 2026-11-13) --
+
+
+def q(id, item, **kw):
+    return [kw.get(c, {"id": id, "item": item}.get(c, "")) for c in sheet.QUEUE]
+
+
+QUEUE = [
+    q("P-004", "Overloaded turns are never retried", lane="mandatory", value="high", appetite="small",
+      due="2026-11-20", status="ready", **{"blocked by": "human: Tom"}),
+    q("P-005", "Entity memory: per-person records with live and retired facts", value="medium", appetite="large",
+      status="shaped"),
+    q("P-006", "Rerank injected memories for diversity", status="raw"),
+    q("P-022", "Auto-responder marks customer email handled", lane="mandatory", status="raw"),
+]  # fmt: skip
+PITCHES = [
+    ["P-004", "Overloaded turns", "Valor finishes a turn the API refused", "A refused turn is dropped",
+     "observed: 3 dropped turns in the log, 2026-11-02", "Retry with backoff", "", "No new queue",
+     "A refused turn is retried", "", "", "2026-11-10: passed"],
+    ["P-022", "Auto-responder", "Staff answer every customer", ("A customer email drops off the staff queue and "
+                                                      "nobody ever replies"), "reported: a customer wrote twice, 2026-11-01", "Keep it on the queue"],
+]  # fmt: skip
+BLOCKED = [
+    ["P-004", "Tom to pick the backoff ceiling", "human", "Tom", "2026-11-10", "2026-11-13", "", "open"],
+    ["P-005", "the memory store", "eng", "#123", "2026-11-01", "2026-11-04", "", "open"],
+]  # fmt: skip
+
+
+def lookup(monkeypatch, capsys, query):
+    calls = []
+
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        got = {"valueRanges": [{"values": QUEUE}, {"values": PITCHES}, {"values": BLOCKED}]}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(got), "")
+
+    monkeypatch.setattr(sheet.subprocess, "run", fake)
+    assert sheet.main(["lookup", "SHEET", query]) == 0
+    return json.loads(capsys.readouterr().out)["matches"], calls
+
+
+def test_an_id_in_any_spelling_finds_its_row_in_one_read(monkeypatch, capsys):
+    for query in ("P-004", "p-4", "P4"):
+        (found,), calls = lookup(monkeypatch, capsys, query)
+        assert found["id"] == "P-004" and "score" not in found
+    (cmd,) = calls  # one batched read of the three tabs, nothing else
+    assert cmd[1:5] == ["sheets", "spreadsheets", "values", "batchGet"]
+    assert json.loads(cmd[cmd.index("--params") + 1])["ranges"] == [
+        "Queue!A2:Z",
+        "Pitches!A2:Z",
+        "Blocked!A2:Z",
+    ]
+
+
+def test_an_item_comes_with_its_values_its_pitch_and_its_blockers_and_no_other_items(monkeypatch, capsys):
+    (found,), _ = lookup(monkeypatch, capsys, "P-004")
+    assert {k: found[k] for k in ("lane", "value", "appetite", "due", "status", "blocked by")} == {
+        "lane": "mandatory", "value": "high", "appetite": "small", "due": "2026-11-20", "status": "ready",
+        "blocked by": "human: Tom"}  # fmt: skip
+    assert found["pitch"]["evidence"] == "observed: 3 dropped turns in the log, 2026-11-02"
+    assert found["pitch"]["readiness"] == "2026-11-10: passed"
+    assert [b["blocker"] for b in found["blocked"]] == ["Tom to pick the backoff ceiling"]
+    (bare,), _ = lookup(monkeypatch, capsys, "P-006")
+    assert bare["pitch"] is None and bare["blocked"] == []
+
+
+def test_a_loose_description_finds_the_item_through_its_pitch(monkeypatch, capsys):
+    """Tom, 2026-11-13: people never know an item's id or title."""
+    found, _ = lookup(monkeypatch, capsys, "the bug where an email never got a reply")
+    assert found[0]["id"] == "P-022" and found[0]["pitch"]["evidence"].startswith("reported:")
+
+
+def test_a_description_several_items_fit_returns_them_best_first(monkeypatch, capsys):
+    found, _ = lookup(monkeypatch, capsys, "the memory thing with retired facts")
+    assert [(f["id"], f["score"]) for f in found] == [("P-005", 6), ("P-006", 2)]
+    assert found[0]["blocked"][0]["owner"] == "#123"
+    found, _ = lookup(monkeypatch, capsys, "the memories one")
+    assert [f["id"] for f in found] == ["P-005", "P-006"]  # a tie keeps the Sheet's order, the ranking
+
+
+def test_the_values_asked_about_and_stray_letters_say_nothing_about_which_item(monkeypatch, capsys):
+    """From the live check (2026-11-13): "what's" left an "s" that matched "Valor's"."""
+    found, _ = lookup(monkeypatch, capsys, "what's the appetite and due date on the memory item?")
+    assert [f["id"] for f in found] == ["P-005", "P-006"]
+    assert lookup(monkeypatch, capsys, "what's the value, size and status?")[0] == []
+
+
+def test_a_description_nothing_fits_finds_nothing(monkeypatch, capsys):
+    assert lookup(monkeypatch, capsys, "the restart that happened")[0] == []
+    assert lookup(monkeypatch, capsys, "P-099")[0] == []

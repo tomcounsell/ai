@@ -824,6 +824,83 @@ def test_a_missing_persona_section_is_unreadable(tmp_path):
         persona.section(tmp_path / "persona", "In a meeting")
 
 
+# -- the backlog ------------------------------------------------------------------
+
+
+def test_a_call_whose_project_has_a_sheet_is_offered_backlog_and_told_when_to_use_it():
+    """Tom, 2026-11-13: a fast lookup of the Sheet's items, answered in the person's terms."""
+    config = call.live_config("acme", "", None, sheet=True)
+    assert [f.name for f in config.tools[0].function_declarations][-1] == "backlog"
+    text = " ".join(config.system_instruction.split())
+    assert (
+        "call `backlog` at once: with `about` set to how they described the item, in their own words" in text
+    )
+    assert "never its id or its title as the Sheet words it" in text and "ask which they mean" in text
+    assert "`backlog`" not in call.live_config("acme", "", None).system_instruction
+
+
+FAKE_SHEET = """import json, sys
+with open(sys.argv[0] + ".argv", "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[-1] == "fail":
+    sys.exit("gws sheets spreadsheets values batchGet failed: 403")
+if sys.argv[1] == "read":
+    print(json.dumps([{"id": "P-005", "lane": "bet", "rank": "", "item": "Entity memory", "value": "medium",
+                       "appetite": "large", "due": "", "status": "shaped", "blocked by": "", "issue": "x",
+                       "_rest": []}]))
+else:
+    print(json.dumps({"matches": [{"id": "P-005", "appetite": "large", "pitch": {"job": "remember people"},
+                                   "blocked": [], "score": 2}]}))
+"""
+
+
+def test_backlog_reads_the_sheet_the_projects_spec_names(dsn, team, quick, tmp_path, monkeypatch):
+    fake = tmp_path / "sheet.py"
+    fake.write_text(FAKE_SHEET)
+    monkeypatch.setattr(call, "SHEET_PY", fake)
+    spec = Path(settings.projects_dir) / f"{team.project}.toml"
+    spec.write_text(spec.read_text() + f'rooms."slack:{team.chat}" = "Product. The backlog Sheet: '
+                    'https://docs.google.com/spreadsheets/d/SHEET-1_x/edit, kept here."\n')  # fmt: skip
+
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, tool("backlog", about="what's the appetite on the memory item?"), done())
+        await push(c.session, tool("backlog"), done())
+        await push(c.session, tool("backlog", about="fail"), done())
+        assert await until(lambda: len([k for k, _ in c.session.sent if k == "tool"]) == 3)
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert "call `backlog`" in c.gemini.configs[0].system_instruction
+    one, whole, failed = [
+        kw["function_responses"][0].response["result"] for k, kw in c.session.sent if k == "tool"
+    ]
+    assert json.loads(one)["matches"][0]["appetite"] == "large"
+    # The whole queue in its order, with only what an overview needs.
+    assert json.loads(whole) == [{"id": "P-005", "lane": "bet", "rank": "", "item": "Entity memory",
+                                  "value": "medium", "appetite": "large", "due": "", "status": "shaped",
+                                  "blocked by": ""}]  # fmt: skip
+    assert failed.startswith("the Sheet could not be read: ") and "403" in failed
+    argv = [json.loads(line) for line in (tmp_path / "sheet.py.argv").read_text().splitlines()]
+    assert argv == [["lookup", "SHEET-1_x", "what's the appetite on the memory item?"], ["read", "SHEET-1_x"],
+                    ["lookup", "SHEET-1_x", "fail"]]  # fmt: skip
+
+
+def test_a_call_whose_project_has_no_sheet_has_no_backlog(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, tool("backlog", about="the memory item"), done())
+        assert await until(lambda: [k for k, _ in c.session.sent if k == "tool"])
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert "`backlog`" not in c.gemini.configs[0].system_instruction
+    (response,) = [kw for k, kw in c.session.sent if k == "tool"]
+    assert response["function_responses"][0].response["result"] == "not done: backlog needs its arguments"
+
+
 # -- metering ---------------------------------------------------------------------
 
 

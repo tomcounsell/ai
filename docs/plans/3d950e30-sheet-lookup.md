@@ -1,67 +1,50 @@
-# Look up one backlog item, in chat and in calls
+# Answer about the backlog from the Sheet, in chat and in calls
 
 Tom, #valor-product, 2026-11-13 15:55 UTC: "a fast-answering tool (not just
 for calls, but all the time) to lookup items in the google sheet and know
-its values (size, value, due date, pitch, etc)". A capability Tom asked
-for; no new check or gate; no governance added.
+its values (size, value, due date, pitch, etc)". 15:59: "humans will never
+know its number or title, so that's just for you". 16:00: shape it from
+the real questions asked. A capability Tom asked for; no governance added.
+
+## The questions it answers (observed, #valor-product and its call, 2026-11-13)
+
+1. "What are all our possible directions for product development?" (chat 10:01): the whole Queue, grouped by theme. `read`.
+2. "What's in your backlog?" (call 10:30): a short overview. `read`.
+3. "What is the top priority?" and "the criteria for what put it in that order" (call 11:02-11:03): the Queue in order, with lane, value, appetite; the rule is the persona's, already in the call. `read`.
+4. "What evidence do we have…", "give me an example" (call 10:32): one item's tagged evidence. `lookup`.
+5. A loose description of one item: its values and pitch. `lookup`.
+
+So one new command, `lookup`; `read` already answers 1-3.
 
 ## What is built
 
-**`sheet.py lookup SHEET "<id or words>"`** (skills/valor/skills/product-sheet/sheet.py).
-One `gws sheets spreadsheets values batchGet` over `Queue!A2:Z`,
-`Pitches!A2:Z`, `Blocked!A2:Z`, `Archive!A2:Z`, parsed with the existing
-`rows()` and fixed column lists (`QUEUE`, `BLOCKED`, new `PITCHES` and
-`ARCHIVE`, as `doc.md` names them). Prints JSON `{"matches": [...]}`:
-each match is the Queue (or Archive) row's fields with `"tab"`, its Pitches
-row as `"pitch"` (or null), and its Blocked rows as `"blocked"` (all of
-them; each carries its status).
-- **By id:** `P-4`, `p-004`, `P-004` match P-004 (compared by number).
-- **By words:** the rows whose `item` contains the most of the query's
-  words (`\w+`, lowercased); ties all returned, at most 5, Queue before
-  Archive. No word matches: `{"matches": []}`, exit 0.
-- Measured live (2026-11-13, a real Sheet): a three-range batchGet took
-  0.8 s warm, 2.1 s cold. No cache: nothing shows a read is slow.
+**`sheet.py lookup SHEET "<their words, or an id>"`**: one `batchGet` of
+Queue, Pitches and Blocked (0.8 s warm, 2.1 s cold on a real Sheet,
+2026-11-13: no cache). An id (`P-4`, `p-004`) is Valor's own shortcut.
+Otherwise each query word (filler, single letters and the names of the
+values asked about dropped; common endings stripped) scores 2 in the title,
+else 1 in the pitch's job, problem, evidence or solution; the best 5,
+highest first, ties in Sheet order. Each match carries its Queue values,
+its Pitches row and its Blocked rows. No match: `{"matches": []}`.
 
-**Chat and task turns.** SKILL.md gains "Looking up an item": when anyone
-asks about one item (its value, appetite, due date, status, blocker,
-pitch), run `lookup` on the room's Sheet and answer with the row's values,
-naming the item; never from memory. Every product-room turn already loads
-the skill; the docstring lists the command.
+**Chat and task turns**: SKILL.md "Answering about the backlog": `lookup`
+for one item, `read` for the whole; answer in the person's terms, never
+by id or the Sheet's title.
 
-**The call.** Today the Live model reaches the Sheet only through `ask`,
-a full worker turn posted in the chat (tens of seconds), so a spoken
-answer waits. Simplest fit: a sixth Live tool, `item` (`query`), offered
-only when the call's project spec names a Sheet. `Call._tools` runs
-`sheet.py lookup` as a subprocess (`sys.executable`, the skill's path)
-and returns its JSON as the tool result, which Live speaks from. The
-Sheet id comes from the project spec's `rooms` text (the first
-`docs.google.com/spreadsheets/d/<id>`; every spec with a Sheet names
-exactly one, checked 2026-11-13), read where `_links()` reads the spec.
-One instruction line: "When someone asks about a backlog item's values,
-call `item` with its id or words from its title and answer from the row
-(say which item you found; with several, ask which); `ask` your worker
-only for what the row does not hold." A lookup that fails returns its
-error as the result, so Live says it could not read the Sheet.
+**The call**: a Live tool `backlog` (`about`, optional), offered only when
+the call's project spec's `rooms` name a Sheet (read once as the call's
+Live lane starts). With `about` it runs `lookup`, without it `read` cut to
+the overview columns; run with `asyncio.create_subprocess_exec` so the
+call's audio keeps flowing; an error comes back as the result. One
+instruction line says when to call it and to answer in the person's terms.
 
-## Out of scope
-
-Writing to the Sheet from a call; fuzzy or semantic matching; a cache; a
-Sheet for projects without one; changing `read`, `order`, `due`.
+Cut: the Archive tab (no question needs it), a cache, writing from a call.
 
 ## Tests
 
-tests/test_product_sheet.py, fake `gws`:
-- by id, in each spelling; exactly one gws call (one batched read);
-- by words: best match wins; a tie returns both; Archive row marked;
-- no match: `{"matches": []}`;
-- a row with a Pitches row and a Blocked row returns both joined;
-- a Pitches/Blocked row of another item is not joined.
-
-tests/test_call.py:
-- `live_config` with a Sheet offers `item` and its instruction line;
-  without one the tool list stays the five (existing test unchanged);
-- an `item` tool call returns the lookup's JSON for the spec's Sheet
-  (subprocess faked), and a failing lookup returns its error;
-- the Sheet id is read from a spec's `rooms` text.
-
-Suites: those two, `tests/test_bloat.py`, then the full suite.
+tests/test_product_sheet.py: an id in each spelling in one read; values,
+pitch and blockers joined, no other item's; a loose description found
+through its pitch; several fitting, best first; field words and stray
+letters ignored; nothing fits. tests/test_call.py: `backlog` and its line
+offered only with a Sheet; the tool reads the spec's Sheet (lookup, the
+whole queue's overview, an error); no Sheet, no tool.

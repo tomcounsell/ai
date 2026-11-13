@@ -93,6 +93,25 @@ reports on; nothing waits on it.
 6. **Goal.** The room's session drafts the product goal and metric first,
    from the room, the code and the record, and tells the room.
 
+**Answering about the backlog.** Whenever anyone in any chat or task asks
+about the backlog, answer from the Sheet as it is now, never from memory:
+- **One item** (its size, value, due date, status, blocker, pitch, evidence):
+  `python3 sheet.py lookup SHEET "<their words>"`. People describe an item
+  loosely ("the memory thing", "the bug where the email never got a
+  reply"), so pass their words as they said them; the lookup ranks the
+  items whose title and pitch (job, problem, evidence, solution) share the
+  most of them, best first, each with its values, its Pitches row and its
+  Blocked rows. An id (`P-004`) is for your own use. When several fit, say
+  in a few words what each is and ask which they mean; when none does,
+  say it is not on the Sheet.
+- **The whole backlog, its directions or its top priority**: `read`, whose
+  row order is the ranking (run `order` first if rows were added); group
+  by theme for directions, and name the ranking rule above for the order.
+
+Answer in their terms (what the item does for them, its values, the
+evidence with its tag), never by id or the Sheet's own title for it. A
+call has the same lookup as its `backlog` tool.
+
 **Adding an item.** Read the code and the issues first; if it exists or
 shipped, say so instead. Otherwise append a Queue row (next free id,
 status `raw`, lane, value and appetite as your first read with the
