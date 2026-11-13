@@ -84,8 +84,6 @@ if TYPE_CHECKING:
 TURN_ENV = "VALOR_TURN"
 STEER_ENV = "VALOR_STEER"
 EVENTS_CHANNEL = "valor_events"
-# How often a turn whose database went away tries it again (`_heard`).
-RELISTEN_S = 1.0
 # Owed to a running turn, from the task's rows: (steered row id, its text).
 Steering = Callable[[list[dict[str, Any]]], list[tuple[int, str]]]
 Transcript = transcripts.Transcript
@@ -370,7 +368,7 @@ async def _delivering(dsn, task_id, steering: Steering, inbox: Path, written: se
             await _deliver(dsn, task_id, steering, inbox, written)
         except psycopg.OperationalError:
             # The database is down: tried again once it answers (`_heard` wakes it).
-            await asyncio.sleep(RELISTEN_S)
+            await asyncio.sleep(db.RELISTEN_S)
             wake.set()
 
 
@@ -502,7 +500,7 @@ async def _heard(listener, task_id: str, wake: asyncio.Event, dsn: str | None = 
                 pass
             if own is not None:
                 await own.close()
-            listener = own = await _relisten(dsn, [*channels, EVENTS_CHANNEL])
+            listener = own = await db.listen(dsn, [*channels, EVENTS_CHANNEL])
             async with await db.connect(dsn) as conn:
                 if await tasks.is_stopped(conn, task_id):
                     return
@@ -510,23 +508,6 @@ async def _heard(listener, task_id: str, wake: asyncio.Event, dsn: str | None = 
     finally:
         if own is not None:
             await own.close()
-
-
-async def _relisten(dsn: str | None, channels: list[str]):
-    """A new connection listening on `channels`, once the database answers."""
-    while True:
-        try:
-            conn = await db.connect(dsn)
-        except psycopg.OperationalError:
-            await asyncio.sleep(RELISTEN_S)
-            continue
-        try:
-            for channel in channels:
-                await conn.execute(f"LISTEN {channel}")
-            return conn
-        except psycopg.OperationalError:
-            await conn.close()
-            await asyncio.sleep(RELISTEN_S)
 
 
 async def _pump(pipe: asyncio.StreamReader, file) -> None:

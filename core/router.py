@@ -72,7 +72,6 @@ SETTLED = {State.WAITING: "waiting", State.MERGED: "merged", State.ENDED: "ended
 # delay that doubles from `STEP_BACKOFF_S`; at `STEP_TRIES` failures in a row
 # of the same state and check, the task ends with a report to Tom.
 STEP_TRIES = 4
-_TRY_LOCK = "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))"
 STEP_BACKOFF_S = 60.0
 STEP_BACKOFF_MAX_S = 900.0
 PerformersFactory = Callable[[tasks.Brief], broker.Performers]
@@ -128,36 +127,14 @@ async def step(
     kept by the caller across steps; without one the step opens its own
     and stops them when it returns."""
     dsn = dsn or gateway.dsn
-    holder = await db.connect(dsn)
+    key = f"run:{task_id}"
+    locked = db.Held(dsn, [key])
     own = services is None
     try:
-        key = f"run:{task_id}"
-        got = await (await holder.execute(_TRY_LOCK, (key,))).fetchone()
-        if not got[0]:
+        if await locked.take() is not None:
             return {"status": "already running"}
-
-        async def alive() -> bool:
-            """The run still holds its lock. A session the database dropped
-            (a restart of the server) takes it again on a new one; refused,
-            another holder has the run."""
-            nonlocal holder
-            try:
-                await holder.execute("SELECT 1")
-                return True
-            except Exception:  # noqa: BLE001, S110  any failure means the session, and its lock, are gone
-                pass
-            try:
-                fresh = await db.connect(dsn)
-            except Exception:  # noqa: BLE001  no database: the lock cannot be held
-                return False
-            got = await (await fresh.execute(_TRY_LOCK, (key,))).fetchone()
-            if not got[0]:
-                await fresh.close()
-                return False
-            await holder.close()
-            holder = fresh
-            return True
-
+        # A session the database dropped takes the lock again; refused, another holder has the run.
+        alive = locked.alive
         if own:
             services = await _Services.open(dsn, task_id)
             if not await services.claim():
@@ -194,7 +171,7 @@ async def step(
                 await asyncio.to_thread(services.down)
                 await services.close()
     finally:
-        await holder.close()
+        await locked.close()
 
 
 def _log(text: str) -> None:

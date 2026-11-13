@@ -7,6 +7,7 @@ connection string names the kernel's password file (`settings.pg_passfile`)
 and never a password; the credential itself is `core/credentials.py`'s.
 """
 
+import asyncio
 from pathlib import Path
 
 import psycopg
@@ -25,6 +26,73 @@ async def connect(dsn: str | None = None, *, application_name: str | None = None
     `application_name` names the process in `pg_stat_activity`."""
     extra = {"application_name": application_name} if application_name else {}
     return await psycopg.AsyncConnection.connect(dsn or settings.dsn(), autocommit=True, **extra)
+
+
+# How often a session the database dropped tries it again (`listen`, `Held`).
+RELISTEN_S = 1.0
+TRY_LOCK = "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))"
+
+
+async def listen(dsn: str | None, channels: list[str]) -> psycopg.AsyncConnection:
+    """A new connection listening on `channels`, once the database answers:
+    a listener the database dropped (a restart of the server,
+    `core/health.py`) is replaced with it."""
+    while True:
+        try:
+            conn = await connect(dsn)
+        except psycopg.OperationalError:
+            await asyncio.sleep(RELISTEN_S)
+            continue
+        try:
+            for channel in channels:
+                await conn.execute(f"LISTEN {channel}")
+            return conn
+        except psycopg.OperationalError:
+            await conn.close()
+            await asyncio.sleep(RELISTEN_S)
+
+
+class Held:
+    """Advisory locks `keys`, held on one session (`conn`). A session the
+    database dropped (a restart of the server) takes them again on a new
+    one (`alive`); refused, another holder has them."""
+
+    def __init__(self, dsn: str | None, keys: list[str], *, application_name: str | None = None):
+        self.dsn, self.keys, self.name = dsn, keys, application_name
+        self.conn: psycopg.AsyncConnection | None = None
+
+    async def take(self) -> str | None:
+        """Take every key on a new session; the first key refused, else None."""
+        self.conn = await connect(self.dsn, application_name=self.name)
+        return await self._take(self.conn)
+
+    async def _take(self, conn) -> str | None:
+        for key in self.keys:
+            if not (await (await conn.execute(TRY_LOCK, (key,))).fetchone())[0]:
+                return key
+        return None
+
+    async def alive(self) -> bool:
+        """The locks are still held, on this session or, after a drop, a new one."""
+        try:
+            await self.conn.execute("SELECT 1")
+            return True
+        except Exception:  # noqa: BLE001, S110  any failure means the session, and its locks, are gone
+            pass
+        try:
+            fresh = await connect(self.dsn, application_name=self.name)
+        except Exception:  # noqa: BLE001  no database: the locks cannot be held
+            return False
+        if await self._take(fresh) is not None:
+            await fresh.close()
+            return False
+        await self.conn.close()
+        self.conn = fresh
+        return True
+
+    async def close(self) -> None:
+        if self.conn is not None:
+            await self.conn.close()
 
 
 def migrate(

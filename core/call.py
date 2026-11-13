@@ -27,7 +27,9 @@ wake writes it for a call whose process died (`sweep`).
 
 **The call's process** (`python -m core call SESSION`, `run`) holds
 `meet:call:<session>` while it lives, and `run:<session>`, so the kernel
-charges none of its model calls twice. It joins through the page
+charges none of its model calls twice (`db.Held`: a restart of the
+database, which drops the session holding them, takes them again, and the
+call stays). It joins through the page
 (`bridges/meet`), mixes what everyone says into one Gemini Live session
 (docs/plans/gemini-live.md), which decides when Valor is addressed and
 speaks, posts and asks its worker through tools, and speaks and posts
@@ -62,6 +64,8 @@ CHANNEL = "meet"
 # A call whose process never wrote `call.started` this long after it was
 # opened, with its lock free, never started.
 NEVER_STARTED_S = 90
+# A call's process waits this long for a database that refuses connections (`Call._connect`).
+DB_WAIT_S = 180.0
 SIGN_IN = "cd ~/src/ai && .venv/bin/python -m core meet-sign-in"
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
@@ -928,10 +932,12 @@ class Call:
         socket=None,
         clock: Callable[[], float] = time.monotonic,
         store: str | None = None,
+        held: db.Held | None = None,
     ):
         from core import bridge
 
         self.id, self.info, self.page, self.dsn, self.gemini = session_id, info, page, dsn, gemini
+        self.held = held  # the call's locks (`core/__main__.py` `_call`), taken again after a restart
         self.worker, self.worker_ready, self.project = worker, worker_ready, project
         self.socket, self.clock = socket, clock
         # An invited call joined before its start waits for the others, and
@@ -1123,7 +1129,7 @@ class Call:
                               "text": text, "channel": "call"})  # fmt: skip
 
     async def _heard(self, who: str, name: str, text: str, via: str) -> None:
-        async with await db.connect(self.dsn) as conn:
+        async with await self._connect() as conn:
             await ledger.append(conn, self.id, "call.heard", {"turn_id": ledger.new_id(), "who": who,
                                 "name": name, "via": via, "text": text})  # fmt: skip
         self.lines.append(f"[{_clock(self.now())}] {name} ({via}): {text}")
@@ -1423,7 +1429,7 @@ class Call:
                 self.posts.put_nowait(Post(reply.id, str(args["text"]).strip(), True))
                 result = "posted"
             elif fc.name == "open_decisions":
-                async with await db.connect(self.dsn) as conn:
+                async with await self._connect() as conn:
                     result = await decisions(conn, self.project)
             elif fc.name == "settle" and args.get("ids") and str(args.get("readback") or "").strip():
                 settles = [
@@ -1454,7 +1460,7 @@ class Call:
                 "route": "gemini-live", "estimated_input": CALL_CONTEXT, "max_tokens": CALL_OUTPUT_MOST,
                 "estimate_usd_micros": spending.gemini_worst_case(price), "unpriced": price["unpriced"]}  # fmt: skip
         try:
-            async with await db.connect(self.dsn) as conn:
+            async with await self._connect() as conn:
                 self.metered = await spending.open_call(conn, self.id, call)
         except tasks.TaskStopped:
             self.leave("the call was stopped", hard=True)
@@ -1469,7 +1475,7 @@ class Call:
         if self.metered is None:
             return
         price = spending.gemini_price(settings.call_model)
-        async with await db.connect(self.dsn) as conn:
+        async with await self._connect() as conn:
             await spending.charge(conn, self.id, self.metered, spending.gemini_cost(usage, price),
                                   {"model": settings.call_model, "usage": usage})  # fmt: skip
         self.metered = None
@@ -1517,7 +1523,7 @@ class Call:
         action = broker.Action(action_type, target or self.info["code"], payload)
         for attempt in range(2):
             try:
-                async with await db.connect(self.dsn) as conn:
+                async with await self._connect() as conn:
                     out = await broker.request(conn, self.declared, self.id, action, request_id=request_id)
                     if out.kind == "released" and action_type in MEET_TYPES:
                         try:
@@ -1624,7 +1630,7 @@ class Call:
                     first = (p["name"] or "").split()[:1]
                     if first and p["name"] != mine and first[0] not in self.first_names:
                         self.first_names += first
-                    async with await db.connect(self.dsn) as conn:
+                    async with await self._connect() as conn:
                         await ledger.append(
                             conn, self.id, "call.participant", {"id": p["id"], "name": p["name"]}
                         )
@@ -1654,30 +1660,86 @@ class Call:
 
     async def orders(self) -> None:
         """A stop of the session leaves at once; a steer is posted in the
-        call's chat."""
-        listener = await db.connect(self.dsn)
+        call's chat. A listening session the database dropped (a restart of
+        the server, `core/health.py`) is listened again on a new one, the
+        call's locks taken again (`db.Held`), and a stop or steer written
+        meanwhile caught up: the call stays (2026-11-13, the Cowboy's
+        restart ended a call through this lane, and the kernel's sweep,
+        finding its lock free, ended it with no reason)."""
+        channels = ["valor_events", tasks.STOP_CHANNEL]
+        listener = await db.listen(self.dsn, channels)
         try:
-            await listener.execute("LISTEN valor_events")
-            await listener.execute(f"LISTEN {tasks.STOP_CHANNEL}")
-            async with await db.connect(self.dsn) as conn:
+            async with await self._connect() as conn:
                 if await tasks.is_stopped(conn, self.id):
                     self.leave("the call was stopped", hard=True)
-            async for got in listener.notifies():
-                if got.channel == tasks.STOP_CHANNEL and got.payload == self.id:
-                    self.leave("the call was stopped", hard=True)
                     return
-                said = json.loads(got.payload) if got.channel == "valor_events" else {}
-                if said.get("task_id") == self.id and said.get("type") == "message.steered":
-                    async with await db.connect(self.dsn) as conn:
-                        row = await (
-                            await conn.execute(
-                                "SELECT payload->>'text' FROM events WHERE id = %s", (said["id"],)
-                            )
-                        ).fetchone()
-                    if row and row[0]:
-                        self.posts.put_nowait(Post(None, row[0], False))
+                row = await (
+                    await conn.execute("SELECT max(id) FROM events WHERE task_id = %s", (self.id,))
+                ).fetchone()
+            seen = row[0] or 0  # steers up to here came before the call
+            while True:
+                try:
+                    async for got in listener.notifies():
+                        if got.channel == tasks.STOP_CHANNEL and got.payload == self.id:
+                            self.leave("the call was stopped", hard=True)
+                            return
+                        said = json.loads(got.payload) if got.channel == "valor_events" else {}
+                        if said.get("task_id") == self.id and said.get("type") == "message.steered":
+                            seen = await self._steers(seen, said["id"])
+                except psycopg.OperationalError:
+                    pass
+                await listener.close()
+                listener = await db.listen(self.dsn, channels)
+                if self.held is not None and not await self.held.alive():
+                    self.leave("another process took over the call")
+                    return
+                async with await self._connect() as conn:
+                    if await tasks.is_stopped(conn, self.id):
+                        self.leave("the call was stopped", hard=True)
+                        return
+                    ended = await (
+                        await conn.execute(
+                            "SELECT 1 FROM events WHERE task_id = %s AND type = 'call.ended'", (self.id,)
+                        )
+                    ).fetchone()
+                if ended is not None:  # the kernel's sweep ended it while the database was down
+                    self.leave("the call was ended while the database was down")
+                    return
+                seen = await self._steers(seen)
         finally:
             await listener.close()
+
+    async def _steers(self, seen: int, upto: int | None = None) -> int:
+        """Post each steer of the call after row `seen` (up to `upto`); the last row posted."""
+        async with await self._connect() as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT id, payload->>'text' FROM events WHERE task_id = %s AND type = 'message.steered' "
+                    "AND id > %s AND id <= coalesce(%s, id) ORDER BY id",
+                    (self.id, seen, upto),
+                )
+            ).fetchall()
+        for row_id, text in rows:
+            if text:
+                self.posts.put_nowait(Post(None, text, False))
+            seen = max(seen, row_id)
+        return max(seen, upto or 0)
+
+    async def _connect(self) -> psycopg.AsyncConnection:
+        """A connection, waiting out a database that refuses them for up to
+        `DB_WAIT_S` (a restart of the server took 61 s, 2026-11-13). The
+        lane that waits stalls meanwhile (the Live receive loop: no line is
+        recorded or spoken), by intent; a database down for longer ends the
+        call, as before."""
+        waited = 0.0
+        while True:
+            try:
+                return await db.connect(self.dsn)
+            except psycopg.OperationalError:
+                if waited >= DB_WAIT_S:
+                    raise
+                await asyncio.sleep(db.RELISTEN_S)
+                waited += db.RELISTEN_S
 
     async def joined(self) -> str | None:
         """Through Meet's join screen and lobby; None once in, else why not."""
@@ -1732,14 +1794,14 @@ class Call:
             price = spending.gemini_price(settings.summary_model)
             est = int(self.recording.seconds * 32) + len(transcript) // 3 + 1000
             call_id = ledger.new_id()
-            async with await db.connect(self.dsn) as conn:
+            async with await self._connect() as conn:
                 await spending.open_call(conn, self.id, {
                     "call_id": call_id, "turn_id": "summary", "model": settings.summary_model,
                     "route": "gemini", "estimated_input": est, "max_tokens": 16_000,
                     "estimate_usd_micros": spending.gemini_worst_case(price, est, 16_000),
                     "unpriced": price["unpriced"]})  # fmt: skip
             notes, usage = await self.gemini.summarise(audio, transcript, self.info.get("prep") or "")
-            async with await db.connect(self.dsn) as conn:
+            async with await self._connect() as conn:
                 await spending.charge(conn, self.id, call_id, spending.gemini_cost(usage, price),
                                       {"model": settings.summary_model, "usage": usage})  # fmt: skip
         except Exception as exc:  # noqa: BLE001  the report says the summary failed
@@ -1826,7 +1888,7 @@ class Call:
             job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
         summary = await self.summarise()
-        async with await db.connect(self.dsn) as conn:
+        async with await self._connect() as conn:
             await end(conn, self.id, self.reason, late=self.late, unanswered=unanswered, summary=summary)
         return self.reason
 

@@ -26,6 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import psycopg
 import pytest
 from google.genai import types
 
@@ -1746,3 +1747,106 @@ def test_every_call_is_joined_as_the_projects_manager():
     # Tom, 2026-11-11: the persona's "In a call" carries it into the call's instruction.
     text = call.live_config("acme", "", None).system_instruction
     assert "as the project's manager" in text and "priority" in text
+
+
+# -- the database restarting under a call ---------------------------------------
+
+
+@pytest.fixture
+def restart(dsn, monkeypatch):
+    """What a restart of the server does to a call: every session dropped
+    (`terminate_all`), and connections refused while `down` is set. The
+    test's own connections go through `real`."""
+    from tests.test_health import terminate_all
+
+    real, down = db.connect, asyncio.Event()
+
+    async def refusing(*a, **kw):
+        if down.is_set():
+            raise psycopg.OperationalError("connection is bad: No such file or directory")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(db, "connect", refusing)
+    monkeypatch.setattr(db, "RELISTEN_S", 0.05)
+
+    def drop():
+        down.set()
+        terminate_all(dsn)
+
+    return SimpleNamespace(real=real, down=down, drop=drop)
+
+
+async def held_call(dsn, team):
+    """A call under way as `python -m core call` runs one: started, its locks held."""
+    c = await in_call(dsn, team)
+    async with await db.connect(dsn) as conn:
+        await ledger.append(conn, c.the.id, "call.started", {"machine": settings.machine})
+    c.the.held = db.Held(dsn, [f"meet:call:{c.the.id}", f"run:{c.the.id}"])
+    assert await c.the.held.take() is None
+    return c
+
+
+def test_a_call_stays_through_its_database_restarting_holds_its_locks_again_and_hears_a_stop_after(
+    dsn, team, quick, restart
+):
+    """2026-11-13, the Cowboy's restart at 10:38: the call's listener raised
+    on the dropped session, its end could not be written, and the sweep,
+    finding its lock free, ended it as "Valor's call process stopped"."""
+
+    async def go():
+        c = await held_call(dsn, team)
+        restart.drop()
+        async with await restart.real(dsn) as conn:
+            await ledger.append(conn, c.the.id, "message.steered", {"text": "Back in a minute."})
+        await asyncio.sleep(1.0)
+        restart.down.clear()
+        posted = await until(lambda: "Back in a minute." in c.page.posts)
+        async with await restart.real(dsn) as conn:
+            lock = await (await conn.execute(db.TRY_LOCK, (f"meet:call:{c.the.id}",))).fetchone()
+            swept = await call.sweep(conn)
+            still = not c.running.done()
+            await tasks.stop(conn, c.the.id, reason="enough", by="tom", via="chat")
+        reason = await asyncio.wait_for(c.running, 10)
+        await c.the.held.close()
+        return posted, lock[0], swept, still, reason, await bridges.rows(dsn, c.the.id)
+
+    posted, free, swept, still, reason, rows = run(go())
+    assert posted and not free and swept == [] and still
+    assert reason == "the call was stopped"
+    (ended,) = [r["payload"] for r in rows if r["type"] == "call.ended"]
+    assert ended["reason"] == "the call was stopped"
+
+
+def test_a_call_the_sweep_ended_while_its_database_was_down_leaves_and_is_ended_once(
+    dsn, team, quick, restart
+):
+    async def go():
+        c = await held_call(dsn, team)
+        restart.drop()
+        async with await restart.real(dsn) as conn:
+            for _ in range(50):  # its lock is free once the session holding it has exited
+                if swept := await call.sweep(conn):
+                    break
+                await asyncio.sleep(0.05)
+        restart.down.clear()
+        reason = await asyncio.wait_for(c.running, 15)
+        await c.the.held.close()
+        return c, swept, reason, await bridges.rows(dsn, c.the.id)
+
+    c, swept, reason, rows = run(go())
+    assert swept == [c.the.id] and reason == "the call was ended while the database was down"
+    assert [r["payload"]["reason"] for r in rows if r["type"] == "call.ended"] == [
+        "Valor's call process stopped"
+    ]
+
+
+def test_a_spoken_answer_answers_what_was_asked_with_the_specific_or_says_it_does_not_know():
+    """Tom, 2026-11-13: asked for an example and for the ranking's criteria,
+    Valor restated the goal and the order."""
+    text = " ".join(call.live_config("acme", "", None).system_instruction.split())
+    assert "Answer what was asked." in text and "the example, the number, the rule" in text
+    assert "say plainly you don't know" in text and "Never answer by restating the goal" in text
+    converse = " ".join((Path(__file__).parent.parent / "skills/sdlc/converse.md").read_text().split())
+    calls = converse[converse.index("**Calls.**") : converse.index("**An invited call.**")]
+    assert "concrete case behind it" in calls and "ranking rule" in calls
+    assert "**One ordered queue**" in calls and "**Value for effort**" in calls
