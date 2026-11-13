@@ -58,7 +58,12 @@ against a new Meet with a second device of Valor's account
   is matched in Live's transcript; anyone else asking, or everyone saying
   goodbye, is the model's `leave`. A call that fails, or any of its lanes
   (the mixer, Live, the posts), ends and writes its traceback to
-  `meet.log`.
+  `meet.log`. A restart of the database is not a failure (the Cowboy,
+  2026-11-13): the call's connections wait up to `DB_WAIT_S` (180 s) for
+  it, its stop listener listens again, its two locks are taken again
+  (`db.Held`), and a stop or steer written meanwhile is caught up; if
+  another process took the locks, or the kernel's sweep ended the call
+  meanwhile, the call leaves and writes no second end.
 - **The page** (`bridges/meet/`): headless Chrome on the call profile
   (a plain Chrome left open on it is quit first; another call's ends this
   one, naming its pid), muted,

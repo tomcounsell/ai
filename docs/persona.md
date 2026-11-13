@@ -474,7 +474,14 @@ a challenged question asked again, "offline" with no where, items that were
 not his, a switch of language. `conduct.md`'s "In a call" section is the
 asking and reader rules above said for speech, and `core/call.py` puts that
 section itself, read by `persona.section`, into the call's instruction, so
-the call and every turn read one text (docs/plans/call-persona.md).
+the call and every turn read one text (docs/plans/call-persona.md). The
+call of 2026-11-13 showed the next gap: asked for an example and for the
+rule behind the queue's order, the voice restated the goal and the
+recommendation, and claimed a bug broke real work with nothing behind it.
+So "In a call" says **Answer what was asked** (the specific, its evidence,
+or plainly that it doesn't know), the call's worker is told the same, and
+converse's **Calls** has the prep carry the case behind each recommendation
+and the ranking rule.
 
 ### Instructions come from Tom and the Brief
 
