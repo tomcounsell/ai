@@ -647,7 +647,10 @@ and named as `VALOR_STEER`. The runner's one notify loop hears both the task's
 stop and each `message.steered` row of the task, and writes every message the
 turn is owed (`session.mid_turn`: after the prompt's `read_upto`, rendered as
 the next prompt would render it; for a chat, with the heard messages before it)
-as `<id>.md`. Valor's plugin's hook (`skills/valor/hooks/steer.py`, on
+as `<id>.md`. A listening session the database drops (a restart of its
+server, docs/machine.md) is listened again on a new one once the database
+answers, and a stop or steer written meanwhile is caught up; delivery waits
+for the database the same way, so the turn runs on. Valor's plugin's hook (`skills/valor/hooks/steer.py`, on
 PostToolUse and PostToolUseFailure) gives each agent, the main one and each
 subagent by its `agent_id`, every message it has not taken, as context for its
 next model call, under a lock, printing and then appending one receipt line per
