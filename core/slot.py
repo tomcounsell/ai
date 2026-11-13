@@ -23,6 +23,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
+import psycopg
+
 from core import db
 from core.settings import settings
 
@@ -70,6 +72,8 @@ async def held(holder: str, dsn: str | None = None) -> AsyncIterator[None]:
         try:
             if taken is not None and not conn.closed:
                 await conn.execute(_UNLOCK, (taken,))
+        except psycopg.OperationalError:
+            pass  # the database dropped the session, and the slot with it (a restart, core/health.py)
         finally:
             await conn.close()
 

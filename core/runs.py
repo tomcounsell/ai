@@ -73,6 +73,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import psycopg
+
 from core import db, git, ledger, machine, memory, slot, spending, tasks, transcripts
 from core.settings import settings
 
@@ -82,6 +84,8 @@ if TYPE_CHECKING:
 TURN_ENV = "VALOR_TURN"
 STEER_ENV = "VALOR_STEER"
 EVENTS_CHANNEL = "valor_events"
+# How often a turn whose database went away tries it again (`_heard`).
+RELISTEN_S = 1.0
 # Owed to a running turn, from the task's rows: (steered row id, its text).
 Steering = Callable[[list[dict[str, Any]]], list[tuple[int, str]]]
 Transcript = transcripts.Transcript
@@ -285,7 +289,7 @@ async def _run_turn(
                     _pump(proc.stdout, out), _pump(proc.stderr, err), _feed(proc, command.stdin)
                 )
                 finished = asyncio.create_task(proc.wait())
-                stopped = asyncio.create_task(_heard(listener, task_id, wake))
+                stopped = asyncio.create_task(_heard(listener, task_id, wake, dsn))
                 waiters += [finished, stopped]
                 if inbox is not None:
                     wake.set()  # a steer recorded before the loop listened
@@ -362,7 +366,12 @@ async def _delivering(dsn, task_id, steering: Steering, inbox: Path, written: se
     while True:
         await wake.wait()
         wake.clear()
-        await _deliver(dsn, task_id, steering, inbox, written)
+        try:
+            await _deliver(dsn, task_id, steering, inbox, written)
+        except psycopg.OperationalError:
+            # The database is down: tried again once it answers (`_heard` wakes it).
+            await asyncio.sleep(RELISTEN_S)
+            wake.set()
 
 
 def _taken(inbox: Path) -> set[int]:
@@ -465,20 +474,59 @@ async def _cut_short(gateway, task_id, turn_id, dsn, proc, pumped, waiters, exc:
         exc.add_note(f"turn {turn_id} was not ended: {failed!r}")
 
 
-async def _heard(listener, task_id: str, wake: asyncio.Event) -> None:
+async def _heard(listener, task_id: str, wake: asyncio.Event, dsn: str | None = None) -> None:
     """The turn's one notify loop: returns on the task's stop; a
-    `message.steered` row of the task wakes its delivery."""
-    async for note in listener.notifies():
-        if note.channel == tasks.STOP_CHANNEL:
-            if note.payload == task_id:
-                return
+    `message.steered` row of the task wakes its delivery. A listening
+    session the database dropped (a restart of the server,
+    `core/health.py`) is listened again on a new one, waiting for the
+    database for as long as it is down, and a stop or a steer written
+    meanwhile is caught up: the turn runs on (2026-11-13, the Cowboy's
+    controlled restart ended a running turn through this loop)."""
+    channels = [tasks.STOP_CHANNEL]
+    own = None
+    try:
+        while True:
+            try:
+                async for note in listener.notifies():
+                    if note.channel == tasks.STOP_CHANNEL:
+                        if note.payload == task_id:
+                            return
+                        continue
+                    try:
+                        row = json.loads(note.payload)
+                    except ValueError:
+                        continue
+                    if row.get("task_id") == task_id and row.get("type") == "message.steered":
+                        wake.set()
+            except psycopg.OperationalError:
+                pass
+            if own is not None:
+                await own.close()
+            listener = own = await _relisten(dsn, [*channels, EVENTS_CHANNEL])
+            async with await db.connect(dsn) as conn:
+                if await tasks.is_stopped(conn, task_id):
+                    return
+            wake.set()
+    finally:
+        if own is not None:
+            await own.close()
+
+
+async def _relisten(dsn: str | None, channels: list[str]):
+    """A new connection listening on `channels`, once the database answers."""
+    while True:
+        try:
+            conn = await db.connect(dsn)
+        except psycopg.OperationalError:
+            await asyncio.sleep(RELISTEN_S)
             continue
         try:
-            row = json.loads(note.payload)
-        except ValueError:
-            continue
-        if row.get("task_id") == task_id and row.get("type") == "message.steered":
-            wake.set()
+            for channel in channels:
+                await conn.execute(f"LISTEN {channel}")
+            return conn
+        except psycopg.OperationalError:
+            await conn.close()
+            await asyncio.sleep(RELISTEN_S)
 
 
 async def _pump(pipe: asyncio.StreamReader, file) -> None:

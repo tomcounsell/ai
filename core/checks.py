@@ -838,7 +838,7 @@ async def stop_heard(ctx):
     stop = None
     try:
         await listener.execute(f"LISTEN {tasks.STOP_CHANNEL}")
-        stop = asyncio.create_task(runs._heard(listener, ctx.task_id, asyncio.Event()))
+        stop = asyncio.create_task(runs._heard(listener, ctx.task_id, asyncio.Event(), ctx.dsn))
         yield stop
     finally:
         if stop is not None:

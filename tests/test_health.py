@@ -23,7 +23,7 @@ from psycopg.conninfo import conninfo_to_dict
 
 import core.bridge
 import core.gateway
-from core import db, health, ledger, machine, rollout, router, runs, serve
+from core import db, health, ledger, machine, rollout, router, runs, serve, tasks
 from core.machine import State
 from core.settings import settings
 from tests.bridges import FakeBridge, new_task, rows, typed
@@ -651,3 +651,43 @@ def test_the_watch_routine_loads_and_its_job_carries_the_watched_macs(monkeypatc
     assert job["EnvironmentVariables"]["VALOR_WATCH"] == "valor-the-pirate,valor-the-bald"
     assert job["StartInterval"] == 1800
     assert Path(job["ProgramArguments"][-1]) == Path("watch")
+
+
+def test_a_running_turn_survives_the_database_dropping_every_session_and_a_stop_after_still_stops_it(
+    fresh, tmp_path
+):
+    """2026-11-13, the Cowboy's controlled restart: the turn's stop listener
+    raised on the dropped session and its turn was killed."""
+    from tests import bridges
+
+    async def go():
+        task = await new_task(fresh)
+        gateway = await bridges.gateway(fresh)
+        marker = tmp_path / "finished"
+        script = f"import time, pathlib; time.sleep(3); pathlib.Path({str(marker)!r}).write_text('ok')"
+
+        def build(url, brief, turn_id, script=script):
+            return runs.TurnCommand(
+                argv=[sys.executable, "-c", script], env={}, cwd=str(tmp_path), harness="sleeper"
+            )
+
+        turn = asyncio.create_task(runs.run_turn(gateway, task, build, dsn=fresh))
+        await asyncio.sleep(1.0)
+        terminate_all(fresh)  # what a restart of the server does
+        ended = await asyncio.wait_for(turn, 30)
+        # A second turn, stopped after a drop: the stop is still heard.
+        sleeper = "import time; time.sleep(60)"
+        second = asyncio.create_task(runs.run_turn(gateway, task, lambda u, b, t: runs.TurnCommand(
+            argv=[sys.executable, "-c", sleeper], env={}, cwd=str(tmp_path), harness="sleeper"), dsn=fresh))  # fmt: skip
+        await asyncio.sleep(1.0)
+        terminate_all(fresh)
+        await asyncio.sleep(1.5)
+        async with await db.connect(fresh) as conn:
+            await tasks.stop(conn, task, reason="test")
+        stopped = await asyncio.wait_for(second, 20)
+        await gateway.close()
+        return ended, marker.exists(), stopped
+
+    ended, finished, stopped = run(go())
+    assert ended["outcome"] == "done" and finished
+    assert stopped["outcome"] == "stopped"
