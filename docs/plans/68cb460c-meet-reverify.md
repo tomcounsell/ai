@@ -12,35 +12,44 @@ exit. Only Tom can clear the prompt (passkey). The code has two faults: the join
 nobody can act on, and the one sign-in command cannot do the re-verify.
 
 **Fix.**
-1. `Page.join` (`bridges/meet/__init__.py`): each try, if the page's host is `accounts.google.com`, raise
-   `SignInNeeded` (a `RuntimeError` in that module) at once. `Call.joined` (`core/call.py`) catches it and
-   returns the reason, so `run()` leaves with it as the one line in the chat that asked for the call (Tom's
-   answer 1): `f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run:
-   {SIGN_IN}"`. There is no new check: the join loop already reads the page, and this replaces a 60 s timeout
-   with its cause.
-2. `call.sign_in`: drop the "already signed in, open nothing" shortcut. Start Chrome headed on the profile
-   through Playwright with the call's own launch (`CHROME_ARGS`, the same `ignore_default_args`), at
-   `https://meet.google.com/`. It is done once the page is on `meet.google.com` and not `accounts.google.com`,
-   and `account()` holds. Then it closes that Chrome itself and prints "signed in as ...". On a healthy profile
-   it says so within seconds. Chrome closed early, or Ctrl-C: report from `account()`, as today. The
-   held-profile handling (`holder`, `a_call`) stays as is. Reuse `Page`'s launch, without its init script,
-   rather than a second launch path.
-3. `docs/bridges/meet.md` and `docs/rollout.md`: the sign-in step also clears "Verify it's you", and a call
-   that hits that page names the command.
+1. `Page.join` (`bridges/meet/__init__.py`): a try whose page is on a Google sign-in page (host
+   `accounts.google.com`, path under `/signin` or `/v3/signin`) counts toward `SIGN_IN_TRIES` (6 tries, 3 s);
+   any other page resets the count. Passive bounces through `ServiceLogin`/`CheckCookie`/`SetSID` on a healthy
+   load pass, since they leave within a few tries. Once the count is reached, raise `SignInNeeded` (a
+   `RuntimeError` in that module) carrying the URL. `Call.joined` (`core/call.py`) catches it, logs the URL
+   and returns the reason, which `run()` ends the call with and `end()` posts to the chat that asked
+   (Tom's answer 1): `f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run:
+   {SIGN_IN}"`. No new check: the join loop already reads the page each try, and this replaces a 60 s
+   timeout with its cause. The plain `TimeoutError` names the last URL too.
+2. `call.sign_in`: Tom's step stays in plain Chrome (a Popen, which works today and is not automation-
+   controlled), now at `https://meet.google.com/`. "Signed in" is decided by `meet_probe(profile)`: a short
+   headless Chrome with `Page`'s own launch, no init script, at `https://meet.google.com/`, true when it settles
+   on `meet.google.com` and not on a sign-in page. Order: no account in the profile, open Chrome; else probe,
+   and if it reaches Meet say "already signed in" and return 0. Otherwise open plain Chrome; poll `account()`
+   as today, and once Chrome exits (⌘Q, Ctrl-C, or ended by us once `account()` holds) probe again and report:
+   0 and "signed in as ..." when Meet is reached, else 1 naming the command. The probe sees what the headless
+   call Chrome sees, and runs only while no Chrome holds the profile; the held-profile handling (`holder`,
+   `a_call`) stays first, as is. Since `account()` already holds on a profile Google wants verified, the poll
+   cannot end that Chrome: Tom quits it with ⌘Q once Meet's home page shows, and the message says so.
+3. `docs/bridges/meet.md` and `docs/rollout.md`: the sign-in step also clears "Verify it's you" (quit with ⌘Q
+   once Meet shows), and a call that hits that page names the command.
 
 **Out of scope.** Why Google asked for re-verification (a Workspace session-length policy?): open, named in the
 delivery (Tom's answer 2). The weekly update notice keeps `profile_ready()`, which cannot see a pending verify.
 Pre-flight probing of Meet before a call: a second mechanism.
 
 **Tests** (`tests/test_meet_sign_in.py`, with its fakes):
-- join on a page at an `accounts.google.com` URL raises `SignInNeeded` on the first try and does not wait out
-  the timeout; a page on `meet.google.com` with a join button still joins.
-- `Call.joined`, with a page raising `SignInNeeded`, returns the reason naming the machine and `SIGN_IN`, and
-  the call leaves with it (no "call process failed").
-- sign_in on a profile whose cookies say signed in but whose page sits on accounts.google.com waits, then
-  ends once the page reaches Meet, closes its Chrome, and returns 0; a healthy profile returns 0 at once; a
-  Chrome closed on the verify page with no account returns 1 and names the command; a call-held profile is
-  still refused and left running.
+- join on a page that stays on `accounts.google.com/v3/signin/...` raises `SignInNeeded` after
+  `SIGN_IN_TRIES`, not the 60 s timeout; a page that passes through `accounts.google.com/ServiceLogin` for two
+  tries and returns to Meet with a join button still joins.
+- `Call.joined`, with a page raising `SignInNeeded`, returns the reason naming the machine and `SIGN_IN`.
+- sign_in, probe faked: a profile with an account whose probe reaches Meet returns 0 and starts no Chrome; one
+  whose probe lands on sign-in starts plain Chrome at meet.google.com, and returns 0 when the probe after
+  Chrome exits reaches Meet, 1 naming the command when it does not; a call-held profile is still refused and
+  left running. `meet_probe` itself against a fake page: Meet settles true, a sign-in page settles false.
 - Existing sign-in tests are updated where they assumed "already signed in opens nothing".
-Then the full suite with `-n auto`. **Live:** once Tom has re-verified at the Cowboy, a real join of
-meet.google.com/sax-cddx-oej on the Cowboy, with the joined button label as evidence. No governance is added.
+Then the full suite with `-n auto`.
+
+**Live verification (part of done).** After Tom says he has re-verified: `meet_probe` on the Cowboy's profile
+reports Meet reached, then a real join of meet.google.com/sax-cddx-oej on the Cowboy with the call's headless
+Chrome, recording the joined button's label, or on failure `page.url` and a screenshot. No governance is added.
