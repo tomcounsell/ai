@@ -161,9 +161,10 @@ def no_repo_env(tmp_path_factory, monkeypatch):
 def no_launch_agents(tmp_path_factory, monkeypatch):
     """Every test reads its installed launchd jobs from an empty folder,
     never this Mac's own (`rollout.services`)."""
-    from core import permissions
+    from core import health, permissions
 
     monkeypatch.setattr(permissions, "AGENTS", tmp_path_factory.getbasetemp() / "LaunchAgents")
+    monkeypatch.setattr(health, "AGENTS", tmp_path_factory.getbasetemp() / "LaunchAgents")
 
 
 @pytest.fixture(autouse=True)

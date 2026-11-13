@@ -1,0 +1,14 @@
+name = "watch"
+runner = "watch"
+ceiling = "act"
+model = "frontier"  # required by every routine; this one calls no model
+mission_item = "6; Tom's ask (rule 2): the Macs heal each other, so Tom is not involved"
+need = [
+  "Tom, 2026-11-13 (Slack, Valor team chat, #see-issue-63): \"The cowboy is the one that has tailscale access to help the others\"; \"i'm also trying to prevent getting me involved at all.\"",
+  "2026-11-13: the nightly upgrade broke every Mac's database; two were still broken twelve hours later, and no Mac noticed another's",
+]
+created = 2026-11-13
+instruction = "Read the health of each Mac in VALOR_WATCH over ssh; hold the nightly upgrade of a broken one, fix what it could not fix itself, and report only what stays broken."
+
+[schedule]
+interval = 1800

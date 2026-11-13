@@ -56,6 +56,11 @@ PLIST_ENV = (
     "VALOR_PROJECTS",
     # Tom's addresses, which match no project's invites (routines/invites).
     "VALOR_OPERATOR_EMAIL",
+    # The Macs `watch` watches, and where its reports go.
+    "VALOR_WATCH",
+    "VALOR_OPERATOR_CHANNEL",
+    "VALOR_OPERATOR_CHAT",
+    "VALOR_OPERATOR_SLACK_IDS",
 )
 
 

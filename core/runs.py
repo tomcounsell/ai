@@ -517,6 +517,12 @@ def reap(turn_id: str, pgid: int | None = None) -> list[dict[str, Any]]:
     return _stop(_turn_processes(turn_id, pgid))
 
 
+def turn_alive(turn_id: str) -> bool:
+    """Whether any process of the turn is running: what `reap` would stop,
+    found without stopping it."""
+    return bool(_turn_processes(turn_id, None) or sandboxed_pids(f"valor.turn.{turn_id}", "valor.turn.none"))
+
+
 async def live(conn) -> dict[str, Any]:
     """What is alive, for the status page: `turns`, each turn with a `turn.started` and no
     `turn.ended`, oldest first, with its task and instruction, state or fresh stage,

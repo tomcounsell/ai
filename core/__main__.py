@@ -31,6 +31,10 @@ memory bench QUESTIONS DUMP... --out DIR --scratch DSN
                                against `pg_dump -Fc -n memory` files, in the
                                scratch database DSN, never the live store
 settings                     every setting, as shell assignments
+health [--fix]                 this Mac's database probe, services and free disk,
+                               as JSON, in the kernel job's environment; --fix
+                               restarts a curably failing database and starts
+                               each service that is not running (core/health.py)
 meet-sign-in                   sign this Mac's call profile in to Google, at the
                                Mac: its Chrome closes itself once signed in
 start INSTRUCTION [--ceiling C] [--workspace DIR] [--parent ID]
@@ -175,10 +179,12 @@ import dataclasses
 import functools
 import json
 import os
+import plistlib
 import resource
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -700,6 +706,7 @@ def _routine_runners() -> dict:
     from routines.hours import runner as hours
     from routines.invites import runner as invites
     from routines.verify import runner as verify
+    from routines.watch import runner as watch
 
     # No business data source is granted yet (Stripe, Google Analytics), so
     # the conditions runner has no adapters and records each condition unread.
@@ -712,6 +719,7 @@ def _routine_runners() -> dict:
         "hours": hours.runner(),
         "invites": invites.runner(),
         "update": update_runner,
+        "watch": watch.runner(),
         "task": routines.task_runner,
     }
 
@@ -1126,6 +1134,19 @@ def _secure_login() -> dict:
     )
 
 
+def _health(fix: bool) -> None:
+    """`python -m core health [--fix]` (`core/health.py`), in the kernel job's
+    environment: over ssh a peer's `watch` runs it with none of this Mac's
+    settings, so it runs itself again with the kernel plist's."""
+    from core import health, serve
+
+    plist = health.AGENTS / f"{serve.LABEL}.plist"
+    env = plistlib.loads(plist.read_bytes()).get("EnvironmentVariables", {}) if plist.exists() else {}
+    if any(os.environ.get(k) != v for k, v in env.items()):
+        os.execve(sys.executable, [sys.executable, "-m", "core", *sys.argv[1:]], {**os.environ, **env})
+    print(json.dumps(asyncio.run(health.report(fix=fix))))
+
+
 def _sync(args) -> bool:
     """The commands that need no event loop. Returns whether it ran one."""
     if args.command == "migrate":
@@ -1175,6 +1196,8 @@ def _sync(args) -> bool:
             raise SystemExit(f"no vault .env at {settings.vault_env}") from None
         for name, what in status.items():
             print(f"{name}: {what}")
+    elif args.command == "health":
+        _health(args.fix)
     elif args.command == "backup":
         if args.plist:
             print(backup.plist().decode(), end="")
@@ -1361,6 +1384,7 @@ def main() -> None:
     sub.add_parser("agenda")
     sub.add_parser("backup").add_argument("--plist", action="store_true")
     sub.add_parser("serve").add_argument("--plist", action="store_true")
+    sub.add_parser("health").add_argument("--fix", action="store_true")
     sub.add_parser("permissions").add_argument("--probe", action="store_true")
     update = sub.add_parser("update")
     update.add_argument("--wait", action="store_true", help="wait for it to end or fail")

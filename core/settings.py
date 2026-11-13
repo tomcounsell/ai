@@ -485,6 +485,9 @@ class Settings:
     operator_slack_ids: tuple[str, ...] = field(
         default_factory=lambda: tuple(a.upper() for a in _addresses(_env("VALOR_OPERATOR_SLACK_IDS", "")))
     )
+    # The Macs this one watches over ssh (`routines/watch`), comma-separated
+    # hostnames: on the Cowboy the other three, on the Captain the Cowboy.
+    watch: tuple[str, ...] = field(default_factory=lambda: _addresses(_env("VALOR_WATCH", "")))
     # Where operator notices go: the channel, and the chat on it (the
     # Telegram group "Valor rebuild", by its -100... id; `local` for the
     # local chat page; `<team id>/<channel id>` on Slack).

@@ -181,6 +181,31 @@ SEEDED: tuple[dict[str, Any], ...] = (
         # Google refuses the send; nothing in the kernel fires.
         "firing_record": False,
     },
+    {
+        "guard_id": "nightly.hold",
+        "name": (
+            "a Mac the watch finds broken, and the Mac watching it, skip the nightly Homebrew upgrade "
+            "while the hold file stands (routines/watch, ~/.config/brew-nightly/hold-<host>); the "
+            "Cowboy upgrades an hour after the others"
+        ),
+        "incident": (
+            "2026-11-13: the 04:00 nightly upgraded postgresql@18 under the running server on all four "
+            "Macs at once; every ledger write failed for 5 to 12 hours"
+        ),
+        "mission_items": [6],
+        "source": "docs/plans/a4601299-db-self-recovery.md, Governance",
+        "granted_at": "2026-11-13",
+        "expires": "2027-02-11",
+        "note": (
+            'Tom, 2026-11-13, #see-issue-63: "what if the cowboy machine updated last? ... The cowboy is '
+            'the one that has tailscale access to help the others"; "i\'m also trying to prevent getting '
+            'me involved at all."'
+        ),
+        "via": "docs/plans/a4601299-db-self-recovery.md, Governance",
+        # Each hold the watch writes is a `watch.held` row on its objective,
+        # not a pipeline verdict row.
+        "firing_record": False,
+    },
 )
 
 

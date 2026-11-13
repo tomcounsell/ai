@@ -116,6 +116,7 @@ from core import (
     credentials,
     db,
     git,
+    health,
     intake,
     judgement,
     ledger,
@@ -165,6 +166,10 @@ LOCK_HOLDER = (
     "AND l.classid = ((h.k >> 32) & 4294967295)::oid AND l.objid = (h.k & 4294967295)::oid"
 )
 ROOT = Path(__file__).resolve().parent.parent
+# The kernel's own rows: a database restart (`db.restarted`), a restart for
+# a Python move (`kernel.restarting`), and the services it then restarted
+# (`kernel.kicked`).
+KERNEL_STREAM = "kernel"
 
 
 def kernel_key() -> str:
@@ -255,13 +260,21 @@ async def recover(
     running: str | None = None,
     kick: Callable[[str], str | None] | None = None,
     setup: Callable[[], dict[str, list[str]]] | None = None,
+    live: set[str] | None = None,
 ) -> dict[str, list]:
     """Settle what a killed kernel left. Returns what was done, by kind.
     With the kernel's `checkout` and the `running` commit, also ends the
     rollouts that commit contains (`rolled`); with `kick` too, when there
     is one to end, first restarts each bridge on code the running commit
     changed (`restart_bridges`, `bridges`), and with `setup`, checks this
-    Mac's setup (`permissions.ensure`), recording both on those rows."""
+    Mac's setup (`permissions.ensure`), recording both on those rows.
+    With `live`, the tasks whose jobs this kernel runs, it settles only what
+    a database restart left mid-life (`Kernel.regain`) and kills nothing:
+    every session lock went with the old server, so a free lock no longer
+    means a dead holder. It charges no call at its estimate, reaps no
+    process and sweeps no service; a turn with no end, of a task not in
+    `live`, ends `interrupted` only when none of its processes is running
+    (`runs.turn_alive`)."""
     done: dict[str, list] = {
         "charged": [],
         "interrupted": [],
@@ -271,17 +284,22 @@ async def recover(
         "swept": [],
         "bridges": [],
         "rolled": [],
+        "kicked": [],
     }
 
     # Calls opened with no charge, whose holder is gone: the worst case.
-    for task_id, call in await (
-        await conn.execute(
-            "SELECT o.task_id, o.payload FROM events o WHERE o.type IN ('gateway.opened', %s) "
-            "AND NOT EXISTS (SELECT 1 FROM events c WHERE c.type = 'gateway.charged' "
-            "AND c.payload->>'call_id' = o.payload->>'call_id') ORDER BY o.id",
-            (tasks.LEGACY_OPENED,),
-        )
-    ).fetchall():
+    for task_id, call in (
+        []
+        if live is not None
+        else await (
+            await conn.execute(
+                "SELECT o.task_id, o.payload FROM events o WHERE o.type IN ('gateway.opened', %s) "
+                "AND NOT EXISTS (SELECT 1 FROM events c WHERE c.type = 'gateway.charged' "
+                "AND c.payload->>'call_id' = o.payload->>'call_id') ORDER BY o.id",
+                (tasks.LEGACY_OPENED,),
+            )
+        ).fetchall()
+    ):
         holder = call.get("holder")
         if not holder or not await _try(conn, holder):
             continue
@@ -306,11 +324,16 @@ async def recover(
         )
     ).fetchall():
         key = f"run:{task_id}"
-        if not await _try(conn, key):
+        if task_id in (live or ()) or not await _try(conn, key):
             continue
         try:
-            reaped = await asyncio.to_thread(runs.reap, turn_id)
-            reaped += await asyncio.to_thread(runs.reap_sandboxed, f"valor.turn.{turn_id}", "valor.turn.none")
+            if live is not None and await asyncio.to_thread(runs.turn_alive, turn_id):
+                continue
+            reaped = [] if live is not None else await asyncio.to_thread(runs.reap, turn_id)
+            if live is None:
+                reaped += await asyncio.to_thread(
+                    runs.reap_sandboxed, f"valor.turn.{turn_id}", "valor.turn.none"
+                )
             metered = await spending.turn_spent(conn, task_id, turn_id)
             async with conn.transaction():
                 if reaped:
@@ -326,7 +349,7 @@ async def recover(
                         "outcome": "interrupted",
                         "returncode": None,
                         "result": {},
-                        "reason": "kernel restarted",
+                        "reason": "kernel restarted" if live is None else "database restarted",
                         "metered_usd_micros": metered,
                     },
                 )
@@ -337,6 +360,8 @@ async def recover(
     # The last working turn of a task, ended and never collected. One whose
     # collection raises is logged and left for the kernel to try again.
     for task_id, ended, started in await (await conn.execute(LAST_WORKING_ENDED, {"task": None})).fetchall():
+        if task_id in (live or ()):
+            continue
         try:
             turn_id = await _recollect(conn, task_id, ended, started, performers)
         except Exception as exc:  # noqa: BLE001  one task's collection fails alone; the kernel starts
@@ -360,6 +385,8 @@ async def recover(
         if outcome is not None:
             done["reconciled"].append(effect_id)
 
+    if live is not None:
+        return done
     # Services a killed kernel left up.
     reaped = await workspace.sweep(conn, "", workspace.work_dir())
     by_task: dict[str, list] = {}
@@ -405,7 +432,40 @@ async def recover(
             async with conn.transaction():
                 await ledger.append(conn, task_id, "rollout.ended", payload | kicked)
             done["rolled"].append(payload["effect_id"])
+    if kick is not None:
+        done["kicked"] = await kick_services(conn, kick)
     return done
+
+
+async def kick_services(conn, kick: Callable[[str], str | None]) -> list[str]:
+    """After a restart for a Python move (`Kernel.drain`), restart every
+    other service of this Mac (`health.services`: the bridges, voice, email,
+    the dashboard) once, onto the new interpreter, and write `kernel.kicked`
+    naming them and any that failed. A routine's or the backup's job is not
+    a service: each starts on the new interpreter at its next run."""
+    due = await (
+        await conn.execute(
+            "SELECT 1 FROM events r WHERE r.task_id = %s AND r.type = 'kernel.restarting' "
+            "AND NOT EXISTS (SELECT 1 FROM events k WHERE k.task_id = r.task_id "
+            "AND k.type = 'kernel.kicked' AND k.id > r.id)",
+            (KERNEL_STREAM,),
+        )
+    ).fetchone()
+    if due is None:
+        return []
+    labels = [label for label in await asyncio.to_thread(health.services) if label != LABEL]
+    failed = {}
+    for label in labels:
+        why = await asyncio.to_thread(kick, label)
+        if why is not None:
+            failed[label] = why
+    kicked = [label for label in labels if label not in failed]
+    await ledger.append(conn, KERNEL_STREAM, "kernel.kicked", {"kicked": kicked, "failed": failed})
+    _log(
+        f"restarted on the new python: {', '.join(kicked) or 'nothing'}"
+        + (f"; failed: {failed}" if failed else "")
+    )
+    return kicked
 
 
 async def _setup(setup: Callable[[], dict[str, list[str]]]) -> dict[str, dict]:
@@ -604,6 +664,10 @@ class Kernel:
         self.backup = backup or _backup
         self.setup = setup  # every update's check of this Mac's setup (`permissions.ensure`)
         self.restart_due: rollout.Merge | None = None  # holds `schedule` until the jobs end
+        # The interpreter this process started on; when Homebrew moves it,
+        # `drain` restarts the kernel once its jobs end.
+        self.python = os.path.realpath(sys.executable)
+        self.python_moved = False
         self.judged: set[str] = set()  # merge effects contained in `started`, or not the kernel's
         self.waiting: set[str] = set()  # failed since the last `serve_tick_s` wake
         self.failures: dict[str, int] = {}  # failed tries of each merge's rollout in this process
@@ -665,6 +729,7 @@ class Kernel:
             _log(f"calls failed: {exc!r}")
             sentry_sdk.capture_exception(exc)
         try:
+            await self.drain(conn)
             await self.roll(conn)
         except rollout.Restart:
             raise
@@ -713,6 +778,43 @@ class Kernel:
     async def _react(self, item: dict[str, Any]) -> None:
         async with await db.connect(self.dsn) as conn:
             await reactions.react(self.judgement_port, conn, item, self.dsn)
+
+    async def drain(self, conn) -> None:
+        """When Homebrew moved the interpreter this process runs on, hold new
+        jobs (`schedule`), and once only background turns run, cancel them,
+        write `kernel.restarting` and raise `rollout.Restart`: launchd starts
+        the kernel on the new interpreter, and its start restarts this Mac's
+        other services (`kick_services`). The nightly's `kickstart -k`
+        killed running work instead."""
+        if not self.python_moved:
+            now = os.path.realpath(sys.executable)
+            if now == self.python:
+                return
+            self.python_moved = True
+            _log(f"python moved from {self.python} to {now}: restarting once the running jobs end")
+        if self._holding():
+            return
+        running = [self.jobs[t] for t in self.background if t in self.jobs]
+        for job in running:
+            job.cancel()
+        await asyncio.gather(*running, return_exceptions=True)
+        await ledger.append(
+            conn, KERNEL_STREAM, "kernel.restarting", {"reason": "python", "from": self.python}
+        )
+        raise rollout.Restart("python moved")
+
+    async def regain(self, conn) -> None:
+        """After the database came back from losing every session: re-take
+        each task's `services:<task>` (a handle refused it is closed, and the
+        task's next step opens one), then settle what the outage ended
+        without killing anything (`recover` with `live`)."""
+        for task_id, services in list(self.services.items()):
+            if not await services.claim():
+                self.services.pop(task_id, None)
+                await services.close()
+        done = await recover(conn, self.performers, live=set(self.jobs))
+        self.uncollected |= set(done["uncollected"])
+        _log(f"after the database came back: {json.dumps({k: len(v) for k, v in done.items()})}")
 
     def _holding(self) -> bool:
         """A job other than a background turn's is running."""
@@ -991,7 +1093,7 @@ class Kernel:
             except Exception as exc:  # noqa: BLE001  one task's settling fails alone
                 _log(f"task {task_id}: settling failed: {exc!r}")
                 sentry_sdk.capture_exception(exc)
-        if self.restart_due is not None:
+        if self.restart_due is not None or self.python_moved:
             return  # a restart is due: no new job until the running ones end
         open_ids: list[str] = []
         for task_id in active:
@@ -1307,13 +1409,30 @@ async def serve(
             sentry_sdk.capture_exception(exc)
     # Stamped like a bridge's lock connection, so the dashboard names the commit it runs.
     name = f"valor-kernel@{started or bridge.NO_HEAD}"
-    conn = await db.connect(dsn, application_name=name)
-    listener = await db.connect(dsn, application_name="valor-kernel-listen")
+    mend = health.Mend(dsn)
+    conn = listener = None
     owned_gateway = gateway is None
     kernel = None
     try:
-        await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (kernel_key(),))
-        done = await recover(conn, performers, checkout=checkout, running=started, kick=kick, setup=setup)
+        # A database that fails at start is waited for, and restarted when
+        # it fails curably (`health.Mend`), never left to launchd's restarts.
+        while True:
+            try:
+                conn = await _connect(dsn, name)
+                listener = await db.connect(dsn, application_name="valor-kernel-listen")
+                done = await recover(
+                    conn, performers, checkout=checkout, running=started, kick=kick, setup=setup
+                )
+                break
+            except psycopg.Error as exc:
+                _log(f"the kernel's database is not working: {exc!r}")
+                for c in (conn, listener):
+                    if c is not None:
+                        await c.close()
+                conn = listener = None
+                await mend.check()
+                await asyncio.sleep(settings.serve_tick_s)
+        await _outage_ended(conn, mend)
         print(f"kernel recovered: {json.dumps({k: len(v) for k, v in done.items()})}", flush=True)
         if gateway is None:
             from core.gateway import ClaudeLogin, OpenAIKey
@@ -1335,32 +1454,39 @@ async def serve(
         )
         await listener.execute("LISTEN valor_events")
         listening = asyncio.create_task(_listen(listener, kernel.wake))
+        lost = False  # the kernel's connection was lost, and with it every session lock on the server
         try:
             while True:
                 kernel.wake.clear()
                 try:
+                    if conn.closed:
+                        conn = await _connect(dsn, name)
+                    if listening.done():
+                        # The listening connection died: a new one, and the
+                        # tick catches up what was missed.
+                        await listener.close()
+                        listener = await db.connect(dsn, application_name="valor-kernel-listen")
+                        await listener.execute("LISTEN valor_events")
+                        listening = asyncio.create_task(_listen(listener, kernel.wake))
+                    if lost:
+                        await _outage_ended(conn, mend)
+                        await kernel.regain(conn)
+                        lost = False
                     await kernel.tick(conn)
                 except rollout.Restart:
                     raise
                 except Exception as exc:  # noqa: BLE001  the next wake tries again
                     _log(f"kernel wake failed: {exc!r}")
                     sentry_sdk.capture_exception(exc)
-                    if conn.closed:
-                        conn = await db.connect(dsn, application_name=name)
-                        await conn.execute(
-                            "SELECT pg_advisory_lock(hashtextextended(%s, 0))", (kernel_key(),)
-                        )
+                    lost = lost or conn.closed
+                # A new connection each wake: a quiet Mac whose old one still
+                # works is a broken database too (`health.probe`).
+                if not await mend.check():
+                    lost = lost or conn.closed
                 try:
                     await asyncio.wait_for(kernel.wake.wait(), settings.serve_tick_s)
                 except TimeoutError:
                     pass
-                if listening.done():
-                    # The listening connection died: a new one, and the
-                    # tick catches up what was missed.
-                    await listener.close()
-                    listener = await db.connect(dsn, application_name="valor-kernel-listen")
-                    await listener.execute("LISTEN valor_events")
-                    listening = asyncio.create_task(_listen(listener, kernel.wake))
         finally:
             listening.cancel()
     finally:
@@ -1368,8 +1494,28 @@ async def serve(
             await kernel.close()
         if owned_gateway and gateway is not None:
             await gateway.close()
-        await listener.close()
+        for c in (listener, conn):
+            if c is not None:
+                await c.close()
+
+
+async def _connect(dsn: str, name: str):
+    """The kernel's connection, holding the kernel lock."""
+    conn = await db.connect(dsn, application_name=name)
+    try:
+        await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (kernel_key(),))
+    except BaseException:
         await conn.close()
+        raise
+    return conn
+
+
+async def _outage_ended(conn, mend: health.Mend) -> None:
+    """Record an outage the kernel restarted the database for (`db.restarted`)."""
+    ended = mend.outage()
+    if ended is not None:
+        _log(f"the database works again: {json.dumps(ended)}")
+        await ledger.append(conn, KERNEL_STREAM, "db.restarted", ended)
 
 
 PLIST_ENV = (

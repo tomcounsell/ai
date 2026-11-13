@@ -68,7 +68,11 @@ def test_the_web_guard_is_ledgered_with_its_grant_and_expiry(dsn):
     )  # fmt: skip
     assert "d0ec204a0" in restated["incident"] and restated["provenance"]["at"] == "2026-10-30"
     sends = by_id["send.sessions_only"]
-    assert (sends["granted_at"], sends["expires"], sends["mission_items"]) == ("2026-11-01", "2027-01-30", [6])
+    assert (sends["granted_at"], sends["expires"], sends["mission_items"]) == (
+        "2026-11-01",
+        "2027-01-30",
+        [6],
+    )
     assert "Sentry routine" in sends["incident"] and "impersonating you" in sends["note"]
     assert sends["source"] == sends["provenance"]["via"] == "docs/plans/one-voice.md, Grant"
     mail = by_id["mail.sessions_only"]
@@ -76,7 +80,14 @@ def test_the_web_guard_is_ledgered_with_its_grant_and_expiry(dsn):
     assert "gmail.modify" in mail["incident"] and '"Agreed"' in mail["note"]
     assert mail["firing_record"] is False
     assert mail["source"] == mail["provenance"]["via"] == "docs/plans/one-voice-mail.md, Grant"
-    own = ("web.agent_only", "update.room", "build.restated", "send.sessions_only", "mail.sessions_only")
+    hold = by_id["nightly.hold"]
+    assert (hold["granted_at"], hold["expires"], hold["mission_items"]) == ("2026-11-13", "2027-02-11", [6])
+    assert "2026-11-13" in hold["incident"] and "tailscale access" in hold["note"]
+    assert (
+        hold["source"] == hold["provenance"]["via"] == "docs/plans/a4601299-db-self-recovery.md, Governance"
+    )
+    own = ("web.agent_only", "update.room", "build.restated", "send.sessions_only", "mail.sessions_only",
+           "nightly.hold")  # fmt: skip
     assert all(by_id[g]["expires"] == guards.EXPIRES.isoformat() for g in by_id if g not in own)
 
 

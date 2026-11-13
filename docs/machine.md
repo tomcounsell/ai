@@ -236,6 +236,28 @@ scheduler, supervisor, or watchdog on the machine.
   before it is tried again. Nothing kills a process on a heuristic such
   as age or memory; stop and recovery are the kernel's (constraint
   "reliable stop, recovery, and correction").
+- **The machine cluster's own restart** (`core/health.py`,
+  docs/plans/a4601299-db-self-recovery.md): its LaunchAgent restarts it
+  only on a crash, and on 2026-11-13 an upgrade under the running server
+  failed every new backend for hours without one. The kernel opens a new
+  connection at start and each wake and runs a plpgsql block; one that
+  fails with what a restart cures (a library that will not load, a
+  refused or lost connection; never "starting up") for 60 s gets
+  `pg_ctl -m fast stop` (immediate when that fails) and `launchctl
+  kickstart` of the cluster's job, spaced ten minutes by a stamp beside the
+  data directory under `flock`, which `python -m core health --fix` shares.
+  The kernel never leaves `serve` for a database that is down: it waits,
+  reconnects, takes the run and services locks of its live jobs again, and
+  settles what the outage ended without killing anything (`recover` with
+  `live`). The bridges exit on their lost connection and launchd starts
+  them; their catch-up retakes what failed to record. When Homebrew moves
+  the kernel's Python, the kernel holds new jobs, waits for the running
+  ones, restarts, and its next start restarts every other service
+  (`kernel.kicked`). The `watch` routine (every 30 minutes, the Macs in
+  `VALOR_WATCH`) reads each peer's `python -m core health` over ssh,
+  writes `~/.config/brew-nightly/hold-<host>` on both while it is broken,
+  runs `health --fix` at the second broken watch, and reports only what
+  stays broken.
 - **LaunchAgents with `StartCalendarInterval`**: routines. Each firing
   runs `python -m core routine NAME`, which starts or continues a run that
   is a child of the routine's objective, so a routine's turn takes the turn

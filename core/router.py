@@ -49,6 +49,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg
+
 from core import broker, db, git, ledger, machine, session, spending, tasks, verdicts, workspace
 from core.gateway import Gateway
 from core.machine import Check, State
@@ -70,6 +72,7 @@ SETTLED = {State.WAITING: "waiting", State.MERGED: "merged", State.ENDED: "ended
 # delay that doubles from `STEP_BACKOFF_S`; at `STEP_TRIES` failures in a row
 # of the same state and check, the task ends with a report to Tom.
 STEP_TRIES = 4
+_TRY_LOCK = "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))"
 STEP_BACKOFF_S = 60.0
 STEP_BACKOFF_MAX_S = 900.0
 PerformersFactory = Callable[[tasks.Brief], broker.Performers]
@@ -129,18 +132,31 @@ async def step(
     own = services is None
     try:
         key = f"run:{task_id}"
-        got = await (
-            await holder.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (key,))
-        ).fetchone()
+        got = await (await holder.execute(_TRY_LOCK, (key,))).fetchone()
         if not got[0]:
             return {"status": "already running"}
 
         async def alive() -> bool:
+            """The run still holds its lock. A session the database dropped
+            (a restart of the server) takes it again on a new one; refused,
+            another holder has the run."""
+            nonlocal holder
             try:
                 await holder.execute("SELECT 1")
                 return True
-            except Exception:  # noqa: BLE001  any failure means the session, and its lock, are gone
+            except Exception:  # noqa: BLE001, S110  any failure means the session, and its lock, are gone
+                pass
+            try:
+                fresh = await db.connect(dsn)
+            except Exception:  # noqa: BLE001  no database: the lock cannot be held
                 return False
+            got = await (await fresh.execute(_TRY_LOCK, (key,))).fetchone()
+            if not got[0]:
+                await fresh.close()
+                return False
+            await holder.close()
+            holder = fresh
+            return True
 
         if own:
             services = await _Services.open(dsn, task_id)
@@ -358,9 +374,15 @@ class _Services:
         return cls(task_id, dsn, names if lay else [], ports, lay)
 
     async def claim(self) -> bool:
-        """Take `services:<task>`; False when another process holds it."""
+        """Take `services:<task>`; False when another process holds it. A
+        handle whose connection the database dropped takes it again."""
         if self.conn is not None:
-            return True
+            try:
+                await self.conn.execute("SELECT 1")
+                return True
+            except psycopg.Error:
+                await self.conn.close()
+                self.conn = None
         conn = await db.connect(self.dsn)
         got = await (
             await conn.execute(
