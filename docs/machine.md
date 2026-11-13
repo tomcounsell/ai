@@ -249,7 +249,7 @@ scheduler, supervisor, or watchdog on the machine.
   kickstart` of the cluster's job, spaced ten minutes by a stamp beside the
   data directory under `flock`, which `python -m core health --fix` shares.
   The kernel never leaves `serve` for a database that is down: it waits,
-  reconnects, takes the run and services locks of its live jobs again, and
+  reconnects, takes the run and services locks of its live jobs again (a running turn's stop listener listens again on a new session and catches up a stop written meanwhile, so the turn runs on), and
   settles what the outage ended without killing anything (`recover` with
   `live`). The bridges exit on their lost connection and launchd starts
   them; their catch-up retakes what failed to record. When Homebrew moves
