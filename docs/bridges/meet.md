@@ -96,8 +96,10 @@ clicks Next, verifies, and quits that Chrome with ⌘Q once Meet shows. A call
 whose join page stays on Google's sign-in for three seconds ends at once,
 naming the Mac and this command. A sign-in window may be left open, however it was opened: a call
 quits a plain Chrome holding the profile before starting its own ([rollout.md](../rollout.md), step 9; the nightly update tells Tom
-once a week until it is). Signed in means the account in the profile's
-preferences and Google's session cookie in its cookies (`call.account`).
+once a week until it is). To `call.account` and that notice, signed in means
+the account in the profile's preferences and Google's session cookie in its
+cookies, which a pending "Verify it's you" leaves in place; `meet-sign-in`
+also needs Meet to settle on Meet.
 Never start Chrome on the profile over ssh: the keychain is locked there,
 and Chrome drops the profile's sign-in (the Captain, 2026-11-03). A call
 whose profile another call's Chrome holds (Playwright's
