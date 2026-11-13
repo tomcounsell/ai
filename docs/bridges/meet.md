@@ -37,8 +37,10 @@ against a new Meet with a second device of Valor's account
   speaking, who is here (with one other person, all they say is to Valor),
   and the worker's answers. Live decides when Valor is addressed and
   speaks; its tools ask the worker (a fresh `call` turn in the session's
-  checkout, on the call's gateway), post, read the open decisions and
-  record Tom's read-backs. Each Live turn is one `meet.say`, its audio
+  checkout, on the call's gateway), post, read the open decisions,
+  record Tom's read-backs and, when the project's spec names a backlog
+  Sheet in its rooms, read it (`backlog`: `sheet.py lookup` on how
+  someone described an item, or the whole Queue in order). Each Live turn is one `meet.say`, its audio
   held until released and settled with Live's transcript of what played;
   a typed line is answered in the chat, never aloud, until someone
   speaks. A Live turn of silence ("<no speech>", "...", or near-silent
