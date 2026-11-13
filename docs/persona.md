@@ -489,9 +489,10 @@ call of 2026-11-13 showed the next gap: asked for an example and for the
 rule behind the queue's order, the voice restated the goal and the
 recommendation, and claimed a bug broke real work with nothing behind it.
 So "In a call" says **Answer what was asked** (the specific, its evidence,
-or plainly that it doesn't know), the call's worker is told the same, and
-converse's **Calls** has the prep carry the case behind each recommendation
-and the ranking rule.
+or plainly that it doesn't know), the call's worker is told the same,
+converse's **Calls** has the prep carry the case behind each recommendation,
+and the instruction also carries "How product decisions are made", so the
+ranking rule comes from the persona rather than the prep.
 
 ### Instructions come from Tom and the Brief
 
