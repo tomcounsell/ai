@@ -1360,6 +1360,26 @@ def test_a_call_not_let_in_ends_saying_so(dsn, team, quick):
     assert reason == "Valor was not let in" and page.posts == []
 
 
+def test_a_call_meet_keeps_on_googles_sign_in_ends_naming_the_mac_and_the_command(dsn, team, quick, capsys):
+    """The Cowboy, 2026-11-13: "Verify it's you" where Meet's join screen was."""
+    from bridges import meet
+
+    class AtSignIn(Page):
+        async def join(self):
+            raise meet.SignInNeeded("https://accounts.google.com/v3/signin/confirmidentifier")
+
+    async def go():
+        page = AtSignIn()
+        _, the = await a_call_of(dsn, team, page, Gemini())
+        return await asyncio.wait_for(the.run(), 10), page
+
+    reason, page = run(go())
+    assert reason == (
+        f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run: {call.SIGN_IN}"
+    )
+    assert page.posts == [] and "confirmidentifier" in capsys.readouterr().out
+
+
 def test_a_steer_of_the_call_is_posted_in_its_chat_and_not_copied(dsn, team, quick):
     async def go():
         c = await in_call(dsn, team)

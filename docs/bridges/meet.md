@@ -87,9 +87,14 @@ against a new Meet with a second device of Valor's account
 
 The call profile signed in once, by Tom at the Mac, in Terminal:
 `cd ~/src/ai && .venv/bin/python -m core meet-sign-in` opens Chrome on it at
-Google's sign-in, closes that Chrome itself once valor@yuda.me is signed in,
-and says so (⌘Q or Ctrl-C gives up; a profile already signed in is left
-alone). A sign-in window may be left open, however it was opened: a call
+Meet, closes that Chrome itself once valor@yuda.me is signed in, and says so
+(⌘Q or Ctrl-C gives up). It answers from where Meet settles for a call's own
+headless Chrome (`meet.settled`): on Meet, signed in; a profile already so
+opens nothing. When Google wants the sign-in verified again ("Verify it's
+you", the Cowboy, 2026-11-13), the cookies still read as signed in, so Tom
+clicks Next, verifies, and quits that Chrome with ⌘Q once Meet shows. A call
+whose join page stays on Google's sign-in for three seconds ends at once,
+naming the Mac and this command. A sign-in window may be left open, however it was opened: a call
 quits a plain Chrome holding the profile before starting its own ([rollout.md](../rollout.md), step 9; the nightly update tells Tom
 once a week until it is). Signed in means the account in the profile's
 preferences and Google's session cookie in its cookies (`call.account`).

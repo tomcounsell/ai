@@ -231,7 +231,10 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    -m core meet-sign-in`, then valor@yuda.me with the passkey in the
    Chrome window it opens. It closes that window itself once signed in
    and prints "signed in as valor@yuda.me" (⌘Q or Ctrl-C gives up; on a
-   Mac already signed in it says so and opens nothing). The window may be
+   Mac whose call Chrome reaches Meet signed in it says so and opens
+   nothing). The same command clears Google's "Verify it's you": click
+   Next, verify, and quit Chrome with ⌘Q once Meet shows; a call that
+   meets that page ends naming the Mac and this command. The window may be
    left open, however it was opened: a call quits a plain Chrome on the
    profile before starting its own. Tom signed in
    every Mac's on 2026-11-05. A call asked for on a Mac not signed in fails, naming this step, and each night's update

@@ -68,6 +68,28 @@ def chrome(tmp_path, mode):
     return str(path)
 
 
+VERIFY = "https://accounts.google.com/v3/signin/confirmidentifier?continue=https://meet.google.com/"
+
+
+@pytest.fixture(autouse=True)
+def meet_at(monkeypatch):
+    """Where Meet settles for a call's Chrome, faked: each `settled` takes
+    the next URL in the list (the last one repeats); its calls in `.asked`."""
+
+    class At(list):
+        asked = 0
+
+    at = At([meet.MEET_HOME])
+
+    async def settled(profile):
+        assert meet.holder(profile) is None  # never while a Chrome holds it
+        at.asked += 1
+        return at.pop(0) if len(at) > 1 else at[0]
+
+    monkeypatch.setattr(meet, "settled", settled)
+    return at
+
+
 def sign_in(profile, path):
     said = []
     code = call.sign_in(str(profile), chrome=path, poll_s=0.05, say=said.append)
@@ -137,7 +159,7 @@ def test_sign_in_ends_its_own_chrome_once_signed_in(tmp_path):
     code, said = sign_in(profile, chrome(tmp_path, "signs"))
     argv = json.loads((profile / "argv").read_text())
     assert code == 0 and f"signed in as {EMAIL}" in said[-1]
-    assert f"--user-data-dir={profile}" in argv and "https://accounts.google.com/" in argv
+    assert f"--user-data-dir={profile}" in argv and meet.MEET_HOME in argv
     assert not (profile / "outlived").exists() and meet.holder(str(profile)) is None
     assert "⌘Q" in said[0]
 
@@ -159,17 +181,40 @@ def test_a_profile_already_signed_in_starts_no_chrome(tmp_path):
     assert not (tmp_path / "p" / "argv").exists()
 
 
-def test_a_profile_open_in_a_sign_in_window_says_sign_in_there_and_leaves_it(tmp_path):
+def test_a_sign_in_google_wants_verified_waits_for_tom_to_quit_and_checks_meet_again(tmp_path, meet_at):
+    """The Cowboy, 2026-11-13: account and cookies in place, Meet at "Verify it's you"."""
+    signed_in(tmp_path / "p")
+    meet_at[:] = [VERIFY, meet.MEET_HOME]
+    code, said = sign_in(tmp_path / "p", chrome(tmp_path, "quits"))  # Tom verifies and quits
+    assert json.loads((tmp_path / "p" / "argv").read_text())[-1] == meet.MEET_HOME
+    assert "verified again" in said[0] and "⌘Q" in said[0] and meet_at.asked == 2
+    assert code == 0 and f"signed in as {EMAIL}" in said[-1]
+
+
+def test_a_sign_in_still_unverified_when_chrome_quits_says_where_meet_stayed(tmp_path, meet_at):
+    signed_in(tmp_path / "p")
+    meet_at[:] = [VERIFY]
+    code, said = sign_in(tmp_path / "p", chrome(tmp_path, "quits"))
+    assert code == 1 and f"Meet stayed on {VERIFY}" in said[-1] and call.SIGN_IN in said[-1]
+
+
+def test_a_new_sign_in_meet_still_refuses_is_not_signed_in(tmp_path, meet_at):
+    meet_at[:] = [VERIFY]
+    code, said = sign_in(tmp_path / "p", chrome(tmp_path, "signs"))
+    assert code == 1 and "not signed in" in said[-1]
+
+
+def test_a_profile_open_in_a_sign_in_window_says_sign_in_there_and_leaves_it(tmp_path, meet_at):
     profile = tmp_path / "p"
     with held(profile) as pid:
         code, said = sign_in(profile, chrome(tmp_path, "signs"))
         assert code == 1 and len(said) == 1 and f"pid {pid}" in said[0]
         assert "sign in as valor@yuda.me there" in said[0] and "may be left open" in said[0]
-        assert not (profile / "argv").exists()
+        assert not (profile / "argv").exists() and meet_at.asked == 0
         os.kill(pid, 0)  # still running
 
 
-def test_a_profile_a_call_holds_is_named_and_left_running(tmp_path):
+def test_a_profile_a_call_holds_is_named_and_left_running(tmp_path, meet_at):
     profile = tmp_path / "p"
     with held(profile, call_=True) as pid:
         code, said = sign_in(profile, chrome(tmp_path, "signs"))
@@ -177,6 +222,7 @@ def test_a_profile_a_call_holds_is_named_and_left_running(tmp_path):
             f"the call profile is in use by a call's Chrome (pid {pid}); run this again after the call"
         ]
         os.kill(pid, 0)
+    assert meet_at.asked == 0
 
 
 @pytest.mark.parametrize("lock", ["stale", "another profile"])
@@ -331,6 +377,86 @@ def test_a_page_that_keeps_navigating_or_fails_otherwise_still_fails():
     with pytest.raises(Error, match="TypeError"):
         asyncio.run(page.state())
     assert page.page.loads == 0
+
+
+# -- Google's sign-in in place of Meet's join screen (the Cowboy, 2026-11-13) ----------
+
+
+class Landing:
+    """A Playwright page at each of `urls` for one try of the join, the last
+    one kept; Meet's join button shown once it is on Meet with `button`."""
+
+    def __init__(self, urls, button=None):
+        self.urls, self.button, self.gotos, self.tries = list(urls), button, [], 0
+
+    @property
+    def url(self):
+        """The page's URL, read once a try; the next read is the next try's."""
+        return self.urls.pop(0) if len(self.urls) > 1 else self.urls[0]
+
+    async def evaluate(self, _expression, _arg=None):
+        self.tries += 1
+        return self.button if meet.on_meet(self.urls[0]) else None
+
+    async def goto(self, url, wait_until):
+        self.gotos.append(url)
+
+    def locator(self, _selector):
+        return self
+
+    async def count(self):
+        return 0
+
+
+@pytest.fixture
+def quick(monkeypatch):
+    sleep = asyncio.sleep
+    monkeypatch.setattr(meet.asyncio, "sleep", lambda _s: sleep(0))
+
+
+def test_a_join_that_stays_on_googles_sign_in_says_so_at_once(quick):
+    page = meet.Page("unused")
+    page.page = Landing([VERIFY])
+    with pytest.raises(meet.SignInNeeded, match="confirmidentifier"):
+        asyncio.run(page.join(timeout_s=60))
+    assert page.page.tries == meet.SETTLE_TRIES
+
+
+def test_a_join_through_googles_passing_redirects_still_joins(quick):
+    passing = (
+        "https://accounts.google.com/v3/signin/identifier?passive=1209600&continue=https://meet.google.com/"
+    )
+    page = meet.Page("unused")
+    page.page = Landing(["https://accounts.google.com/ServiceLogin?passive=true", "https://accounts.google.com/CheckCookie",
+                         *[passing] * (meet.SETTLE_TRIES - 1), URL], button="Join now")  # fmt: skip
+    assert asyncio.run(page.join()) == "Join now"
+
+
+def test_a_join_with_no_button_names_the_page_it_ended_on(quick):
+    page = meet.Page("unused")
+    page.page = Landing([URL])
+    with pytest.raises(TimeoutError, match=f"no join button at {URL}"):
+        asyncio.run(page.join(timeout_s=2))
+
+
+@pytest.mark.parametrize(("urls", "at"), [([meet.MEET_HOME, "https://meet.google.com/landing"], "https://meet.google.com/landing"),
+                                          (["https://accounts.google.com/ServiceLogin", VERIFY], VERIFY)])  # fmt: skip
+def test_where_meet_settles_for_a_calls_chrome(monkeypatch, quick, urls, at):
+    pages = []
+
+    async def launch(self):
+        self.page = Landing(urls)
+        pages.append(self.page)
+
+    async def close(self):
+        pages.append("closed")
+
+    monkeypatch.undo()  # the autouse fake of `settled`, not the one under test
+    monkeypatch.setattr(meet.asyncio, "sleep", lambda _s, sleep=asyncio.sleep: sleep(0))
+    monkeypatch.setattr(meet.Page, "launch", launch)
+    monkeypatch.setattr(meet.Page, "close", close)
+    assert asyncio.run(meet.settled("unused")) == at
+    assert pages[0].gotos == [meet.MEET_HOME] and pages[-1] == "closed"
 
 
 def test_a_media_connections_state_from_the_page_is_written_to_the_calls_log(capsys):

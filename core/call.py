@@ -117,18 +117,19 @@ def profile_ready(profile: str | None = None) -> bool:
 
 
 def sign_in(profile: str | None = None, *, chrome: str = CHROME, poll_s: float = 2.0, say=print) -> int:
-    """`python -m core meet-sign-in`, by Tom at the Mac: Chrome on the call
-    profile at Google's sign-in, ended by this once the profile is signed
-    in (the Captain, 2026-11-03). A Chrome already holding it is left
-    alone: a call's is named, any other is the window to sign in from,
-    which may be left open, since the next call quits it. The answer is
-    read from the profile whenever Chrome exits; 0 when signed in."""
-    from bridges.meet import a_call, holder
+    """`python -m core meet-sign-in`, by Tom at the Mac: plain Chrome on the
+    call profile at Meet, and the answer from where Meet settles for a
+    call's Chrome (`bridges.meet.settled`) once that Chrome has exited. A
+    profile with no account is signed in, and its Chrome ended by this once
+    it is (the Captain, 2026-11-03). One with an account whose Meet stays on
+    Google's sign-in has its "Verify it's you" cleared, and Tom quits that
+    Chrome, since its cookies already read as signed in (the Cowboy,
+    2026-11-13). A Chrome already holding the profile is left alone: a
+    call's is named, any other is the window to sign in from, which may be
+    left open, since the next call quits it. 0 when Meet opens signed in."""
+    from bridges.meet import MEET_HOME, a_call, holder, on_meet, settled
 
     profile = profile or settings.meet_profile
-    if email := account(profile):
-        say(f"already signed in as {email}; {settings.machine} can join calls")
-        return 0
     if (pid := holder(profile)) is not None:
         if a_call(pid):
             say(f"the call profile is in use by a call's Chrome (pid {pid}); run this again after the call")
@@ -136,17 +137,23 @@ def sign_in(profile: str | None = None, *, chrome: str = CHROME, poll_s: float =
             say(f"the call profile is already open in Chrome (pid {pid}): sign in as valor@yuda.me there; "
                 "the window may be left open, the next call quits it")  # fmt: skip
         return 1
+    verify = (email := account(profile)) is not None
+    if verify:
+        if on_meet(asyncio.run(settled(profile))):
+            say(f"already signed in as {email}; {settings.machine} can join calls")
+            return 0
+        say(f"Google wants the sign-in as {email} verified again: in the Chrome window, click Next and verify, "
+            "then quit Chrome with ⌘Q once Meet's home page shows (Ctrl-C here to give up)")  # fmt: skip
+    else:
+        say("sign in as valor@yuda.me in the Chrome window; it closes itself once signed in, and if it is left "
+            "open the next call quits it (⌘Q or Ctrl-C to give up)")  # fmt: skip
     Path(profile).mkdir(parents=True, exist_ok=True)
     child = subprocess.Popen(
-        [chrome, f"--user-data-dir={profile}", "--no-first-run", "https://accounts.google.com/"],
+        [chrome, f"--user-data-dir={profile}", "--no-first-run", MEET_HOME],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )  # fmt: skip
-    say(
-        "sign in as valor@yuda.me in the Chrome window; it closes itself once signed in, and if it is left "
-        "open the next call quits it (⌘Q or Ctrl-C to give up)"
-    )
     try:
-        while child.poll() is None and not profile_ready(profile):
+        while child.poll() is None and (verify or not profile_ready(profile)):
             time.sleep(poll_s)
     except KeyboardInterrupt:
         pass
@@ -154,10 +161,10 @@ def sign_in(profile: str | None = None, *, chrome: str = CHROME, poll_s: float =
         if child.poll() is None:
             child.terminate()  # a clean exit, which saves the cookies
         child.wait()
-    if email := account(profile):
+    if (email := account(profile)) and on_meet(url := asyncio.run(settled(profile))):
         say(f"signed in as {email}; {settings.machine} can join calls")
         return 0
-    say(f"not signed in; run this again to sign in: {SIGN_IN}")
+    say(f"not signed in{f' (Meet stayed on {url})' if email else ''}; run this again to sign in: {SIGN_IN}")
     return 1
 
 
@@ -1674,7 +1681,13 @@ class Call:
 
     async def joined(self) -> str | None:
         """Through Meet's join screen and lobby; None once in, else why not."""
-        await self.page.join()
+        from bridges.meet import SignInNeeded
+
+        try:
+            await self.page.join()
+        except SignInNeeded as exc:
+            _log(f"call {self.id}: Meet stayed on Google's sign-in at {exc}")
+            return f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run: {SIGN_IN}"
         start = self.clock()
         while True:
             status = (await self.page.state())["status"]

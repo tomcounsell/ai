@@ -28,6 +28,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import numpy as np
 import psutil
@@ -49,6 +50,10 @@ CHROME_ARGS = (
 JOIN = ("Join now", "Ask to join", "Ask to join anyway", "Join anyway", "Join the call now", "Join here too")
 # Navigations under one `Page.evaluate` waited out before it fails.
 NAVIGATIONS = 3
+# Half-second tries a page stays on before it counts as where Meet settled:
+# Google's own redirects through accounts.google.com pass within fewer.
+SETTLE_TRIES = 6
+MEET_HOME = "https://meet.google.com/"
 # A shown button whose words end with one of `labels` (an icon's name comes
 # first), clicked; else "Other ways to join" opened, for the next try.
 CLICK_JOIN = """(labels) => {
@@ -154,6 +159,22 @@ class Socket:
             )
 
 
+class SignInNeeded(RuntimeError):
+    """Meet sent the call's Chrome to Google's sign-in and it stayed there:
+    "Verify it's you" for an account whose cookies are all still in the
+    profile (the Cowboy, 2026-11-13). Only someone at the Mac clears it."""
+
+
+def on_sign_in(url: str) -> bool:
+    """Whether `url` is one of Google's sign-in pages."""
+    parts = urlsplit(url)
+    return parts.hostname == "accounts.google.com" and parts.path.startswith(("/signin", "/v3/signin"))
+
+
+def on_meet(url: str) -> bool:
+    return urlsplit(url).hostname == "meet.google.com"
+
+
 def holder(profile: str) -> int | None:
     """The live Chrome holding `profile`: the pid its `SingletonLock`
     (`host-pid`) names, when that process was started on this profile. A
@@ -203,6 +224,12 @@ class Page:
         self._playwright = self._context = self.page = None
 
     async def open(self, url: str, port: int) -> None:
+        await self.launch()
+        await self._context.add_init_script(script(port))
+        await self.page.goto(url, wait_until="domcontentloaded")
+
+    async def launch(self) -> None:
+        """Chrome on the profile, as every call starts it, at a blank page."""
         from playwright.async_api import async_playwright
 
         await quit_holder(self.profile)
@@ -224,9 +251,7 @@ class Page:
             raise RuntimeError(
                 f"this Mac's call profile is open in another Chrome (pid {pid}); quit it with ⌘Q and ask again"
             ) from None
-        await self._context.add_init_script(script(port))
         self.page = self._context.pages[0] if self._context.pages else await self._context.new_page()
-        await self.page.goto(url, wait_until="domcontentloaded")
 
     async def evaluate(self, expression: str, arg: Any = None) -> Any:
         """`page.evaluate`, run again on the new document when Meet
@@ -250,12 +275,16 @@ class Page:
         camera = self.page.locator('button[aria-label="Turn off camera"]')
         if await camera.count() and await camera.first.is_visible():
             await camera.first.click()
+        signing_in = 0
         for _ in range(int(timeout_s * 2)):
             clicked = await self.evaluate(CLICK_JOIN, list(JOIN))
             if clicked:
                 return clicked
+            signing_in = signing_in + 1 if on_sign_in(self.page.url) else 0
+            if signing_in >= SETTLE_TRIES:
+                raise SignInNeeded(self.page.url)
             await asyncio.sleep(0.5)
-        raise TimeoutError("Meet showed no join button")
+        raise TimeoutError(f"Meet showed no join button at {self.page.url}")
 
     async def ready(self) -> None:
         """Once in the call: the payloads start reading it and open the chat."""
@@ -289,3 +318,25 @@ class Page:
             await self._context.close()
         if self._playwright is not None:
             await self._playwright.stop()
+
+
+async def settled(profile: str, url: str = MEET_HOME, timeout_s: float = 30) -> str:
+    """Where Meet settles for `profile`, in a headless Chrome started as a
+    call's is: the URL a page stayed on for `SETTLE_TRIES`, or the last
+    one. On `meet.google.com`, the profile can join calls; on a sign-in
+    page, someone at the Mac has to sign in (`python -m core meet-sign-in`)."""
+    page = Page(profile)
+    try:
+        await page.launch()
+        await page.page.goto(url, wait_until="domcontentloaded")
+        last, same = None, 0
+        for _ in range(int(timeout_s * 2)):
+            now = page.page.url
+            same = same + 1 if now == last else 1
+            if same >= SETTLE_TRIES:
+                break
+            last = now
+            await asyncio.sleep(0.5)
+        return page.page.url
+    finally:
+        await page.close()
