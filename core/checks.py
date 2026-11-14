@@ -45,6 +45,7 @@ from core.machine import Check, State
 
 SUITE = "suite.ran"
 JUNIT = "tmp/junit.xml"
+_DIR_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_DIRECTORY
 NO_TESTS = "the suite ran no tests at head"
 BOTH_FAIL = "the whole suite fails at base and at head, with no per-test results to tell them apart"
 # Files at a commit's top level that pin what setup installs.
@@ -74,23 +75,15 @@ def worktree(mirror: str | Path, sha: str, dest: Path) -> None:
 # -- JUnit -------------------------------------------------------------------------
 
 
-def _junit_tree(checks_dir: Path, name: str, relpath: str) -> tuple[ET.Element | None, str | None]:
-    """The parsed JUnit report at `<name>/<relpath>` under `checks_dir`, or
-    (None, why not); see `read_junit`."""
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_DIRECTORY
+def _junit_tree(checks_dir: Path, name: str) -> tuple[ET.Element | None, str | None]:
+    """The parsed JUnit report `keep_junit` kept for the check `name` under
+    `checks_dir`, or (None, why not); see `read_junit`."""
     try:
-        root = os.open(checks_dir, flags)
+        root = os.open(checks_dir, _DIR_FLAGS)
     except OSError as exc:
         return None, f"no checks directory ({exc.strerror})"
     try:
-        try:
-            check = os.open(name, flags, dir_fd=root)
-        except OSError as exc:
-            return None, f"{name} is not a plain directory ({exc.strerror})"
-        try:
-            body, why = workspace.read_turn_file(check, relpath)
-        finally:
-            os.close(check)
+        body, why = workspace.read_turn_file(root, junit_kept(name))
     finally:
         os.close(root)
     if body is None:
@@ -103,24 +96,48 @@ def _junit_tree(checks_dir: Path, name: str, relpath: str) -> tuple[ET.Element |
         return None, f"the JUnit report is not XML ({exc})"
 
 
+def junit_kept(name: str) -> str:
+    """Where the check `name`'s report is kept, beside its logs."""
+    return f"{name}.junit.xml"
+
+
+def keep_junit(check_dir: Path) -> None:
+    """Move the report the suite wrote at `<check>/tmp/junit.xml` to
+    `junit_kept` beside the check's logs, so it outlives the check's
+    directory. `checks` and each directory below it are opened without
+    following a link, and the rename moves a link as a link, so nothing
+    outside is moved or read. No report, or a `tmp` that is not a plain
+    directory, keeps nothing."""
+    parent = os.open(check_dir.parent, _DIR_FLAGS)
+    try:
+        tmp, _why = workspace.open_turn_dir(parent, f"{check_dir.name}/{Path(JUNIT).parent}")
+        if tmp is None:
+            return
+        try:
+            with contextlib.suppress(FileNotFoundError):
+                os.rename(Path(JUNIT).name, junit_kept(check_dir.name), src_dir_fd=tmp, dst_dir_fd=parent)
+        finally:
+            os.close(tmp)
+    finally:
+        os.close(parent)
+
+
 def _case_id(case: ET.Element) -> str:
     name = case.get("name") or ""
     cls = case.get("classname") or case.get("file") or ""
     return f"{cls}::{name}" if cls else name
 
 
-def read_junit(
-    checks_dir: Path, name: str, relpath: str = JUNIT
-) -> tuple[dict[str, list[str]] | None, str | None]:
-    """The per-test results the suite wrote at `<name>/<relpath>` (by
-    default `tmp/junit.xml`; a VM run's is `out/junit.xml`) under
-    the kernel-owned `checks_dir`: `checks_dir` and the check directory
-    `name` each opened with `O_NOFOLLOW | O_DIRECTORY`, the file read whole
-    with `workspace.read_turn_file` (no link followed, no FIFO blocked on).
+def read_junit(checks_dir: Path, name: str) -> tuple[dict[str, list[str]] | None, str | None]:
+    """The per-test results the suite wrote at `<name>/tmp/junit.xml`, as
+    `keep_junit` kept them beside the check's logs under the kernel-owned
+    `checks_dir`: `checks_dir` opened with `O_NOFOLLOW | O_DIRECTORY`, the
+    file read whole with `workspace.read_turn_file` (no link followed, no
+    FIFO blocked on).
     A file holding a DOCTYPE or an entity declaration is refused. Returns
     ({passed, failed, errored, skipped: [test id]}, None) or (None, why
     not). A test id is `classname::name`."""
-    tree, why = _junit_tree(checks_dir, name, relpath)
+    tree, why = _junit_tree(checks_dir, name)
     if tree is None:
         return None, why
     out: dict[str, list[str]] = {"passed": [], "failed": [], "errored": [], "skipped": []}
@@ -138,12 +155,12 @@ def read_junit(
     return out, None
 
 
-def junit_failures(checks_dir: Path, name: str, relpath: str = JUNIT) -> list[dict[str, str]]:
+def junit_failures(checks_dir: Path, name: str) -> list[dict[str, str]]:
     """Each failed or errored case of the report `read_junit` reads, through
     the same no-follow read: `id`, `kind` (`failed` or `errored`), the
     element's `message` attribute and its text. Empty when the report
     cannot be read."""
-    tree, _why = _junit_tree(checks_dir, name, relpath)
+    tree, _why = _junit_tree(checks_dir, name)
     if tree is None:
         return []
     out = []
@@ -713,7 +730,10 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
     project = b.project or {}
     command = project.get("suite") or "true"
     started = time.monotonic()
-    async with workspace.fresh(lay.checks / f"test-{role}-{sha[:12]}") as check_dir:
+    name = f"test-{role}-{sha[:12]}"
+    # An earlier run's report at this commit is never read as this run's.
+    await asyncio.to_thread(workspace.rmtree, lay.checks / junit_kept(name))
+    async with workspace.fresh(lay.checks / name) as check_dir:
         checkout = check_dir / "repo"
 
         def out(step: str) -> Path:
@@ -778,6 +798,7 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
                 payload["lint"] = await _lint(project, checkout, harness, f"{mark}-lint", stop, lint_out)
         finally:
             await asyncio.to_thread(services.__exit__, None, None, None)
+        await asyncio.to_thread(keep_junit, check_dir)
         tests, why = await asyncio.to_thread(read_junit, lay.checks, check_dir.name)
         cause = None
         reason = None

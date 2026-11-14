@@ -79,49 +79,81 @@ def made(tmp_path, monkeypatch):
     git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
     work = tmp_path / "work"
     spec = workspace.Spec(name="app", repo=str(origin), kind="plain", suite="true")
-    workspace.provision(TASK, spec, {}, work=work)
-    lay = workspace.layout(TASK, work)
-    return lay, git(ws, "rev-parse", "HEAD")
+    # The test's own task id: a check's processes are reaped by a mark made
+    # from it, so a shared one would kill another worker's.
+    task = ledger.new_id()
+    workspace.provision(task, spec, {}, work=work)
+    return workspace.layout(task, work), git(ws, "rev-parse", "HEAD")
 
 
-def suite(lay, sha, command, *, stop_after=None):
-    b = SimpleNamespace(mirror=str(lay.mirror), project={"suite": command, "setup": ["true"]})
+def suite(lay, sha, command, *, stop_after=None, setup="true"):
+    b = SimpleNamespace(mirror=str(lay.mirror), project={"suite": command, "setup": [setup]})
 
     async def go():
         stop = asyncio.create_task(asyncio.sleep(3600 if stop_after is None else stop_after))
         try:
-            return await checks.suite(SimpleNamespace(task_id=TASK), lay, b, sha, "head", stop, digest="d")
+            return await checks.suite(
+                SimpleNamespace(task_id=lay.root.name), lay, b, sha, "head", stop, digest="d"
+            )
         finally:
             stop.cancel()
 
     return asyncio.run(go())
 
 
-def test_a_suite_runs_checkout_goes_after_its_junit_is_read(made):
+FAILED = '<testsuite><testcase classname="t" name="a"><failure message="boom">trace</failure></testcase></testsuite>'
+
+
+def name_of(sha: str) -> str:
+    """The check's name as the verify runner builds it (`test-<role>-<sha12>`)."""
+    return f"test-head-{sha[:12]}"
+
+
+def test_a_suite_runs_checkout_goes_and_its_report_stays_beside_its_logs(made):
     lay, sha = made
-    command = f"printf '{JUNIT}' > {{junit}}"
     for _ in range(2):  # a second run at the same commit checks out again
-        ran = suite(lay, sha, command)
-        assert ran["exit"] == 0 and ran["tests"] is not None and ran["cause"] is None, ran
-        assert not (lay.checks / f"test-head-{sha[:12]}").exists()
+        ran = suite(lay, sha, f"printf '{FAILED}' > {{junit}}")
+        assert ran["exit"] == 0 and ran["tests"]["failed"] == ["t::a"] and ran["cause"] is None, ran
+        assert not (lay.checks / name_of(sha)).exists()
     names = {p.name for p in lay.checks.iterdir()}
-    assert {f"test-head-{sha[:12]}.suite.out", f"test-head-{sha[:12]}.setup-0.out"} <= names
+    assert {f"{name_of(sha)}.suite.out", f"{name_of(sha)}.setup-0.out", f"{name_of(sha)}.junit.xml"} <= names
+    # The verify runner reads the failure's message after the checkout is gone.
+    assert checks.junit_failures(lay.checks, name_of(sha)) == [
+        {"id": "t::a", "kind": "failed", "message": "boom", "text": "trace"}
+    ]
+
+
+@pytest.mark.parametrize("setup", ["true", "exit 4"])
+def test_a_run_that_writes_no_report_never_reads_the_last_ones(made, setup):
+    lay, sha = made
+    assert suite(lay, sha, f"printf '{FAILED}' > {{junit}}")["tests"]["failed"] == ["t::a"]
+    ran = suite(lay, sha, "exit 3", setup=setup)
+    assert ran["tests"] is None and checks.junit_failures(lay.checks, name_of(sha)) == []
+
+
+def test_a_report_left_as_a_link_or_a_directory_is_refused_and_nothing_outside_is_moved(made, tmp_path):
+    lay, sha = made
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "junit.xml").write_text(FAILED)
+    ran = suite(lay, sha, f"ln -s {outside / 'junit.xml'} {{junit}}")
+    assert "is a link" in ran["junit"] and ran["tests"] is None
+    assert checks.junit_failures(lay.checks, name_of(sha)) == []
+    # `tmp` itself replaced by a link to a directory holding a report.
+    ran = suite(lay, sha, f'd=$(dirname {{junit}}); rm -rf "$d"; ln -s {outside} "$d"')
+    assert ran["tests"] is None and not (lay.checks / f"{name_of(sha)}.junit.xml").exists()
+    assert (outside / "junit.xml").read_text() == FAILED
+    # A directory where the report should be is refused, and the next run's report is read.
+    ran = suite(lay, sha, "mkdir {junit} && touch {junit}/x")
+    assert "not a" in ran["junit"] and ran["tests"] is None
+    assert suite(lay, sha, f"printf '{JUNIT}' > {{junit}}")["tests"]["passed"] == ["t::a"]
 
 
 def test_a_failed_setup_and_a_stop_leave_no_checkout(made):
     lay, sha = made
-    b = SimpleNamespace(mirror=str(lay.mirror), project={"suite": "true", "setup": ["exit 4"]})
-
-    async def failed_setup():
-        stop = asyncio.create_task(asyncio.sleep(3600))
-        try:
-            return await checks.suite(SimpleNamespace(task_id=TASK), lay, b, sha, "head", stop, digest="d")
-        finally:
-            stop.cancel()
-
-    ran = asyncio.run(failed_setup())
+    ran = suite(lay, sha, "true", setup="exit 4")
     assert ran["setup"]["ok"] is False and ran["exit"] == 4
-    assert not (lay.checks / f"test-head-{sha[:12]}").exists()
+    assert not (lay.checks / name_of(sha)).exists()
     with pytest.raises(checks._Stopped):
         suite(lay, sha, "sleep 30", stop_after=0.5)
     assert not (lay.checks / f"test-head-{sha[:12]}").exists()
