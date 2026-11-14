@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from core import workspace
+from core import ledger, workspace
 from core.settings import settings
 from tests import scripted
 
@@ -37,13 +37,17 @@ def made(tmp_path, monkeypatch):
     git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
     work = tmp_path / "work"
     spec = workspace.Spec(name="app", repo=str(origin), kind="plain", suite="true")
+    # A fresh id per test: `remove` reaps every process marked with its
+    # task's id, so a shared one would kill another xdist worker's provisioning.
+    task = ledger.new_id()
     return (
-        workspace.provision("a1b2c3d4e5f6", spec, {}, work=work),
-        workspace.layout("a1b2c3d4e5f6", work),
+        workspace.provision(task, spec, {}, work=work),
+        workspace.layout(task, work),
         ws,
         origin,
         spec,
         work,
+        task,
     )
 
 
@@ -56,7 +60,7 @@ def test_a_workspace_uses_the_macs_package_caches_and_keeps_none_of_its_own(made
 
 
 def test_the_clone_origin_and_mirror_borrow_the_caches_history(made):
-    _, lay, _, _, spec, work = made
+    _, lay, _, _, spec, work, _ = made
     cache = workspace.cache_path(spec.repo, work)
     for repo in (lay.repo, lay.origin, lay.mirror):
         git_dir = repo / ".git" if (repo / ".git").exists() else repo
@@ -83,7 +87,7 @@ def test_the_clone_origin_and_mirror_borrow_the_caches_history(made):
 
 
 def test_an_upstream_force_push_and_gc_in_the_cache_leave_the_workspace_whole(made, tmp_path):
-    p, lay, _, origin, spec, work = made
+    p, lay, _, origin, spec, work, task = made
     cache = workspace.cache_path(spec.repo, work)
     other = tmp_path / "other"
     subprocess.run([settings.git_bin, "init", "-q", "-b", "main", str(other)], check=True)
@@ -96,14 +100,14 @@ def test_an_upstream_force_push_and_gc_in_the_cache_leave_the_workspace_whole(ma
         git(repo, "fsck", "--connectivity-only")
     assert git(lay.repo, "cat-file", "-t", p.base_sha) == "commit"
     # Removing the workspace leaves the cache whole for the next task.
-    workspace.remove("a1b2c3d4e5f6", lay)
+    workspace.remove(task, lay)
     git(cache, "fsck", "--connectivity-only")
-    nxt = workspace.provision("b1b2c3d4e5f6", spec, {}, work=work)
+    nxt = workspace.provision(ledger.new_id(), spec, {}, work=work)
     assert (Path(nxt.workspace) / "README.md").read_text() == "rewritten\n"
 
 
 def test_a_cache_made_before_this_change_is_set_to_keep_every_object(made):
-    *_, spec, work = made
+    *_, spec, work, _ = made
     cache = workspace.cache_path(spec.repo, work)
     git(cache, "config", "--unset", "gc.pruneExpire")
     workspace._cache(spec, None, work)
