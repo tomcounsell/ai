@@ -274,3 +274,31 @@ def test_a_message_whose_handling_the_reconnect_cancelled_is_retaken_by_the_gap_
 
     rows = asyncio.run(go())
     assert [r["message_id"] for r in rows] == ["42"]
+
+
+@pytest.mark.parametrize("stale", [123, None], ids=["after-a-lost-ping", "fresh"])
+def test_a_reconnect_clears_a_ping_lost_with_the_dropped_connection(tmp_path, stale):
+    """The Cowboy, 2026-11-14: a ping unanswered when the connection dropped
+    stayed pending, so each later connection was dropped at its first
+    keepalive tick, 60 s in, until the bridge restarted."""
+
+    async def go():
+        w = _real(tmp_path)
+        sender = w.client._sender
+        sender._ping = stale
+
+        async def connect():
+            sender._user_connected = True  # as Telethon's connect leaves it
+
+        w.client.connect = connect
+        await w.connect()
+        sent, reconnects = [], []
+        sender.send = lambda request, ordered=False: sent.append(request)
+        sender._start_reconnect = reconnects.append
+        sender._keepalive_ping(7)
+        assert reconnects == []
+        assert [type(r).__name__ for r in sent] == ["PingRequest"]
+        w.client.session.set_dc(2, "149.154.167.40", 443)
+        w.client.session.save()
+
+    asyncio.run(go())

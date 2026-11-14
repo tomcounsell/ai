@@ -180,6 +180,12 @@ class TelethonWire:
         # state (the Captain, 2026-11-08). A message the old loop was still
         # handling is cancelled with it; the gap fill after connect retakes it.
         await self.client.disconnect()
+        # Telethon (1.45.0, mtprotosender.py:758) clears the last keepalive
+        # ping's id only when its pong arrives, and drops the connection on
+        # the next tick while it is set. A ping lost with the dropped
+        # connection would otherwise drop every later one after 60 s, until
+        # a restart (the Cowboy, 2026-11-14).
+        self.client._sender._ping = None
         try:
             await self.client.connect()
             authorized = await self.client.is_user_authorized()
