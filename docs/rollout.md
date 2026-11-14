@@ -226,18 +226,21 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    Homebrew Updates replaces this job once it is deployed
    (yudame/studio-tools#2).
    Meet calls (docs/plans/meet.md) join from their own Chrome profile,
-   `~/Library/Application Support/Valor/meet-chrome`, which Tom signs in
-   once per Mac, at the Mac, in Terminal: `cd ~/src/ai && .venv/bin/python
-   -m core meet-sign-in`, then valor@yuda.me with the passkey in the
-   Chrome window it opens. It closes that window itself once signed in
-   and prints "signed in as valor@yuda.me" (⌘Q or Ctrl-C gives up; on a
-   Mac whose call Chrome reaches Meet signed in it says so and opens
-   nothing). The same command clears Google's "Verify it's you": click
-   Next, verify, and quit Chrome with ⌘Q once Meet shows; a call that
-   meets that page ends naming the Mac and this command. The window may be
+   `~/Library/Application Support/Valor/meet-chrome`, which Valor signs in
+   itself, on its first call or at `cd ~/src/ai && .venv/bin/python -m
+   core meet-sign-in`, once its Google login is in 1Password (the item
+   "Google valor@yuda.me" in `m-valor`: password and authenticator
+   one-time password, docs/bridges/meet.md). Without the item Tom signs it
+   in at the Mac, in Terminal, with that command: valor@yuda.me with the
+   passkey in the Chrome window it opens, or Next and verify when Google
+   wants "Verify it's you", then ⌘Q once Meet shows; it then prints "signed
+   in as valor@yuda.me" (Ctrl-C gives up; on a Mac whose call Chrome
+   reaches Meet signed in it says so and opens nothing). A call that meets
+   Google's sign-in ends naming the Mac and this command. The window may be
    left open, however it was opened: a call quits a plain Chrome on the
-   profile before starting its own. Tom signed in
-   every Mac's on 2026-11-05. A call asked for on a Mac not signed in fails, naming this step, and each night's update
+   profile before starting its own. On 2026-11-13 the Cowboy and the
+   Captain were signed in; the Pirate's sign-in of 2026-11-05 never
+   finished and the Bald has no call profile. Without the item, a call asked for on a Mac not signed in fails, naming this step, and each night's update
    tells Tom once a week. A call refuses only when another call's Chrome holds the
    profile, and says so.
    Chrome on the call profile runs only in the Mac's own session (the

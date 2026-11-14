@@ -752,9 +752,10 @@ async def update_runner(ctx: routines.Context) -> routines.Ran:
             text=f"{settings.machine} has {free:.0f} GB of disk left after tonight's cleanup. "
             "Builds start failing when it fills; what should go?",
         )
+    from bridges.meet import google
     from core import call
 
-    if not call.profile_ready(settings.meet_profile):
+    if not call.profile_ready(settings.meet_profile) and not google.secret("password"):
         await notices.request(
             ctx.conn,
             intake.UPDATES,

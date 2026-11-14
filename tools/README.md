@@ -16,7 +16,8 @@ Governed by [docs/architecture.md](../docs/architecture.md) (effect classes and 
 
 - `meet.py`: `meet.join` (`act`), offered to a group chat's session only: opens a Google Meet call's
   session (`core/call.py`), on a new Meet (`gws meet spaces create`, open to anyone with its link) or
-  a given link, reports the link to the asking session, and starts the call's process
+  a given link, reports to the asking session that Valor is joining (the link comes only once Valor
+  is in, from the call's process), and starts the call's process
   ([docs/bridges/meet.md](../docs/bridges/meet.md)).
 
 ## Workspace tools

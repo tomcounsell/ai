@@ -1,7 +1,8 @@
 # Google Meet
 
 Valor in a Google Meet call as itself (docs/plans/meet.md): asked for in a
-group chat, it posts the link in that thread, joins ready on the topic,
+group chat, it joins ready on the topic, posts the link in that thread once
+it is in,
 speaks through Gemini Live (docs/plans/gemini-live.md) when it is
 addressed, posts written answers in the call's chat with a copy in the
 thread, and when the call ends Gemini summarises the recording and the
@@ -28,8 +29,14 @@ against a new Meet with a second device of Valor's account
   `new` (`gws meet spaces create`, open to anyone with the link), payload
   the thread asked in (`reply_to`, `topic_id`) and `prep`, the session's
   notes on the topic. It opens the call session (channel `meet`, chat id
-  the meeting code) and reports the link to the asking session, which
-  posts it in the thread, then starts the call's process.
+  the meeting code), reports to the asking session that Valor is joining
+  (naming the call session, so the chat can stop or steer it, with no
+  link) and starts the call's process. Neither that report nor the
+  request's result carries the link: it reaches the asking session only in
+  the `link` report the call's process writes once Valor is in
+  (`call.entered`, with `call.joined`), and a call Valor never got into
+  ends saying why and not to post the link (Tom, 2026-11-13: "don't share
+  a meet link if it doesn't work!").
 - **The call's process** holds `meet:call:<session>` and
   `run:<session>`. Everyone's audio is mixed to 16 kHz and streamed to one
   Gemini Live session (`settings.call_model`, voice `settings.call_voice`,
@@ -92,21 +99,42 @@ against a new Meet with a second device of Valor's account
 
 ## Setup per Mac
 
-The call profile signed in once, by Tom at the Mac, in Terminal:
-`cd ~/src/ai && .venv/bin/python -m core meet-sign-in` opens Chrome on it at
-Meet, closes that Chrome itself once valor@yuda.me is signed in, and says so
-(⌘Q or Ctrl-C gives up). It answers from where Meet settles for a call's own
-headless Chrome (`meet.settled`): on Meet, signed in; a profile already so
-opens nothing. When Google wants the sign-in verified again ("Verify it's
-you", the Cowboy, 2026-11-13), the cookies still read as signed in, so Tom
-clicks Next, verifies, and quits that Chrome with ⌘Q once Meet shows. A call
-whose join page stays on Google's sign-in for three seconds ends at once,
-naming the Mac and this command. A sign-in window may be left open, however it was opened: a call
+The call profile is signed in as valor@yuda.me, by Valor itself when its
+login is in 1Password: the item "Google valor@yuda.me" in the `m-valor`
+vault, with its password and the authenticator's one-time password
+(`bridges/meet/google.py`, read by name with `op item get`, since an `op://`
+reference cannot hold the `@`; 1Password computes the code, so the
+authenticator's setup key never leaves the vault). With it, Valor walks
+Google's sign-in on the call's own page: "Verify it's you" (Next), the
+account or the email, "Try another way" from a passkey, the password, then
+the authenticator's code. A call does that before opening the meeting on a
+profile with no account (a signed-out Chrome gets Meet's guest screen,
+never Google's sign-in), and once more when its join meets Google's
+sign-in: a join page that stays on Google's sign-in for three seconds, or
+Meet's "You can't join this video call" whose Google sign-in for the
+meeting stays put (a signed-out profile, the Captain, 2026-11-13). The
+join is then tried once more; without the login, or when Google keeps it
+out, the call ends at once naming the Mac and `meet-sign-in`. Meet's "You
+can't join" for a profile Google lets through ends the call as "Meet would
+not let Valor in".
+
+Without the item, Tom signs it in at the Mac, in Terminal:
+`cd ~/src/ai && .venv/bin/python -m core meet-sign-in`. It first asks where
+Meet settles for a call's own headless Chrome (`meet.settled`, which signs
+in from 1Password itself when it can): on Meet, it says "signed in" and
+opens nothing. Otherwise it opens Chrome on the profile at Meet, where Tom
+signs in, or clicks Next and verifies when Google wants the sign-in
+verified again ("Verify it's you", the Cowboy, 2026-11-13), then quits that
+Chrome with ⌘Q once Meet shows (Ctrl-C gives up). It never ends Chrome
+itself: Google writes its cookies before its passkey step is done (the
+Captain, 2026-11-13). A sign-in window may be left open, however it was opened: a call
 quits a plain Chrome holding the profile before starting its own ([rollout.md](../rollout.md), step 9; the nightly update tells Tom
-once a week until it is). To `call.account` and that notice, signed in means
+once a week while it is not signed in and the item is not in 1Password).
+To `call.account` and that notice, signed in means
 the account in the profile's preferences and Google's session cookie in its
 cookies, which a pending "Verify it's you" leaves in place; `meet-sign-in`
-also needs Meet to settle on Meet.
+also needs Meet to settle on Meet. `meet.join` refuses a Mac whose profile
+is not signed in only while the item is not in 1Password.
 Never start Chrome on the profile over ssh: the keychain is locked there,
 and Chrome drops the profile's sign-in (the Captain, 2026-11-03). A call
 whose profile another call's Chrome holds (Playwright's

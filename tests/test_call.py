@@ -48,6 +48,8 @@ class Page:
     bytes and whether it began a turn) and posted. `ahead` is the seconds
     a stream reports still queued; a stop reports `played` seconds."""
 
+    profile = None  # this Mac's, signed in (`test_meet.team`)
+
     def __init__(self):
         self.status = "in"
         self.people = [{"id": "devices/9", "name": "Valor Engels", "me": True},
@@ -64,6 +66,9 @@ class Page:
 
     async def join(self):
         pass
+
+    async def renew(self, back):
+        return False
 
     async def ready(self):
         pass
@@ -1427,35 +1432,134 @@ def test_a_late_worker_answer_goes_in_the_report_once(dsn, team, quick):
     assert ended["text"].count("The import.") == 1 and "the call ended" in ended["text"]
 
 
-def test_a_call_not_let_in_ends_saying_so(dsn, team, quick):
-    async def go():
-        page = Page()
-        page.status = "denied"
-        _, the = await a_call_of(dsn, team, page, Gemini())
-        return await asyncio.wait_for(the.run(), 10), page
+async def ended_alone(dsn, team, page) -> tuple[str, list[dict], list[dict]]:
+    """A call on `page` run to its end: its reason, the call session's rows
+    and the asking session's `call` reports."""
+    brief, the = await a_call_of(dsn, team, page, Gemini())
+    reason = await asyncio.wait_for(the.run(), 10)
+    return reason, await bridges.rows(dsn, the.id), await test_meet.reports(dsn, brief.id)
 
-    reason, page = run(go())
+
+def never_in(rows, got) -> dict:
+    """A call Valor never got into: no `call.joined`, no `link` report; its
+    ended report, which says not to post the link and names no summary."""
+    assert not any(r["type"] == "call.joined" for r in rows)
+    assert [r["about_key"].rsplit(":", 1)[1] for r in got if r["kind"] == "call"] == ["joining", "ended"]
+    ended = got[-1]
+    assert ended["text"].startswith("Valor could not join the Meet ") and "Do not post its link." in ended["text"]
+    assert "summary" not in ended["text"] and "valor-record call" not in ended["text"]
+    return ended
+
+
+def test_a_call_not_let_in_ends_saying_so_and_reports_no_link(dsn, team, quick):
+    page = Page()
+    page.status = "denied"
+    reason, rows, got = run(ended_alone(dsn, team, page))
     assert reason == "Valor was not let in" and page.posts == []
+    assert "Valor was not let in" in never_in(rows, got)["text"]
+
+
+def test_the_link_is_reported_only_after_meets_join(dsn, team, quick):
+    """Tom, 2026-11-13: "don't share a meet link if it doesn't work!" """
+    gate = asyncio.Event()
+
+    class Slow(Page):
+        async def join(self):
+            await gate.wait()
+
+    async def go():
+        c_page = Slow()
+        brief, the = await a_call_of(dsn, team, c_page, Gemini())
+        running = asyncio.create_task(the.run())
+        await asyncio.sleep(0.3)
+        before = await test_meet.reports(dsn, brief.id)
+        gate.set()
+        assert await until(lambda: call.JOIN_LINE in c_page.posts)
+        after = await test_meet.reports(dsn, brief.id)
+        the.leave("done")
+        await asyncio.wait_for(running, 15)
+        return before, after, await bridges.rows(dsn, the.id), await test_meet.reports(dsn, brief.id)
+
+    before, after, rows, got = run(go())
+    assert [r["about_key"].rsplit(":", 1)[1] for r in before if r["kind"] == "call"] == ["joining"]
+    (link,) = [r for r in after if r["about_key"].endswith(":link")]
+    assert link["text"].startswith("Valor is in the Meet: https://meet.google.com/") and at(1) in link["text"]
+    assert [r["type"] for r in rows].count("call.joined") == 1
+    assert [r["about_key"].rsplit(":", 1)[1] for r in got if r["kind"] == "call"] == ["joining", "link", "ended"]
+    assert got[-1]["text"].startswith("The call https://meet.google.com/")
+
+
+class AtSignIn(Page):
+    """Meet at Google's sign-in until Valor signs itself in, when `renews`."""
+
+    def __init__(self, renews=False):
+        super().__init__()
+        self.renews, self.signed, self.done = renews, False, []
+
+    async def join(self):
+        self.done.append("join")
+        if not self.signed:
+            from bridges import meet
+
+            raise meet.SignInNeeded("https://accounts.google.com/v3/signin/confirmidentifier")
+
+    async def renew(self, back):
+        self.done.append(("renew", back))
+        self.signed = self.renews
+        return self.renews
 
 
 def test_a_call_meet_keeps_on_googles_sign_in_ends_naming_the_mac_and_the_command(dsn, team, quick, capsys):
-    """The Cowboy, 2026-11-13: "Verify it's you" where Meet's join screen was."""
-    from bridges import meet
-
-    class AtSignIn(Page):
-        async def join(self):
-            raise meet.SignInNeeded("https://accounts.google.com/v3/signin/confirmidentifier")
-
-    async def go():
-        page = AtSignIn()
-        _, the = await a_call_of(dsn, team, page, Gemini())
-        return await asyncio.wait_for(the.run(), 10), page
-
-    reason, page = run(go())
+    """The Cowboy, 2026-11-13: "Verify it's you" where Meet's join screen
+    was, and no login of Valor's in 1Password to pass it with."""
+    page = AtSignIn()
+    reason, rows, got = run(ended_alone(dsn, team, page))
     assert reason == (
         f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run: {call.SIGN_IN}"
     )
     assert page.posts == [] and "confirmidentifier" in capsys.readouterr().out
+    assert page.done == ["join", ("renew", page.url)]
+    ended = never_in(rows, got)
+    assert settings.machine in ended["text"] and call.SIGN_IN in ended["text"]
+
+
+def test_a_call_valor_signs_itself_in_to_joins_and_reports_its_link(dsn, team, quick, capsys):
+    async def go():
+        c = await in_call(dsn, team, AtSignIn(renews=True))
+        rows = await bridges.rows(dsn, c.the.id)
+        await finish(c)
+        return c.page, rows, await test_meet.reports(dsn, c.brief.id)
+
+    page, rows, got = run(go())
+    assert page.done == ["join", ("renew", page.url), "join"]
+    assert any(r["type"] == "call.joined" for r in rows) and any(r["about_key"].endswith(":link") for r in got)
+    assert "signed in to Google again from 1Password" in capsys.readouterr().out
+
+
+def test_a_profile_google_signed_out_is_signed_in_before_the_join(dsn, team, quick, tmp_path):
+    """The Pirate and the Bald: a profile with no account, which Meet
+    shows its guest screen, never Google's sign-in."""
+    page = AtSignIn(renews=True)
+    page.profile = str(tmp_path / "never-signed-in")
+
+    async def go():
+        c = await in_call(dsn, team, page)
+        await finish(c)
+
+    run(go())
+    assert page.done == [("renew", page.url), "join"]
+
+
+def test_meet_refusing_a_signed_in_valor_says_so_and_reports_no_link(dsn, team, quick):
+    from bridges import meet
+
+    class Refusing(Page):
+        async def join(self):
+            raise meet.Refused("https://meet.google.com/abc-defg-hij")
+
+    reason, rows, got = run(ended_alone(dsn, team, Refusing()))
+    assert reason == "Meet would not let Valor in"
+    never_in(rows, got)
 
 
 def test_a_steer_of_the_call_is_posted_in_its_chat_and_not_copied(dsn, team, quick):

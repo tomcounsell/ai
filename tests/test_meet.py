@@ -1,5 +1,6 @@
 """Valor in Google Meet, the kernel's side (docs/plans/meet.md): `meet.join`
-from a group chat opens one call session and reports its link once; the
+from a group chat opens one call session, reports that Valor is joining
+and, once it is in, the link, once; the
 call session runs no turn and owes no notice; its end is written once,
 answers the questions Tom's read-backs settle, refuses what it never
 delivered, and reports to the chat that asked; a call whose process died
@@ -148,12 +149,13 @@ def test_meet_join_is_offered_to_a_group_chats_session_and_never_a_dm():
     assert not any(u.startswith("`meet.") and "join" not in u for u in offered)
 
 
-def test_a_join_opens_one_call_session_reports_its_link_once_and_starts_its_process(dsn, team):
+def test_a_join_opens_one_call_session_reports_joining_with_no_link_and_starts_its_process(dsn, team):
     """The call session is a root chat session on `meet` under the asking
     chat's project and ceiling, carrying the thread and the prep; the
-    asking session gets the link in one `call` report naming the call
-    session, so it can stop or steer it; a retry of the request, and a
-    re-performed effect, make no second session."""
+    asking session gets one `joining` report naming the call session, so
+    it can stop or steer it, with no link: neither it nor the request's
+    result carries one before Valor is in (Tom, 2026-11-13); a retry of
+    the request, and a re-performed effect, make no second session."""
 
     async def go():
         brief = await asking_session(dsn, team)
@@ -172,7 +174,7 @@ def test_a_join_opens_one_call_session_reports_its_link_once_and_starts_its_proc
         return brief, first, again, found, started, b, info, await reports(dsn, brief.id), reporting
 
     brief, first, again, found, started, b, info, got, reporting = run(go())
-    assert first.kind == "done" and first.result["url"] == URL
+    assert first.kind == "done" and first.result == {"session_id": first.result["session_id"]}
     assert again.effect_id == first.effect_id and found == first.result
     session_id = first.result["session_id"]
     assert started == [session_id]
@@ -180,10 +182,49 @@ def test_a_join_opens_one_call_session_reports_its_link_once_and_starts_its_proc
     assert b.max_effect_class == brief.max_effect_class == "act" and b.parent_id is None
     assert info["asked_by"] == {"channel": "slack", "chat_id": team.chat, "reply_to": at(1), "topic_id": None,
                                 "session": brief.id}  # fmt: skip
-    assert info["prep"].startswith("The launch") and info["machine"] == settings.machine
-    (link,) = [r for r in got if r["kind"] == "call"]
-    assert link["child_id"] == session_id and URL in link["text"] and at(1) in link["text"]
+    assert info["url"] == URL and info["prep"].startswith("The launch") and info["machine"] == settings.machine
+    (joining,) = [r for r in got if r["kind"] == "call"]
+    assert joining["about_key"].endswith(":joining") and joining["child_id"] == session_id
+    assert URL not in joining["text"] and CODE not in joining["text"] and "Post nothing yet" in joining["text"]
     assert session_id in reporting
+
+
+def test_meet_joins_usage_says_the_link_comes_only_in_the_link_report():
+    usage = meet.MeetJoin.usage
+    assert "the link comes only in a `link` report once Valor is in" in usage
+    assert "post no link when the call reports it could not join" in usage
+
+
+def test_the_link_is_reported_once_valor_is_in_and_only_once(dsn, team):
+    async def go():
+        brief, session_id = await a_call(dsn, team)
+        for _ in range(2):  # a second write, as a re-entered run would make, is none
+            async with await db.connect(dsn) as conn, conn.transaction():
+                await call.entered(conn, session_id)
+        return brief, session_id, await reports(dsn, brief.id), await bridges.rows(dsn, session_id)
+
+    _brief, session_id, got, rows = run(go())
+    assert [r["type"] for r in rows].count("call.joined") == 1
+    (link,) = [r for r in got if r["about_key"].endswith(":link")]
+    assert link["child_id"] == session_id and URL in link["text"] and at(1) in link["text"]
+    assert [r["about_key"].rsplit(":", 1)[1] for r in got if r["kind"] == "call"] == ["joining", "link"]
+
+
+def test_a_call_still_joining_can_be_stopped_from_the_asking_session(dsn, team):
+    """Before Valor is in, the `joining` report is what puts the call in
+    the asking session's `tasks.reporting`, which `task.stop` reads."""
+
+    async def go():
+        brief, session_id = await a_call(dsn, team)
+        stop = next(p for p in chat_tasks.performers(brief, dsn) if p.action_type == "task.stop")
+        action = broker.Action("task.stop", session_id, {"why": "never mind", "by": "tom", "via": "chat"})
+        async with await db.connect(dsn) as conn:
+            refused = await stop.refuse(conn, action)
+        await stop.perform(action, ledger.new_id())
+        async with await db.connect(dsn) as conn:
+            return refused, await tasks.is_stopped(conn, session_id)
+
+    assert run(go()) == (None, True)
 
 
 def test_a_second_call_on_this_mac_fails_naming_the_first_and_the_chat_hears_why(dsn, team):
@@ -209,6 +250,22 @@ def test_a_join_with_the_profile_signed_out_names_the_sign_in(dsn, team):
 
     out = run(go())
     assert out.kind == "failed" and "not signed in" in out.error and call.SIGN_IN in out.error
+
+
+def test_a_join_with_the_profile_signed_out_goes_ahead_when_valors_login_is_held(dsn, team, monkeypatch):
+    """The Pirate and the Bald, never signed in: the call signs in itself
+    (`Call.joined`) with the login in 1Password."""
+    from bridges.meet import google
+
+    (team.profile / "Default" / "Preferences").write_text(json.dumps({"account_info": []}))
+    monkeypatch.setattr(google, "secret", lambda field: "x")
+    started: list[str] = []
+
+    async def go():
+        return await join(dsn, await asking_session(dsn, team), started)
+
+    out = run(go())
+    assert out.kind == "done" and started == [out.result["session_id"]]
 
 
 def test_meet_join_refuses_a_target_that_is_no_meet(dsn, team):
@@ -299,6 +356,8 @@ def test_the_end_is_written_once_refuses_what_never_left_and_leaves_copies_to_th
 
     async def go():
         brief, session_id = await a_call(dsn, team)
+        async with await db.connect(dsn) as conn, conn.transaction():
+            await call.entered(conn, session_id)
         never = await held(dsn, session_id, "meet.say", {"text": "Hello.", "turn": "t"}, done=None)
         caught = ledger.new_id()
         payload = {"text": "Posting."}

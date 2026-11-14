@@ -168,6 +168,15 @@ def no_launch_agents(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_google_login(monkeypatch):
+    """Valor's Google login in 1Password (`bridges/meet/google.py`) is never
+    read by a test: none is held unless the test gives one."""
+    from bridges.meet import google
+
+    monkeypatch.setattr(google, "secret", lambda field: None)
+
+
+@pytest.fixture(autouse=True)
 def release_ports(request):
     """After a test that used the ledger, stop the services of every task
     whose workspace still holds ports and record `workspace.removed`, so a

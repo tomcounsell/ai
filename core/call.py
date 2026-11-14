@@ -10,8 +10,12 @@ this Mac, the chat and thread it was asked in (`asked_by`), and `prep`,
 the asking turn's notes on the topic. It runs no turn (`router.has_step`)
 and owes no report of its own (`notices.owe`); everything it says goes to the asking
 chat's session as a `child.reported` row of kind `call` (`report`): first
-the link, which that session posts in the thread, and at the end what the
-call settled. A steer of it is posted in the call's chat while it is
+that Valor is joining, which names the call session, so the chat can stop
+or steer it, and carries no link; then, once Valor is in (`entered`,
+`call.joined`), the link, which that session posts in the thread; and at
+the end what the call settled, or, for a call Valor never got into, why,
+with no link to post (Tom, 2026-11-13: "don't share a meet link if it
+doesn't work!"). A steer of it is posted in the call's chat while it is
 open; after `call.ended` it is refused (`tools/chat_tasks.py`).
 
 **The end** (`end`), written once, in one transaction: `call.ended` (with
@@ -129,16 +133,17 @@ def profile_ready(profile: str | None = None) -> bool:
 
 
 def sign_in(profile: str | None = None, *, chrome: str = CHROME, poll_s: float = 2.0, say=print) -> int:
-    """`python -m core meet-sign-in`, by Tom at the Mac: plain Chrome on the
-    call profile at Meet, and the answer from where Meet settles for a
-    call's Chrome (`bridges.meet.settled`) once that Chrome has exited. A
-    profile with no account is signed in, and its Chrome ended by this once
-    it is (the Captain, 2026-11-03). One with an account whose Meet stays on
-    Google's sign-in has its "Verify it's you" cleared, and Tom quits that
-    Chrome, since its cookies already read as signed in (the Cowboy,
-    2026-11-13). A Chrome already holding the profile is left alone: a
-    call's is named, any other is the window to sign in from, which may be
-    left open, since the next call quits it. 0 when Meet opens signed in."""
+    """`python -m core meet-sign-in`, at the Mac: where Meet settles for a
+    call's Chrome (`bridges.meet.settled`), signed in first by Valor itself
+    when its login is in 1Password (`bridges/meet/google.py`); when Meet
+    still does not open signed in, plain Chrome on the call profile at Meet
+    for Tom to sign in or clear "Verify it's you" (the Cowboy, 2026-11-13),
+    and the answer from where Meet settles once he quits it. Chrome is never
+    ended at the first sign of a sign-in: Google writes its cookies before
+    its passkey step is done (the Captain, 2026-11-13). A Chrome already
+    holding the profile is left alone: a call's is named, any other is the
+    window to sign in from, which may be left open, since the next call
+    quits it. 0 when Meet opens signed in."""
     from bridges.meet import MEET_HOME, a_call, holder, on_meet, settled
 
     profile = profile or settings.meet_profile
@@ -149,23 +154,22 @@ def sign_in(profile: str | None = None, *, chrome: str = CHROME, poll_s: float =
             say(f"the call profile is already open in Chrome (pid {pid}): sign in as valor@yuda.me there; "
                 "the window may be left open, the next call quits it")  # fmt: skip
         return 1
-    verify = (email := account(profile)) is not None
-    if verify:
-        if on_meet(asyncio.run(settled(profile))):
-            say(f"already signed in as {email}; {settings.machine} can join calls")
-            return 0
+    if on_meet(asyncio.run(settled(profile, renew=True))):
+        say(f"signed in as {account(profile)}; {settings.machine} can join calls")
+        return 0
+    if email := account(profile):
         say(f"Google wants the sign-in as {email} verified again: in the Chrome window, click Next and verify, "
             "then quit Chrome with ⌘Q once Meet's home page shows (Ctrl-C here to give up)")  # fmt: skip
     else:
-        say("sign in as valor@yuda.me in the Chrome window; it closes itself once signed in, and if it is left "
-            "open the next call quits it (⌘Q or Ctrl-C to give up)")  # fmt: skip
+        say("sign in as valor@yuda.me in the Chrome window, then quit Chrome with ⌘Q once Meet's home page "
+            "shows (Ctrl-C here to give up)")  # fmt: skip
     Path(profile).mkdir(parents=True, exist_ok=True)
     child = subprocess.Popen(
         [chrome, f"--user-data-dir={profile}", "--no-first-run", MEET_HOME],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )  # fmt: skip
     try:
-        while child.poll() is None and (verify or not profile_ready(profile)):
+        while child.poll() is None:
             time.sleep(poll_s)
     except KeyboardInterrupt:
         pass
@@ -215,8 +219,9 @@ async def begin(
     effect_key: str,
     starts: str | None = None,
 ) -> str:
-    """Start the call session and write its first report, the link, inside
-    the caller's transaction. Returns the session's id."""
+    """Start the call session and write its first report, that Valor is
+    joining, with no link, inside the caller's transaction. Returns the
+    session's id."""
     chat = asking.chat or {}
     harness_name, model = resolve_seat("frontier")
     brief = tasks.Brief(
@@ -236,15 +241,35 @@ async def begin(
         call["starts"] = starts
     await tasks.start(conn, brief, marker={"sdlc": 1, "call": call, "effect_key": effect_key}, by="valor",
                       via="meet.join")  # fmt: skip
-    where = f"reply_to {reply_to}" + (f", topic_id {topic_id}" if topic_id else "")
     await report(
         conn,
         brief.id,
-        "link",
-        f"The Meet you asked for is open: {url}\nI am joining it now (call session {brief.id}). Post the "
-        f"link in the thread it was asked in ({where}), one line; what the call writes is copied there.",
+        "joining",
+        f"Valor is joining the call (call session {brief.id}); its link comes in a `link` report once Valor "
+        "is in. Post nothing yet.",
     )
     return brief.id
+
+
+async def entered(conn, session_id: str) -> None:
+    """Valor is in the call: `call.joined` and the `link` report, once each,
+    inside the caller's transaction."""
+    found = await (
+        await conn.execute("SELECT 1 FROM events WHERE task_id = %s AND type = 'call.joined'", (session_id,))
+    ).fetchone()
+    if found is not None:
+        return
+    await ledger.append(conn, session_id, "call.joined", {"machine": settings.machine})
+    call = await marker(conn, session_id) or {}
+    asked = call.get("asked_by") or {}
+    where = f"reply_to {asked.get('reply_to')}" + (f", topic_id {asked['topic_id']}" if asked.get("topic_id") else "")
+    await report(
+        conn,
+        session_id,
+        "link",
+        f"Valor is in the Meet: {call.get('url')}\nPost the link in the thread it was asked in ({where}), one "
+        "line; what the call writes is copied there.",
+    )
 
 
 async def report(conn, session_id: str, what: str, text: str, **more: Any) -> str:
@@ -322,21 +347,28 @@ async def end(
         settled = await _settle(conn, session_id, rows)
         dropped = await _leftovers(conn, session_id, rows, stopped)
         call = await marker(conn, session_id) or {}
-        lines = [f"The call {call.get('url')} ended: {reason}."]
         code, thread = call.get("code"), f"reply_to {(call.get('asked_by') or {}).get('reply_to')}"
-        if summary and summary.get("path"):
-            lines.append(
-                f"Gemini's summary of the call is {summary['path']}. Copy it into your workspace under its "
-                f"own name and send it, unchanged, in the thread it was asked in ({thread}) as the "
-                "send's `files`, with at most two lines of text beside it. The recording, transcript and "
-                "notes are in Yudame Tools' meetings on this Mac, which back them up to Drive."
-            )
+        if not any(r["type"] == "call.joined" for r in rows):
+            lines = [f"Valor could not join the Meet {call.get('url')}: {reason}. Do not post its link."]
+        elif summary and summary.get("path"):
+            lines = [
+                f"The call {call.get('url')} ended: {reason}.",
+                (
+                    f"Gemini's summary of the call is {summary['path']}. Copy it into your workspace under "
+                    f"its own name and send it, unchanged, in the thread it was asked in ({thread}) as the "
+                    "send's `files`, with at most two lines of text beside it. The recording, transcript "
+                    "and notes are in Yudame Tools' meetings on this Mac, which back them up to Drive."
+                ),
+            ]
         else:
             why = f"Gemini could not summarise it ({summary['error']})" if summary else "no summary was made"
-            lines.append(
-                f"{why}: say so in the thread it was asked in ({thread}), in one line; write no summary of "
-                f"your own. Its transcript: `valor-record call {code}`."
-            )
+            lines = [
+                f"The call {call.get('url')} ended: {reason}.",
+                (
+                    f"{why}: say so in the thread it was asked in ({thread}), in one line; write no summary "
+                    f"of your own. Its transcript: `valor-record call {code}`."
+                ),
+            ]
         lines += settled
         lines += [
             f'Answered by your worker after the call: on "{a["question"]}": {a["answer"]}' for a in late
@@ -1800,14 +1832,28 @@ class Call:
                 waited += db.RELISTEN_S
 
     async def joined(self) -> str | None:
-        """Through Meet's join screen and lobby; None once in, else why not."""
-        from bridges.meet import SignInNeeded
+        """Through Meet's join screen and lobby; None once in, else why not.
+        A profile Google signed out is signed in first, and a join Google's
+        sign-in stops is tried once more after it, both by Valor itself when
+        its login is in 1Password (`Page.renew`)."""
+        from bridges.meet import Refused, SignInNeeded
 
-        try:
-            await self.page.join()
-        except SignInNeeded as exc:
-            _log(f"call {self.id}: Meet stayed on Google's sign-in at {exc}")
-            return f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run: {SIGN_IN}"
+        url = self.info["url"]
+        again = f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run: {SIGN_IN}"
+        if not profile_ready(self.page.profile) and not await self.page.renew(url):
+            return again
+        for renewed in (False, True):
+            try:
+                await self.page.join()
+                break
+            except SignInNeeded as exc:
+                _log(f"call {self.id}: Meet stayed on Google's sign-in at {exc}")
+                if renewed or not await self.page.renew(url):
+                    return again
+                _log(f"call {self.id}: signed in to Google again from 1Password")
+            except Refused as exc:
+                _log(f"call {self.id}: Meet refused Valor, signed in, at {exc}")
+                return "Meet would not let Valor in"
         start = self.clock()
         while True:
             status = (await self.page.state())["status"]
@@ -1922,6 +1968,8 @@ class Call:
             if why is not None:
                 self.leave(why)
             else:
+                async with await db.connect(self.dsn) as conn, conn.transaction():
+                    await entered(conn, self.id)
                 await self.page.ready()
                 self.store.parent.mkdir(parents=True, exist_ok=True)
                 self.staging = Path(tempfile.mkdtemp(prefix=".valor-call-", dir=self.store.parent))

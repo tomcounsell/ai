@@ -10,11 +10,13 @@ names the thread it was asked in (`reply_to`, Telegram's `topic_id`) and
 `prep`, the asking turn's notes on the topic, read before the call.
 
 Under `meet:<machine>`, one call at a time on this Mac: it fails when the
-Mac's call profile is not signed in (naming the step that signs it in) or
-the Mac is in a call (naming it); otherwise it opens the call session and
-its first report, the link (`core.call.begin`), then starts the call's
-process, `python -m core call SESSION`, detached, and returns the link and
-the session. A failure is reported to the asking session too, so the chat
+Mac's call profile is not signed in and Valor's own Google login is not in
+1Password to sign it in with (`bridges/meet/google.py`), naming the step
+that signs it in, or when the Mac is in a call (naming it); otherwise it
+opens the call session and its first report, that Valor is joining
+(`core.call.begin`), then starts the call's process, `python -m core call
+SESSION`, detached, and returns the session. The link reaches the chat only
+in the call's `link` report, once Valor is in (`core.call.entered`). A failure is reported to the asking session too, so the chat
 hears why. `lookup` finds the session by the effect's key; a Meet made
 before a crash is left unused, its link given to no one.
 """
@@ -28,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from bridges.meet import google
 from core import broker, call, channels, db, tasks
 from core.settings import settings
 
@@ -73,7 +76,8 @@ class MeetJoin:
         'asking message\'s id>", "topic_id": null, "prep": "<your notes on the topic or project, as your '
         'Calls section says: each recommendation with its case>", "starts": null}`, `starts` being an '
         "invited call's start (ISO), from which its waits for others count; Valor joins the call ready "
-        "on that topic, and your next prompt carries its link to post in that thread."
+        "on that topic. Your next prompt says Valor is joining; the link comes only in a `link` report once Valor "
+        "is in, so post it only from that report, and post no link when the call reports it could not join."
     )
 
     def __init__(self, brief: tasks.Brief, dsn: str | None = None, *, create=create_space, start=spawn):
@@ -101,7 +105,7 @@ class MeetJoin:
             lock = f"meet:{settings.machine}"
             await conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock,))
             try:
-                session_id, url = await self._open(conn, action, key)
+                session_id = await self._open(conn, action, key)
             except broker.Failed as exc:
                 async with conn.transaction():
                     await call.to_session(conn, self.brief.chat["channel"], self.brief.chat["chat_id"],
@@ -111,10 +115,10 @@ class MeetJoin:
             finally:
                 await conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
         self.start(session_id)
-        return {"url": url, "session_id": session_id}
+        return {"session_id": session_id}
 
-    async def _open(self, conn, action: broker.Action, key: str) -> tuple[str, str]:
-        if not call.profile_ready():
+    async def _open(self, conn, action: broker.Action, key: str) -> str:
+        if not call.profile_ready() and not google.secret("password"):
             raise broker.Failed(
                 "this Mac's call profile is not signed in to Google; Tom signs it in once, as Valor, at the Mac in Terminal: "
                 + call.SIGN_IN
@@ -135,18 +139,18 @@ class MeetJoin:
             session_id = await call.begin(conn, self.brief, url=url, code=code, reply_to=p.get("reply_to"),
                                           topic_id=p.get("topic_id"), prep=p.get("prep") or "", effect_key=key,
                                           starts=p.get("starts"))  # fmt: skip
-        return session_id, url
+        return session_id
 
     async def lookup(self, action: broker.Action, key: str) -> dict[str, Any] | None:
         async with await db.connect(self.dsn) as conn:
             row = await (
                 await conn.execute(
-                    "SELECT task_id, payload->'call'->>'url' FROM events WHERE type = 'task.started' "
+                    "SELECT task_id FROM events WHERE type = 'task.started' "
                     "AND payload->>'effect_key' = %s",
                     (key,),
                 )
             ).fetchone()
-        return {"url": row[1], "session_id": row[0]} if row else None
+        return {"session_id": row[0]} if row else None
 
 
 def performers(brief: tasks.Brief, dsn: str | None = None) -> list:

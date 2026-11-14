@@ -1,7 +1,8 @@
 """Google Meet's page: Valor in a call as itself (docs/plans/meet.md).
 
 Chrome, through Playwright, on this Mac's call profile
-(`settings.meet_profile`, signed in once as Valor's own Google account),
+(`settings.meet_profile`, signed in as Valor's own Google account, by Tom
+at the Mac or by Valor with its login in 1Password, `google.py`),
 headless and muted, camera off. Attendee's page payloads (`vendor/`, ELv2,
 at Attendee 5acfb99, unmodified, with protobuf.js and pako) read the call:
 each person's audio apart, the call's chat, and who is in it; they give
@@ -28,7 +29,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import numpy as np
 import psutil
@@ -54,9 +55,15 @@ NAVIGATIONS = 3
 # Google's own redirects through accounts.google.com pass within fewer.
 SETTLE_TRIES = 6
 MEET_HOME = "https://meet.google.com/"
-# A shown button whose words end with one of `labels` (an icon's name comes
-# first), clicked; else "Other ways to join" opened, for the next try.
+# Google's sign-in for the profile's account, continuing to a page.
+SIGN_IN_AT = "https://accounts.google.com/ServiceLogin?continue="
+# What `CLICK_JOIN` returns for Meet's "You can't join this video call".
+CANT_JOIN = "can't join"
+# `CANT_JOIN` on Meet's refusal; else a shown button whose words end with one
+# of `labels` (an icon's name comes first), clicked; else "Other ways to
+# join" opened, for the next try.
 CLICK_JOIN = """(labels) => {
+    if (/You can.t join this video call/.test(document.body.innerText)) return "can't join";
     const shown = [...document.querySelectorAll('button')].filter((b) => b.getClientRects().length);
     for (const label of labels) {
         const button = shown.find((b) => b.innerText.trim().endsWith(label));
@@ -163,6 +170,11 @@ class SignInNeeded(RuntimeError):
     """Meet sent the call's Chrome to Google's sign-in and it stayed there:
     "Verify it's you" for an account whose cookies are all still in the
     profile (the Cowboy, 2026-11-13). Only someone at the Mac clears it."""
+
+
+class Refused(RuntimeError):
+    """Meet said "You can't join this video call" to a profile Google's
+    sign-in lets through: Meet's own refusal, no sign-in to fix."""
 
 
 def on_sign_in(url: str) -> bool:
@@ -278,6 +290,12 @@ class Page:
         signing_in = 0
         for _ in range(int(timeout_s * 2)):
             clicked = await self.evaluate(CLICK_JOIN, list(JOIN))
+            if clicked == CANT_JOIN:
+                # A profile Google signed out (the Captain, 2026-11-13): its
+                # sign-in for this meeting says which.
+                await self.page.goto(SIGN_IN_AT + quote(self.page.url, safe=""), wait_until="domcontentloaded")
+                at = await self.where()
+                raise SignInNeeded(at) if on_sign_in(at) else Refused(at)
             if clicked:
                 return clicked
             signing_in = signing_in + 1 if on_sign_in(self.page.url) else 0
@@ -285,6 +303,29 @@ class Page:
                 raise SignInNeeded(self.page.url)
             await asyncio.sleep(0.5)
         raise TimeoutError(f"Meet showed no join button at {self.page.url}")
+
+    async def where(self, timeout_s: float = 30) -> str:
+        """The URL the page stayed on for `SETTLE_TRIES`, or its last."""
+        last, same = None, 0
+        for _ in range(int(timeout_s * 2)):
+            now = self.page.url
+            same = same + 1 if now == last else 1
+            if same >= SETTLE_TRIES:
+                break
+            last = now
+            await asyncio.sleep(0.5)
+        return self.page.url
+
+    async def renew(self, back: str) -> bool:
+        """Google's sign-in for `back` passed with Valor's own login
+        (`google.renew`), then `back` opened; False, the page untouched,
+        when that login is not in 1Password, or when Google kept it out."""
+        from bridges.meet import google
+
+        if not await google.renew(self.page, SIGN_IN_AT + quote(back, safe="")):
+            return False
+        await self.page.goto(back, wait_until="domcontentloaded")
+        return True
 
     async def ready(self) -> None:
         """Once in the call: the payloads start reading it and open the chat."""
@@ -320,23 +361,19 @@ class Page:
             await self._playwright.stop()
 
 
-async def settled(profile: str, url: str = MEET_HOME, timeout_s: float = 30) -> str:
+async def settled(profile: str, url: str = MEET_HOME, timeout_s: float = 30, *, renew: bool = False) -> str:
     """Where Meet settles for `profile`, in a headless Chrome started as a
-    call's is: the URL a page stayed on for `SETTLE_TRIES`, or the last
-    one. On `meet.google.com`, the profile can join calls; on a sign-in
-    page, someone at the Mac has to sign in (`python -m core meet-sign-in`)."""
+    call's is (`Page.where`). On `meet.google.com`, the profile can join
+    calls; elsewhere it needs signing in, which with `renew` Valor does
+    itself first, on that page, when its login is in 1Password
+    (`Page.renew`); else someone at the Mac (`python -m core meet-sign-in`)."""
     page = Page(profile)
     try:
         await page.launch()
         await page.page.goto(url, wait_until="domcontentloaded")
-        last, same = None, 0
-        for _ in range(int(timeout_s * 2)):
-            now = page.page.url
-            same = same + 1 if now == last else 1
-            if same >= SETTLE_TRIES:
-                break
-            last = now
-            await asyncio.sleep(0.5)
-        return page.page.url
+        at = await page.where(timeout_s)
+        if renew and not on_meet(at) and await page.renew(url):
+            at = await page.where(timeout_s)
+        return at
     finally:
         await page.close()

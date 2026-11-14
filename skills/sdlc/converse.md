@@ -194,8 +194,12 @@ only decisions the people in the call hold, each with what is being
 decided, why now and what it changes; your own work (a Sheet row, a
 ranking, a draft) is done before the call and listed as done, and a
 blocker on someone else is status, with who and since when. Say
-nothing yet: your next prompt brings a `call` report with the link. Post
-that link in that thread, one line. During the call, everything Valor
+nothing yet: your next prompt brings a `call` report that Valor is
+joining, with no link; the link comes only in a `link` report, sent once
+Valor is in the call. Post the link only from that report, in that thread,
+one line, and never from any other report: one saying Valor could not
+join gets one line saying why, with no link (Tom, 2026-11-13: "don't share
+a meet link if it doesn't work!"). During the call, everything Valor
 writes in the call's chat is copied to that thread for you, so add
 nothing to it then. When the call ends, its report says what it settled
 and where Gemini's summary of the call is: copy that file into this
@@ -227,7 +231,7 @@ that post sent and no call yet for its link (a reply to the post cancels
 the wake, so it may be the reply's turn) requests `meet.join`: target the
 link, `reply_to` the post's message id, `prep` from `call-prep.md`, and
 `starts` the start from the report, so the call waits for latecomers from
-the start. From then on it is a call as above: the link report needs no
+the start. From then on it is a call as above: the `link` report needs no
 second post. When the report says it matched no project, or two, join
 with this chat's own context and ask Tom in the same post which project it
 is for.

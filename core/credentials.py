@@ -358,9 +358,14 @@ def copy_keys(
 
 
 def op_read(ref: str, vault_env: str | Path) -> str | None:
-    """A secret from 1Password by its `op://` reference, read with `op` on
-    the service account (`OP_SERVICE_ACCOUNT_TOKEN`, from the vault `.env`
-    when the environment lacks it); None when it cannot be read."""
+    """A secret from 1Password by its `op://` reference (`op`)."""
+    return op(["read", ref], vault_env)
+
+
+def op(args: list[str], vault_env: str | Path) -> str | None:
+    """`op` with `args`, on the service account (`OP_SERVICE_ACCOUNT_TOKEN`,
+    from the vault `.env` when the environment lacks it); what it printed,
+    None when it failed or printed nothing."""
     env = dict(os.environ)
     if not env.get("OP_SERVICE_ACCOUNT_TOKEN"):
         try:
@@ -370,9 +375,7 @@ def op_read(ref: str, vault_env: str | Path) -> str | None:
         if token:
             env["OP_SERVICE_ACCOUNT_TOKEN"] = token
     try:
-        got = subprocess.run(
-            ["op", "read", ref], env=env, capture_output=True, text=True, timeout=60, check=False
-        )
+        got = subprocess.run(["op", *args], env=env, capture_output=True, text=True, timeout=60, check=False)
     except OSError, subprocess.TimeoutExpired:
         return None
     return (got.stdout.strip() or None) if got.returncode == 0 else None
