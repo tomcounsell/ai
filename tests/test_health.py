@@ -53,6 +53,13 @@ def test_a_library_that_will_not_load_or_a_lost_connection_is_curable_and_starti
     )
     assert not health.curable(psycopg.errors.CannotConnectNow("the database system is starting up"))
     assert not health.curable(psycopg.OperationalError("FATAL:  the database system is starting up"))
+    # A server that answered: `health --fix` run with another cluster's settings restarted
+    # the Cowboy's machine database on 2026-11-15.
+    assert not health.curable(psycopg.OperationalError('connection failed: connection to server at "127.0.0.1", '
+                                                       'port 5444 failed: FATAL:  database "valor" does not exist'))  # fmt: skip
+    assert not health.curable(
+        psycopg.OperationalError('FATAL:  password authentication failed for user "app"')
+    )
     assert not health.curable(psycopg.errors.InternalError_("some other internal error"))
     assert not health.curable(psycopg.errors.UniqueViolation("duplicate key"))
     assert not health.curable(psycopg.errors.SyntaxError("syntax error"))
@@ -691,3 +698,109 @@ def test_a_running_turn_survives_the_database_dropping_every_session_and_a_stop_
     ended, finished, stopped = run(go())
     assert ended["outcome"] == "done" and finished
     assert stopped["outcome"] == "stopped"
+
+
+# -- Tailscale is reopened when it is quit or stopped -----------------------------------
+
+
+@pytest.fixture
+def tailscale_app(tmp_path, monkeypatch):
+    """An installed Tailscale.app whose process and state the test sets, and
+    every command run recorded."""
+    app = tmp_path / "Tailscale.app"
+    app.mkdir()
+    monkeypatch.setattr(health, "TAILSCALE_APP", app)
+    monkeypatch.setattr(health, "settings", dataclasses.replace(settings, log_dir=str(tmp_path / "logs")))
+    mac = SimpleNamespace(running=True, state="Running", calls=[], hangs=False, app=app)
+
+    def fake(argv, **kw):
+        mac.calls.append([Path(argv[0]).name, *argv[1:]])
+        if argv[0] == health.PGREP:
+            return subprocess.CompletedProcess(argv, 0 if mac.running else 1)
+        if argv[1:] == ["status", "--json"]:
+            if mac.hangs:
+                raise subprocess.TimeoutExpired(argv, kw["timeout"])
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"BackendState": mac.state}), "")
+        if argv[0] == health.OPEN:
+            mac.running, mac.state = True, "Stopped"  # it reopens with the tailnet off
+        elif argv[1:] == ["up"]:
+            mac.state = "Running"
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(health.subprocess, "run", fake)
+    return mac
+
+
+def acts(mac) -> list[list[str]]:
+    return [c for c in mac.calls if c[0] != "pgrep" and c[1:] != ["status", "--json"]]
+
+
+def test_the_tailscale_state_is_none_when_not_installed_else_the_apps_own(
+    tailscale_app, tmp_path, monkeypatch
+):
+    assert health.tailscale() == "Running"
+    tailscale_app.state = "NeedsLogin"
+    assert health.tailscale() == "NeedsLogin"
+    tailscale_app.hangs = True
+    assert health.tailscale() == "unreadable"
+    tailscale_app.running = False
+    assert health.tailscale() == "not running"
+    monkeypatch.setattr(health, "TAILSCALE_APP", tmp_path / "nowhere.app")
+    assert health.tailscale() is None and acts(tailscale_app) == []
+
+
+def test_a_quit_tailscale_is_reopened_after_a_minute_then_brought_up_and_each_action_is_spaced(
+    tailscale_app, monkeypatch
+):
+    clock = [1000.0]
+    monkeypatch.setattr(health.time, "monotonic", lambda: clock[0])
+    tailscale_app.running = False
+    net = health.Tailnet()
+
+    def at(t):
+        clock[0] = 1000.0 + t
+        return run(net.check())
+
+    assert at(0) == "not running" and acts(tailscale_app) == []  # a self-update relaunch passes
+    assert at(10) is None  # checked at most every TAILNET_EVERY_S
+    assert at(30) == "not running" and acts(tailscale_app) == []
+    assert at(60) == "not running"
+    assert acts(tailscale_app) == [["open", "-a", str(tailscale_app.app)]]
+    # It came back Stopped: its own `up`, at the next check, not ten minutes on.
+    assert at(90) == "Stopped" and acts(tailscale_app)[1:] == [["Tailscale", "up"]]
+    assert at(120) == "Running" and net.down_since is None
+    # Quit again within ten minutes: the reopen is spaced.
+    tailscale_app.running = False
+    for t in (150, 180, 210, 240):
+        at(t)
+    assert len(acts(tailscale_app)) == 2
+
+
+def test_a_tailscale_waiting_for_a_sign_in_is_left_to_a_person(tailscale_app, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(health.time, "monotonic", lambda: clock[0])
+    tailscale_app.state = "NeedsLogin"
+    net = health.Tailnet()
+    for t in range(0, 600, 30):
+        clock[0] = t
+        assert run(net.check()) == "NeedsLogin"
+    assert acts(tailscale_app) == [] and health.reopen_tailscale("NeedsMachineAuth") == "needs a person"
+
+
+def test_health_fix_reopens_tailscale_at_once_and_shares_the_spacing_with_the_kernel(
+    tailscale_app, monkeypatch, tmp_path
+):
+    async def probe(dsn=None):
+        return None
+
+    monkeypatch.setattr(health, "probe", probe)
+    monkeypatch.setattr(health, "services", lambda agents: {})
+    tailscale_app.running = False
+    out = run(health.report(agents=tmp_path))
+    assert out["tailscale"] == "not running" and out["healthy"] and acts(tailscale_app) == []
+    out = run(health.report(fix=True, agents=tmp_path))
+    assert out["fixed"] == {"tailscale": "opened"} and len(acts(tailscale_app)) == 1
+    tailscale_app.running = False
+    assert health.reopen_tailscale("not running") == "spaced" and len(acts(tailscale_app)) == 1
+    tailscale_app.running, tailscale_app.state = True, "Running"
+    assert run(health.report(fix=True, agents=tmp_path))["fixed"] == {}

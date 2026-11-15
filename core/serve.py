@@ -1410,6 +1410,7 @@ async def serve(
     # Stamped like a bridge's lock connection, so the dashboard names the commit it runs.
     name = f"valor-kernel@{started or bridge.NO_HEAD}"
     mend = health.Mend(dsn)
+    tailnet = health.Tailnet()
     conn = listener = None
     owned_gateway = gateway is None
     kernel = None
@@ -1431,6 +1432,7 @@ async def serve(
                         await c.close()
                 conn = listener = None
                 await mend.check()
+                await tailnet.check()
                 await asyncio.sleep(settings.serve_tick_s)
         await _outage_ended(conn, mend)
         print(f"kernel recovered: {json.dumps({k: len(v) for k, v in done.items()})}", flush=True)
@@ -1483,6 +1485,7 @@ async def serve(
                 # works is a broken database too (`health.probe`).
                 if not await mend.check():
                     lost = lost or conn.closed
+                await tailnet.check()
                 try:
                     await asyncio.wait_for(kernel.wake.wait(), settings.serve_tick_s)
                 except TimeoutError:

@@ -165,6 +165,8 @@ def no_launch_agents(tmp_path_factory, monkeypatch):
 
     monkeypatch.setattr(permissions, "AGENTS", tmp_path_factory.getbasetemp() / "LaunchAgents")
     monkeypatch.setattr(health, "AGENTS", tmp_path_factory.getbasetemp() / "LaunchAgents")
+    # Nor this Mac's Tailscale.app: none is installed unless the test places one.
+    monkeypatch.setattr(health, "TAILSCALE_APP", tmp_path_factory.getbasetemp() / "Tailscale.app")
 
 
 @pytest.fixture(autouse=True)

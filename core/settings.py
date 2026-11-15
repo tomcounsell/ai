@@ -24,7 +24,8 @@ from core import channels
 VALOR_PLUGIN = str(Path(__file__).resolve().parent.parent / "skills" / "valor")
 # The real project specs: private, in the iCloud folder every Mac syncs, not
 # in the public repository (docs/plans/private-projects.md).
-PRIVATE_PROJECTS = str(Path.home() / "Desktop" / "Valor" / "projects")
+VALOR_FOLDER = Path.home() / "Desktop" / "Valor"
+PRIVATE_PROJECTS = str(VALOR_FOLDER / "projects")
 
 
 def _env(name: str, default: str) -> str:
@@ -488,6 +489,9 @@ class Settings:
     # The Macs this one watches over ssh (`routines/watch`), comma-separated
     # hostnames: on the Cowboy the other three, on the Captain the Cowboy.
     watch: tuple[str, ...] = field(default_factory=lambda: _addresses(_env("VALOR_WATCH", "")))
+    # Where the update routine copies the Valor folder each night, a folder
+    # in a git vault (`core/snapshot.py`); set on one Mac, the Cowboy.
+    snapshot_dir: str | None = field(default_factory=lambda: _env("VALOR_SNAPSHOT_DIR", "") or None)
     # Where operator notices go: the channel, and the chat on it (the
     # Telegram group "Valor rebuild", by its -100... id; `local` for the
     # local chat page; `<team id>/<channel id>` on Slack).

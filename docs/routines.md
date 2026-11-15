@@ -38,7 +38,8 @@ Postgres (`VALOR_PG*`, `VALOR_DB*`), and the three
 that must match the kernel's so a routine's turns share Tom's turn slots and
 resolve the same paths (`VALOR_MACHINE`, `VALOR_WORK`, `VALOR_PROJECTS`), and
 Tom's addresses (`VALOR_OPERATOR_EMAIL`), which match no project's invites,
-the Macs `watch` reads (`VALOR_WATCH`) and the operator chat its reports go
+the Macs `watch` reads (`VALOR_WATCH`), where `update` snapshots the Valor
+folder (`VALOR_SNAPSHOT_DIR`), and the operator chat its reports go
 to (`VALOR_OPERATOR_CHANNEL`, `VALOR_OPERATOR_CHAT`, `VALOR_OPERATOR_SLACK_IDS`). It
 names no script and carries no secret. launchd starts a job missed during sleep once
 on wake and coalesces several missed intervals into one run, so a laptop
@@ -162,7 +163,10 @@ The six routines the kernel holds:
   `python -m core update` does, and starts no task. It also starts `uv cache prune`
   on the Mac's uv cache and leaves it running, since the prune waits while
   any task's uv uses the cache, and tells Tom once a day when the Mac's disk is low and once a
-  week while its call profile is not signed in. Having no run task, the
+  week while its call profile is not signed in. Where `VALOR_SNAPSHOT_DIR`
+  is set (the Cowboy) it also commits the night's copy of the Valor folder
+  into the work vault ([machine.md](machine.md), The Valor folder's
+  history). Having no run task, the
   expiry sweep lists it for Tom every ninety days.
 
 ## Metered spending and ceiling

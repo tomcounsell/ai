@@ -262,6 +262,28 @@ scheduler, supervisor, or watchdog on the machine.
   writes `~/.config/brew-nightly/hold-<host>` on both while it is broken,
   runs `health --fix` at the second broken watch, and reports only what
   stays broken.
+- **Tailscale, reopened** (`core/health.py`, `Tailnet`): it is Valor's
+  only route to the other Macs, and on 2026-10-28 the Captain fell off the
+  tailnet with nobody at it. At most every 30 s on its wake, the kernel reads
+  Tailscale.app's state (`pgrep`, then the app's own CLI's
+  `status --json`); quit, unreadable or not connected for 60 s, it is
+  reopened (`open -a Tailscale`), and `Stopped` is brought up (the app's
+  `up`). Each action is spaced ten minutes by its own stamp in the log
+  directory, which `health --fix` shares; a Mac waiting for a sign-in is
+  left to a person, and one with no Tailscale.app is not touched. A quit
+  app is back in about 90 s. It replaced the 04:00 reopen step in the
+  vault's Homebrew script.
+- **The Valor folder's history** (`core/snapshot.py`): the `update`
+  routine on the Mac whose job sets `VALOR_SNAPSHOT_DIR` (the Cowboy:
+  `~/work-vault/_valor-desktop_`) copies `~/Desktop/Valor` into that
+  folder of Tom's work vault each night, leaving out what
+  `~/Desktop/Valor/snapshot-exclude.txt` names (secrets, dumps and
+  exports, media) and files of 50 MB or more, commits that folder alone
+  with each changed path, and pushes. It holds the vault sync job's lock
+  while it copies and skips a vault off `main` or mid-rebase, as that job
+  does; a refused push is left to that job. iCloud stays the live copy;
+  nothing reads the vault's. A night that commits nothing for a reason
+  tells Tom once.
 - **LaunchAgents with `StartCalendarInterval`**: routines. Each firing
   runs `python -m core routine NAME`, which starts or continues a run that
   is a child of the routine's objective, so a routine's turn takes the turn

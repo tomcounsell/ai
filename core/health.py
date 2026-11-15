@@ -9,7 +9,9 @@ answering, so only a new connection that loads plpgsql sees it.
 `curable` says whether a restart of the server cures a failure: a library
 that will not load (SQLSTATE 58P01, or XX000 "could not load library"), or
 a refused or lost connection. "The database system is starting up" (57P03)
-is waited out, never restarted.
+is waited out, never restarted, and a server that answers a new connection
+with any other refusal (a database that does not exist, a password it will
+not take) is working: a restart cures none of them.
 
 `restart_postgres` stops the cluster in `settings.pg_data_dir` with a fast
 stop (a smart stop waits forever on the kernel's and the bridges'
@@ -26,6 +28,18 @@ over ssh.
 `Mend` is the kernel's clock: a curable probe failure that has lasted
 `DOWN_S` restarts the server.
 
+`tailscale` is this Mac's Tailscale.app: None when it is not installed,
+`not running`, or the app's own `BackendState` (`unreadable` when its CLI
+does not answer). Tailscale is Valor's only route to the other Macs; on
+2026-10-28 the Captain fell off the tailnet and nobody was at it.
+`reopen_tailscale` opens the app, or runs its `up` when it is `Stopped`;
+it leaves `NeedsLogin` and `NeedsMachineAuth` to a person. Each action is
+spaced `SPACING_S` by its own stamp in `settings.log_dir`, so an app that
+reopens `Stopped` is brought up at the next check, not ten minutes later.
+`Tailnet` is the kernel's clock for it, as `Mend` is for the database: a
+down state that has lasted `DOWN_S` (Tailscale's own self-update relaunch
+passes inside it) is acted on, checked at most every `TAILNET_EVERY_S`.
+
 `services` lists this Mac's launchd services (a loaded `com.valor.*` job
 whose plist keeps it alive) with each one's pid, None when it is not
 running; `report` is `python -m core health`'s JSON: the probe, the
@@ -33,7 +47,9 @@ services, free disk.
 """
 
 import asyncio
+import contextlib
 import fcntl
+import json
 import os
 import plistlib
 import shutil
@@ -53,6 +69,12 @@ STOP_TIMEOUT_S = 60
 START_TIMEOUT_S = 120
 PROBE = "DO $$BEGIN END$$"
 AGENTS = Path.home() / "Library/LaunchAgents"
+TAILSCALE_APP = Path("/Applications/Tailscale.app")
+TAILSCALE_STATUS_TIMEOUT_S = 10
+TAILNET_EVERY_S = 30.0
+NEEDS_PERSON = ("NeedsLogin", "NeedsMachineAuth")
+PGREP = "/usr/bin/pgrep"
+OPEN = "/usr/bin/open"
 
 
 async def probe(dsn: str | None = None) -> Exception | None:
@@ -75,13 +97,26 @@ def curable(exc: BaseException) -> bool:
     if exc.sqlstate in ("58P01", "XX000"):
         return "could not load library" in text
     if exc.sqlstate is None and isinstance(exc, psycopg.OperationalError):
-        return True  # refused, or lost: no server answered
+        return "FATAL:" not in text  # refused, or lost: no server answered
     return exc.sqlstate in ("57P01", "57P02")  # the server ended the session
 
 
 def _stamp(data_dir: str) -> Path:
     d = Path(data_dir)
     return d.with_name(f"{d.name}.valor-restart")
+
+
+@contextlib.contextmanager
+def _spaced(stamp: Path):
+    """Under an exclusive `flock` on `stamp`: True, and the stamp written,
+    when nothing was done within `SPACING_S`; else False."""
+    with open(stamp, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        if time.time() - stamp.stat().st_mtime < SPACING_S and stamp.stat().st_size:
+            yield False
+            return
+        stamp.write_text(f"{time.time():.0f}\n")
+        yield True
 
 
 def _job(data_dir: str, agents: Path = AGENTS) -> tuple[str, Path] | None:
@@ -116,12 +151,9 @@ def restart_postgres(data_dir: str | None = None, pg_bin: str | None = None, age
     if found is None:
         return "no job"
     label, plist = found
-    stamp = _stamp(data_dir)
-    with open(stamp, "a") as held:
-        fcntl.flock(held, fcntl.LOCK_EX)
-        if time.time() - stamp.stat().st_mtime < SPACING_S and stamp.stat().st_size:
+    with _spaced(_stamp(data_dir)) as due:
+        if not due:
             return "spaced"
-        stamp.write_text(f"{time.time():.0f}\n")
         if (Path(data_dir) / "postmaster.pid").exists():
             for mode in ("fast", "immediate"):
                 stopped = subprocess.run(
@@ -183,6 +215,71 @@ class Mend:
         return ended
 
 
+def tailscale() -> str | None:
+    """This Mac's Tailscale.app state (module docstring)."""
+    if not TAILSCALE_APP.is_dir():
+        return None
+    if subprocess.run([PGREP, "-xq", "Tailscale"], check=False).returncode != 0:
+        return "not running"
+    try:
+        status = subprocess.run(
+            [str(TAILSCALE_APP / "Contents/MacOS/Tailscale"), "status", "--json"],
+            capture_output=True, text=True, timeout=TAILSCALE_STATUS_TIMEOUT_S, check=False,
+        )  # fmt: skip
+        return str(json.loads(status.stdout)["BackendState"])
+    except OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError:
+        return "unreadable"
+
+
+def reopen_tailscale(state: str, stamps: Path | None = None) -> str:
+    """Act on a down Tailscale (module docstring). Returns what was done:
+    `opened`, `up`, `spaced`, `needs a person`, or why it failed."""
+    if state in NEEDS_PERSON:
+        return "needs a person"
+    if state == "Stopped":
+        action, argv = "up", [str(TAILSCALE_APP / "Contents/MacOS/Tailscale"), "up"]
+    else:
+        action, argv = "opened", [OPEN, "-a", str(TAILSCALE_APP)]
+    stamps = Path(stamps or settings.log_dir)
+    stamps.mkdir(parents=True, exist_ok=True)
+    with _spaced(stamps / f"tailscale-{action}.valor-reopen") as due:
+        if not due:
+            return "spaced"
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=START_TIMEOUT_S, check=False)
+        except subprocess.TimeoutExpired:
+            return f"{action} timed out"
+        if done.returncode != 0:
+            return f"{action} exited {done.returncode}: {done.stderr.strip()[-200:]}"
+    return action
+
+
+class Tailnet:
+    """The kernel's Tailscale clock (module docstring)."""
+
+    def __init__(self):
+        self.down_since: float | None = None
+        self.checked: float | None = None
+
+    async def check(self) -> str | None:
+        """The state, when one was read; acts on one down for `DOWN_S`."""
+        now = time.monotonic()
+        if self.checked is not None and now - self.checked < TAILNET_EVERY_S:
+            return None
+        self.checked = now
+        state = await asyncio.to_thread(tailscale)
+        if state in (None, "Running", *NEEDS_PERSON):
+            self.down_since = None
+            return state
+        if self.down_since is None:
+            self.down_since = now
+        if now - self.down_since >= DOWN_S:
+            done = await asyncio.to_thread(reopen_tailscale, state)
+            if done != "spaced":
+                print(f"tailscale {state}: {done}", flush=True)
+        return state
+
+
 def services(agents: Path = AGENTS) -> dict[str, int | None]:
     """Each loaded `com.valor.*` job whose plist keeps it alive, with its pid."""
     listed = _launchctl("list")
@@ -207,16 +304,19 @@ def kick(label: str) -> str | None:
 
 
 async def report(dsn: str | None = None, *, fix: bool = False, agents: Path = AGENTS) -> dict[str, Any]:
-    """`python -m core health [--fix]`: the probe, the services, free disk.
-    `--fix` restarts a curably failing server and starts each service with
-    no pid; it touches no running process."""
+    """`python -m core health [--fix]`: the probe, the services, Tailscale,
+    free disk. `--fix` restarts a curably failing server, starts each
+    service with no pid, and reopens a down Tailscale; it touches no
+    running process. Tailscale is not part of `healthy`."""
     failed = await probe(dsn)
     running = await asyncio.to_thread(services, agents)
+    tailnet = await asyncio.to_thread(tailscale)
     out: dict[str, Any] = {
         "machine": settings.machine,
         "probe": None if failed is None else str(failed).strip().splitlines()[0][:300],
         "curable": failed is not None and curable(failed),
         "services": running,
+        "tailscale": tailnet,
         "free_gb": round(shutil.disk_usage(Path.home()).free / 1e9, 1),
     }
     if fix:
@@ -226,6 +326,8 @@ async def report(dsn: str | None = None, *, fix: bool = False, agents: Path = AG
         for label, pid in running.items():
             if pid is None:
                 fixed[label] = await asyncio.to_thread(kick, label) or "started"
+        if tailnet not in (None, "Running"):
+            fixed["tailscale"] = await asyncio.to_thread(reopen_tailscale, tailnet)
         out["fixed"] = fixed
     out["healthy"] = failed is None and all(pid is not None for pid in running.values())
     return out

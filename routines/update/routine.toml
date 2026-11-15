@@ -6,9 +6,10 @@ mission_item = "1; Tom's ask (rule 2)"
 need = [
   "Tom, 2026-10-20: \"an overnight auto rollout would also be nice\"; the old system's com.valor.update",
   "Tom, 2026-10-22: \"improve a nightly /update run to also do a cleanup as well, purging anything old and keeping an eye on disk space\"",
+  "Tom, 2026-11-15 (Telegram DM 11867): history for the iCloud Valor folder in the work vault, keeping its auto-sync; the Oct 28 edit to its Homebrew script left no record",
 ]
 created = 2026-10-20
-instruction = "Roll this Mac's kernel to the tip of its branch overnight: one update request, which the resident kernel rolls; then prune uv's cache and tell Tom when the disk is low."
+instruction = "Roll this Mac's kernel to the tip of its branch overnight: one update request, which the resident kernel rolls; then prune uv's cache and tell Tom when the disk is low; where VALOR_SNAPSHOT_DIR is set, commit the night's copy of the Valor folder into the work vault."
 
 [schedule]
 hour = 3

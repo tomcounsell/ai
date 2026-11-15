@@ -58,6 +58,8 @@ PLIST_ENV = (
     "VALOR_OPERATOR_EMAIL",
     # The Macs `watch` watches, and where its reports go.
     "VALOR_WATCH",
+    # Where the update routine snapshots the Valor folder (core/snapshot.py).
+    "VALOR_SNAPSHOT_DIR",
     "VALOR_OPERATOR_CHANNEL",
     "VALOR_OPERATOR_CHAT",
     "VALOR_OPERATOR_SLACK_IDS",

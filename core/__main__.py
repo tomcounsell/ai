@@ -220,6 +220,7 @@ from core.settings import (
     JEV_URL,
     OPEN_WEIGHT_KEY,
     OPEN_WEIGHT_URL,
+    VALOR_FOLDER,
     resolve_model,
     resolve_seat,
     settings,
@@ -738,7 +739,9 @@ async def update_runner(ctx: routines.Context) -> routines.Ran:
     Captain, 2026-10-22), left to run on its own, since `uv cache prune`
     waits for every uv process using the cache (tasks share it); tells Tom
     once a day when this Mac's disk is low, and once a week while its call profile is not signed in (the Captain was first
-    asked mid-call, 2026-11-02)."""
+    asked mid-call, 2026-11-02). On the Mac with `snapshot_dir` it copies the
+    Valor folder into the vault (`core/snapshot.py`) and tells Tom once a day
+    when that commits nothing for a reason."""
     request_id = await intake.request_update(ctx.conn, by="routine", via="routine")
     await asyncio.to_thread(subprocess.Popen, [settings.uv, "cache", "prune"], stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)  # fmt: skip
@@ -765,9 +768,24 @@ async def update_runner(ctx: routines.Context) -> routines.Ran:
             f"Google as Valor, once, at that Mac: {call.SIGN_IN}. The Chrome window may be left open; "
             "the next call quits it.",
         )
-    return routines.Ran(
-        None, "started", f"update {request_id} requested; uv cache prune started; {free:.0f} GB free"
-    )
+    summary = f"update {request_id} requested; uv cache prune started; {free:.0f} GB free"
+    if settings.snapshot_dir:
+        from core import snapshot
+
+        try:
+            summary += "; snapshot " + await asyncio.to_thread(
+                snapshot.run, VALOR_FOLDER, Path(settings.snapshot_dir), ctx.now.astimezone().date()
+            )
+        except snapshot.Failed as exc:
+            summary += f"; snapshot failed: {exc}"
+            await notices.request(
+                ctx.conn,
+                intake.UPDATES,
+                kind="rollout",
+                about_key=f"snapshot:{ctx.now:%Y-%m-%d}",
+                text=f"Tonight's copy of the Valor folder into the work vault committed nothing: {exc}",
+            )
+    return routines.Ran(None, "started", summary)
 
 
 # How long `update --wait` waits for its request to end or fail.

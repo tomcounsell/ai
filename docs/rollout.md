@@ -224,7 +224,16 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    (`yudame/brew-status`) ran it from 2026-10-28 morning and was removed
    from all four Macs that day (Tom, Telegram 11762); Studio Tools'
    Homebrew Updates replaces this job once it is deployed
-   (yudame/studio-tools#2).
+   (yudame/studio-tools#2). Tailscale is reopened by the kernel, not by
+   this job (docs/machine.md, Tailscale, reopened).
+   On the Cowboy only, the update routine's job is printed with
+   `VALOR_SNAPSHOT_DIR=$HOME/work-vault/_valor-desktop_` (`cd ~/src/ai &&
+   VALOR_SNAPSHOT_DIR=... .venv/bin/python -m core routine update --plist >
+   ~/Library/LaunchAgents/com.valor.routine.update.plist`, keeping the
+   job's other settings, then bootout and bootstrap), beside the work
+   vault's clone at `~/work-vault`; what it leaves out is
+   `~/Desktop/Valor/snapshot-exclude.txt`, edited in the folder. Without
+   that list nothing is copied.
    Meet calls (docs/plans/meet.md) join from their own Chrome profile,
    `~/Library/Application Support/Valor/meet-chrome`, which Valor signs in
    itself, on its first call or at `cd ~/src/ai && .venv/bin/python -m
