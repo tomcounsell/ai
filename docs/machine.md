@@ -244,7 +244,8 @@ scheduler, supervisor, or watchdog on the machine.
   failed every new backend for hours without one. The kernel opens a new
   connection at start and each wake and runs a plpgsql block; one that
   fails with what a restart cures (a library that will not load, a
-  refused or lost connection; never "starting up") for 60 s gets
+  refused or lost connection; never "starting up", nor a server that
+  answers with a refusal, such as an unknown database or password) for 60 s gets
   `pg_ctl -m fast stop` (immediate when that fails) and `launchctl
   kickstart` of the cluster's job, spaced ten minutes by a stamp beside the
   data directory under `flock`, which `python -m core health --fix` shares.

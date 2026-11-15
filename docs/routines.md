@@ -152,7 +152,8 @@ The six routines the kernel holds:
   that hold on both, so neither takes the nightly Homebrew upgrade (the
   `nightly.hold` guard), and when the target was already broken at the
   last run it runs `health --fix` there, which restarts a curably failing
-  database and starts services that are not running, killing nothing.
+  database, starts services that are not running, and reopens a down
+  Tailscale, killing nothing.
   Unreachable holds nothing. A row (`watch.held`, `fixed`, `failed`,
   `unreachable`, `healthy`) is written only when a target's state changes.
   A fix that worked is only recorded; a target still broken after its fix,
