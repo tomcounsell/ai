@@ -51,8 +51,19 @@ data changes shape.
    - A Gemini error or timeout never fails or delays a judgement Jev answered.
    - Each attempt on a row keeps its per-question `answers` (label, p_proceed, decision), so
      Jev's lean on an abstained question is recorded beside Gemini's answer.
-   - A process that exits with a shadow call in flight leaves its `gateway.opened` row open,
-     and the existing holder recovery charges it at its estimate. No new mechanism is added.
+   - `judgement.shadowed` goes in `ledger.QUIET`. A shadow row can land after a
+     `step.failed` (Gemini has up to 10 s). If it were not quiet it would become the
+     latest row, `router.retry_due` and `tasks.failed_step` would read false, the task
+     would never be retried, the resident loop would wake, and the task would move in
+     the overlap site's open-task ordering. Because the shadow task copies the step's
+     context, its row id lands in the finished step's `ledger.WRITTEN` set; that is
+     harmless once the row is quiet.
+   - **Drain.** `JudgementPort.drain()` awaits every held shadow task, bounded by
+     `gemini_timeout_s`. It is called before the loop closes by `python -m core run`,
+     `serve`'s shutdown, and `calibrate`, and by the test fixtures that share a port
+     (`tests/scripted.py`, `tests/judgement_upstream.py`). A process killed outright
+     leaves its `gateway.opened` row open, and the existing holder recovery charges it at
+     its estimate; that judgement drops out of the count.
    - `ask_leg` (calibration) is unchanged.
 5. **`python -m core judgement-agreement [--since DATE]`.**
    - Per site, over live tasks (calibration tasks excluded), it counts the judgements where
@@ -68,7 +79,8 @@ data changes shape.
      are updated to the new record: per-leg score, Brier, n, and which cases were rebuilt.
    - The wording is not changed to make a case pass. A Gemini miss is reported as it stands.
 7. **Docs.** `docs/judgement-layer.md` (legs, router, side by side, the shadow row, the
-   agreement command), `core/README.md`, `tools/README.md`.
+   agreement command), `docs/tech-stack.md` (:56, :301, :337-348, :517), `core/README.md`,
+   `tools/README.md`, and the `core/judgement.py` module and `route()` docstrings.
    - Scope addition: the doc that names *OpenAI's* Decisions API, citing a community post, as
      the images design is corrected to name Google's leg, which takes images. Debt paid: a
      wrong vendor citation, found by the assessment. Images are still not routed.
@@ -98,6 +110,9 @@ data changes shape.
   4. Jev returns `max_tokens_exceeded`: Gemini answers.
   5. Gemini times out or returns 500 while Jev is confident: the judgement is answered with
      no added delay, and the shadow row records the failure.
+  8. A shadow row appended after `step.failed` leaves `retry_due` and `failed_step` true.
+  9. `drain()` after an early return: the shadow row and its charge are present once it
+     returns, and it returns within `gemini_timeout_s` when Gemini hangs.
   6. Both fail: `judgement.failed`, as before.
   7. A stopped task is refused before either provider is asked.
 - **Agreement.** Rows covering agree, disagree on action, disagree only on label, a failed
@@ -105,8 +120,10 @@ data changes shape.
 - **Composition root.** The `gemini` leg reads `GOOGLE_API_KEY` from `google-key`; a missing
   key raises `MissingKey`; loopback gets the placeholder; `calibrate` refuses a non-default
   Gemini URL.
-- **Existing tests.** Tests that build `OpenWeight` (`test_pipeline`, `scripted`,
-  `test_reactions`) move to the new leg.
+- **Existing tests.** `tests/judgement_upstream.py` and `test_pipeline`'s dead port move
+  to the new leg. The shared upstream port in `tests/scripted.py` and
+  `tests/judgement_upstream.py` now makes a shadow Gemini call on every judgement, so its
+  fixtures call `drain()` before any assertion reads rows.
 
 ## Done
 
