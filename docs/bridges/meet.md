@@ -1,8 +1,8 @@
 # Google Meet
 
 Valor in a Google Meet call as itself (docs/plans/meet.md): asked for in a
-group chat, it joins ready on the topic, posts the link in that thread once
-it is in,
+group chat, it joins first and reads up on the topic while it joins, posts
+the link in that thread once it is in,
 speaks through Gemini Live (docs/plans/gemini-live.md) when it is
 addressed, posts written answers in the call's chat with a copy in the
 thread, and when the call ends Gemini summarises the recording and the
@@ -48,7 +48,9 @@ against a new Meet with a second device of Valor's account
   Gemini Live session (`settings.call_model`, voice `settings.call_voice`,
   the key in `google-key`), with notes that ask for no reply: who is
   speaking, who is here (with one other person, all they say is to Valor),
-  and the worker's answers. Live decides when Valor is addressed and
+  the worker's answers and, for a call asked for in a chat, the worker's
+  reading once it is in (until then the instruction says it is still
+  reading up). Live decides when Valor is addressed and
   speaks; its tools ask the worker (a fresh `call` turn in the session's
   checkout, on the call's gateway), post, read the open decisions,
   record Tom's read-backs and, when the project's spec names a backlog
