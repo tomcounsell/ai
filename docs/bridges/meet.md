@@ -50,14 +50,15 @@ against a new Meet with a second device of Valor's account
   speaking, who is here (with one other person, all they say is to Valor),
   the worker's answers and, for a call asked for in a chat, the worker's
   reading once it is in (until then the instruction says it is still
-  reading up). Live decides when Valor is addressed and
+  reading up, while asking the worker and taking tasks go on as usual;
+  the note bringing the reading says it no longer is). Live decides when Valor is addressed and
   speaks; its tools ask the worker (a fresh `call` turn in the session's
   checkout, on the call's gateway), post, read the open decisions,
   record Tom's read-backs and, when the project's spec names a backlog
   Sheet in its rooms, read it (`backlog`: `sheet.py lookup` on how
   someone described an item, or the whole Queue in order), and look a
 person up (`person`: their dossier on the call's project, by name or loose
-description, docs/memory.md, People; the instruction says to call it before
+description, or the project's roster for "everyone", docs/memory.md, People; the instruction says to call it before
 saying anything about someone). Each Live turn is one `meet.say`, its audio
   held until released and settled with Live's transcript of what played;
   a typed line is answered in the chat, never aloud, until someone
@@ -109,7 +110,10 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   heading. PR and issue numbers in the summary link to the project's
   GitHub repository, and its spec's `links` prefixes to theirs. The
   asking session sends that file unchanged in the thread with at most two
-  lines beside it. `valor-record call <code>` reads the transcript.
+  lines beside it. The summary's actions (each task given or taken in the
+  call, with the one to do it) are listed in the call's report as tasks
+  for the asking session to take, hand on or decline; with no summary, the
+  report points at the transcript for them (P-034). `valor-record call <code>` reads the transcript.
 
 ## Setup per Mac
 

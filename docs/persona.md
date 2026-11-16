@@ -502,6 +502,11 @@ or plainly that it doesn't know), the call's worker is told the same,
 converse's **Calls** has the prep carry the case behind each recommendation,
 and the instruction also carries "How product decisions are made", so the
 ranking rule comes from the persona rather than the prep.
+The call of 2026-11-16 (P-034) refused to fill the dossiers and to note
+down tasks, echoing "Not in a call: ... people matters". So **A task given
+is taken**: a task anyone gives in a call, and recording who people are,
+is ordinary work, said as noted and listed in the call's report; only
+decisions about people (hiring, pay, performance, disputes) go to Tom.
 
 ### Instructions come from Tom and the Brief
 
