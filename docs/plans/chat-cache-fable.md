@@ -28,35 +28,45 @@ from the spec. Those are the likely 13 unattributed turns.
    compaction apply. `frontier` stays Opus 5.5: tasks, critique, docs, the call
    worker and routines are unchanged.
 2. **Every chat session on Fable, the existing ones too.** A Brief is written
-   once, so a session's stored `model` stays Opus. `tasks.turn_model(b)`: the
-   `chat` seat's model for a chat session, else `b.model`; used by `_turn_for`
-   (`core/__main__.py:282`) and `context_report` (`core/session.py:1483`), and
-   `core/intake.py` starts new sessions on the `chat` seat. The first Fable
-   turn of a resumed session rewrites its cache once (caches are per model).
-3. **A frozen system prompt; what changed goes in the turn prompt.**
-   `tasks.dispatch` for a chat session still renders the Brief fresh, as a
-   list of sections, then compares it with the Brief its last turn was given
-   (the `brief` text `turn.started` already stores, `core/runs.py:241`):
-   - **Refresh** (the fresh Brief becomes the system prompt) when the cache
-     is gone anyway: the session's first turn, the last turn started more than
-     an hour ago (the cache's TTL; the builder confirms 1h from the metered
-     usage), the last turn was a `/compact`, or the persona or the stage file
-     changed (a deploy).
-   - **Otherwise** the system prompt is the last turn's text, byte for byte,
-     and dispatch returns `news`: a section headed "Your Brief has changed
-     since it was written" holding each section that now differs, in full,
-     and for Children one line per child that is new or changed since the
-     snapshot (id, state, spending, last activity), with the full instruction
-     for a child that is new. It is measured against the snapshot, not the
-     last turn, so every turn's system prompt plus its own prompt hold every
-     child's current state and instruction, and a compaction loses nothing.
+   once, so a session's stored `model` stays Opus. A *chat session's turn* is
+   one run by `session.run` for a task with `b.chat`, never a `fresh` turn:
+   the Meet call worker (`core/__main__.py:557`, `fresh="call"`) is not one,
+   though its Brief has `chat`. `tasks.turn_model(b)` gives the `chat` seat's
+   model for a chat session, else `b.model`; `session.run` passes
+   `dataclasses.replace(b, model=turn_model(b))` to `turn_for`, and
+   `context_report` (`core/session.py:1483`) uses it. `_turn_for` and the call
+   path are untouched, so the call worker keeps Opus. `core/intake.py` starts
+   new sessions on the `chat` seat. The first Fable turn of a resumed session
+   rewrites its cache once (caches are per model).
+3. **A frozen system prompt; what changed goes in the turn prompt.** For a
+   chat session's turn (`b.chat` and `fresh is None`), `tasks.dispatch`
+   renders the Brief fresh as named sections plus the structured child
+   reports (id, state, spending, last activity, instruction), then:
+   - **Refresh** (the fresh Brief becomes the system prompt) on the
+     session's first turn; when the last turn *ended* (`turn.ended` at) more
+     than an hour ago (the cache's TTL; the builder confirms from metered
+     usage that Fable turns write `ephemeral_1h` tokens through the gateway);
+     after a `/compact` turn; when the persona or stage file changed; or when
+     the news below exceeds a quarter of the Brief's size, so repeated news
+     never outgrows what a rewrite would cost. A refresh's `turn.started`
+     records `brief_sections` and `brief_children` beside `brief`.
+   - **Otherwise** the system prompt is the latest snapshot's `brief`, byte
+     for byte (the newest `turn.started` with `brief_sections`), and dispatch
+     returns `news`: under "Your Brief has changed since it was written",
+     each section whose text differs from the snapshot's, in full, and one
+     line per child new or changed against `brief_children` (id, state,
+     spending, last activity), with the instruction for a new child. Against
+     the snapshot, not the last turn, so every turn's system prompt plus its
+     own prompt hold every child's current state and instruction, and a
+     compaction loses nothing. No rendered text is parsed back.
    - Children lines gain the child's last activity (its latest row's time).
-     Spending stays exact: it costs only the changed child's line.
-   - `runs._run_turn` passes `news` to the harness's `build`, which appends it
-     to the turn's prompt (all three harnesses, one keyword argument), and
-     records it as `brief_news` beside `brief` in `turn.started`, so the store
-     still reproduces what the turn received.
-   Task turns (non-chat) are unchanged.
+     Spending stays exact: a change costs only that child's line.
+   - `runs._run_turn` passes `news` to the harness's `build` (one keyword
+     argument, all three harnesses), which appends it to the turn's prompt;
+     Claude Code's `subagent_start` gets the Brief plus news, so subagents
+     see current states. `turn.started` records it as `brief_news`.
+   Task turns and fresh turns (critique, review, docs, advice, call) are
+   unchanged: fresh each turn, no news.
 4. **Build time, measured.** Time `dispatch` on the Cowboy for the #valor-dev
    session (a read). `child_report` reads each child's whole ledger and
    subtree spending, one child at a time; if dispatch takes over a second,
@@ -73,7 +83,8 @@ then). No fallback is added: no refusal has happened yet.
 ## Out of scope
 
 Effort levels; tasks and other stages on Fable; dropping the Children list;
-moving the persona out of the system prompt; the Meet call worker's model.
+moving the persona out of the system prompt; the Meet call worker's model
+(it stays on Opus).
 No new check, gate or guard: the Brief comparison is how dispatch renders,
 not a check on anything.
 
@@ -85,12 +96,16 @@ not a check on anything.
   dispatch's `text` is byte-identical to the first's; its `news` names every
   changed child's new state, the new child's instruction, and the changed
   sections; text plus news contain every child's id, state and instruction.
-- Refresh: after an hour's gap, after a compaction turn, after a persona
-  change, and on a first turn, `text` is the fresh render and `news` is empty.
+- Refresh: on a first turn, an hour after the last turn ended (a long turn
+  that ended minutes ago does not refresh), after a compaction turn, after a
+  persona change, and when news passes a quarter of the Brief: `text` is the
+  fresh render, `news` empty, and `turn.started` carries the snapshot.
 - Nothing changed: `news` empty, `text` identical.
-- A task (non-chat) Brief is unchanged: fresh each turn, no news.
+- A task (non-chat) Brief, and the call worker's (`fresh="call"`), are
+  fresh each turn with no news; the call worker's turn keeps the frontier
+  model while a chat session's turn gets the chat seat's.
 - Harness: `build(..., news=...)` puts news after the prompt in argv; empty
-  news leaves the argv as today.
+  news leaves the argv as today; `VALOR_SUBAGENT_START` holds Brief and news.
 - Settings: `compaction("claude-fable-5-2")` gives the 1M marks; the Fable
   price is used by metering; `turn_model` gives Fable for a chat session
   whose stored model is Opus, and the stored model for a task.
