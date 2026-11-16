@@ -13,7 +13,7 @@ session. Tom sometimes says **hat** for the role a room asks of Valor, the
 role-in-room.
 
 Not: "channel" (Telegram, Slack, email, local: the transport a room is
-on), "chat session" (the task that serves a room).
+on), "chat session" (the task that serves a room, Tom's top agent).
 
 ## Role
 
@@ -41,3 +41,31 @@ Not: "persona" (Valor's one identity, the same in every room; the old
 system called roles "personas"), `roles` in a project spec (the
 project's Postgres roles), `mentions` (whether a room waits to be named,
 which is separate from its role).
+
+## Top agent
+
+Tom's name for a chat session: the one agent per room that carries the
+conversation, speaks to people as Valor, and delegates. There is a top
+per room, not one overall; the tops of a project share its record and
+memory. In code it stays "chat session": a task with a chat, whose text
+is `skills/sdlc/converse.md`, on the chat seat (`core/settings.py`
+`SEATS["chat"]`, Fable 5.2 since 2026-11-16).
+
+Below it:
+
+- **task**: started by a chat session (`task.start`), reports to it
+  through `.valor/`, and speaks to no one.
+- **subagent**: a helper Claude Code starts inside a turn, at any depth;
+  it reports to that turn.
+
+The top agent is not the only one with the persona. `core/tasks.py`
+renders `persona/` first into every turn's text, chat session or task
+(the advisor's and a call worker's too). In a Claude Code turn that whole
+text, persona included, is `VALOR_SUBAGENT_START`
+(`harnesses/claude_code.py`), which `skills/valor/hooks/subagent_start.py`
+gives every subagent at every depth but `valor:web`, which gets only its
+prompt. What only the top agent does is speak as Valor to people.
+
+Not: "persona" (Valor's one identity, rendered into every turn and
+subagent above), "kernel" (the code that runs sessions and sends what
+they ask for; it has no model), "room" (the chat a top agent serves).
