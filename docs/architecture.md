@@ -18,7 +18,7 @@ the evidence that justifies it.
 | Tier | Decides | Never decides |
 |---|---|---|
 | Kernel (`core/`, deterministic code) | what a thing may do: effect ceiling, merge predicate, stop | what a request means |
-| Judgement (a hosted Jev-class model behind one port, open-weight fallback behind the same port) | what a thing is: is this request underspecified | whether it may proceed |
+| Judgement (a hosted Jev-class model behind one port, Google's Decisions API as the fallback behind the same port) | what a thing is: is this request underspecified | whether it may proceed |
 | Agents (frontier models, one `claude -p` turn at a time) | how to do the work | anything about their own authority |
 
 A classifier decides what a thing is; the kernel decides what it may do. Low-confidence judgement
@@ -180,9 +180,10 @@ per-account table, with the gaps, is [performers.md](performers.md).
   the Mac, with no account.
 - **Through the gateway, not the broker**: model calls on the Anthropic
   credential and the OpenAI key, and the judgement tier's calls on the
-  TypeSafe and OpenRouter keys. Each call is a `gateway.opened` and a
+  TypeSafe key and the Gemini key. Each call is a `gateway.opened` and a
   `gateway.charged` row; a judgement is also a `judgement.answered` or
-  `judgement.failed` row.
+  `judgement.failed` row, and a fallback answer that came after it a
+  quiet `judgement.shadowed` row.
 - **Through a bridge's receive, not the broker**: the Telegram bridge reads
   and marks read Valor's Telegram messages, the email bridge reads the
   mailbox over IMAP and sets `\Seen`, and the Slack bridge reads Valor's
@@ -381,7 +382,7 @@ not say so (rebuild-demonstration.md, Kernel findings 5).
 
 ## The judgement tier in the loop
 
-Each judgement is a Jev call, with an open-weight fallback, through `JudgementPort` in
+Each judgement is a Jev call, with Google's Decisions API asked beside it as the fallback, through `JudgementPort` in
 [judgement-layer.md](judgement-layer.md) and decides what a thing is, nothing about what it may do.
 The SDLC uses two:
 

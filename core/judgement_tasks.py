@@ -65,11 +65,13 @@ JUDGE = JudgementTask(
     consumer={"proceed": "judge verdict precise: to plan", "caution": "judge verdict thin: to clarify"},
     serves="Mission items 3 and 6",
     guard=machine.GUARD_JUDGE,
-    # Calibration run 5 of 2026-10-02 (results/calibration/intake.underspecified-run5.json):
-    # both legs 7 of 7 on the seed cases; Brier 0.0114 (Jev) and 0.0040 (fallback), n = 7 each.
-    # Fitted over runs 1 to 5: the wording here and the fallback's prompt and schema were
-    # changed after seeing which cases failed (docs/plans/m1-3-judgement.md, Build record).
-    calibrated="32b8245e60649f4884abba82e5d02ea6cfc865acc7ec21f4afb2737af6ff9c21",
+    # Calibration of 2026-11-16, Jev and gemini-decision-1, on run 5's seven seed cases
+    # recovered verbatim (docs/judgement-baseline.md): both legs right on 7 of 7 at their
+    # own floors; Brier 0.0109 (Jev) and 0.0935 (Gemini), n = 7 each. Gemini abstained on
+    # one one-line ask at p_proceed 0.74: right at its 0.75 floor, wrong at Jev's 0.70.
+    # Run 5 of 2026-10-02 fitted the wording over runs 1 to 5 (docs/plans/m1-3-judgement.md);
+    # nothing was reworded for Gemini.
+    calibrated="0b907d123c7f6473530745a8f5d1acefcd533e7bab9efaf516f01b048da0e511",
 )
 
 _GAP = "the change leaves unexercised by any test"

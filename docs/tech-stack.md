@@ -53,7 +53,7 @@ outside the model is AI Control [4].
 | Model prices | a dated table in `core/settings.py` | in use |
 | Model seats | a pinned registry in `core/settings.py`, each seat a harness and a model: frontier, chat, reviewer, light, reviewer_openai; the judgement legs pinned beside it | in use |
 | Frontier provider | Anthropic; OpenAI through the gateway's second route | in use |
-| Judgement tier | Jev (`jev-1.13.0`), with the open-weight fallback Qwen3-235B-A22B Instruct 2507 on Parasail fp8 through OpenRouter behind the same port; OpenAI's Decisions API for judgements that need images | in use; the images leg chosen, not built |
+| Judgement tier | Jev (`jev-1.13.0`), with Google's Decisions API (`gemini-decision-1`) as the fallback behind the same port, asked beside Jev on every judgement | in use; images not routed |
 | Harness | the `claude` CLI, one `claude -p` per turn; Pi (`docs/pi.md`) as the second | in use |
 | Other harnesses | Codex, Pi, behind the same `TurnCommand` port | open |
 | Sandbox for turns | `sandbox-exec` profile per workspace | in use |
@@ -298,7 +298,7 @@ same terms (the constraint "Bounded authority, metered spending").
 ## 5. The judgement tier
 
 A hosted Jev-class model handles every decision that is not authority:
-classifying a request, routing, triage, cheap checks. An open-weight equivalent sits behind the same port as
+classifying a request, routing, triage, cheap checks. Google's Decisions API sits behind the same port as
 the fallback. A low-confidence call takes its judgement task's abstain
 route, which reaches Tom only through a step he would see anyway. A
 classifier decides what a thing is; it never decides what a thing may do. The taxonomy, the port, and
@@ -330,22 +330,22 @@ What the stack fixes:
   about the old SDLC stages). Serves Mission items 3 and 6. The
   demonstration estimated the judge's cost at well under $0.05 a request
   against $1.40 to $1.80 of frontier spend it would have saved; an estimate. Calibration measured about $0.000033 (Jev) and
-  $0.00023 (fallback) per call.
+  $0.000055 (Gemini, the fallback) per call (2026-11-16).
 
 **Vendor.** Jev is the primary leg, including for client request text
-(Tom, 2026-10-01). Jev takes no images, so a judgement that needs one goes
-to OpenAI's Decisions API behind the same port (not built). The fallback is
-hosted, never resident on this machine. Jev's base model is not published,
-so it cannot be the same model on a second provider (Tom's ask,
-2026-10-01): it is Qwen3-235B-A22B Instruct 2507, open weights and no
-reasoning tokens, on Parasail at fp8 through OpenRouter with provider
-fallback off ([judgement-layer.md](judgement-layer.md),
+(Tom, 2026-10-01). The fallback is Google's Decisions API, `gemini-decision-1`
+(beta, `v1beta`), hosted, never resident on this machine, and asked beside Jev
+on every judgement. Tom asked on 2026-10-01 for an open-weight model on a
+second host; on 2026-11-16 he asked to move non-local, non-Claude work to
+Google models, so Google is the independent second vendor. Google's leg takes
+images, audio, video, and PDF; Jev takes text only, no task takes images, and
+the router does not route them ([judgement-layer.md](judgement-layer.md),
 [machine.md](machine.md)).
 
 | Model (as pinned) | Input $/Mtok | Output $/Mtok | Checked | Source |
 |---|---|---|---|---|
 | `jev-1.13.0` | 0.042 | 0 | 2026-10-02 | https://docs.typesafe.ai/models |
-| `qwen/qwen3-235b-a22b-2507@parasail/fp8` | 0.14 | 0.80 | 2026-10-02 | OpenRouter's endpoints list for the model, Parasail fp8 |
+| `gemini-decision-1` | 0.10 | 0 | 2026-11-16 | https://aistudio.google.com/docs/pricing |
 
 The table is `JUDGEMENT_PRICES` in `core/settings.py`, kept apart from the
 gateway's Anthropic prices.
@@ -478,8 +478,8 @@ is metered like any other task.
 
 **Secrets.** Kernel-held secrets live in the kernel key directory, which
 the sandbox profile denies: the kernel databases' passwords in a libpq
-password file, the judgement keys in `judgement-keys`, the OpenAI key in `openai-key` and
-the Gemini key a Meet call uses in `google-key` beside it, copied from the
+password file, Jev's key in `judgement-keys`, the OpenAI key in `openai-key` and
+the Gemini key a Meet call and the judgement fallback use in `google-key` beside it, copied from the
 vault `.env` by `python -m core judgement-keys` and `python -m core
 openai-key`, and read from 1Password by `python -m core google-key` ([machine.md](machine.md),
 Keychain, for why not the Keychain). Status: **in use**. The GitHub push
@@ -514,8 +514,8 @@ the target machine fixes in the stack:
 - **One Postgres server for the kernel**, resident. Workspace clusters start
   with their task and stop with it. The shared memory store is not on this
   list until its host is chosen with a second Mac's install.
-- **No resident model.** Judgement is hosted (section 5). The open-weight
-  fallback is hosted too (Parasail, through OpenRouter).
+- **No resident model.** Judgement is hosted (section 5). The fallback is
+  hosted too (Google's Decisions API).
 - **The kernel and the bridges resident, everything else on demand.** They are the only
   components that must be up when Tom is not at the machine. Routines start
   under launchd and exit.

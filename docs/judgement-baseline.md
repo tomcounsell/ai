@@ -38,7 +38,17 @@ What the seed set can and cannot show:
   whose first PM feedback changed the scope is a missed thin label
   (rebuild-baseline.md, "Appendix").
 
-**The record.** Run 5 of 2026-10-02 is the record the declaration names:
+**The record.** The calibration of 2026-11-16 is the record the
+declaration names (task digest `0b907d123c7f6473530745a8f5d1acefcd533e7bab9efaf516f01b048da0e511`), with Google's Decisions
+API (`gemini-decision-1`) as the fallback, on run 5's seven cases, the
+original cases file recovered verbatim: both legs right on 7 of 7 at their
+own floors, Brier 0.0109 (Jev) and 0.0935 (Gemini), n = 7 each, about 33
+and 55 micro-dollars per call. Gemini abstained on one one-line ask
+(popoto #191) at p_proceed 0.74: right at its 0.75 floor, where an abstain
+goes to clarify, and wrong at Jev's 0.70. Nothing was reworded for Gemini.
+
+Run 5 of 2026-10-02 was the record before it, with the open-weight
+fallback of the time:
 both legs right on all seven cases, Brier 0.0114 (Jev) and 0.0040
 (fallback), n = 7 each, no abstains or errors, about 33 and 226
 micro-dollars per call; label sources Tom 1, role-played 0, judge 6. This

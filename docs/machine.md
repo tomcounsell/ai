@@ -176,18 +176,19 @@ money and wall time, not local memory.
 ## Judgement: hosted, with a fallback that is never resident
 
 Judgement goes to a hosted Jev-class API (TypeSafe's Jev). Nothing in the
-judgement tier runs a model on the Air. An open-weight model behind the
-same port is the fallback for when the hosted leg fails or abstains, and it
-is not resident on the Air.
+judgement tier runs a model on the Air. Google's Decisions API behind the
+same port is the fallback, asked beside Jev on every judgement and taken
+where Jev fails or abstains, and it is not resident on the Air.
 
 Why: a Jev-class open-weight model in the 7 to 8 billion parameter range,
 quantized to 4 bits, needs about 5 GB for its weights and cache (estimate;
 not measured). Resident, it takes more than the 4 GB headroom with every
 turn. Loaded beside a turn, it pushes the machine into swap.
 
-The fallback is hosted too: Qwen3-235B-A22B Instruct 2507 on Parasail,
-reached through OpenRouter. Tom asked for Jev's own model on a second
-provider (2026-10-01), but Jev's base model is not published. It costs the
+The fallback is hosted too: Google's `gemini-decision-1`. Tom asked on
+2026-10-01 for an open-weight model on a second host; on 2026-11-16 he asked
+to move non-local, non-Claude work to Google models, so Google is the
+independent second vendor. It costs the
 Air no memory and stays available while a turn holds the slot. A call
 neither leg answers with confidence takes its abstain route, per
 [judgement-layer.md](judgement-layer.md).
@@ -363,8 +364,8 @@ session cannot ([projects/README.md](../projects/README.md)).
 | Secret | Read by | Today |
 |---|---|---|
 | The Anthropic credential for frontier turns | The gateway, which sets it on every call; a turn carries only a placeholder, since it runs with its own Claude Code config directory | `claude-token` in the kernel key directory (a long-lived token from `claude setup-token`) when present; otherwise Claude Code's own login, read from the Keychain through `/usr/bin/security`, which lasts about eight hours and is refreshed only by Claude Code sessions on the default config directory |
-| The judgement legs' keys, `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` | The kernel process, when `run`, `calibrate`, or `serve` builds the judgement port, and only for a leg pointed at its default endpoint | `judgement-keys` in the kernel key directory (mode 600, `NAME=value` lines), written only by `python -m core judgement-keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in the two adapter objects, never in `os.environ`, a ledger row, an exception, or a log line |
-| The Gemini key, `GOOGLE_API_KEY` | A Meet call's process (`core/call.py`), which opens its Gemini Live session and has its recording summarised with it; never a turn's | `google-key` in the kernel key directory (mode 600), written only by `python -m core google-key [--ref OP_REF]`, which reads it with `op read` from `settings.google_key_ref` (the paid "Gemini API Key Yudame Tools" in 1Password's `Yudame Secrets`, Tom, 2026-11-05) and prints `written`, `kept`, or `missing`, never a value |
+| Jev's key, `TYPESAFE_API_KEY` | The kernel process, when `run`, `calibrate`, or `serve` builds the judgement port, and only for Jev pointed at its default endpoint | `judgement-keys` in the kernel key directory (mode 600, `NAME=value` lines), written only by `python -m core judgement-keys`, which copies it from the vault `.env` and prints each name with `written`, `kept`, or `missing`, never a value. Held in Jev's adapter object, never in `os.environ`, a ledger row, an exception, or a log line |
+| The Gemini key, `GOOGLE_API_KEY` | A Meet call's process (`core/call.py`), which opens its Gemini Live session and has its recording summarised with it; the kernel process, when it builds the judgement port, for the fallback leg at its default endpoint; never a turn's | `google-key` in the kernel key directory (mode 600), written only by `python -m core google-key [--ref OP_REF]`, which reads it with `op read` from `settings.google_key_ref` (the paid "Gemini API Key Yudame Tools" in 1Password's `Yudame Secrets`, Tom, 2026-11-05) and prints `written`, `kept`, or `missing`, never a value |
 | A client's own 1Password service account, `OP_SERVICE_ACCOUNT_TOKEN_<CLIENT>` (Tom, 2026-11-11) | Each turn of a project whose spec's `client` has the file, chat sessions and tasks alike (`core/__main__.py` `_client_env`, `core/tasks.py` `client_op`), beside Valor's own `OP_SERVICE_ACCOUNT_TOKEN`, which stays; no other project's turn, and no setup, suite or check step. The turn's Brief says to run `op` with `OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN_<CLIENT>"` for the client's vaults; plain `op` signs in to Valor's | `op-token.<client>` in the kernel key directory (mode 600, beside `claude-token`), placed by hand on the one Mac that runs the client, never in the iCloud folder; read each turn and never recorded. The vault `.env` that the Macs' `~/.zshenv` exports in every shell holds no such name, so a turn's shells keep it |
 | The OpenAI key, `OPENAI_API_KEY` | The gateway, which sets it on every call of the OpenAI route and drops any key, organization, project, or `proxy-authorization` the turn sent; a gateway with no key forwards the turn's own `authorization`, and a 401 is answered with a body naming which key was refused | `openai-key` in the kernel key directory (mode 600), written only by `python -m core openai-key [--name NAME]`, which copies the vault's key (default `OPENAI_API_KEY`) over the one held and prints `written`, `kept`, or `missing`, never a value |
 | Telegram API id, hash, and session | The Telegram bridge, at start | `telegram-keys` (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, mode 600) in the kernel key directory, written only by `python -m bridges.telegram keys`, which copies them from the vault `.env` and prints each name with `written`, `kept`, or `missing`; the session is `telegram.session` beside it, mode 600, written by `python -m bridges.telegram login`, which Tom runs and types the code and password into. No output holds any part of the hash |
@@ -399,10 +400,10 @@ directory), and is not sparse, and otherwise returns why. The transcript copy
 ([harnesses.md](harnesses.md)) is read this way.
 
 `serve` builds the judgement port once, when it starts, and holds the
-keys for its life, so a key rotated with `judgement-keys` reaches the
+keys for its life, so a key rotated with `judgement-keys` or `google-key` reaches the
 resident kernel only when it starts again (`launchctl kickstart -k
 gui/$(id -u)/com.valor.kernel`).
-With a judgement key missing, `serve` exits with `serve refused:` and the
+With a judgement key (`judgement-keys` or `google-key`) missing, `serve` exits with `serve refused:` and the
 key's name; launchd's `KeepAlive` starts it again, at most once every ten
 seconds (launchd's default throttle), and each start writes the same line
 to `kernel.log` until the key is installed.
@@ -461,7 +462,7 @@ the gateway is for visibility and honest metering, not a hard wall.
 `valor_memory`, and the owner role on the kernel databases live in a libpq
 password file,
 `~/.config/valor-kernel/pgpass` (the `pg_passfile` setting; mode 600), and
-the judgement keys in `judgement-keys`, the mail credentials in `mail-keys`, the Slack tokens in `slack-keys`, the OpenAI key in `openai-key`, the Gemini key in `google-key`, and the optional long-lived Claude
+Jev's key in `judgement-keys`, the mail credentials in `mail-keys`, the Slack tokens in `slack-keys`, the OpenAI key in `openai-key`, the Gemini key (Meet and the judgement fallback) in `google-key`, and the optional long-lived Claude
 token in `claude-token` beside it, paths derived from the password file's
 so the sandbox deny, derived from the same setting, cannot drift from
 them. A Keychain item is readable by a turn through `security`,

@@ -28,8 +28,8 @@ from core import judgement
 from core.judgement import DATA_ONLY, JudgementTask, Kind, LegAnswer, LegError
 from core.settings import GEMINI_DECISION_MODEL, settings
 
-# Jev's estimate (`tools.jev.Jev.estimate`), not yet fitted to Google's
-# count: the probe of 2026-11-16 billed 235 tokens on an estimate of about 800.
+# Jev's estimate (`tools.jev.Jev.estimate`): over the seven seed cases of
+# 2026-11-16 Google billed at most 0.38 of it.
 OVERHEAD_RATIO = 1.25
 OVERHEAD_FIXED = 300
 OVERHEAD_PER_QUESTION = 50

@@ -43,7 +43,7 @@ Speech out is the yudame present skill's `tts.py`, which a turn runs itself: Kok
 Adapters behind `core/judgement.py`'s `JudgementPort` ([docs/judgement-layer.md](../docs/judgement-layer.md)). Each is built by the composition root with its endpoint, pinned model, timeout, and key; makes one POST per call with no retry; and decodes any response into probabilities per label or a failure with a fixed sentence, so no provider text or key reaches a row or an exception.
 
 - `jev.py`: the primary, TypeSafe's Jev, pinned `jev-1.13.0`.
-- `open_weight.py`: the fallback, `qwen/qwen3-235b-a22b-2507` on Parasail at fp8 through OpenRouter, with provider fallback off and a strict JSON schema.
+- `gemini_decisions.py`: the fallback, Google's Decisions API `gemini-decision-1`, asked beside Jev on every judgement.
 
 ## Imports
 

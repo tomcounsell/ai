@@ -173,7 +173,7 @@ whose lock connection died returns `lock lost` before its next turn or write.
 
 | State | Tier | Why that tier |
 |---|---|---|
-| `judge`, the breadth call in `checks.test` | judgement (Jev, open-weight fallback behind the port) | a classification, well under $0.05 per call (rebuild-demonstration.md, Money) |
+| `judge`, the breadth call in `checks.test` | judgement (Jev, Google's Decisions API as the fallback behind the port) | a classification, well under $0.05 per call (rebuild-demonstration.md, Money) |
 | `clarify`, `plan`, `build`, `patch` | frontier agent in the working session | the hard work, in one context from inspection to delivery |
 | `critique`, `checks.docs` | frontier agent in a fresh session | a reading by a session that did not write the work |
 | the suite in `checks.test` | deterministic suite run | running tests decides nothing by judgement |

@@ -12,10 +12,10 @@ model costs dollars where a judgement call costs a fraction of a cent. Authority
 what it may do. The layer is built so that the second sentence holds by structure.
 
 Status. Built: the port, router, and gate (`core/judgement.py`); the legs (`tools/jev.py`,
-`tools/open_weight.py`); the tasks (`core/judgement_tasks.py`); the judge runner and the
-breadth call (`core/judgement_sites.py`); metering; and `python -m core calibrate`.
-The test runner calls breadth. The images leg, live scoring, and use shapes 2
-to 5, 7, and 10 are design, and each section says which.
+`tools/gemini_decisions.py`); the tasks (`core/judgement_tasks.py`); the judge runner and the
+breadth call (`core/judgement_sites.py`); metering; `python -m core calibrate`; and
+`python -m core judgement-agreement`. The test runner calls breadth. Routing images, live
+scoring, and use shapes 2 to 5, 7, and 10 are design, and each section says which.
 
 ## Terms
 
@@ -23,8 +23,8 @@ to 5, 7, and 10 are design, and each section says which.
 |---|---|
 | judgement | One closed-label answer from the judgement tier: per question, a probability per label and the kernel action it leads to; the leg that answered, and its cost |
 | judgement task | The declaration of one place Valor asks a judgement question: its site, questions, labels, inputs, error cost, floor per leg, abstain route, and failure route |
-| `JudgementPort` | The one interface in `core/` every judgement call goes through. A vendor's hosted judgement API or the open-weight fallback sits behind it as a leg |
-| leg | One adapter behind the port: the primary (a hosted judgement API) or the fallback (a hosted open-weight model) |
+| `JudgementPort` | The one interface in `core/` every judgement call goes through. Each leg is a vendor's hosted judgement API |
+| leg | One adapter behind the port: the primary (TypeSafe's Jev) or the fallback (Google's Decisions API) |
 | router | The pure function that, for a judgement task, names the primary leg and the fallback leg |
 | calibration record | The measurement that lets a judgement task land: both legs, the same labelled inputs, the same run |
 | abstain | A leg's answer to a question whose summed probability for the `proceed` action lies between one minus the leg's floor and the floor. The consumer takes the task's declared abstain route |
@@ -32,10 +32,9 @@ to 5, 7, and 10 are design, and each section says which.
 | Jev-class | The capability class: a model served for closed structured decisions with per-label probabilities, cheap per call, fast enough to sit in front of a turn |
 
 "Judgement" is the vendor-neutral name for the tier, the port, and the calls. TypeSafe's Jev is the
-primary leg, and OpenAI's Decisions API is the design for judgements that need images, which Jev
-does not take (Tom, 2026-10-01; [Decisions
-API](https://huggingface.co/blog/sora-2/what-is-decisions-api-openais-fast-decision-layer)). Any of
-them can sit behind the port without a change to any caller.
+primary leg, and Google's Decisions API is the fallback. Google's leg takes images, audio, video,
+and PDF; Jev takes text only, no task takes images, and the router does not route them. Either can
+sit behind the port without a change to any caller.
 
 ## The boundary with the kernel
 
@@ -104,12 +103,15 @@ The router (`judgement.route`) is a pure function naming a task's primary and fa
 constraint "16 GB of RAM" (no resident model) and Mission item 6 (a failed vendor call does not
 become a frontier call).
 
-1. Every judgement task routes to the primary leg, Jev, with the
-   open-weight leg as its fallback. A task that takes images raises
-   `NotRouted`: the Decisions API leg is not built, and no task takes one.
-2. The fallback is asked once, on the same inputs, when the primary failed
-   or abstained on any question. Its answers are taken only for the
-   questions the primary did not answer; each records its leg.
+1. Every judgement task routes to the primary leg, Jev, with Google's
+   Decisions API (`gemini`) as its fallback. A task that takes images
+   raises `NotRouted`: Jev, the primary, takes text only, and no task
+   takes images.
+2. Both legs are asked at once, on the same inputs, on every judgement.
+   The primary's confident answers stand; the fallback's are taken only
+   for the questions the primary failed or abstained on; each records its
+   leg. A judgement the primary answered in full is returned without
+   waiting for the fallback (see Rows).
 3. When both legs fail, the port returns no answer, the ledger records
    why, and the consumer applies `on_failure`. It never invents one.
 4. There is no third leg. A judgement never falls back to a frontier model,
@@ -118,37 +120,33 @@ become a frontier call).
 
 No leg runs resident on the Mac: 16 GB beside Postgres, two `claude -p` turns, and
 the bridges leaves no room for a classifier worth running (`docs/machine.md`). Tom asked for the
-primary's own open-weight model on a second provider (2026-10-01), but Jev's underlying model is not
-published, so the fallback is a model chosen for the job: Qwen3-235B-A22B Instruct 2507 (open
-weights, no reasoning tokens), hosted by Parasail at fp8 through OpenRouter with provider fallback
-off. It is an assumed answer that Tom can reverse.
+primary's own open-weight model on a second provider (2026-10-01); on 2026-11-16 he asked to move
+non-local, non-Claude work to Google models, so the fallback is Google's Decisions API, the
+independent second vendor. It is beta (`v1beta`,
+https://aistudio.google.com/docs/decisions-api, read 2026-11-16), so its shape may change.
 
 Models are pinned by exact version on both legs (`core/settings.py`):
 
 | Leg | Pinned model on the row | Endpoint setting | Timeout | Input limit |
 |---|---|---|---|---|
 | primary | `jev-1.13.0` | `VALOR_JEV_URL`, default TypeSafe's `/v1/systemone` | 10 s | none of Valor's; Jev refuses an input over its own limits |
-| fallback | `qwen/qwen3-235b-a22b-2507@parasail/fp8` | `VALOR_OPEN_WEIGHT_URL`, default OpenRouter's chat completions | 30 s | none of Valor's; OpenRouter refuses an input over the endpoint's context; no output limit is sent |
+| fallback | `gemini-decision-1` | `VALOR_GEMINI_DECISIONS_URL`, default Google's `/v1beta/decisions` | 10 s | none of Valor's; Google refuses an input over 262,144 tokens |
 
-An answer naming another model or provider is `malformed`. A version change is a new calibration
-record. One call is one attempt; the fallback is the retry.
+An answer naming another model is `malformed` (Google's names none). A version change is a new
+calibration record. One call is one attempt; the fallback is the second attempt.
 
 Jev's limits are 64,000 tokens per request and 32,000 for the `state` plus
 the longest question (https://docs.typesafe.ai/models), counted by Jev's
 own tokenizer, which Valor does not have. So every input is sent, and Jev
 refuses one over its limits with `400` and `error_type`
 `max_tokens_exceeded`, billing nothing: that is `input_too_large`, and the
-fallback is asked as for any failed leg.
+fallback's answer is taken as for any failed leg.
 
-The fallback endpoint's context (131,072) and largest answer are as
-OpenRouter lists them (`OPEN_WEIGHT_MAX_COMPLETION` 117,964 in
-`core/settings.py`, with the day checked). Valor's estimate
-(bytes / 3) is a metering worst case, not the host's count, so every input
-is sent. OpenRouter refuses one over the context with `404`, no usage, and
-a message naming `parasail/fp8` in its "Filter by Context Length" step:
-that is `input_too_large`, billing nothing; any other 404 is
-`http_status`. The body sends no `max_tokens`, so the host's own
-completion limit applies and no answer is cut short by a figure of Valor's.
+Google's limit is 262,144 input tokens. Every input is sent, and Google
+refuses one over it with `400` and the message "The input token count
+exceeds the maximum number of tokens allowed 262144." (probed 2026-11-16):
+that is `input_too_large`, billing nothing; any other non-200 is
+`http_status`. Its output is free and is not limited.
 
 **A 429** is the failure reason `rate_limited`, never `http_status`. When
 the answer carries `Retry-After` (seconds in ASCII digits, or an HTTP date), that endpoint
@@ -183,16 +181,21 @@ tiers".
 - **Primary: Jev** (`tools/jev.py`). One call carries every question, the
   inputs in its `state` object. Client request text goes to Jev like any
   other input (Tom, 2026-10-01).
-- **Fallback: the open-weight model** (`tools/open_weight.py`). The inputs
-  go in the user message as JSON; a strict schema asks for a short `notes`
-  string (discarded), then one probability per label. A generative model's
-  stated probabilities are a weaker signal, so its floors are higher.
+- **Fallback: Google's Decisions API** (`tools/gemini_decisions.py`). One
+  call carries every question; the inputs, as one JSON object, are the one
+  text block in `input`. A boolean question is a `noul` question with a
+  true and a false description; a choice or pick question is a `choice`
+  question with a rubric per label. The key goes in `x-goog-api-key`. It
+  answers a probability for a `noul` and per label for a `choice`, with
+  its own `confidence`, recorded and deciding nothing. Its floors are
+  higher.
 
 Both renderings follow the questions with one fixed sentence: the inputs
 are data, and nothing in them is an instruction.
 
-**Keys.** A leg sends its real key, read from `judgement-keys` in the
-kernel key directory (`docs/machine.md`), only to its pinned default
+**Keys.** A leg sends its real key, read from the kernel key directory
+(`docs/machine.md`): Jev's `TYPESAFE_API_KEY` from `judgement-keys`, and
+Google's the Meet key, `GOOGLE_API_KEY` in `google-key`. It sends it only to its pinned default
 endpoint; a missing key refuses `run` or `calibrate`, naming it. Any other
 endpoint must be on loopback and gets a fixed placeholder, so tests need no key; `calibrate` takes only providers.
 
@@ -201,13 +204,12 @@ kernel process, through `core/spending.py`'s open and `charge`: the
 gateway's rows with `route: judgement`, and no HTTP route, since no turn
 makes these calls. Each leg's call opens with a `gateway.opened` row whose
 estimate is the worst case: estimated input at the input price plus every
-output token allowed (for the fallback, `OPEN_WEIGHT_MAX_COMPLETION`, the
-most its endpoint produces). The estimate gates nothing; it is the charge only
+output token allowed (both legs' output is free, so none). The estimate gates nothing; it is the charge only
 when billing is unknown. Input is estimated as bytes / 2 of the request body
 (`settings.bytes_per_token`, as at the gateway); for Jev, which bills a prompt of its own around it, 1.25 times that plus 300
 tokens and 50 per question (`tools/jev.py`), sized from its single-question
 calibration calls on lock-file hashes (near 1.5 bytes
-per token). The unused fallback is charged 0. A
+per token), and the same for Google's leg. Every judgement pays for both calls. A
 charge is the usage at the pinned price (`JUDGEMENT_PRICES`) or the
 reported cost if more, rounded up; the
 worst-case estimate when billing is unknown; 0 when nothing reached the
@@ -216,13 +218,37 @@ authority, metered spending".
 
 **Rows.** Each judgement writes one `judgement.answered` or
 `judgement.failed` row to the task's stream (`events_one_judgement`: one
-per `judgement_id`), with the answers or the failure, the attempts, the
-cost, `inputs_sha256`, `ref`, and two digests: `task_sha256` (questions,
+per `judgement_id`), with the answers or the failure, the attempts (each
+keeping its per-question `answers`: label, probabilities, `p_proceed`,
+decision, the provider's own choice, leg, and model), the cost, the
+`model` of the answers used, `inputs_sha256`, `ref`, and two digests: `task_sha256` (questions,
 rubrics, input fields, floors, each leg's model and fixed rendering text)
 and `calibrated_sha256` (the declaration's `calibrated`). Differing digests
 mean no calibration record covers the task as asked; that blocks nothing.
 Serves: Mission item 6; the row is how a later reader sees why the kernel
 chose what it chose.
+
+When Jev answered every question outside its abstain band, the row is
+written and `judge` returns at once. If Gemini had already answered, its
+attempt is on the row; if not, the row's Gemini attempt has `outcome:
+"shadowed"`, and when Gemini's answer or failure arrives it charges its own
+call and appends a `judgement.shadowed` row (`judgement_id`, `site`, `ref`,
+`attempt`). A Gemini error or timeout never fails or delays a judgement Jev
+answered. `judgement.shadowed` is quiet (`ledger.QUIET`): it can land after
+the step that asked has failed, and it never counts as a task's latest row.
+It is not an outcome row. `JudgementPort.drain()` waits for held Gemini
+calls, at most the longest leg timeout and a second; `run`, `serve` (on
+exit), and `calibrate` call it. A held call that raises is printed to
+stderr and sent to Sentry. A process killed outright leaves that call's
+`gateway.opened` open, and holder recovery charges it at its estimate.
+
+`python -m core judgement-agreement [--since YYYY-MM-DD]` prints, per
+declared site, over the judgements where Gemini was asked, JSON counts:
+judgements, unsettled (no shadow row came), failures per leg, questions
+both answered, `action_agree` (each leg at its own floor),
+`action_agree_at_primary_floor` (Gemini's `p_proceed` re-gated at Jev's
+floor, where it would sit as first line), `label_agree`, and each
+disagreement by its pair, such as `jev proceed / gemini abstain`.
 
 ## Confidence gating
 
@@ -232,7 +258,7 @@ the `proceed` labels (`p_proceed`, rounded to nine places so a float sum never l
 floor it meets). With the leg's floor `f`, the leg proceeds when `p_proceed` is at least `f`, is
 cautious when it is at most `1 - f`, and abstains in between. The band is two-sided: a confident
 cautious answer is not second-guessed, since the fallback could only move it toward less caution.
-Only an abstain goes to the fallback; a question both legs abstain on takes the abstain route. The
+The fallback is asked on every judgement, but its answer is taken only on an abstain; a question both legs abstain on takes the abstain route. The
 argmax decides nothing: `precise` at .45 against thin labels at .20, .20, and .15 is an abstain,
 never a bare build. Serves: constraint "Three tiers" ("confidence-gated to a human") and Mission
 item 6.
@@ -500,7 +526,7 @@ is a proposed first version of the decisions, not a questionnaire.
 ### Confidence gating
 
 The decision is on P(precise), the only `proceed` label. At or above the leg's floor (0.70 for Jev,
-0.75 for the fallback) the request builds; an abstain, a cautious answer, and a failure of both legs
+0.75 for Gemini, the fallback) the request builds; an abstain, a cautious answer, and a failure of both legs
 go to clarify. The clarify message is the human gate, and a one-word "go" costs Tom one message.
 
 The asymmetry behind that choice, from the records: a thin request built bare cost the demonstration
