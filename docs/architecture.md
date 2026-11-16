@@ -133,7 +133,8 @@ class; the requester never names a class. For each request the broker, under the
 Performing writes `effect.intent` and commits it before the performer runs, then `effect.outcome`,
 holding a session lock on the effect throughout. A kill between the two leaves a dangling intent,
 never a silent effect, and frees the lock. The resident kernel settles a dangling `push_branch` or
-`merge` from the target on restart (`broker.reconcile`, never on an unanswered lookup; the rule is
+`merge` from the target, and a chat session's dangling `task.start|answer|steer|stop` from the ledger
+(`tools/chat_tasks.py` `lookup`), on restart and when it regains its database (`broker.reconcile`, never on an unanswered lookup; the rule is
 in [data.md](data.md)), and a bridge's outbox settles its own sends; the intent carries the action,
 so any dangling intent can be reconciled.
 

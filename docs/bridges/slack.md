@@ -45,7 +45,7 @@ from the product Sheet template and kept by the `product-sheet` skill
 skill's "Onboarding a project" checklist sets one up. Valor approves each item that
 passes the skill's full readiness review (Tom, 2026-11-01: "the system
 should be the approver"), with a new thread in the dev channel and a
-`task.start` with `"in"` the dev channel, so the task reads and reports
+`valor-record act start --in` the dev channel, so the task reads and reports
 there (`tools/chat_tasks.py`).
 
 **Business channels** (Tom, 2026-11-05: "a coworker, like a PM or
@@ -79,7 +79,7 @@ repo into the same project"). `#yudame-dev` covers yuda.me, the Studio
 Tools Mac app and the yudame Claude Code plugins (`yudame/skills`):
 `yudame.toml` lists `studio-tools` and `skills` in `projects`
 (projects/README.md), so its session's Brief carries a `Repos:` line,
-`task.start` takes `"project"` to start the task in the repository the
+`valor-record act start --project` starts the task in the repository the
 request is about, and the board covers all three. Another repository is one
 spec and one name in that list.
 

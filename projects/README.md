@@ -78,7 +78,7 @@ it (they come from settings), and loading a spec names the folder.
   ([update.md](../docs/plans/update.md)).
 - `projects` names other project specs whose repositories the project's
   chats work in too (a site project may list the app it ships with). A chat session's
-  `task.start` takes `"project"` to start its task under one of them, its
+  `valor-record act start --project` starts its task under one of them, its
   Brief lists them on a `Repos:` line, and its board covers their tasks.
   Every chat of the project gets them, its team chats too; their room
   role (`teammate`) is what keeps engineering out of a team chat. A child runs on the

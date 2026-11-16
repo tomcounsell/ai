@@ -429,9 +429,10 @@ turn, in that turn's news until the Brief is next written afresh
 The session reads and dispatches (`skills/sdlc/converse.md`): it replies
 with a send to the chat, threaded; stays quiet by sending nothing; and
 starts, answers and stops tasks (`task.start`, `task.answer`,
-`task.stop`, `tools/chat_tasks.py`). A task it started reports its
+`task.stop`, `tools/chat_tasks.py`), in its turn with `valor-record act`,
+reading the outcome before it writes the reply that reports it. A task it started reports its
 questions, deliveries and ends to the session (`child.reported`), never
-to a chat; one started with `"in"` another chat of the project (a product
+to a chat; one started with `--in` another chat of the project (a product
 room approving a build in its dev channel, [slack.md](slack.md)) is that
 chat's session's child instead, reads that chat and reports there; the session answers what it can of a question, raises only the
 rest in the chat, and passes one `task.answer`; a project's board session
@@ -464,10 +465,10 @@ which reports to the session, and the session tells him.
 
 ### Started tasks
 
-A task starts when a chat session asks for one (`task.start`, under the
-project its `"project"` names, one its Brief's `Repos:` line lists, else
+A task starts when a chat session asks for one (`valor-record act start`, `task.start`, under the
+project its `--project` names, one its Brief's `Repos:` line lists, else
 the session's own; the child carries
-the session's chat as `project.chat`, the chat it reads, or with `"in"`
+the session's chat as `project.chat`, the chat it reads, or with `--in`
 the named chat of the project, under that chat's session, opened if it
 has none, and the `"context"` the session wrote for it: a few lines of
 where it came from and what its room allows and forbids, rendered as its
