@@ -49,9 +49,7 @@ def version(path: str) -> str | None:
 SPAWN_DEPTH = "1000"
 # The turn's CLAUDE_CONFIG_DIR hides ~/.claude/settings.json, so the no-credit
 # attribution is passed here too.
-TURN_SETTINGS = json.dumps(
-    {"disableAllHooks": False, "attribution": {"commit": "", "pr": ""}}
-)
+TURN_SETTINGS = json.dumps({"disableAllHooks": False, "attribution": {"commit": "", "pr": ""}})
 SUBAGENT_OPENING = (
     "The Brief of the Valor session that started you follows. Its stage and channel are that "
     "session's; your task is the prompt you were given, and what you find goes back to it."
@@ -151,7 +149,9 @@ def workspace_turn(
     (critique, review, docs) is this with no `resume`.
 
     A new session gets `--session-id` with an id the kernel chose; a
-    resumed one `--resume`.
+    resumed one `--resume`. The builder's `news`, what changed in a chat
+    session's frozen Brief (`tasks.frozen`), follows the prompt and reaches
+    subagents after the Brief, leaving the system prompt as it was.
     """
     harness = harness or {}
     if not harness.get("sandbox_profile"):
@@ -161,7 +161,9 @@ def workspace_turn(
         )
     max_output_tokens = harness.get("max_output_tokens", max_output_tokens)
 
-    def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
+    def build(base_url: str, brief: str, turn_id: str, news: str = "") -> TurnCommand:
+        # What changed in a chat session's frozen Brief (`tasks.frozen`) follows the prompt.
+        said = f"{prompt}\n\n{news}" if news else prompt
         env = environment(harness.get("env", {}))
         env["ANTHROPIC_BASE_URL"] = base_url
         env["VALOR_RECORD_URL"] = f"{base_url}/record"  # valor-record (core/record.py)
@@ -177,7 +179,7 @@ def workspace_turn(
         env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] = SPAWN_DEPTH
         # Every subagent, at every depth, opens with the dispatched text: the
         # SubagentStart hook of Valor's plugin prints this.
-        env["VALOR_SUBAGENT_START"] = subagent_start(brief)
+        env["VALOR_SUBAGENT_START"] = subagent_start(f"{brief}\n\n{news}" if news else brief)
         if channel := harness.get("chat_channel"):
             env["VALOR_COMPACT"] = compact_text(channel)
             if marks := compaction(model):
@@ -222,7 +224,7 @@ def workspace_turn(
         else:
             session_id = str(uuid.uuid4())
             argv += ["--session-id", session_id]
-        argv += ["--", prompt]
+        argv += ["--", said]
         argv = [
             binaries.require(binaries.SANDBOX_EXEC),
             "-D",

@@ -182,7 +182,7 @@ def fresh_for(verdict: dict, commit: bool = False):
     from harnesses import claude_code
 
     def for_(prompt, checkout, model, harness, harness_name):
-        def build(url, brief, turn_id):
+        def build(url, brief, turn_id, news=""):
             return claude_code.TurnCommand(
                 argv=[sys.executable, "-c", VERDICT_TURN, json.dumps(verdict), "1" if commit else "0",
                       settings.git_bin],

@@ -905,7 +905,7 @@ async def session_for(conn, channel: str, chat_id: str, spec: workspace.Spec | N
 async def _session_brief(
     conn, channel: str, chat_id: str, spec: workspace.Spec, *, own: bool, before: str | None
 ) -> tasks.Brief:
-    harness_name, model = resolve_seat("frontier")
+    harness_name, model = resolve_seat("chat")
     return tasks.Brief(
         instruction=await _chat_start(conn, channel, chat_id, spec, own, before),
         model=model,

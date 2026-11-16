@@ -188,7 +188,9 @@ def workspace_turn(
         raise ValueError("a Codex turn needs `codex_home` in the harness settings: the turn's own Codex home")
     codex_home = harness["codex_home"]
 
-    def build(base_url: str, brief: str, turn_id: str) -> TurnCommand:
+    def build(base_url: str, brief: str, turn_id: str, news: str = "") -> TurnCommand:
+        # What changed in a chat session's frozen Brief (`tasks.frozen`) follows the prompt.
+        said = f"{prompt}\n\n{news}" if news else prompt
         write_config(codex_home, {"config.toml": config_toml(base_url, model, brief)})
         link_skills(codex_home)
         env = environment(harness.get("env", {}))
@@ -220,7 +222,7 @@ def workspace_turn(
             harness="codex",
             parse=parse,
             harness_version=version(settings.codex),
-            stdin=(f"{brief}\n\n{prompt}" if resume else prompt).encode(),
+            stdin=(f"{brief}\n\n{said}" if resume else said).encode(),
             # Codex names the session: the rollout is found by the id `parse` reads.
             transcript=transcripts.anchored(codex_home, None, layout="codex"),
             tmpdir=harness.get("tmpdir"),

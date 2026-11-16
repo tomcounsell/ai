@@ -98,6 +98,7 @@ class Price:
 # family (`claude-haiku`), or of every entry when its family has none, its
 # charge marked `unpriced`. A dated id (`claude-haiku-4-5-20251001`) takes its undated entry.
 PRICES: dict[str, Price] = {
+    "claude-fable-5-2": Price(8.00, 40.00, 10.00, 16.00, 0.20, date(2026, 11, 16)),
     "claude-opus-5-5": Price(4.00, 20.00, 5.00, 8.00, 0.20, date(2026, 10, 1)),
     "claude-opus-5": Price(5.00, 25.00, 6.25, 10.00, 0.50, date(2026, 10, 1)),
     "claude-opus-4-8": Price(5.00, 25.00, 6.25, 10.00, 0.50, date(2026, 10, 1)),
@@ -214,9 +215,12 @@ OPENAI_LOOPING_TOOLS = frozenset({"web_search", "file_search", "mcp"})
 # `reviewer_openai` is the blind verifier's second seat, on Pi; the id is the
 # one the gateway's OpenAI price table pins (m3-openai-route.md). Editing
 # this is a change inside the trust boundary, reviewed like kernel code.
+# `chat` is every chat session's turn (`tasks.turn_model`), and `reviewer`
+# code review, both on Fable (Tom, 2026-11-16); tasks stay on `frontier`.
 SEATS: dict[str, tuple[str, str]] = {
     "frontier": ("claude_code", "claude-opus-5-5"),
-    "reviewer": ("claude_code", "claude-opus-5-5"),
+    "chat": ("claude_code", "claude-fable-5-2"),
+    "reviewer": ("claude_code", "claude-fable-5-2"),
     "light": ("claude_code", "claude-haiku-5-5"),
     "reviewer_openai": ("pi", "gpt-6.1-sol"),
 }
@@ -225,7 +229,7 @@ SEATS: dict[str, tuple[str, str]] = {
 # The model windows a chat session compacts against, by pinned id. Claude
 # Code's calls on the frontier seat reached 947,155 input tokens before a
 # compaction (docs/harnesses.md), so it has the 1M window.
-WINDOWS = {"claude-opus-5-5": 1_000_000}
+WINDOWS = {"claude-opus-5-5": 1_000_000, "claude-fable-5-2": 1_000_000}
 # A chat session is reminded of its context size as it passes each of these,
 # and compacted for it past `FORCE` (Tom, 2026-10-17), on a 1M window.
 REMIND = (150_000, 250_000, 350_000, 450_000, 550_000, 600_000)

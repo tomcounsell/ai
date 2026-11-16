@@ -673,7 +673,7 @@ def test_a_running_turn_survives_the_database_dropping_every_session_and_a_stop_
         marker = tmp_path / "finished"
         script = f"import time, pathlib; time.sleep(3); pathlib.Path({str(marker)!r}).write_text('ok')"
 
-        def build(url, brief, turn_id, script=script):
+        def build(url, brief, turn_id, news="", script=script):
             return runs.TurnCommand(
                 argv=[sys.executable, "-c", script], env={}, cwd=str(tmp_path), harness="sleeper"
             )
@@ -684,7 +684,7 @@ def test_a_running_turn_survives_the_database_dropping_every_session_and_a_stop_
         ended = await asyncio.wait_for(turn, 30)
         # A second turn, stopped after a drop: the stop is still heard.
         sleeper = "import time; time.sleep(60)"
-        second = asyncio.create_task(runs.run_turn(gateway, task, lambda u, b, t: runs.TurnCommand(
+        second = asyncio.create_task(runs.run_turn(gateway, task, lambda u, b, t, news="": runs.TurnCommand(
             argv=[sys.executable, "-c", sleeper], env={}, cwd=str(tmp_path), harness="sleeper"), dsn=fresh))  # fmt: skip
         await asyncio.sleep(1.0)
         terminate_all(fresh)

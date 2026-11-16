@@ -9,7 +9,7 @@ the two.
 import re
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, fields
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -329,6 +329,14 @@ async def brief(conn, task_id: str) -> Brief:
     return Brief.load(body)
 
 
+def turn_model(b: Brief) -> str:
+    """The model a working-session turn of `b` runs: the `chat` seat's for a
+    chat session, whatever model its Brief was written with (Tom,
+    2026-11-16), else the Brief's own. A call's worker is a fresh turn and
+    keeps the Brief's."""
+    return resolve_model("chat") if b.chat else b.model
+
+
 def stage_text(state: machine.State | str) -> str | None:
     """The stage file for a state (or a check's name), or None for one no
     turn runs in."""
@@ -405,6 +413,7 @@ async def dispatch(
     *,
     fresh: str | None = None,
     offered: Sequence[str] = (),
+    compaction: bool = False,
 ) -> dict[str, Any]:
     """The text a turn receives: the persona first (`persona/`, rendered
     now from the kernel's own checkout, never from the workspace), then the
@@ -429,7 +438,13 @@ async def dispatch(
     Brief whose task has children ends with their Children section
     (`children_text`). Returns the text, the
     correction numbers it carries, the text's digest, the usage lines it
-    offered, and the persona's digest and size. A persona that cannot be
+    offered, and the persona's digest and size.
+
+    A chat session's working turn (`frozen`) keeps the cache of its whole
+    conversation: its text is the Brief its last snapshot rendered, byte
+    for byte, and `news` says what changed since then, for the turn's
+    prompt. `compaction` marks its `/compact` turn, which takes the
+    snapshot and no news. A persona that cannot be
     read (a missing persona file or identity field) raises
     `persona.PersonaUnreadable`; there is no fallback text."""
 
@@ -474,48 +489,135 @@ async def dispatch(
         head += f"\nWorkspace: {b.workspace}"
     if f.plan and state in (machine.State.BUILD, machine.State.PATCH, machine.State.PLAN) and not fresh:
         head += f"\nPlan: {f.plan['path']} at {f.plan['commit']}"
-    sections = [rendered, head, corrections.render(standing)]
+    sections = {"persona": rendered, "brief": head, "corrections": corrections.render(standing)}
     remembered = await memory.recall(conn, task_id, fresh)
     if remembered:
-        sections.append(remembered)
+        sections["remembered"] = remembered
     if b.workspace and not fresh:
         shared = await record.memories(conn, task_id)
         if shared:
-            sections.append(shared)
+            sections["memories"] = shared
         stands = await record.summary(conn, task_id)
         if stands:
-            sections.append(stands)
+            sections["summary"] = stands
     lines: list[str] = []
     if fresh:
         if fresh not in ("advice", "call"):  # the advisor and a call's worker answer in prose
-            sections.append(verdict_text())
+            sections["verdict"] = verdict_text()
         stage = stage_text(fresh)
         if stage:
-            sections.append(stage)
+            sections["stage"] = stage
     elif b.workspace and b.chat:
         lines = list(offered)
-        sections.append(channel_text(lines, "converse.md"))
+        sections["channel"] = channel_text(lines, "converse.md")
     elif b.workspace:
         lines = list(offered)
-        sections.append(channel_text(lines))
+        sections["channel"] = channel_text(lines)
         stage = stage_text(state)
         if stage:
-            sections.append(stage)
+            sections["stage"] = stage
     if played and fresh in (None, "call"):  # a call's worker plays the asking chat's role
-        sections.append(role_text(played))
+        sections["role"] = role_text(played)
+    found: list[dict[str, Any]] = []
     if not fresh:
         found = await reports(conn, task_id)
         if found:
-            sections.append(children_text(found))
-    text = "\n\n".join(sections)
+            sections["children"] = children_text(found)
+    sections = {k: v for k, v in sections.items() if v}
+    text = "\n\n".join(sections.values())
+    news = ""
+    snapshot: dict[str, Any] = {}
+    if b.chat and not fresh:
+        text, news, snapshot = frozen(rows, f, sections, found, text, compaction)
     return {
         "text": text,
+        "news": news,
+        **snapshot,
         "corrections": [c["number"] for c in standing],
         "sha256": ledger.digest(text),
         "offered": lines,
         "persona_sha256": persona.digest(rendered),
         "persona_bytes": len(rendered.encode()),
     }
+
+
+# The prompt cache's lifetime: Claude Code writes a turn's cache for an hour.
+CACHE_TTL = timedelta(hours=1)
+# Sections whose change starts the Brief afresh: Valor's own text, changed
+# by a deploy, which a new system prompt reads better than a note.
+REFRESHED_BY = ("persona", "channel")
+SECTION_NAMES = {"brief": "the Brief's head (instruction, room, repos, ceiling)", "corrections": "Corrections",
+                 "remembered": "Remembered", "memories": "other sessions' memory", "summary": "the project summary",
+                 "role": "your role"}  # fmt: skip
+
+
+def _child_facts(c: dict[str, Any]) -> list[Any]:
+    return [c["state"], c["tree_spent_usd_micros"], c["last_activity"]]
+
+
+def frozen(rows, f, sections: dict[str, str], found: list[dict[str, Any]], text: str, compaction: bool):
+    """A chat session's working turn: the system prompt it gets, its news,
+    and the snapshot to record when it starts afresh.
+
+    The snapshot is the latest `turn.started` carrying `brief_sections` (a
+    digest per section) and `brief_children` (each child's state, subtree
+    spending and last activity). The turn gets that snapshot's `brief`, byte
+    for byte, and news: each section whose digest differs, in full, and a
+    line for each child that is new or changed since, with a new child's
+    instruction. Measured against the snapshot, so the system prompt and the
+    news together always hold every child's current state and instruction.
+
+    It starts afresh, rendering `text` now, when the cache is cold anyway or
+    the news would cost more than a rewrite: a new conversation (no session
+    to resume), no snapshot, an hour since the last working turn ended, the
+    turn after a `/compact`, a change to the persona or the stage file, or
+    news past a quarter of the Brief. A `/compact` turn keeps the snapshot
+    and gets no news: its prompt is the compaction's instructions."""
+    starts = [r for r in rows if r["type"] == "turn.started" and not r["payload"].get("fresh")]
+    shot = next((r for r in reversed(starts) if "brief_sections" in r["payload"]), None)
+    digests = {k: ledger.digest(v) for k, v in sections.items()}
+    kids = {c["task_id"]: _child_facts(c) for c in found}
+    afresh = (text, "", {"brief_sections": digests, "brief_children": kids})
+    if shot is None or (f.session is None and not compaction):
+        return afresh
+    p = shot["payload"]
+    old, before = p["brief_sections"], p.get("brief_children") or {}
+    if compaction:
+        return p["brief"], "", {}
+    ids = {r["payload"]["turn_id"] for r in starts}
+    ended = [r["at"] for r in rows if r["type"] == "turn.ended" and r["payload"].get("turn_id") in ids]
+    if starts[-1]["payload"].get("compaction") or not ended or datetime.now(UTC) - max(ended) > CACHE_TTL:
+        return afresh
+    if any(digests.get(k) != old.get(k) for k in REFRESHED_BY):
+        return afresh
+    changed = [c for c in found if before.get(c["task_id"]) != _child_facts(c)]
+    parts = []
+    if changed:
+        lines = ["## Your children that are new or changed", ""]
+        for c in changed:
+            lines.append(f"- {child_line(c)}" + ("" if c["task_id"] in before else ", new:"))
+            if c["task_id"] not in before:
+                lines += quoted(c["instruction"])
+        parts.append("\n".join(lines))
+    for k, v in sections.items():
+        if k not in ("children", *REFRESHED_BY) and digests[k] != old.get(k):
+            parts.append(v)
+    gone = [SECTION_NAMES.get(k, k) for k in old if k not in sections and k != "children"]
+    if gone:
+        parts.append("No longer in your Brief: " + ", ".join(gone) + ".")
+    if not parts:
+        return p["brief"], "", {}
+    when = shot["at"].astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    head = (
+        "# Your Brief has changed since it was written\n\n"
+        f"Your system prompt holds your Brief as it stood at {when}. What follows is current and wins: "
+        "each section below replaces the one of the same heading there, and each child listed here has "
+        "the state, spending and last activity given here."
+    )
+    news = "\n\n".join([head, *parts])
+    if len(news) * 4 > len(text):
+        return afresh
+    return p["brief"], news, {}
 
 
 async def has_stop_row(conn, task_id: str) -> bool:
@@ -832,15 +934,18 @@ async def tree_spending(conn, task_id: str) -> dict[str, Any]:
 
 
 async def child_report(conn, child_id: str) -> dict[str, Any]:
-    """A child as its parent sees it: id, instruction, state, its subtree's
-    metered spending, and its latest delivery (`summary`, `outcome`) or
+    """A child as its parent sees it: id, instruction, state, the time of
+    its latest row (`last_activity`), its subtree's metered spending, and
+    its latest delivery (`summary`, `outcome`) or
     None."""
-    f = machine.fold(await ledger.read(conn, child_id))
+    rows = await ledger.read(conn, child_id)
+    f = machine.fold(rows)
     delivery = f.delivery
     return {
         "task_id": child_id,
         "instruction": (await brief(conn, child_id)).instruction,
         "state": f.state.value,
+        "last_activity": rows[-1]["at"].astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC") if rows else None,
         "tree_spent_usd_micros": (await tree_spending(conn, child_id))["tree_spent_usd_micros"],
         "delivery": {"summary": delivery.get("summary"), "outcome": delivery.get("outcome")}
         if delivery
@@ -865,13 +970,19 @@ def quoted(text: str | None, indent: str = "  ") -> list[str]:
 
 def children_text(found: list[dict[str, Any]]) -> str:
     """The Brief's Children section: kernel facts only (id, state, subtree
-    spending, the instruction Tom or kernel code gave), never a child's own
-    words."""
+    spending, last activity, the instruction Tom or kernel code gave), never
+    a child's own words."""
     lines = ["# Children", ""]
     for c in found:
-        lines.append(f"- {c['task_id']} ({c['state']}, metered spending {usd(c['tree_spent_usd_micros'])})")
+        lines.append(f"- {child_line(c)}")
         lines += quoted(c["instruction"])
     return "\n".join(lines)
+
+
+def child_line(c: dict[str, Any]) -> str:
+    """A child's id, state, subtree spending and last activity, on one line."""
+    when = f", last activity {c['last_activity']}" if c.get("last_activity") else ""
+    return f"{c['task_id']} ({c['state']}, metered spending {usd(c['tree_spent_usd_micros'])}{when})"
 
 
 # Every kind of attention entry, in the order `attention_counts` lists them.

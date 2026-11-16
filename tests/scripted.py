@@ -191,9 +191,9 @@ def steer(ws: Path, **cfg) -> None:
 
 
 def turn_for(prompt, resume, b):
-    def build(url, brief, turn_id):
+    def build(url, brief, turn_id, news=""):
         return claude_code.TurnCommand(
-            argv=[sys.executable, "-c", SCRIPT, prompt, resume or "", brief], harness="script",
+            argv=[sys.executable, "-c", SCRIPT, f"{prompt}\n\n{news}" if news else prompt, resume or "", brief], harness="script",
             env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "VALOR_GIT": settings.git_bin},
             cwd=b.workspace,
             parse=claude_code.parse,

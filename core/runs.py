@@ -223,8 +223,9 @@ async def _run_turn(
                     state=machine.State(state) if state else None,
                     fresh=fresh,
                     offered=offered,
+                    compaction=compaction,
                 )
-                command = build(base_url, dispatched["text"], turn_id)
+                command = build(base_url, dispatched["text"], turn_id, news=dispatched["news"])
                 await ledger.append(
                     conn,
                     task_id,
@@ -245,6 +246,8 @@ async def _run_turn(
                         "offered": dispatched["offered"],
                         "persona_sha256": dispatched["persona_sha256"],
                         "persona_bytes": dispatched["persona_bytes"],
+                        **{k: dispatched[k] for k in ("brief_sections", "brief_children") if k in dispatched},
+                        **({"brief_news": dispatched["news"]} if dispatched["news"] else {}),
                     },
                 )
         except BaseException:

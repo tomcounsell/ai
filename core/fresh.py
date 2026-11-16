@@ -252,7 +252,7 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None, seat: str | N
 # -- the advisor -----------------------------------------------------------------------------
 
 ADVICE_GIVEN = session.ADVICE_GIVEN
-ADVISOR_SEATS = ("reviewer_openai", "reviewer")
+ADVISOR_SEATS = ("reviewer_openai", "frontier")
 
 
 def advisor_seat(harness_name: str) -> str:

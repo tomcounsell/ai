@@ -191,7 +191,7 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
         gateway = await bridges.gateway(dsn)
         # A real subprocess that would run for a minute, with a child of its own.
         script = "import subprocess,time; subprocess.Popen(['sleep','60']); time.sleep(60)"
-        build = lambda url, brief, turn_id: runs.TurnCommand(
+        build = lambda url, brief, turn_id, news="": runs.TurnCommand(
             argv=[sys.executable, "-c", script], env={}, cwd=str(tmp_path), harness="sleeper",
             tmpdir=str(tmp_path / "tmp"),
         )  # fmt: skip
@@ -267,7 +267,7 @@ def test_a_turns_tmpdir_is_emptied_before_it_and_removed_after_it(dsn, tmp_path,
     async def go(harness):
         task = await new_task(dsn)
         gateway = await bridges.gateway(dsn)
-        build = lambda url, brief, turn_id: runs.TurnCommand(
+        build = lambda url, brief, turn_id, news="": runs.TurnCommand(
             argv=[sys.executable, "-c", SCRATCH, str(outside), str(code)], cwd=str(tmp_path),
             env={**harness["env"], "TMPDIR": harness["tmpdir"]}, harness="scratch", tmpdir=harness["tmpdir"],
         )  # fmt: skip
