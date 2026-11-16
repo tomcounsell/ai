@@ -2032,6 +2032,22 @@ def test_a_spoken_answer_answers_what_was_asked_with_the_specific_or_says_it_doe
     assert "concrete case behind it" in calls and "How product decisions are made" in calls
 
 
+def test_a_call_ask_is_answered_at_once_in_its_thread_and_joined_a_turn_later():
+    """Tom, 2026-11-16: after a call ask the thread sat silent until Valor
+    was in. The asking turn posts one line with no link and wakes itself;
+    a later turn reads, requests `meet.join`, and posts no second line. An
+    invited call keeps its own post and gets no such line."""
+    converse = " ".join((Path(__file__).parent.parent / "skills/sdlc/converse.md").read_text().split())
+    calls = converse[converse.index("**Calls.**") : converse.index("**An invited call.**")]
+    ack = calls.index('"Starting a call, link in a moment", with no link')
+    assert ack < calls.index("Read first:") < calls.index("Then request `meet.join`")
+    assert "write `.valor/wake.md` at `30s`" in calls and "end the turn there" in calls
+    assert "posts no second line" in calls
+    assert "Post the link only from that report" in calls
+    invited = converse[converse.index("**An invited call.**") : converse.index("**Voice notes.**")]
+    assert "Starting a call" not in invited and "the `link` report needs no second post" in invited
+
+
 def test_every_managers_call_carries_valors_own_product_decision_process():
     """Tom, 2026-11-13: the process that orders the queue is standing context
     in every call, from the persona's one copy, not from the prep."""

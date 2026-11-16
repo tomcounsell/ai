@@ -185,7 +185,8 @@ def test_a_join_opens_one_call_session_reports_joining_with_no_link_and_starts_i
     assert info["url"] == URL and info["prep"].startswith("The launch") and info["machine"] == settings.machine
     (joining,) = [r for r in got if r["kind"] == "call"]
     assert joining["about_key"].endswith(":joining") and joining["child_id"] == session_id
-    assert URL not in joining["text"] and CODE not in joining["text"] and "Post nothing yet" in joining["text"]
+    assert URL not in joining["text"] and CODE not in joining["text"]
+    assert "Post nothing more yet" in joining["text"]
     assert session_id in reporting
 
 

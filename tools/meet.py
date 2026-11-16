@@ -76,7 +76,8 @@ class MeetJoin:
         'asking message\'s id>", "topic_id": null, "prep": "<your notes on the topic or project, as your '
         'Calls section says: each recommendation with its case>", "starts": null}`, `starts` being an '
         "invited call's start (ISO), from which its waits for others count; Valor joins the call ready "
-        "on that topic. Your next prompt says Valor is joining; the link comes only in a `link` report once Valor "
+        'on that topic; ask it a turn after the thread\'s "Starting a call" line (your Calls section). '
+        "Your next prompt says Valor is joining; the link comes only in a `link` report once Valor "
         "is in, so post it only from that report, and post no link when the call reports it could not join."
     )
 

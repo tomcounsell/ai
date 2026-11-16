@@ -28,7 +28,10 @@ against a new Meet with a second device of Valor's account
 - **`meet.join`** (`act`), a group chat session's: target a Meet link or
   `new` (`gws meet spaces create`, open to anyone with the link), payload
   the thread asked in (`reply_to`, `topic_id`) and `prep`, the session's
-  notes on the topic. It opens the call session (channel `meet`, chat id
+  notes on the topic. The asking session first answers the ask in its
+  thread with one line, "Starting a call, link in a moment", and requests
+  `meet.join` a turn later, after its reading (Tom, 2026-11-16;
+  `skills/sdlc/converse.md` **Calls.**). It opens the call session (channel `meet`, chat id
   the meeting code), reports to the asking session that Valor is joining
   (naming the call session, so the chat can stop or steer it, with no
   link) and starts the call's process. Neither that report nor the

@@ -246,7 +246,7 @@ async def begin(
         brief.id,
         "joining",
         f"Valor is joining the call (call session {brief.id}); its link comes in a `link` report once Valor "
-        "is in. Post nothing yet.",
+        "is in. Post nothing more yet: the thread already has your line that the call is starting.",
     )
     return brief.id
 

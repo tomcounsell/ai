@@ -8,13 +8,14 @@ governance.
 
 ## Change (one commit)
 
-1. `skills/sdlc/converse.md`, **Calls.**: "Say nothing yet" becomes: in the
-   same turn as the `meet.join` request, post one line in that thread,
-   "Starting a call, link in a moment" (the chat's own send, as the reply
-   section says, with the same `reply_to`/`topic_id` as the join), with no
-   link and no Meet code; then say nothing more until the `link` report. The
-   rest stands: the link only from the `link` report, one line; a
-   could-not-join report gets one line why, with no link.
+1. `skills/sdlc/converse.md`, **Calls.** (amended after critique: a chat
+   turn's sends leave only when it ends, so the line gets its own turn):
+   before any reading, post one line in the asking thread, "Starting a call,
+   link in a moment", with no link, write `.valor/wake.md` at `30s` on that
+   send, and end the turn. The turn that finds the line sent and no call yet
+   (the wake, or a thread message that dropped it) posts no second line,
+   reads, and requests `meet.join` as before. "Say nothing yet" becomes "Say
+   nothing more yet". The link still comes only from the `link` report.
 2. `core/call.py:248`, the `joining` report: "Post nothing yet." becomes
    "Post nothing more yet: the thread already has your line that the call is
    starting." so a turn waking on that report does not post a second line.
@@ -28,9 +29,9 @@ post already acknowledges, and the `link` report needs no second post.
 ## Tests
 
 - `tests/test_call.py`, beside the existing Calls-text test: the **Calls.**
-  section (sliced to **An invited call.**) holds "Starting a call, link in a
-  moment", says to post it in the same turn as the `meet.join` request, and
-  still says the link is posted only from the `link` report.
+  section holds the line with no link, before the reading and the
+  `meet.join` request; the 30s wake and the turn's end; no second line;
+  the link still only from the `link` report.
 - `tests/test_meet.py:188`: the `joining` report says to post nothing more,
   and still carries neither the link nor the Meet code.
 - Beyond the obvious: the ack line itself names no link (assert the Calls
