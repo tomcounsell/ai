@@ -627,6 +627,9 @@ labelled as records, not instructions, for the turn to Read when it
 matters (`record.memories`). It is in the Brief, not a `CLAUDE.md`, so it
 reaches Pi and Codex turns too, never reaches a fresh session (critique,
 review, docs, the advisor), and is never loaded as instructions.
+After it comes "Where the project stands", the project's latest nightly
+summary (`record.summary`, the `summary` routine in [routines.md](routines.md)),
+labelled the same way and likewise never in a fresh session's Brief.
 
 ## Speaking a reply
 
