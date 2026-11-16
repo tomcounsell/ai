@@ -981,8 +981,6 @@ async def _run(args) -> None:
             record = await judgement_sites.calibrate(judgement_port, settings.dsn(), args.cases)
         except ValueError as exc:
             raise SystemExit(f"calibrate refused: {exc}") from None
-        finally:
-            await judgement_port.drain()
         print(json.dumps(record, indent=2))
         return
     if args.command == "routine" and args.finding is None and (args.key or args.evidence):

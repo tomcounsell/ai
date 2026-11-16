@@ -237,8 +237,8 @@ call and appends a `judgement.shadowed` row (`judgement_id`, `site`, `ref`,
 answered. `judgement.shadowed` is quiet (`ledger.QUIET`): it can land after
 the step that asked has failed, and it never counts as a task's latest row.
 It is not an outcome row. `JudgementPort.drain()` waits for held Gemini
-calls, at most `gemini_timeout_s` and a second; `run`, `serve` (on
-exit), and `calibrate` call it. A held call that raises is printed to
+calls, at most `gemini_timeout_s` and a second; `run` and `serve` (on
+exit) call it. A held call that raises is printed to
 stderr and sent to Sentry. A process killed outright leaves that call's
 `gateway.opened` open, and holder recovery charges it at its estimate.
 
