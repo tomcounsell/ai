@@ -599,7 +599,9 @@ project's memory as recall reads it ([memory.md](memory.md), Search), and
 `facts`, `sources`, `fact add|supersede|confirm`, `entity add|alias`,
 `link` and `source`, which read and write what is true about the project
 over time ([memory.md](memory.md), Facts): the one write it makes, a POST
-of the gateway's `record/facts`. The kernel answers it: each harness sets `VALOR_RECORD_URL`, the
+of the gateway's `record/facts`; and `person WORDS`, the dossier of each of
+the project's people a name or loose description fits ([memory.md](memory.md),
+People). The kernel answers it: each harness sets `VALOR_RECORD_URL`, the
 turn's gateway base URL with `/record`, and the gateway's `record/` route
 (before the catch-all that forwards upstream) resolves the turn's token to
 its task, the task to its project, and reads `core/record.py`'s SELECTs (or

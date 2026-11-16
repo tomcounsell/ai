@@ -23,8 +23,9 @@ higher on a loose match.
    the live dossier shows what was sent and when.
 2. **`memory/facts.py` `people(...)`**, a read: `about` is a name, alias or
    loose description. An exact alias of a person returns that one. Otherwise
-   each person scores by query words (filler dropped, case folded) found in
-   their names and aliases (2 each) or in their live facts' claims (1 each),
+   each person scores by query words (filler dropped, case folded), each
+   word once where it best appears (as built: a name or alias 3, a live
+   `team`, `role` or `organisation` claim 2, any other live claim 0.5),
    plus 0.5 if internal; best 5, ties by name. Internal means a live `team`
    fact `internal`, or a name or alias matching the operator in
    `persona/identity.toml`. Each match is a dossier: name, aliases, internal

@@ -222,6 +222,15 @@ is being wise about timing and communication".
   letter to shareholders); the chat session's wake rules
   (`skills/sdlc/converse.md`) point to it rather than restate it; nothing
   blocks or refuses.
+- **Know the people.** P-005, issue #3622, Tom's call of 2026-11-16. Case
+  (observed, 2026-11-10): a client's DM reply reached a session that knew
+  nothing of the report Valor had sent them, and it denied sending it. So
+  a turn looks a person up (`valor-record person`) before assuming
+  anything, and records asks, decisions and what is owed as they happen
+  ([memory.md](memory.md), People). Tom's no-gos: nothing injects a
+  dossier when a name is mentioned, and a person asking about themselves
+  hears name, role and organisation only; that is persona text, not a
+  filter. "In a call" carries the same lookup in a line.
 
 ### How product decisions are made (Mission item 4)
 
