@@ -599,14 +599,14 @@ INSTRUCTIONS = (
 )
 TOOLS = [
     {"name": "ask", "description": "Ask your worker to look something up; the answer is posted in the call's "
-     "chat and noted to you.", "parameters": {"type": "object", "properties": {"question": {"type": "string"}},
+     "chat and noted to you.", "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {"question": {"type": "string"}},
      "required": ["question"]}},
     {"name": "post", "description": "Post text in the call's chat (copied to the thread the call was asked in).",
-     "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
+     "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
     {"name": "open_decisions", "description": "The decisions open for Tom on this project, with their ids.",
      "parameters": {"type": "object", "properties": {}}},
     {"name": "settle", "description": "Record Tom's answer to open decisions: the read-back, and each "
-     "`task id/question id` it settles.", "parameters": {"type": "object", "properties": {
+     "`task id/question id` it settles.", "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {
          "ids": {"type": "array", "items": {"type": "string"}}, "readback": {"type": "string"}},
          "required": ["ids", "readback"]}},
     {"name": "person", "description": "A person's dossier on this project, by their name or a loose description: "
@@ -614,8 +614,14 @@ TOOLS = [
      "delivered).", "parameters": {"type": "object", "properties": {"about": {"type": "string"}},
      "required": ["about"]}},
     {"name": "leave", "description": "Leave the call: when someone asks you to, or everyone has said goodbye.",
-     "parameters": {"type": "object", "properties": {}}},
+     "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {}}},
 ]  # fmt: skip
+# A non-blocking tool's response asks Live for a turn of its own: after a
+# readback and its `post`, or "I'll check" and its `ask`, Valor said a second
+# reply (five in two calls, 2026-11-16). One that only acknowledges, in a
+# turn that has spoken, is silent; any other result is said.
+ASKED = "asked: the answer will be posted in the chat and noted to you"
+ACKNOWLEDGED = {"posted", "recorded", "leaving", ASKED}
 # Offered when the call's project has a backlog Sheet (Tom, 2026-11-13).
 BACKLOG_LINE = (
     "- When someone asks about the backlog or an item on it (what is in it, the top priority, an item's size, "
@@ -643,9 +649,10 @@ def live_config(project: str, prep: str, handle: str | None, so_far: str = "", s
     persona's "In a call" section and its "How product decisions are
     made" (Valor's own process as the project's manager, Tom, 2026-11-13),
     read as the call starts. What Valor
-    hears is transcribed as English unless clearly another language (an
-    unclear phrase came out as Portuguese, 2026-11-06); the reply's
-    language is the model's, which the persona section keeps English.
+    hears is hinted English for its transcript; Live has no pin, and the
+    reply's language is the model's own from the audio (`SpeechConfig`'s
+    language did not change it, 2026-11-16), which the persona section keeps
+    English.
     A fresh session in a call under way is told `so_far` (`Call.so_far`).
     With a `sheet`, Valor has `backlog` and is told when to use it."""
     from google.genai import types
@@ -1317,6 +1324,8 @@ class Call:
         its transcript of the question, and the stretch closed before it was
         another person's (a cut for side talk in the live test, 2026-11-06)."""
         if self.reply is None:
+            # What was heard before it is what it answers: never later "words you did not catch".
+            self.voiced_s = 0.0
             spoke = self.energy
             self.answering = max(spoke, key=spoke.get) if spoke else self.speaking or self.last_who
             if self.close_at is not None:
@@ -1484,6 +1493,10 @@ class Call:
         from google.genai import types
 
         out = []
+        # The turn has spoken once its say is requested (its sound, before
+        # Live's lagging transcript of it), or, its turn complete, while it plays.
+        spoke = self.reply.said is not None if self.reply is not None else self.out is not None
+        quiet = {t["name"] for t in TOOLS if t.get("behavior") == "NON_BLOCKING"}
         for fc in calls:
             args = dict(fc.args or {})
             reply = await self._begin()
@@ -1498,7 +1511,7 @@ class Call:
                 else:
                     self.asked[key] = None
                     self.questions.put_nowait(question)
-                    result = "asked: the answer will be posted in the chat and noted to you"
+                    result = ASKED
                 if not await self.worker_ready():
                     result += (
                         "; your worker's copy of the project is still being set up, so say it needs a moment"
@@ -1527,7 +1540,16 @@ class Call:
                 result = "leaving"
             else:
                 result = f"not done: {fc.name} needs its arguments"
-            out.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result}))
+            scheduling = None
+            if fc.name in quiet:
+                scheduling = (
+                    types.FunctionResponseScheduling.SILENT
+                    if spoke and result in ACKNOWLEDGED
+                    else types.FunctionResponseScheduling.WHEN_IDLE
+                )
+            out.append(
+                types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result}, scheduling=scheduling)
+            )
         if out:
             await session.send_tool_response(function_responses=out)
 

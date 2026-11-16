@@ -755,6 +755,117 @@ def test_a_settle_posts_the_readback_with_its_settles_and_copies_it(dsn, team, q
     )
 
 
+def _schedules(session) -> list[tuple[str, object]]:
+    return [(r.name, r.scheduling) for k, kw in session.sent if k == "tool" for r in kw["function_responses"]]
+
+
+SILENT, WHEN_IDLE = types.FunctionResponseScheduling.SILENT, types.FunctionResponseScheduling.WHEN_IDLE
+
+
+@pytest.mark.parametrize("complete_first", [False, True])
+def test_a_tool_called_after_valor_spoke_is_answered_silently_so_he_says_one_reply(
+    dsn, team, quick, complete_first
+):
+    """Valor read Tom's answer back, posted it, and Live said a second reply
+    to the tool's response (#118690 then #118695, 2026-11-16). The post came
+    while the turn's sound played, before Live's transcript of it (#118659,
+    4.76 s with no words); and the turn may be complete before its tool call."""
+
+    async def go():
+        page = Page()
+        page.ahead = 30.0  # still playing
+        c = await in_call(dsn, team, page)
+        await talk(c.the, TOMS, 0.4)
+        await push(c.session, heard("It's only for your use."))
+        if complete_first:
+            await push(c.session, audio(), said("Got it, for my use only."), done())
+            assert await until(lambda: c.the.out is not None)
+            await push(c.session, tool("post", text="For Valor's use only."), done(None))
+        else:
+            voiced = (np.full(int(0.5 * call.OUT_RATE), 3000, "<i2")).tobytes()  # sound, no transcript yet
+            await push(c.session, sc(model_turn=types.Content(parts=[types.Part(inline_data=types.Blob(
+                data=voiced, mime_type="audio/pcm"))])))  # fmt: skip
+            assert await until(lambda: c.the.out is not None)
+            await push(c.session, tool("post", text="For Valor's use only."), said("Got it, for my use only."),
+                       audio(), done())  # fmt: skip
+        assert await until(lambda: _schedules(c.session))
+        assert await until(lambda: "For Valor's use only." in c.page.posts)
+        await finish(c)  # cuts the reply still playing
+        return c, await effects(dsn, c.the.id)
+
+    c, done_ = run(go())
+    assert _schedules(c.session) == [("post", SILENT)]
+    assert len([e for e in done_ if e["type"] == "meet.say"]) == 1
+    assert "For Valor's use only." in c.page.posts
+
+
+def test_a_settle_read_back_aloud_is_answered_silently(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, audio(), said("Ship Monday, then."), tool("settle", ids=["t1/q1"], readback="Ship Monday."),
+                   done())  # fmt: skip
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    assert _schedules(run(go()).session) == [("settle", SILENT)]
+
+
+def test_a_tool_result_with_something_to_say_is_said(dsn, team, quick):
+    """Only an acknowledgement in a turn that has spoken is silent: a tool
+    called before any words, an ask the worker is not ready for, an answer
+    already in, and a call missing its arguments are each said; a lookup's
+    result is the answer, and stays blocking."""
+
+    async def go():
+        c = await in_call(dsn, team, worker=_answers("Tuesday."), ready=False)
+        await push(c.session, tool("ask", question="When did we ship?"), audio(), said("I'll check."), done())
+        await settle(c.the)
+        await push(c.session, audio(), said("Checking."), tool("ask", question="When did we ship?"), done())
+        await settle(c.the)
+        await push(c.session, audio(), said("Posting."), tool("post"), done())
+        await push(c.session, audio(), said("One moment."), tool("open_decisions"), done())
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert _schedules(c.session) == [("ask", WHEN_IDLE), ("ask", WHEN_IDLE), ("post", WHEN_IDLE),
+                                     ("open_decisions", None)]  # fmt: skip
+    responses = [r.response["result"] for k, kw in c.session.sent if k == "tool" for r in kw["function_responses"]]
+    assert "needs a moment" in responses[0] and responses[1].startswith("already asked")
+    assert responses[2] == "not done: post needs its arguments"
+
+
+def test_only_the_tools_that_acknowledge_are_declared_non_blocking():
+    config = call.live_config("acme", "", None, sheet=True)
+    behaviours = {f.name: f.behavior for f in config.tools[0].function_declarations}
+    assert {n for n, b in behaviours.items() if b == types.Behavior.NON_BLOCKING} == {"ask", "post", "settle", "leave"}
+    assert {n for n, b in behaviours.items() if b is None} == {"open_decisions", "person", "backlog"}
+
+
+def test_a_short_sound_valor_answers_asks_for_no_answer_after_his_reply(dsn, team, quick, monkeypatch):
+    """A short sound Live gave no transcript of, answered by Valor, then
+    asked him for an answer to "words you did not catch" once his reply
+    was over: "Could you please say that again?" after his own answer
+    (#117782 then #117788, 2026-11-16)."""
+    monkeypatch.setattr(call, "UNANSWERED_S", 0.3)
+
+    async def go():
+        page = Page()
+        page.people = page.people[:1] + page.people[2:]  # only Tom
+        c = await in_call(dsn, team, page)
+        await until(lambda: c.the.present)
+        await talk(c.the, TOMS, 0.5)
+        await push(c.session, audio(), said("The next item is the summary."), done())
+        await settle(c.the)
+        await asyncio.sleep(call.QUIET_S + call.LAG_S + 1)
+        await finish(c)
+        return c
+
+    assert not [t for t, _ in run(go()).session.contents() if "spoke to you" in t]
+
+
 def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
     config = call.live_config("acme", "Logan wants the launch date.", None)
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Alnilam"
@@ -797,7 +908,9 @@ def test_the_call_speaks_by_the_personas_in_a_call_section_and_in_english(tmp_pa
     assert "a blocker on someone else is status in a line (who, since when) and asks nothing" in flat
     assert "ask your worker to check it, or drop the question" in flat and "Never ask it again" in flat
     assert "Taking something offline says where it goes" in flat
-    assert "**English,** unless the person speaks another language clearly and on purpose" in flat
+    # A short phrase is no switch (¿Qué tal?, answered in Spanish, 2026-11-16).
+    assert "A few words that sound like another language (a greeting, a short phrase) are English you did not catch" in flat
+    assert "Switch only when someone speaks whole sentences in another language, or asks you to" in flat
     assert real in persona.render(settings.persona_dir)  # every turn reads the same text
 
     # One source: a changed section is what the call is told, braces and all.

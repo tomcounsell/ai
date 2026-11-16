@@ -60,7 +60,10 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   audio) is never said. Live itself never cuts Valor off; the call does,
   when the person he answers speaks over him, and side talk does not. With
   one other person in the call, a silence after their words asks Live for
-  the answer. Each turn's usage is charged by modality. A Live session
+  the answer, unless a reply already answered them. `ask`, `post`, `settle`
+  and `leave` don't block: a result that only acknowledges, in a turn that
+  has already spoken, goes back silent, so it starts no second reply; any
+  other result is said. Each turn's usage is charged by modality. A Live session
   that goes away, or sends nothing back through 6 s of speech and the 6 s
   of quiet after it, is resumed (a long turn, however little Live sends
   during it, is not; nor is a short utterance), the old session closed
