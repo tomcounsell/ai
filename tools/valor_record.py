@@ -18,6 +18,10 @@ valor-record entity add NAME --kind K [--alias A]...
 valor-record entity alias ENTITY ALIAS
 valor-record link A B --kind K [--source CITE]
 valor-record source CHANNEL [--failed] [--upto CURSOR]
+valor-record act start --instruction TEXT --by WHO --context TEXT [--project P] [--in CHAT] [--key K]
+valor-record act answer TASK --text TEXT --by WHO [--via HOW] [--question-id Q] [--key K]
+valor-record act steer TASK --text TEXT --by WHO [--key K]
+valor-record act stop TASK --why TEXT --by WHO [--via HOW] [--key K]
 
 Reads the ledger of this turn's own project: its chats, the messages each
 received and what they were bound to, its tasks and what became of them.
@@ -42,6 +46,15 @@ inferred; only `fact confirm`, naming a person's answer, confirms.
 alias or a loose description fits, best first: internal or external, and
 their live facts (team, role, organisation, asks, decisions, what is owed
 and delivered), each dated and sourced (docs/memory.md, People).
+`act` is a chat session's hands on its tasks, done now, in the turn
+(`core/gateway.py`, `tools/chat_tasks.py`): it starts, answers, steers or
+stops a task and prints `done` and what it did (a start prints the new
+task's id), or the error, exiting 1; so the turn writes its reply from
+what happened. The same command again in a turn is the same request
+(`--key` defaults to a hash of it): it answers what the first did, a
+failure included, and never starts a second task; to try a failed one
+again, change it or pass a new `--key`. When the outcome is not known yet
+it says so and exits 1.
 Standard library only, and Python 3.9 (macOS's own `python3`), so it runs
 in any workspace.
 """
@@ -49,6 +62,7 @@ in any workspace.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -144,6 +158,27 @@ def fact_write(args: argparse.Namespace) -> dict | None:
     return None
 
 
+NOT_KNOWN = (
+    "valor-record: the outcome is not known yet{effect}; read `valor-record task <your Brief's Task id>` "
+    "before you report it, and say it is not known if it is still not there"
+)
+
+
+def act_request(args: argparse.Namespace) -> dict:
+    """The `act` body for the gateway: `task.<verb>`'s target and payload,
+    as the chat_tasks performers read them, and the request's key."""
+    names = {"start": ("instruction", "by", "context", "project", "in"), "answer": ("text", "by", "via", "question_id"),
+             "steer": ("text", "by"), "stop": ("why", "by", "via")}[args.op]  # fmt: skip
+    payload = {n: getattr(args, n if n != "in" else "into") for n in names}
+    payload = {k: v for k, v in payload.items() if v is not None}
+    target = "work" if args.op == "start" else args.task
+    key = (
+        args.key
+        or hashlib.sha256(json.dumps([args.op, target, payload], sort_keys=True).encode()).hexdigest()[:16]
+    )
+    return {"verb": args.op, "target": target, "payload": payload, "key": key}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="valor-record", description="Read this project's record.")
     sub = parser.add_subparsers(dest="verb", required=True)
@@ -221,7 +256,30 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("channel")
     src.add_argument("--failed", action="store_true", help="the read failed")
     src.add_argument("--upto", help="how far it read: the last sha or message id")
-    for p in [*leaves, c, e, a, link, src]:
+    acts = sub.add_parser("act", help="start, answer, steer or stop a task, now").add_subparsers(
+        dest="op", required=True
+    )
+    ops = []
+    for op in ("start", "answer", "steer", "stop"):
+        o = acts.add_parser(op)
+        if op == "start":
+            o.add_argument("--instruction", required=True, help="the request as written, with what it needs")
+            o.add_argument(
+                "--context", required=True, help="a few lines: where it came from, what the room allows"
+            )
+            o.add_argument("--project", help="one of the projects your Repos line names")
+            o.add_argument("--in", dest="into", help="another chat of this project, slack:<team>/<channel>")
+        else:
+            o.add_argument("task", help="the task's id")
+            o.add_argument("--why" if op == "stop" else "--text", required=True)
+        if op in ("answer", "stop"):
+            o.add_argument("--via", help="how it came: chat, slack reaction :+1:, meet call")
+        if op == "answer":
+            o.add_argument("--question-id", help="only this open question")
+        o.add_argument("--by", required=True, help="who asked or said it")
+        o.add_argument("--key", help="the request's key (default: a hash of the request)")
+        ops.append(o)
+    for p in [*leaves, c, e, a, link, src, *ops]:
         p.add_argument("--json", action="store_true", help="print the kernel's JSON")
     args = parser.parse_args(argv)
 
@@ -248,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
         args.verb, query["sources"] = "facts", "1"
     if args.verb == "person":
         args.verb, query["about"] = "people", " ".join(args.about)
+    if args.verb == "act":
+        return act(base, act_request(args), args.json)
     write = fact_write(args)
     url = f"{base}/{'facts' if write else args.verb}?" + urllib.parse.urlencode(
         {k: v for k, v in query.items() if v is not None and not write}
@@ -329,6 +389,37 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"{r['id']:>7} {_when(r['at'])} {r['type']:<18} {json.dumps(r['payload'], ensure_ascii=False)}"
             )
+    return 0
+
+
+def act(base: str, body: dict, as_json: bool) -> int:
+    """Request one act and print what came of it."""
+    request = urllib.request.Request(
+        f"{base}/act", data=json.dumps(body).encode(), headers={"content-type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as r:
+            out = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            said = json.loads(e.read()).get("error")
+        except ValueError:
+            said = None
+        print(f"valor-record: {said or e}", file=sys.stderr)
+        return 1
+    except OSError:
+        print(NOT_KNOWN.format(effect=""), file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+    if out["kind"] == "unknown" or (out["kind"] == "refused" and out["error"] == "in flight"):
+        print(NOT_KNOWN.format(effect=f" (effect {out['effect_id']})"), file=sys.stderr)
+        return 1
+    if out["kind"] != "done":
+        print(f"valor-record: {out['kind']}: {out['error']}", file=sys.stderr)
+        return 1
+    if not as_json:
+        print("done: " + ", ".join(f"{k} {v}" for k, v in out["result"].items()))
     return 0
 
 

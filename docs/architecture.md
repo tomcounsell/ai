@@ -60,7 +60,9 @@ workspace's Postgres is its own, with password auth.
 page, and turns: a turn reads its own project's record (every chat the project's spec lists, both
 ways; Tom, 2026-10-24) through the gateway, which answers `valor-record` on the turn's token from
 `core/record.py` (and searches the project's memory the same way, `valor-record memory`, and reads and appends the project's facts, `valor-record facts` and `fact`, [memory.md](memory.md), Facts), so the turn never holds a ledger credential ([harnesses.md](harnesses.md),
-Reading the project's record).
+Reading the project's record). A chat session's `valor-record act` goes the same way: the gateway
+requests its `task.start|answer|steer|stop` from the broker in the turn, so the session reads the outcome
+before it writes the reply that reports it ([plans/act-then-report.md](plans/act-then-report.md)).
 
 ## The task and its Brief
 

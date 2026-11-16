@@ -1,5 +1,7 @@
 """A chat session's hands on work: `task.start`, `task.answer`,
-`task.steer`, `task.stop`.
+`task.steer`, `task.stop`, which the session asks for in its turn with
+`valor-record act` (the gateway's `act` route), reading the outcome before
+it writes the reply that reports it; they offer no effect-file usage.
 
 A chat session (`core/intake.py`) does no work itself. It starts a task
 for the work, as a child of itself, with the request as written and who
@@ -76,18 +78,6 @@ class _ChatTask:
 
 class TaskStart(_ChatTask):
     action_type = "task.start"
-    usage = (
-        '`task.start`: target "work", payload `{"instruction": "<the request as written, with what the chat '
-        'said it needs>", "by": "<who asked>", "context": "<a few lines you write>", "project": null, '
-        '"in": null}`; starts a task that does the work and '
-        "reports to you, under this project, or under one of the projects your Repos line names when "
-        '`"project"` names it. With `"in"` another chat of this project (`"slack:<team>/<channel>"`), it '
-        "starts under that chat's session instead, reads that chat and reports there, not to you. "
-        '`"context"` is the task\'s environment, every turn of it and its subagents reading it as its '
-        "Brief's `Context:` line: the chat and room it came from, who asked, and what your Room and role "
-        "allow and forbid that bears on this work. Write one for every task you start. "
-        "Your next prompt names it."
-    )
 
     async def perform(self, action, key: str) -> dict:
         seat, model = resolve_seat("frontier")
@@ -148,12 +138,6 @@ class TaskStart(_ChatTask):
 
 class TaskAnswer(_ChatTask):
     action_type = "task.answer"
-    usage = (
-        '`task.answer`: target the task id, payload `{"text": "...", "by": "<who answered>", "via": "chat", '
-        '"question_id": null}`; answers that task\'s open question, or with `question_id` only that one; '
-        "`via` is how it came (`chat`, `slack reaction :+1:`, `meet call`). The board chat's session also "
-        "answers any task of its project waiting on a question."
-    )
 
     async def _child(self, conn, task_id: str) -> tasks.Brief:
         try:
@@ -187,13 +171,6 @@ class TaskAnswer(_ChatTask):
 
 class TaskSteer(_ChatTask):
     action_type = "task.steer"
-    usage = (
-        '`task.steer`: target the task id, payload `{"text": "...", "by": "<who said it>"}`; '
-        "gives that task what the chat added: after its current step when it is working, else at its next "
-        "turn. To a task waiting on its question it is the answer. To a task that has delivered "
-        "(merged or ended) it is feedback: the task reopens in its own workspace and conversation, "
-        "revises, and reports to you again. A stopped task stays stopped."
-    )
 
     async def perform(self, action, key: str) -> dict:
         async with await db.connect(self.dsn) as conn, conn.transaction():
@@ -229,11 +206,6 @@ class TaskSteer(_ChatTask):
 
 class TaskStop(_ChatTask):
     action_type = "task.stop"
-    usage = (
-        '`task.stop`: target the task id, payload `{"why": "...", "by": "<who asked>", "via": "chat"}`; '
-        "stops that task; `via` is how it came (`chat`, `slack reaction :-1:`). The board chat's session "
-        "also stops any task of its project."
-    )
 
     async def _child(self, conn, task_id: str) -> tasks.Brief:
         try:

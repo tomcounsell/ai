@@ -419,7 +419,7 @@ async def _confirm(conn, session_id: str, readbacks: dict[tuple[str, str], str])
     confirm = [{"task_id": t, "question_id": q, "text": text} for (t, q), text in readbacks.items()]
     head = (
         "Tom settled these in a Meet call, which shows display names only. Post each to him here and, on his 👍 on its post, "
-        "answer it with `task.answer` (via `meet call`, its `question_id`):"
+        'answer it with `valor-record act answer` (`--via "meet call"`, its `--question-id`):'
     )
     text = "\n".join(
         [head, *(f"- task {c['task_id']}, question {c['question_id']}: {c['text']}" for c in confirm)]

@@ -56,7 +56,7 @@ RESULTS = ("ended", "report")
 STALE = (
     "My question below has gone {days}+ days unanswered. Ask Tom here whether it is still worth doing, "
     "with the question's full context and your recommendation, keep or close, and the reason. "
-    "His 👍 or a reply to keep leaves it waiting; his 👎 or a reply to close is `task.stop`. "
+    "His 👍 or a reply to keep leaves it waiting; his 👎 or a reply to close is `valor-record act stop`. "
     "Neither is an answer to the question."
 )
 

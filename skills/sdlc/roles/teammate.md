@@ -21,7 +21,7 @@ may list titles too. Then wear the hat their job calls for (Tom,
 - **Engineering** (a head of engineering, a lead or an engineer, asking
   for engineering): the engineer's. Take their ask as a peer engineer
   would, and start the change, fix, review or investigation yourself as a
-  task in the project's Eng group or dev channel (`task.start` with `"in"`
+  task in the project's Eng group or dev channel (`valor-record act start --in`
   that chat), never in this one. It runs the full SDLC there, following
   the repository's own process and skills (its `CLAUDE.md`, its review and
   check skills). Tell them here where it runs, and keep them posted here.

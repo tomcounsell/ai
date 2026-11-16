@@ -254,7 +254,14 @@ async def _recollect(
 async def recover(
     conn,
     performers: router.PerformersFactory | None = None,
-    kernel_types: tuple[str, ...] = ("push_branch", "merge"),
+    kernel_types: tuple[str, ...] = (
+        "push_branch",
+        "merge",
+        "task.start",
+        "task.answer",
+        "task.steer",
+        "task.stop",
+    ),
     *,
     checkout: Path | None = None,
     running: str | None = None,
@@ -372,7 +379,7 @@ async def recover(
         if turn_id is not None:
             done["recollected"].append(turn_id)
 
-    # Intents of a kernel type with no outcome.
+    # Intents of a kernel type, or a chat session's task action, with no outcome.
     for effect_id in await broker.dangling(conn, list(kernel_types)):
         row = await (
             await conn.execute(
@@ -1439,7 +1446,9 @@ async def serve(
         if gateway is None:
             from core.gateway import ClaudeLogin, OpenAIKey
 
-            gateway = Gateway(dsn, credential=ClaudeLogin(), openai_credential=OpenAIKey())
+            gateway = Gateway(
+                dsn, credential=ClaudeLogin(), openai_credential=OpenAIKey(), performers=performers
+            )
             await gateway.start()
         kernel = Kernel(
             gateway,

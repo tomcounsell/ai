@@ -687,6 +687,8 @@ def test_each_activity_from_effects_and_tools():
         ("Skill", '{"skill": "yudame-dev:do-issue"}'): "issue", ("CronCreate", "{}"): "schedule",
         ("Edit", '{"file_path": "/w/app.py"}'): "code", ("Write", '{"file_path": "/w/plan.md"}'): "document",
         ("Bash", '{"command": "gh issue create -t x"}'): "issue", ("Bash", '{"command": "git commit -m x"}'): "code",
+        ("Bash", '{"command": "valor-record act start --instruction x --by tom --context y"}'): "task",
+        ("Bash", '{"command": "valor-record act steer t1 --text x --by tom"}'): "task",
         ("Bash", '{"command": "valor-telegram read --search x"}'): "lookup",
         ("Bash", '{"command": "gws calendar events insert --json {}"}'): "schedule",
         ("Bash", '{"command": "cat x | grep y"}'): "lookup",

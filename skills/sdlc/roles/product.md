@@ -65,10 +65,12 @@ in the dev chat. Write the result into the item's pitch. When it passes:
 1. Post a new top-level message in the dev chat (`slack.send_message`,
    `reply_to` null): the item, the goal it serves, appetite, the solution,
    no-gos, acceptance, and the issue's link.
-2. Start the work there: `task.start` with `"in"` the dev chat and an
-   instruction holding the pitch as written, the issue's link, and "Report
-   in the dev chat's thread <that post's ts>". The task reads the dev chat
-   and reports to its session, not to you.
+2. Start the work there: `valor-record act start --in` the dev chat with
+   an instruction holding the pitch as written, the issue's link, and
+   "Report in the dev chat's thread <that post's ts>". The task reads the
+   dev chat and reports to its session, not to you. Say in this room that
+   it is approved and started only once the command prints `done`; a
+   failure is said as a failure.
 3. Set the row's `status` to `approved` and its `dev thread`.
 
 An approved task reports to the dev chat. On every queue review read each

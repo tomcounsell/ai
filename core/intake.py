@@ -92,7 +92,8 @@ The binding table, first match wins:
 any verified member of the room).
 
 A chat session passes what its chat says about a task that reports to it
-with `task.steer` (`tools/chat_tasks.py`): on a task in `merged` or
+with `task.steer` (`tools/chat_tasks.py`, asked in its turn with
+`valor-record act steer`): on a task in `merged` or
 `ended` it is `feedback` (with the sender's name, via `chat`), on a
 stopped task it stays a steer, otherwise it is a steer; and answers its
 question with `task.answer`.

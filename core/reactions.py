@@ -156,6 +156,7 @@ SKILLS = {"present": "present", "officecli": "document", "calendar": "schedule",
 COMMANDS = (
     (re.compile(r"\bgh\s+issue\s+(create|edit|comment|close|reopen)\b"), "issue"),
     (re.compile(r"\bgit\s+(commit|push)\b"), "code"),
+    (re.compile(r"\bvalor-record\s+act\s+(start|answer|steer)\b"), "task"),
     (re.compile(r"\bgws\s+calendar\b.*\b(insert|patch|update|delete|quickAdd)\b"), "schedule"),
     (re.compile(r"\bgws\s+gmail\b.*\bsend\b"), "send"),
     (re.compile(r"\bvalor-(telegram|slack)\s+read\b|\bgh\s+(issue|pr|run)\s+(view|list)\b|\bgit\s+(log|show|blame)\b"

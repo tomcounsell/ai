@@ -489,7 +489,7 @@ async def _run_task(task_id: str) -> str:
         judgement_port = port()
     except (credentials.MissingKey, ValueError) as exc:
         raise SystemExit(f"run refused: {exc}") from None
-    gateway = Gateway(credential=ClaudeLogin(), openai_credential=OpenAIKey())
+    gateway = Gateway(credential=ClaudeLogin(), openai_credential=OpenAIKey(), performers=_performers)
     await gateway.start()
     try:
         out = await router.run(gateway, task_id, runners(judgement_port), performers=_performers)
@@ -533,7 +533,7 @@ async def _call(session_id: str) -> str:
         except credentials.MissingKey as exc:
             await call.end(holder, session_id, f"Valor's call process could not start: {exc}")
             return str(exc)
-        gateway = Gateway(credential=ClaudeLogin())
+        gateway = Gateway(credential=ClaudeLogin(), performers=_performers)
         await gateway.start()
         asked = {k: info["asked_by"][k] for k in ("channel", "chat_id")}
         resume: str | None = None

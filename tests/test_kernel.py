@@ -1519,7 +1519,6 @@ def test_a_plan_turn_asks_the_session_it_reports_to_before_the_first_plan(dsn, t
 
 def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team, tmp_path):
     from core import signals, verdicts
-    from tools import chat_tasks
 
     async def go():
         async with await db.connect(dsn) as conn:
@@ -1528,16 +1527,15 @@ def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team
             )
             task = await tasks.start(conn, b)
             await verdicts.record_chat(conn, task)
-            offered = [p.usage for p in chat_tasks.performers(b)]
-            return b, (await tasks.dispatch(conn, task, offered=offered))["text"]
+            return b, (await tasks.dispatch(conn, task, offered=[]))["text"]
 
     b, text = run(go())
-    assert "# A chat session" in text and "`task.start`" in text and "# Stage: clarify" not in text
+    assert "# A chat session" in text and "`valor-record act start" in text and "# Stage: clarify" not in text
     assert "# How this task reaches Tom" not in text
     assert "`yudame-dev:ask-me`" in text and "Anything I missed? If not, I'll go ahead." in text
     assert "one at a time in a live chat" in text and "One batch from a task" in text
     flat = " ".join(text.split())
-    assert "Otherwise raise only the rest in the chat" in flat and "pass one `task.answer`" in flat
+    assert "Otherwise raise only the rest in the chat" in flat and "pass one `valor-record act answer`" in flat
     assert "only the items left for Tom" in flat and "one line naming where it was asked" in flat
     # A chat session sets a wake on each question: silence is never go on a real question,
     # five quiet minutes are go on the read-back, and a quiet task is checked on.
@@ -1674,7 +1672,7 @@ def test_only_decisions_the_person_holds_reach_a_call_or_the_board():
         "your own work (a Sheet row, a ranking, a draft) is done before the call and listed as done" in chat
     )
     assert "a blocker on someone else is status, with who and since when" in chat
-    assert "Open holds only what Tom holds" in chat and '(`task.answer`, `"by": "valor"`)' in chat
+    assert "Open holds only what Tom holds" in chat and '(`valor-record act answer`, `--by valor`)' in chat
     product = " ".join(tasks.role_text("product").split())
     assert "You draft them from what the people who own the product have said, set them" in product
     assert "they correct or override them, and their word replaces yours" in product

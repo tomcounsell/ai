@@ -2,7 +2,10 @@
 
 It also answers a turn's `valor-record` (`GET <base>/record/<verb>`, and
 `POST <base>/record/facts` for the project's facts) from `core/record.py`,
-for the project of the token's task, never upstream.
+for the project of the token's task, never upstream; and a chat session's
+`valor-record act` (`POST <base>/record/act`), which requests its
+`task.start|answer|steer|stop` from the broker in the turn, so the turn
+reads the outcome before it writes the reply that reports it.
 
 A local HTTP proxy with two model routes. A turn is pointed at it with a per-turn
 token in the path (`ANTHROPIC_BASE_URL`, or `<base>/openai/v1` for an
@@ -83,7 +86,7 @@ import aiohttp
 from aiohttp import web
 from yarl import URL
 
-from core import binaries, credentials, db, record, spending, tasks
+from core import binaries, broker, credentials, db, record, spending, tasks
 from core.ledger import new_id
 from core.settings import resolve_model, settings
 
@@ -270,6 +273,10 @@ class OpenAIKey:
             return value
 
 
+# A chat session's task actions, `valor-record act <verb>`.
+ACTS = ("start", "answer", "steer", "stop")
+
+
 @dataclass(frozen=True)
 class Grant:
     task_id: str
@@ -409,8 +416,11 @@ class Gateway:
         credential: ClaudeLogin | None = None,
         openai_upstream: str | None = None,
         openai_credential: OpenAIKey | None = None,
+        performers=None,
     ):
         self.dsn = dsn or settings.dsn()
+        # The kernel's performers factory (`router.PerformersFactory`), for `act`.
+        self.performers = performers
         self.credential = credential
         self.upstream = (upstream or settings.upstream).rstrip("/")
         self.openai_credential = openai_credential
@@ -505,6 +515,8 @@ class Gateway:
         if grant is None or grant.task_id in self.revoked:
             return web.json_response({"error": "turn token revoked or unknown"}, status=403)
         verb, body = request.match_info["verb"], None
+        if request.method == "POST" and verb == "act":
+            return await self._act(grant, request)
         if request.method == "POST" and verb in record.WRITES:
             try:
                 body = await request.json()
@@ -520,6 +532,34 @@ class Gateway:
         except record.NotFound as exc:
             return web.json_response({"error": str(exc)}, status=404)
         return web.json_response(found, dumps=lambda v: json.dumps(v, default=str, ensure_ascii=False))
+
+    async def _act(self, grant: Grant, request: web.Request) -> web.Response:
+        """A chat session's task action, `{verb, target, payload, key}`
+        with `verb` one of `ACTS`, requested from the broker as
+        `task.<verb>` now, with the request id `<turn>/act/<key>`: the same
+        intent and outcome rows, performers and ceiling as an end-of-turn
+        effect file, so the same key in a turn is the standing answer."""
+        try:
+            body = await request.json()
+        except ValueError:
+            return web.json_response({"error": "the body is not JSON"}, status=400)
+        verb = body.get("verb") if isinstance(body, dict) else None
+        if verb not in ACTS or self.performers is None:
+            return web.json_response({"error": f"no act {verb!r}; one of {', '.join(ACTS)}"}, status=404)
+        action = broker.Action(f"task.{verb}", str(body.get("target") or ""), dict(body.get("payload") or {}))
+
+        async def act() -> broker.Outcome:
+            async with await db.connect(self.dsn, application_name="valor-record") as conn:
+                built = self.performers(await tasks.brief(conn, grant.task_id))
+                return await broker.request(
+                    conn, built, grant.task_id, action, request_id=f"{grant.turn_id}/act/{body.get('key')}"
+                )
+
+        o = await asyncio.to_thread(asyncio.run, act())
+        return web.json_response(
+            {"kind": o.kind, "error": o.error, "result": o.result, "effect_id": o.effect_id},
+            dumps=lambda v: json.dumps(v, default=str, ensure_ascii=False),
+        )
 
     # -- the call path --------------------------------------------------------
 
