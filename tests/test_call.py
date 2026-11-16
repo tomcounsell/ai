@@ -915,12 +915,14 @@ def test_the_call_speaks_by_the_personas_in_a_call_section_and_in_english(tmp_pa
     assert "a blocker on someone else is status in a line (who, since when) and asks nothing" in flat
     assert "ask your worker to check it, or drop the question" in flat and "Never ask it again" in flat
     assert "Taking something offline says where it goes" in flat
-    # A short phrase is no switch (¿Qué tal?, answered in Spanish, 2026-11-16).
+    # English always: a short phrase is no switch (¿Qué tal?, answered in Spanish, 2026-11-16), nor are whole
+    # sentences in another language; only an explicit ask is (Tom, 2026-11-16).
+    assert "Answer in English even when someone speaks another language, a phrase or whole sentences" in flat
+    assert "Switch only when someone explicitly asks you to speak another language" in flat
+    voice = " ".join(persona.render(settings.persona_dir).split())
     assert (
-        "A few words that sound like another language (a greeting, a short phrase) are English you did not catch"
-        in flat
+        "Every conversation is in English" in voice and "explicitly asks you to use another language" in voice
     )
-    assert "Switch only when someone speaks whole sentences in another language, or asks you to" in flat
     assert real in persona.render(settings.persona_dir)  # every turn reads the same text
 
     # One source: a changed section is what the call is told, braces and all.
