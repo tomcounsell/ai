@@ -51,7 +51,7 @@ outside the model is AI Control [4].
 | Memory | popoto 1.10.0's Postgres backend, schema `memory`, role `valor_memory` | in use in each Mac's kernel database; the shared store across the four Macs built (`memory_dsn`), its host chosen with a second Mac's install |
 | Model gateway | in-house aiohttp proxy, Anthropic Messages and OpenAI Responses routes | in use |
 | Model prices | a dated table in `core/settings.py` | in use |
-| Model seats | a pinned registry in `core/settings.py`, each seat a harness and a model: frontier, reviewer, light, reviewer_openai; the judgement legs pinned beside it | in use |
+| Model seats | a pinned registry in `core/settings.py`, each seat a harness and a model: frontier, chat, reviewer, light, reviewer_openai; the judgement legs pinned beside it | in use |
 | Frontier provider | Anthropic; OpenAI through the gateway's second route | in use |
 | Judgement tier | Jev (`jev-1.13.0`), with the open-weight fallback Qwen3-235B-A22B Instruct 2507 on Parasail fp8 through OpenRouter behind the same port; OpenAI's Decisions API for judgements that need images | in use; the images leg chosen, not built |
 | Harness | the `claude` CLI, one `claude -p` per turn; Pi (`docs/pi.md`) as the second | in use |
@@ -260,18 +260,24 @@ Model choice is data the kernel reads, not code: a small registry of pinned
 model ids with their prices and the seats they fill (`core/settings.py`,
 `SEATS`): each seat is a harness and a pinned id. `python -m core start
 --model` takes a seat name or a model id (run on Claude Code), and
-`--harness` overrides the harness; the Brief records both. Status: **in use** for frontier, reviewer, light, and
+`--harness` overrides the harness; the Brief records both. Status: **in use** for frontier, chat, reviewer, light, and
 reviewer_openai; the judgement legs are pinned beside the seats.
 
-- **Frontier**: the newest model, for turns. A task Tom starts from a
-  message runs on it (`core/intake.py`), the same seat a kernel task's
-  build lead runs on.
+- **Frontier**: Opus 5.5, for turns. A task Tom starts from a
+  message runs on it, the same seat a kernel task's build lead runs on,
+  and so do critique, docs, the advisor's Claude seat, a call's worker and
+  routines.
+- **Chat**: Fable 5.2, every chat session's turn (Tom, 2026-11-16).
+  `core/intake.py` starts a chat session on it, and `tasks.turn_model`
+  runs every chat session's working turn on it whatever model its Brief
+  was written with, so sessions started on Opus moved too. A call's worker
+  is a fresh turn and keeps its Brief's model.
 - **Light**: Haiku 5.5, the default of a bare builder turn. No task runs on
   it unless started with `--model light`: the SDLC stages are frontier work,
   which the light model does not hold, so `python -m core start --model`
   and a Brief default to frontier.
-- **Reviewer**: Opus-class, never cheaper (Tom, 2026-10-01): the
-  frontier model itself in a fresh session, or an Opus-class model
+- **Reviewer**: Opus-class, never cheaper (Tom, 2026-10-01): Fable 5.2
+  since 2026-11-16 (Tom), in a fresh session, or an Opus-class model
   from another vendor through another harness. What a weaker judge loses is
   [18]; the baseline's Sonnet reviewer accepted #191 at fidelity 1. A
   model's preference for its own output [16] is countered by a fresh session with no narration when
@@ -351,7 +357,8 @@ gateway's Anthropic prices.
 A turn is one `claude -p` subprocess (`harnesses/claude_code.py`). A
 workspace turn keeps Claude Code's own system prompt and tools, appends the
 dispatched text (persona, then Brief) re-rendered every turn
-(`--system-prompt-snapshot off`), resumes the task's session, and runs with:
+(`--system-prompt-snapshot off`; a chat session's is held byte-identical
+between turns, with what changed in the turn's prompt: `docs/persona.md`), resumes the task's session, and runs with:
 
 - the project's own `CLAUDE.md`, settings, hooks, skills, and MCP servers, and the plugins in
   `settings.plugin_dirs` (Valor's own first, then yudame's), each passed as `--plugin-dir`: a turn

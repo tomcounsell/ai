@@ -423,7 +423,8 @@ incident yet calls for one). The room is the
 Brief's `Room:` line, read on every dispatch (`intake.room`), so it rides
 in the appended system prompt beside the persona and the corrections and
 no compaction removes it; editing it reaches an open session at its next
-turn. A chat with none has only its opening's project and kind.
+turn, in that turn's news until the Brief is next written afresh
+(docs/persona.md). A chat with none has only its opening's project and kind.
 
 The session reads and dispatches (`skills/sdlc/converse.md`): it replies
 with a send to the chat, threaded; stays quiet by sending nothing; and

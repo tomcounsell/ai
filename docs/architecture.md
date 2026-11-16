@@ -411,8 +411,8 @@ verifier:
   answers `changes` for a diff that adds any.
 - **Runs the suite itself**, in a git worktree of the candidate the kernel set up from the mirror,
   with fresh services, so a delivery saying "all tests pass" is judged against its own run.
-- **Is Opus-class, never cheaper** (Tom, 2026-10-01): the builder's own
-  Opus model in a fresh session, or an Opus-class model from another
+- **Is Opus-class, never cheaper** (Tom, 2026-10-01): the reviewer
+  seat's Fable 5.2 (Tom, 2026-11-16) in a fresh session, or an Opus-class model from another
   vendor through another harness. A weaker judge underestimates a stronger
   executor [18]; the baseline's Sonnet stand-in accepted popoto #191 bare at
   fidelity 1 and #633 clarify with the stale-cache bug moved, not removed

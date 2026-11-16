@@ -97,7 +97,8 @@ by default the yudame and yudame-dev plugins of the yudame marketplace clone und
 among them) are passed as `--mcp-config`, since the turn's own config directory holds none.
 
 It defaults to the light seat's pinned model id
-(`claude-haiku-5-5`), and a Brief to the frontier seat's, never an alias: the installed CLI
+(`claude-haiku-5-5`), and a Brief to the frontier seat's (a chat
+session's turn to the chat seat's, `tasks.turn_model`), never an alias: the installed CLI
 resolves an alias, and may resolve it to a model the gateway has no price
 for, which the gateway charges at a stand-in price marked `unpriced`.
 
@@ -109,7 +110,7 @@ Its arguments:
 | `--permission-mode bypassPermissions` | edits files and runs commands without asking | Mission item 6: nobody is there to answer a prompt, and the kernel bounds the turn |
 | `--plugin-dir DIR`, once per existing `settings.plugin_dirs` entry | loads Valor's plugin, then the yudame plugins | developer parity (C18); the web guard |
 | `--settings '{"disableAllHooks": false}'` | keeps Valor's plugin hooks on: command-line settings outrank the project's and any the turn writes, which Claude Code reloads mid-turn | the web guard (Skill rendering) |
-| `--system-prompt-snapshot off` with `--append-system-prompt` | keeps Claude Code's own system prompt and tools, and appends the dispatched text (persona first; a chat session's Brief with its `Room:` line), re-rendered every turn | correctable: a correction recorded mid-task reaches the next turn |
+| `--system-prompt-snapshot off` with `--append-system-prompt` | keeps Claude Code's own system prompt and tools, and appends the dispatched text (persona first; a chat session's Brief with its `Room:` line), re-rendered every turn; a chat session's working turn gets its last snapshot's Brief byte for byte, and what changed since (`news`) follows the prompt after `--` | correctable: a correction recorded mid-task reaches the next turn; a chat session keeps its prompt cache |
 | `--session-id ID` or `--resume SESSION` | a new session under an id the kernel chose, or the task's session continued | Mission item 1 (see below); the kernel knows which transcript is the turn's |
 | `--` before the prompt | the prompt is never read as an option | Mission item 1: a request starting "- Create new flag" failed a baseline run before this (rebuild-baseline.md, Infrastructure 3) |
 
@@ -140,7 +141,8 @@ The wrapper then sets:
 - `GIT_TERMINAL_PROMPT=0`.
 - `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`: `claude_code.SPAWN_DEPTH`, so subagents start subagents
   past Claude Code's own cap of 3 (Skill rendering).
-- `VALOR_SUBAGENT_START`: the SubagentStart hook output carrying the dispatched text, which Valor's
+- `VALOR_SUBAGENT_START`: the SubagentStart hook output carrying the dispatched text, and a chat
+  session's `news` after it, which Valor's
   plugin gives every subagent but the web agent (Corrections reaching subagents, below).
 - `VALOR_COMPACT`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`: for a
   chat session's turn only (`chat_channel` in the harness), its compaction instructions, which the
@@ -211,8 +213,8 @@ Review and docs start on every candidate, concurrently with the test run
 when the machine's turn slots allow (`docs/machine.md`); the docs session
 works in its own checkout of the candidate and commits only doc paths. Its
 prompt is the request, the plan, and the diff, asking for
-the docs the change made untrue. The reviewer runs the same Opus model or
-an Opus-class model from another vendor through that vendor's harness; the
+the docs the change made untrue. The reviewer runs the reviewer seat's
+model (Fable 5.2) or an Opus-class model from another vendor through that vendor's harness; the
 port below is what lets either run without the kernel knowing which.
 
 The kernel's support today: the working session for every row above, and
@@ -493,7 +495,7 @@ Two points the harness relies on and has to keep true:
   the system prompt of the main session. A subagent Claude Code starts
   inside a turn (`cc_is_subagent=true` on its requests) gets Claude Code's
   own subagent system prompt and the prompt the parent wrote, and, at every
-  depth, the Brief as its opening context: the wrapper puts the
+  depth, the Brief (with a chat session's `news` after it) as its opening context: the wrapper puts the
   SubagentStart hook output in `VALOR_SUBAGENT_START`
   (`claude_code.subagent_start`), and Valor's plugin's SubagentStart hook
   (`skills/valor/hooks/subagent_start.py`) prints it for every subagent but

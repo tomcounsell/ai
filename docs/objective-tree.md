@@ -23,7 +23,11 @@ Rules the kernel enforces:
   parent carries every direct child's latest delivery, quoted under
   `# Reports from your children`, and the parent's Brief ends with a
   Children section holding kernel facts only (each child's id, state,
-  subtree spending, and instruction), never a child's words. `status`
+  subtree spending, last activity, and instruction), never a child's words.
+  A chat session's system prompt keeps the Children section as it stood
+  at its last snapshot, and each turn's prompt lists every child new or
+  changed since (`tasks.frozen`, docs/persona.md), so the two together
+  hold every child's current state and instruction. `status`
   lists the same reports.
 - Stopping a node fences its subtree (see Stop in [architecture.md](architecture.md)).
 

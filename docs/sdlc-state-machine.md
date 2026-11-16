@@ -360,7 +360,7 @@ no governance (CLAUDE.md).
 
 **What runs.** The registered runner is `fresh.review_runner`, the verifier
 ([architecture.md](architecture.md)). The kernel sets up a git worktree of the candidate with fresh
-services and runs one fresh session there, which may run the suite: the builder's Opus model, or an
+services and runs one fresh session there, which may run the suite: the reviewer seat's Fable 5.2, or an
 Opus-class model from another vendor through another harness, never a cheaper class. It reads the
 request, Tom's answers and feedback, the plan, the diff, and its setup's exit, never the executor's
 narration, reruns any test itself, reads the diff for governance, and answers `pass` or `changes` as

@@ -587,8 +587,9 @@ reaches the agent; it is never the thing that enforces it.
 
 ## How the persona reaches a turn
 
-Every turn's system prompt is rendered fresh as the turn starts, in this
-order:
+Every turn's Brief is rendered fresh as the turn starts, in this order
+(a chat session's reaches its system prompt as below, under "A chat
+session's frozen Brief"):
 
 1. **Persona.** Identity, voice, conduct, the governance paragraphs. Read
    from `persona/`, which changes only by a reviewed diff in git.
@@ -634,6 +635,26 @@ session's or a task's, whose project's spec lists `email_cc` carries an
 `Email CC:` line naming them, read from the spec at each turn
 (`tasks.email_cc`), so a draft for someone else to send names them too.
 
+**A chat session's frozen Brief.** Any byte that changes in the system
+prompt rewrites the cache of the whole conversation after it, so a chat
+session's working turn keeps its system prompt byte-identical between
+turns (`tasks.frozen`, Tom, 2026-11-16). The Brief is rendered fresh each
+turn as named sections plus each child's report, and compared with the
+latest snapshot (the newest `turn.started` carrying `brief_sections`).
+The turn gets the snapshot's text as its system prompt and, after its
+prompt, its `news` under "Your Brief has changed since it was written":
+each section whose text differs, in full, and a line for each child new
+or changed since (id, state, spending, last activity), with a new
+child's instruction. Measured against the snapshot, not the last turn,
+so the system prompt and the news together always hold every child's
+current state and instruction, and a correction recorded now still
+reaches the next turn. The Brief is written afresh, and becomes the new
+snapshot, on a new conversation, more than an hour (the cache's lifetime)
+after the last turn ended, on the turn after a `/compact`, when the
+persona or stage file changed, or when the news would pass a quarter of
+the Brief's size. Task turns and fresh sessions are rendered fresh every
+turn, with no news.
+
 **What the kernel renders.** `core/persona.py` renders `persona/` on every
 dispatch, from the kernel's own checkout (`settings.persona_dir`, never the
 workspace): "You are Valor Engels.", the identity fields, `turn.md`,
@@ -654,7 +675,8 @@ records none and goes on, and a later one records it
 correction numbers, `brief_sha256` (the SHA-256 of the whole text the turn
 reads, persona included), `persona_sha256`, and `persona_bytes`, so the
 ledger shows which persona version every turn ran under (property:
-Legible).
+Legible); a chat session's turn also records its snapshot or its
+`brief_news` (docs/data.md).
 
 **Subagents.** Corrections and persona reach every Brief the kernel
 sends, and Pi's session gets the Brief appended to its system prompt. A
