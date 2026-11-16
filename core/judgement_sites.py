@@ -519,7 +519,7 @@ def _scored(task, j, expected, *, asked_again: int) -> dict[str, Any]:
         "usd_micros": j.usd_micros,
         "reason": None if j.answered else "; ".join(str(x.get("reason")) for x in j.attempts),
         "rate_limited": not j.answered
-        and all(x.get("reason") == "rate_limited" for x in j.attempts if x.get("outcome") != "unused"),
+        and all(x.get("reason") == "rate_limited" for x in j.attempts),
         "asked_again": asked_again,
         "judgement_id": j.judgement_id,
     }
