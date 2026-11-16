@@ -380,15 +380,13 @@ class JudgementPort:
         async with _connect(dsn) as conn:
             await ledger.append(conn, task_id, "judgement.shadowed", payload)
 
-    async def drain(self, timeout_s: float | None = None) -> None:
+    async def drain(self) -> None:
         """Wait for every held fallback call to write its row, at most
-        `timeout_s` (default the longest leg timeout and a second), so a
-        process that exits after its judgements keeps their rows."""
+        `gemini_timeout_s` and a second, so a process that exits after its
+        judgements keeps their rows."""
         if not self._held:
             return
-        if timeout_s is None:
-            timeout_s = max(getattr(leg, "timeout_s", 0) for leg in self.legs.values()) + 1
-        await asyncio.wait(set(self._held), timeout=timeout_s)
+        await asyncio.wait(set(self._held), timeout=settings.gemini_timeout_s + 1)
 
     async def ask_leg(
         self,
@@ -488,7 +486,6 @@ class JudgementPort:
     async def _record(self, dsn, task, inputs, task_id, ref, jid, attempts, *, merge) -> Judgement:
         answers, abstained = _merge(task, attempts) if merge else _single(task, attempts[0])
         spent = sum(a.get("usd_micros") or 0 for a in attempts)
-        public = list(attempts)
         payload: dict[str, Any] = {
             "judgement_id": jid,
             "site": task.site,
@@ -497,7 +494,7 @@ class JudgementPort:
             "inputs_sha256": ledger.digest(dict(inputs)),
             "ref": ref,
             "usd_micros": spent,
-            "attempts": public,
+            "attempts": attempts,
         }
         if answers is None:
             kind = "judgement.failed"
@@ -536,7 +533,7 @@ class JudgementPort:
             leg,
             model,
             spent,
-            tuple(public),
+            tuple(attempts),
             event_id,
             payload,
         )
