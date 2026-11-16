@@ -655,13 +655,6 @@ def unanswered_count(rows: list[dict], site: str, key: Mapping[str, Any]) -> int
     return n
 
 
-def _action(question: Question, p: float, floor: float) -> str:
-    """`decide`'s decision for a stored `p_proceed` at another floor."""
-    if question.kind is Kind.PICK:
-        return "proceed" if p >= floor else "abstain"
-    return "proceed" if p >= floor else ("caution" if p <= 1 - floor else "abstain")
-
-
 def agreement(rows: list[dict], by_site: Mapping[str, JudgementTask]) -> dict[str, dict[str, Any]]:
     """Per site, how Jev's and Gemini's answers to the same judgements
     compare, from `judgement.answered`, `judgement.failed` and
@@ -669,8 +662,9 @@ def agreement(rows: list[dict], by_site: Mapping[str, JudgementTask]) -> dict[st
     calibration's rows ask one leg each and never do. Per question both
     answered: whether the actions agree (each at its own floor), whether
     Gemini's action at the primary floor (where it would sit as first line)
-    agrees, and whether the argmax labels agree; each disagreement is
-    counted by its pair, `jev proceed / gemini abstain`."""
+    agrees (re-gated by `decide` from its stored probabilities), and whether
+    the argmax labels agree; each disagreement is counted by its pair,
+    `jev proceed / gemini abstain`."""
     shadows = {r["payload"]["judgement_id"]: r["payload"]["attempt"] for r in rows
                if r["type"] == "judgement.shadowed"}  # fmt: skip
     out: dict[str, dict[str, Any]] = {}
@@ -705,7 +699,7 @@ def agreement(rows: list[dict], by_site: Mapping[str, JudgementTask]) -> dict[st
             if j is None or g is None:
                 continue
             site["questions"] += 1
-            raised = _action(q, g["p_proceed"], task.floor["primary"])
+            raised = decide(q, g["probabilities"], task.floor["primary"])["decision"]
             site["label_agree"] += j["label"] == g["label"]
             for key, theirs_action in (("", g["decision"]), ("_at_primary_floor", raised)):
                 if j["decision"] == theirs_action:

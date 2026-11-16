@@ -267,7 +267,9 @@ def test_a_shadow_row_after_a_failed_step_leaves_the_step_to_be_retried():
 
 
 def _answer(label, p, decision):
-    return {"label": label, "p_proceed": p, "decision": decision}
+    """An answer whose proceed label (`a`, or `false`) has probability `p`."""
+    proceed, other = ("false", "true") if label in ("true", "false") else ("a", "b")
+    return {"label": label, "p_proceed": p, "decision": decision, "probabilities": {proceed: p, other: 1 - p}}
 
 
 def _row(jid, jev, gemini, kind="judgement.answered", site="test.two"):
