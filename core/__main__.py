@@ -93,7 +93,8 @@ github-key                     copy GITHUB_PUSH_TOKEN from the vault .env into
                                same way
 judgement-agreement [--since YYYY-MM-DD]
                                per judgement site, how often Jev and Gemini
-                               agree on the same judgements, as JSON
+                               agree on the same judgements, as JSON, from
+                               the start of that UTC day
 calibrate CASES.json
                                both judgement legs alone on every labelled
                                case (at most 50), one
@@ -1413,7 +1414,7 @@ def main() -> None:
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")
     sub.add_parser("google-key").add_argument("--ref", default=settings.google_key_ref)
     sub.add_parser("github-key")
-    sub.add_parser("judgement-agreement").add_argument("--since")
+    sub.add_parser("judgement-agreement").add_argument("--since", help="a day, read in UTC")
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("cases")
     routine = sub.add_parser("routine")

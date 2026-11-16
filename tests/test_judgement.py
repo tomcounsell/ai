@@ -5,6 +5,7 @@ the agreement count."""
 import asyncio
 import dataclasses
 import json
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -308,18 +309,43 @@ def test_agreement_counts_both_answers_per_question_and_gemini_at_the_primary_fl
     assert got["disagree_at_primary_floor"] == {"jev proceed / gemini caution": 1}
 
 
-def test_agreement_reads_rows_since_a_date(dsn):
+def test_agreement_reads_since_as_a_utc_day_whatever_the_sessions_timezone(dsn):
+    """Two rows a second either side of the next UTC midnight: since that
+    day counts only the later one, in a session seven hours ahead of UTC."""
+    from core import judgement_sites
+    from core.judgement_tasks import JUDGE
+
+    q = JUDGE.questions[0]
+    answer = {
+        "label": "precise",
+        "p_proceed": 0.9,
+        "decision": "proceed",
+        "probabilities": {
+            label: (0.9 if label == "precise" else 0.1 / (len(q.labels) - 1)) for label in q.labels
+        },
+    }
+    attempts = [{"leg": leg, "outcome": "answered", "answers": {q.id: answer}} for leg in ("jev", "gemini")]
+    midnight = datetime.combine(datetime.now(UTC).date() + timedelta(days=1), datetime.min.time(), UTC)
+
     async def go():
         t = await a_task(dsn)
-        await judge(judgement_upstream.shared().port(fixed="a"), dsn, t)
-        from core import judgement_sites
+        async with await db.connect(dsn) as conn:
+            for n, at in enumerate((midnight - timedelta(seconds=1), midnight + timedelta(seconds=1))):
+                payload = {"judgement_id": f"utc-day-{n}-{t}", "site": JUDGE.site, "attempts": attempts}
+                await conn.execute(
+                    "INSERT INTO events (task_id, type, payload, at) VALUES (%s, 'judgement.answered', %s, %s)",
+                    (t, json.dumps(payload), at),
+                )
+        os.environ["PGTZ"] = "Asia/Bangkok"
+        try:
+            return await judgement_sites.agreement(dsn), await judgement_sites.agreement(
+                dsn, midnight.date().isoformat()
+            )
+        finally:
+            os.environ.pop("PGTZ")
 
-        tomorrow = (datetime.now(UTC) + timedelta(days=1)).date().isoformat()
-        return await judgement_sites.agreement(dsn), await judgement_sites.agreement(dsn, tomorrow)
-
-    everything, none = run(go())
-    # test.two is no declared site; the declared ones the suite judged are counted.
-    assert "test.two" not in everything and none == {}
+    everything, since = run(go())
+    assert "test.two" not in everything and since[JUDGE.site]["judgements"] == 1
 
 
 # -- the composition root -----------------------------------------------------------

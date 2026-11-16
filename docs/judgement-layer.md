@@ -242,7 +242,7 @@ exit), and `calibrate` call it. A held call that raises is printed to
 stderr and sent to Sentry. A process killed outright leaves that call's
 `gateway.opened` open, and holder recovery charges it at its estimate.
 
-`python -m core judgement-agreement [--since YYYY-MM-DD]` prints, per
+`python -m core judgement-agreement [--since YYYY-MM-DD]` (from the start of that UTC day) prints, per
 declared site, over the judgements where Gemini was asked, JSON counts:
 judgements, unsettled (no shadow row came), failures per leg, questions
 both answered, `action_agree` (each leg at its own floor),

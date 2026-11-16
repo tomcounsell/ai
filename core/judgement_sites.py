@@ -661,11 +661,11 @@ def _record(task, port, results, task_id, calls) -> dict[str, Any]:
 
 async def agreement(dsn: str, since: str | None = None) -> dict[str, dict[str, Any]]:
     """`judgement.agreement` over every task's judgement rows, from `since`
-    (an ISO date, default all) on (`python -m core judgement-agreement`)."""
+    (an ISO date, read as the start of that UTC day; default all) on (`python -m core judgement-agreement`)."""
     kinds = [*judgement.OUTCOMES, "judgement.shadowed"]
     async with await db.connect(dsn) as conn, conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(
-            "SELECT type, payload FROM events WHERE type = ANY(%s) AND at >= COALESCE(%s::date, '-infinity') "
+            "SELECT type, payload FROM events WHERE type = ANY(%s) AND at >= COALESCE(%s::timestamp AT TIME ZONE 'UTC', '-infinity') "
             "ORDER BY id",
             (kinds, since),
         )
