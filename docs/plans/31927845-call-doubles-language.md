@@ -18,12 +18,17 @@ restarted. Bug fixes: a commit with tests, no new check, gate or guard.
 - **Cause A: a tool's response starts a second reply.** Valor speaks a
   readback, calls `post` or `settle` (or `ask`) in the same turn, and
   `_tools` answers with a blocking `FunctionResponse`. Live then generates a
-  new turn. Today: #118690 then #118695 (with `post` meet/4b6cf27b8de6/0/post),
-  and the empty #118659 then #118667 (with post meet/a2c5c0d1244b/0/post).
-  In the 12:30 call: #117642 then #117650, #117739 then #117750, and
-  #117885 then #117893, each with an `ask`. A live probe on gemini-3.8-live
-  reproduced it: WHEN_IDLE spoke, called `post`, then spoke again. SILENT
-  produced no follow-on turn in 4 of 4 runs.
+  new turn. Each post's request id names the turn whose say was already
+  held, so the tool call came mid-turn, after its speech began and before
+  `turn_complete`. Today #118690, then #118695: say 4b6cf27b8de6 held
+  #118678, its post #118681. And the empty #118659, then #118667: say
+  a2c5c0d1244b held #118649, post #118652, 4.76 s played with no output
+  transcript, so voiced audio with no text yet. In the 12:30 call
+  (ugz-iwkx-vey): #117642 then #117650, #117739 then #117750, and #117885
+  then #117893, each with an `ask` (its worker turn #117640 began after say
+  #117637). eed-fiog-nve (2026-11-13) has no doubles and no switch. A live
+  probe on gemini-3.8-live reproduced it: WHEN_IDLE spoke, called `post`,
+  then spoke again. SILENT produced no follow-on turn in 4 of 4 runs.
 - **Cause B: the "words you did not catch" prompt fires after Valor has
   already answered.** `_speakers`' no-transcript branch sets `unanswered`
   2.3 s after a sound even when a reply began after that sound. In the 12:30
@@ -38,29 +43,42 @@ restarted. Bug fixes: a commit with tests, no new check, gate or guard.
   the barge-in at 0.4 s working as built. Tom spoke over replies that A and
   B had put in his way, and over late answers to his previous line.
 - **The language.** In the recording, "¿Qué tal?" was a 0.4 s sound from Tom
-  at 288.3 s, made as the unneeded second reply (A) ended. Recognition is
-  already hinted `en-US`. The SDK documents `language_codes` as hints and
-  has no pin. `SpeechConfig.language_code="en-US"` is ignored: the probe
-  answered "¿Qué tal?" in Spanish with it and without it. The model hears
-  the audio itself, so its reply language comes from the instruction. The
-  persona's line leaves "clearly" to the model's judgement, and to the model
-  "¿Qué tal?" is clear: the probe answered in Spanish with the line as
-  written. The same probe with the line below answered in English and asked
-  Tom to say it again, and it still switched for whole sentences of Spanish
-  that asked to switch. The earlier switch, Portuguese on 2026-11-06 in
-  another project's call, is reported (task e3b0988bd3d4).
+  at 288.3 s, made as the unneeded second reply (A) ended. Gemini 3.1 Pro,
+  given that clip alone, heard Hindi, "Kya tha?", 2 of 2 times: the sound
+  is ambiguous. Valor's reply clip (289.9 to 293.5 s) is clear Spanish,
+  word for word the transcript, 2 of 2 times. So the voice spoke what the
+  text says, and the Portuguese was Tom's hearing of Spanish. Recognition
+  is already hinted `en-US`. The SDK documents `language_codes` as hints
+  and has no pin. `SpeechConfig.language_code="en-US"` is ignored: the
+  probe answered "¿Qué tal?" in Spanish with it and without it. The model
+  hears the audio itself, so its reply language comes from the
+  instruction. The persona's line leaves "clearly" to the model, and to
+  the model "¿Qué tal?" is clear: the probe answered in Spanish with the
+  line as written. With the line below it answered in English and asked
+  Tom to say it again, and it still switched for whole sentences of
+  Spanish that asked to switch. The calls in this project's record show
+  no other switch. The 2026-11-06 Portuguese switch was in another
+  project's call (fzo-qhoo-qpo, not in this record:
+  `valor-record call fzo-qhoo-qpo` says "no call"), and is reported in
+  task e3b0988bd3d4.
 
 ## Fix
 
 1. **`core/call.py` `TOOLS`, `_tools`.** `post`, `settle`, `ask` and `leave`
-   are declared `behavior=NON_BLOCKING`, since their result carries nothing
-   to say. Their response is `scheduling=SILENT` when the calling turn has
-   already said words (`not wordless(reply.text)`), and `WHEN_IDLE`
-   otherwise, so a turn that called first still speaks once. The lookups
-   (`person`, `backlog`, `open_decisions`) stay blocking, because their
-   result is the answer. The `live_config` docstring's language sentence is
-   corrected to what the probe showed.
-2. **`_begin`** sets `voiced_s = 0`: speech heard before a reply is what the
+   are declared `behavior=NON_BLOCKING`. Each response is
+   `scheduling=SILENT` only when its result is a plain acknowledgement
+   ("posted", "recorded", "leaving", or "asked: …" with the worker ready)
+   *and* the turn has already spoken. Otherwise it is `WHEN_IDLE`, so Live
+   says it: an already-asked answer, "say it needs a moment", or "not done:
+   … needs its arguments". "Has spoken" is read before `_begin`. It is true
+   when the turn in progress has its say requested (`reply.said`, set on
+   voiced audio or words, so it does not wait on the lagging transcript),
+   or when no turn is in progress and Valor's last reply is still playing
+   (`self.out`, the case where `turn_complete` came before the tool call).
+   The lookups (`person`, `backlog`, `open_decisions`) stay blocking,
+   because their result is the answer. The `live_config` docstring's
+   language sentence is corrected to what the probe showed.
+2. **`_begin`**, inside `if self.reply is None`, sets `voiced_s = 0`: speech heard before a reply is what the
    reply answers, so it can never later ask for an answer.
 3. **`persona/conduct.md` "In a call".** The English line becomes: "**English.**
    A few words that sound like another language (a greeting, a short phrase)
@@ -76,9 +94,13 @@ reconnect change, since none happened.
 
 ## Tests (`tests/test_call.py`, the fake Session)
 
-- A turn that speaks, then calls `post`: the response is SILENT, and no
-  second say. A turn that calls `ask` before any words: WHEN_IDLE. `person`:
-  no scheduling. The declarations carry NON_BLOCKING only on the four.
+- In the recorded order, voiced audio with no output transcript, then
+  `post`, then `turn_complete`: SILENT and one say. The same with
+  `turn_complete` first and the reply still playing: SILENT. A turn that
+  calls `ask` before any words: WHEN_IDLE. `ask` after words with the
+  worker not ready: WHEN_IDLE. A repeated `ask` whose answer is in:
+  WHEN_IDLE. `post` with no text: WHEN_IDLE. `person`: no scheduling. The
+  declarations carry NON_BLOCKING only on the four.
 - `settle` read back aloud, then called: SILENT.
 - Tom makes a short sound, Live answers it, and the reply plays out: no
   "words you did not catch" note follows. The existing no-reply test still
