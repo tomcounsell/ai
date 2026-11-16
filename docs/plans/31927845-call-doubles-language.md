@@ -80,12 +80,14 @@ restarted. Bug fixes: a commit with tests, no new check, gate or guard.
    language sentence is corrected to what the probe showed.
 2. **`_begin`**, inside `if self.reply is None`, sets `voiced_s = 0`: speech heard before a reply is what the
    reply answers, so it can never later ask for an answer.
-3. **`persona/conduct.md` "In a call".** The English line becomes: "**English.**
-   A few words that sound like another language (a greeting, a short phrase)
-   are English you did not catch: say so in English and ask them to say it
-   again. Switch only when someone speaks whole sentences in another
-   language, or asks you to." The call reads this section as it starts, so
-   there is one source.
+3. **`persona/conduct.md` "In a call".** The English line becomes, as Tom
+   tightened it (2026-11-16): "**English, always.** Answer in English even
+   when someone speaks another language, a phrase or whole sentences. A few
+   words that sound like another language are English you did not catch:
+   say so and ask them to say it again. Switch only when someone explicitly
+   asks you to speak another language." The call reads this section as it
+   starts, so there is one source. `persona/voice.md` carries the same rule
+   for every conversation, chats included.
 
 Out of scope: the empty-words prompt firing on a 0.4 s sound with nothing
 before it (803.1 s). It is the 2026-11-05 "Hello." behaviour working as
@@ -108,9 +110,9 @@ reconnect change, since none happened.
 - The call instruction carries the new English line (updates the line-800
   assert). Full suite under 5 minutes.
 - Live, after the build: the probes (`../probe/q.py`, `t.py`) are rerun
-  against the built `live_config`, 3 runs each: "¿Qué tal?" gets English, a
-  full Spanish request still switches, and a readback followed by `post`
-  gives one turn.
+  against the built `live_config`, 3 runs each: "¿Qué tal?" gets English,
+  whole Spanish sentences get English, an explicit ask to speak Spanish
+  switches, and a readback followed by `post` gives one turn.
 
 Done when Tom's next call has no doubled reply after a settle or an ask, and
 no switch on a short phrase.
