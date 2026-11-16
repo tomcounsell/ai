@@ -262,7 +262,9 @@ async def entered(conn, session_id: str) -> None:
     await ledger.append(conn, session_id, "call.joined", {"machine": settings.machine})
     call = await marker(conn, session_id) or {}
     asked = call.get("asked_by") or {}
-    where = f"reply_to {asked.get('reply_to')}" + (f", topic_id {asked['topic_id']}" if asked.get("topic_id") else "")
+    where = f"reply_to {asked.get('reply_to')}" + (
+        f", topic_id {asked['topic_id']}" if asked.get("topic_id") else ""
+    )
     await report(
         conn,
         session_id,
@@ -1548,7 +1550,9 @@ class Call:
                     else types.FunctionResponseScheduling.WHEN_IDLE
                 )
             out.append(
-                types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result}, scheduling=scheduling)
+                types.FunctionResponse(
+                    id=fc.id, name=fc.name, response={"result": result}, scheduling=scheduling
+                )
             )
         if out:
             await session.send_tool_response(function_responses=out)
@@ -1886,7 +1890,9 @@ class Call:
         from bridges.meet import Refused, SignInNeeded
 
         url = self.info["url"]
-        again = f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run: {SIGN_IN}"
+        again = (
+            f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run: {SIGN_IN}"
+        )
         if not profile_ready(self.page.profile) and not await self.page.renew(url):
             return again
         for renewed in (False, True):

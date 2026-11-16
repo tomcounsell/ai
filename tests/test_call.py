@@ -832,7 +832,9 @@ def test_a_tool_result_with_something_to_say_is_said(dsn, team, quick):
     c = run(go())
     assert _schedules(c.session) == [("ask", WHEN_IDLE), ("ask", WHEN_IDLE), ("post", WHEN_IDLE),
                                      ("open_decisions", None)]  # fmt: skip
-    responses = [r.response["result"] for k, kw in c.session.sent if k == "tool" for r in kw["function_responses"]]
+    responses = [
+        r.response["result"] for k, kw in c.session.sent if k == "tool" for r in kw["function_responses"]
+    ]
     assert "needs a moment" in responses[0] and responses[1].startswith("already asked")
     assert responses[2] == "not done: post needs its arguments"
 
@@ -840,7 +842,12 @@ def test_a_tool_result_with_something_to_say_is_said(dsn, team, quick):
 def test_only_the_tools_that_acknowledge_are_declared_non_blocking():
     config = call.live_config("acme", "", None, sheet=True)
     behaviours = {f.name: f.behavior for f in config.tools[0].function_declarations}
-    assert {n for n, b in behaviours.items() if b == types.Behavior.NON_BLOCKING} == {"ask", "post", "settle", "leave"}
+    assert {n for n, b in behaviours.items() if b == types.Behavior.NON_BLOCKING} == {
+        "ask",
+        "post",
+        "settle",
+        "leave",
+    }
     assert {n for n, b in behaviours.items() if b is None} == {"open_decisions", "person", "backlog"}
 
 
@@ -909,7 +916,10 @@ def test_the_call_speaks_by_the_personas_in_a_call_section_and_in_english(tmp_pa
     assert "ask your worker to check it, or drop the question" in flat and "Never ask it again" in flat
     assert "Taking something offline says where it goes" in flat
     # A short phrase is no switch (¿Qué tal?, answered in Spanish, 2026-11-16).
-    assert "A few words that sound like another language (a greeting, a short phrase) are English you did not catch" in flat
+    assert (
+        "A few words that sound like another language (a greeting, a short phrase) are English you did not catch"
+        in flat
+    )
     assert "Switch only when someone speaks whole sentences in another language, or asks you to" in flat
     assert real in persona.render(settings.persona_dir)  # every turn reads the same text
 
@@ -1560,7 +1570,10 @@ def never_in(rows, got) -> dict:
     assert not any(r["type"] == "call.joined" for r in rows)
     assert [r["about_key"].rsplit(":", 1)[1] for r in got if r["kind"] == "call"] == ["joining", "ended"]
     ended = got[-1]
-    assert ended["text"].startswith("Valor could not join the Meet ") and "Do not post its link." in ended["text"]
+    assert (
+        ended["text"].startswith("Valor could not join the Meet ")
+        and "Do not post its link." in ended["text"]
+    )
     assert "summary" not in ended["text"] and "valor-record call" not in ended["text"]
     return ended
 
@@ -1599,7 +1612,11 @@ def test_the_link_is_reported_only_after_meets_join(dsn, team, quick):
     (link,) = [r for r in after if r["about_key"].endswith(":link")]
     assert link["text"].startswith("Valor is in the Meet: https://meet.google.com/") and at(1) in link["text"]
     assert [r["type"] for r in rows].count("call.joined") == 1
-    assert [r["about_key"].rsplit(":", 1)[1] for r in got if r["kind"] == "call"] == ["joining", "link", "ended"]
+    assert [r["about_key"].rsplit(":", 1)[1] for r in got if r["kind"] == "call"] == [
+        "joining",
+        "link",
+        "ended",
+    ]
     assert got[-1]["text"].startswith("The call https://meet.google.com/")
 
 
@@ -1646,7 +1663,9 @@ def test_a_call_valor_signs_itself_in_to_joins_and_reports_its_link(dsn, team, q
 
     page, rows, got = run(go())
     assert page.done == ["join", ("renew", page.url), "join"]
-    assert any(r["type"] == "call.joined" for r in rows) and any(r["about_key"].endswith(":link") for r in got)
+    assert any(r["type"] == "call.joined" for r in rows) and any(
+        r["about_key"].endswith(":link") for r in got
+    )
     assert "signed in to Google again from 1Password" in capsys.readouterr().out
 
 
