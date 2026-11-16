@@ -550,7 +550,7 @@ class Settings:
     # summarises it (docs/plans/gemini-live.md). The call is saved in Yudame
     # Tools' meeting store, whose app backs it up to Drive.
     call_model: str = field(default_factory=lambda: _env("VALOR_CALL_MODEL", "gemini-3.8-live"))
-    call_voice: str = field(default_factory=lambda: _env("VALOR_CALL_VOICE", "Charon"))
+    call_voice: str = field(default_factory=lambda: _env("VALOR_CALL_VOICE", "Alnilam"))
     summary_model: str = field(default_factory=lambda: _env("VALOR_SUMMARY_MODEL", "gemini-3.1-pro-preview"))
     # The paid Gemini key, "Gemini API Key Yudame Tools" in 1Password's
     # Yudame Secrets (Tom, 2026-11-05: m-valor's GOOGLE_API_KEY ran out of credit).

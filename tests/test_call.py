@@ -757,7 +757,7 @@ def test_a_settle_posts_the_readback_with_its_settles_and_copies_it(dsn, team, q
 
 def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
     config = call.live_config("acme", "Logan wants the launch date.", None)
-    assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Charon"
+    assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Alnilam"
     assert config.proactivity.proactive_audio is True
     assert config.realtime_input_config.activity_handling == types.ActivityHandling.NO_INTERRUPTION
     assert config.context_window_compression.trigger_tokens == call.CALL_CONTEXT

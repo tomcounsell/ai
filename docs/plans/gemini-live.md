@@ -24,7 +24,7 @@ amends: docs/plans/meet.md (items 4, 5, 7)
 
 1. **Key.** `python -m core google-key` stores it into the kernel key directory (amended 2026-11-05: that key ran out of credit, and Tom put a paid one, "Gemini API Key Yudame Tools", in `Yudame Secrets`; `google-key` reads it with `op read` from `settings.google_key_ref`), read with `read_key`. This is the `openai-key` path, recorded in `docs/machine.md`.
 2. **Session** (google-genai, `settings.call_model` = `gemini-3.8-live`).
-   - The voice is Charon. Transcription in and out, resumption and compression are on.
+   - The voice is Charon (amended 2026-11-16: Tom picked Alnilam). Transcription in and out, resumption and compression are on.
    - The tracks are mixed to 16 kHz mono and sent with `send_realtime_input`. Valor's own audio is not sent.
    - Activity detection: start sensitivity LOW, prefix padding 300 ms, interruptions kept.
    - Instructions: the call's mechanics (answer only when addressed, or when asked what only Valor holds; a line tagged "typed" is answered with `post()`; the tools), then the persona's own "In a call" section (`persona/conduct.md`, read by `persona.section` as the call starts; docs/plans/call-persona.md), then `prep`. Proactive audio is on.
