@@ -334,8 +334,9 @@ async def end(
     summary: dict[str, str] | None = None,
 ) -> bool:
     """Write the call's end once (module docstring). False when it had
-    already ended. `summary` is Gemini's summary document (`path`) or why
-    it failed (`error`); None when none was made."""
+    already ended. `summary` is Gemini's summary document (`path`) and its
+    `actions`, each listed as a task from the call, or why it failed
+    (`error`); None when none was made."""
     async with conn.transaction():
         await ledger.lock(conn, f"task:{session_id}")
         rows = await ledger.read(conn, session_id)
@@ -371,9 +372,12 @@ async def end(
                 f"The call {call.get('url')} ended: {reason}.",
                 (
                     f"{why}: say so in the thread it was asked in ({thread}), in one line; write no summary "
-                    f"of your own. Its transcript: `valor-record call {code}`."
+                    f"of your own. Its transcript, where any task given in the call is: `valor-record call {code}`."
                 ),
             ]
+        if actions := (summary or {}).get("actions"):
+            lines.append("Tasks from the call: take, hand on or decline each in the thread it was asked in:")
+            lines += [f"- {a['task']}" + (f" ({a['owner']})" if a.get("owner") else "") for a in actions]
         lines += settled
         lines += [
             f'Answered by your worker after the call: on "{a["question"]}": {a["answer"]}' for a in late
@@ -590,10 +594,15 @@ INSTRUCTIONS = (
     "- Before saying anything about a person (who they are, what they asked for or decided, what they are owed "
     "or were sent), call `person` with their name or how they were described, and answer from the dated facts "
     "it returns; when it returns nobody, say you have nothing recorded about them. Asked what you know about "
-    "themselves, a person hears only their name, role and organisation.\n"
+    "themselves, a person hears only their name, role and organisation. Asked who is on the team or who you "
+    'have records of, call `person` with "everyone": it returns the project\'s people, its own team first, '
+    "with role and organisation; say their names.\n"
+    "- A task anyone gives you in the call (to note something down, look into it, build it, fill records) is "
+    "ordinary work: say in a sentence that it is noted. Your notes on the call carry it to your chat "
+    "session after the call.\n"
     "- When someone asks what is open, call `open_decisions` and go through what is theirs to decide as "
     '"In a call" below says, and let them choose. With anyone but Tom in the call, a decision about a client '
-    "relationship (pricing, terms, its people) is one line: it is for Tom. Never say an id aloud.\n"
+    "relationship (pricing, terms, hiring or pay) is one line: it is for Tom. Never say an id aloud.\n"
     "- When Tom settles open decisions (one idea may settle several), read his answer back in a sentence and "
     "call `settle` with the ids it settles. Only Tom settles decisions; a correction is a new `settle`.\n"
     "- Call `leave` when anyone in the call asks you to leave, or when everyone has wrapped up and said "
@@ -630,8 +639,9 @@ ACKNOWLEDGED = {"posted", "recorded", "leaving", ASKED}
 # A call asked for in a chat joins first and reads up after (P-033, Tom, 2026-11-16).
 READING_LINE = (
     "- Your worker is still reading up for this call. Asked what that reading would hold, say you are still "
-    "reading up, and answer from `backlog`, `person` and `open_decisions` meanwhile. A note saying your "
-    "reading is in brings it: use it from then on, and say nothing about the note itself.\n"
+    "reading up, and answer from `backlog`, `person` and `open_decisions` meanwhile; everything else goes on "
+    "as usual: `ask` your worker, and take the tasks you are given. A note saying your reading is in brings "
+    "it: use it from then on, and say nothing about the note itself.\n"
 )
 READ_UP = (
     "Read up for this call while Valor joins it: the thread it was asked in ({where}), the project's record "
@@ -641,7 +651,10 @@ READ_UP = (
     "case (what happened, when, where it is recorded; observed, reported or assumed) or saying there is no "
     "case yet."
 )
-READ_IN = "Your reading for this call is in; use it from now on, and say nothing about this note:\n{notes}"
+READ_IN = (
+    "Your reading for this call is in: you are no longer reading up, so never say you are. Use it from now "
+    "on, and say nothing about this note:\n{notes}"
+)
 READ_NONE = "Your reading for this call did not come back; `ask` your worker for what you need."
 # Offered when the call's project has a backlog Sheet (Tom, 2026-11-13).
 BACKLOG_LINE = (
@@ -729,7 +742,8 @@ SUMMARY = (
     "using only what was said:\n"
     "- topic: what the call was about, in two to five words, as its title;\n"
     "- summary: a short paragraph;\n- decisions: each decision made;\n"
-    "- actions: each thing someone said they would do, with its owner (the person who said it) or null;\n"
+    "- actions: each task from the call: each thing someone said they would do, each task someone gave or "
+    "asked Valor for, and each thing Valor said it would do, with its owner (the one to do it) or null;\n"
     "- markdown: the full summary as a Markdown document: who joined, what was discussed, what was settled, "
     "what Valor answered and promised, and what is still open.\n\nValor's notes from before the call:\n{prep}"
     "\n\nThe transcript:\n"
@@ -2052,7 +2066,7 @@ class Call:
         for name, text in files.items():
             (staging / name).write_text(text)
         folder = keep(staging, self.store, folder_name(title, self.started_at))
-        return {"path": str(folder / f"{day} {title}.md")}
+        return {"path": str(folder / f"{day} {title}.md"), "actions": summary["actions"]}
 
     def _title(self, topic: str | None) -> str:
         """The call's topic, then the first names of those in it, Valor's last."""

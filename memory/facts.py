@@ -557,6 +557,20 @@ FILLER = frozenset(
         "has",
         "have",
         "had",
+        # Asking for the whole team (Tom's wordings, call pxz-exmv-icy, 2026-11-16).
+        "so",
+        "you",
+        "any",
+        "all",
+        "anyone",
+        "everyone",
+        "everybody",
+        "here",
+        "team",
+        "project",
+        "record",
+        "dossier",
+        "list",
     ]
 )
 # Most dossiers a lookup returns.
@@ -564,12 +578,13 @@ PEOPLE = 5
 
 
 def _words(text: str) -> set[str]:
-    """Text's words, case folded, filler and single letters dropped, a
-    plural `s` stripped."""
+    """Text's words, case folded, a plural `s` stripped, and filler (as
+    written or stripped) and single letters dropped."""
     out = set()
     for w in re.findall(r"\w+", str(text).casefold()):
-        if len(w) > 1 and w not in FILLER:
-            out.add(w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w)
+        one = w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+        if len(w) > 1 and w not in FILLER and one not in FILLER:
+            out.add(one)
     return out
 
 
@@ -583,7 +598,9 @@ def people(
     best appears: a name or alias 3, a live `team`, `role` or
     `organisation` claim 2, any other live claim about them 0.5; an
     internal person scores 0.5 more, and a person no word fits is no match.
-    Internal: a live `team` fact whose claim is `internal`, or a name in
+    A description that names no one (every word filler: "who's on this
+    team", "everyone") is the roster: every person, internal first, then by
+    name, each entry only who they are (`WHO` kinds). Internal: a live `team` fact whose claim is `internal`, or a name in
     `internal` (the operator's). Each dossier holds the person's live facts,
     `DOSSIER` kinds first, oldest first within a kind."""
     use(dsn)
@@ -608,10 +625,14 @@ def people(
         return any(fold(a) in ours for a in aliases.get(name, []))
 
     exact = entity(ledger, project, client, about) if fold(about) else None
+    asked, roster = _words(about), False
     if exact is not None and ref(exact.ledger, exact.key) in persons:
         chosen = [ref(exact.ledger, exact.key)]
+    elif not asked:
+        roster = True
+        chosen = sorted(persons, key=lambda n: (not inside(n), fold(persons[n].name)))
     else:
-        asked, scored = _words(about), []
+        scored = []
         for name, e in persons.items():
             score = 0.0
             for w in asked:
@@ -629,7 +650,8 @@ def people(
         e, team = persons[name], "internal" if inside(name) else "external"
         order = {k: i for i, k in enumerate(DOSSIER)}
         facts = sorted(
-            live.get(name, []), key=lambda f: (order.get(fold(f.kind), len(DOSSIER)), f.since, int(f.key))
+            (f for f in live.get(name, []) if not roster or fold(f.kind) in WHO),
+            key=lambda f: (order.get(fold(f.kind), len(DOSSIER)), f.since, int(f.key)),
         )
         shown = [_shown(f, successors, confirmed, names) for f in facts]
         also = sorted(a for a in aliases.get(name, []) if a != e.name)

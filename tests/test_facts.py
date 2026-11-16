@@ -442,9 +442,37 @@ def test_a_loose_description_matches_who_they_are_and_internal_ranks_first(world
     assert teams == {"Sam Ito": "internal", "Rowan Vale": "external", "Tom Counsell": "internal",
                      "Lee Park": "external"}  # fmt: skip
     assert people(dsn, "a", "the plumber") == []
-    assert people(dsn, "a", "who is the") == []  # filler alone fits no one
     with pytest.raises(record.NotFound, match="by name or description"):
         asyncio.run(record.answer(dsn, started(dsn, "a"), "people", {"about": " "}))
+
+
+def test_who_is_on_the_team_lists_the_projects_people_internal_first_by_who_they_are(world):
+    """Tom, call pxz-exmv-icy (2026-11-16): asked who is on the team and what
+    person records it had, the call had no answer. A description that names
+    no one, in Tom's own words, is the roster: internal first (the operator
+    by name, a marked teammate), then external, each with role and
+    organisation and not their asks; a name still returns one person."""
+    dsn = world
+    write(dsn, "a",
+          person("Rowan Vale"), about("Rowan Vale", "role", "finance lead", "2026-10-20"),
+          about("Rowan Vale", "organisation", "Fernhill Ltd", "2026-10-20"),
+          about("Rowan Vale", "ask", "a weekly usage report", "2026-11-01"),
+          person("Sam Ito"), about("Sam Ito", "team", "internal", "2026-10-20"),
+          person("Tom Counsell", "Tom"), person("Ada Moss"))  # fmt: skip
+    write(dsn, "c", person("Kit Hale"))
+    for asked in ("Who who's on this team?", "So what person records do you have?",
+                  "do you have any records at all?", "who are the people on this project", "everyone"):  # fmt: skip
+        found = people(dsn, "a", asked)
+        assert [(d["name"], d["team"]) for d in found] == [
+            ("Sam Ito", "internal"), ("Tom Counsell", "internal"), ("Ada Moss", "external"),
+            ("Rowan Vale", "external")], asked  # fmt: skip
+    rowan = found[-1]
+    assert [f["kind"] for f in rowan["facts"]] == ["role", "organisation"]
+    assert "weekly usage report" not in rowan["entry"]
+    assert [d["name"] for d in people(dsn, "c", "everyone")] == ["Kit Hale"]
+    assert people(dsn, "b", "everyone") == []
+    (d,) = people(dsn, "a", "Rowan Vale")
+    assert "ask" in [f["kind"] for f in d["facts"]]
 
 
 def test_another_projects_or_clients_people_never_return(world):

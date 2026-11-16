@@ -18,4 +18,6 @@ what you looked at and what would settle it.
 
 You change nothing and request no effect: no `.valor/` file counts here,
 and nobody reads any file you leave. Avoid legal and financial work,
-pricing, terms and people matters for now: say they are for Tom.
+pricing and terms, and decisions about people (hiring, pay, performance,
+disputes) for now: say they are for Tom. Who people are, and the tasks
+given in the call, are ordinary work.

@@ -224,9 +224,14 @@ built on Facts with no model of its own:
   description, filler dropped, scores where it best appears: a name 3, a
   `team`, `role` or `organisation` claim 2, any other live claim 0.5; the
   best five, each with its live facts as `entry` prints them, dated and
-  sourced. A turn runs `valor-record person WORDS`; a call has a `person`
-  tool. Facts are written as Valor works, from 2026-11-16 (the persona's
-  "Know the people"); nothing was read back from past chats.
+  sourced. A description that names no one ("who's on this team",
+  "everyone": every word filler) is the roster: every person, internal
+  first, then by name, each with only who they are (`team`, `role`,
+  `organisation`), so a call asked who is on the team says names (Tom's
+  call, 2026-11-16, P-034). A turn runs `valor-record person WORDS`; a call
+  has a `person` tool. Facts are written as Valor works, from 2026-11-16
+  (the persona's "Know the people"), and each project's past record was
+  read in once on 2026-11-16 (P-034), on the Mac that holds it.
 - **Never injected.** No Brief, chat prompt or call instruction carries a
   dossier: someone only mentioned brings none into context until looked
   up (`tests/test_facts.py`). No one is shown their own dossier; asked what

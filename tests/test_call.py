@@ -1386,6 +1386,7 @@ def test_a_failed_summary_is_named_in_the_report_and_no_other_is_written(dsn, te
     ]
     assert "Gemini could not summarise it (RuntimeError: quota; the call's files are kept in" in ended["text"]
     assert "write no summary of your own" in ended["text"]
+    assert "Its transcript, where any task given in the call is: `valor-record call" in ended["text"]
 
 
 def test_the_summary_uploads_the_recording_and_sends_it_with_the_transcript(tmp_path):
@@ -2434,3 +2435,101 @@ def test_a_reading_that_fails_says_so_and_leaves_no_question_unanswered(dsn, tea
     c = run(go())
     assert (f"[note] {call.READ_NONE}", False) in c.session.contents()
     assert not c.the.dropped and c.the.info["prep"].startswith("The launch")
+
+
+# -- the team, and a task given in a call (P-034) ----------------------------------
+
+
+def test_a_call_asked_who_is_on_the_team_looks_up_everyone_and_gets_the_roster(dsn, team, quick):
+    """Tom, call pxz-exmv-icy (2026-11-16), #122073: "Who's on this team?"
+    had no answer. The call is told to look up "everyone"; its `person` tool
+    on that, or on Tom's own words, returns the project's people, internal
+    first, with who they are."""
+    from core import memory, workspace
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            await memory.fact_write(conn, workspace.Spec.load(team.project), [
+                {"op": "entity", "kind": "person", "name": "Rowan Vale"},
+                {"op": "fact", "kind": "role", "claim": "finance lead at the client", "source": "telegram:-1/3",
+                 "since": "2026-10-20", "about": ["Rowan Vale"]},
+                {"op": "entity", "kind": "person", "name": "Tom Counsell"},
+            ])  # fmt: skip
+        c = await in_call(dsn, team)
+        await push(c.session, tool("person", about="everyone"), done())
+        await push(c.session, tool("person", about="Who's on this team?"), done())
+        assert await until(lambda: len([k for k, _ in c.session.sent if k == "tool"]) == 2)
+        await finish(c)
+        return c
+
+    memory.reset()
+    try:
+        c = run(go())
+    finally:
+        memory.reset()
+    told = " ".join(c.gemini.configs[0].system_instruction.split())
+    assert 'Asked who is on the team or who you have records of, call `person` with "everyone"' in told
+    roster, again = [
+        kw["function_responses"][0].response["result"] for k, kw in c.session.sent if k == "tool"
+    ]
+    assert roster == again
+    assert roster.index("## Tom Counsell (internal;") < roster.index("## Rowan Vale (external;")
+    assert "finance lead at the client" in roster
+
+
+def test_a_task_given_in_a_call_is_ordinary_work_and_only_people_decisions_go_to_tom():
+    """Tom, call pxz-exmv-icy (2026-11-16), #122150-#122163: told to fill the
+    dossiers, Valor refused three times as "people matters ... go to Tom".
+    Recording who people are and a task given are ordinary work, said as
+    noted; hiring, pay, performance and disputes still go to Tom."""
+    flat = " ".join(persona.section(settings.persona_dir, "In a call").split())
+    assert "people matters" not in flat
+    assert "A task anyone gives you in a call (note something down" in flat
+    assert "is ordinary work, and so is recording who people are: say in a sentence that it is noted" in flat
+    assert "decisions about people: hiring, pay, performance and disputes. Say they go to Tom" in flat
+    told = " ".join(call.live_config("acme", "", None, reading=True).system_instruction.split())
+    assert "(pricing, terms, its people)" not in told and "(pricing, terms, hiring or pay)" in told
+    assert "is ordinary work: say in a sentence that it is noted" in told
+    # P-033's reading line no longer narrows the call to three tools.
+    assert "everything else goes on as usual: `ask` your worker, and take the tasks you are given" in told
+    worker = " ".join((Path(__file__).parent.parent / "skills/sdlc/call.md").read_text().split())
+    assert "people matters" not in worker and "hiring, pay, performance, disputes" in worker
+
+
+def test_the_reading_note_takes_back_the_still_reading_line():
+    """Call pxz-exmv-icy, #122072: after its reading came in (#122065) the
+    call still said "I am still reading up"; its instruction cannot change
+    mid-session, so the note says it no longer applies."""
+    note = call.READ_IN.format(notes="n")
+    assert "you are no longer reading up, so never say you are" in note
+
+
+def test_the_tasks_from_a_call_reach_the_chat_session_in_its_report(dsn, team, quick):
+    """Tom, #valor-product 2026-11-16 14:44: "Valor surprisingly denied my
+    request to note down tasks." Each task the summary lists, given by Tom or
+    taken by Valor, is a line of the call's report to the chat session."""
+    notes = {"topic": "Dossiers", "summary": "s", "decisions": [], "markdown": "m",
+             "actions": [{"task": "Fill the dossiers for each project", "owner": "Valor"},
+                         {"task": "Prepare the build of action results before replies", "owner": "Valor"},
+                         {"task": "Mark team lookup as something to improve"}]}  # fmt: skip
+
+    async def go():
+        c = await in_call(dsn, team, gemini=Gemini(notes=notes))
+        c.the.hear(LOGAN, loud(), 48_000)
+        await until(lambda: c.the.energy.get(LOGAN))
+        await push(c.session, heard("Valor, fill the dossiers."), audio(), said("Noted."), done())
+        await settle(c.the)
+        await finish(c)
+        return await bridges.rows(dsn, c.brief.id)
+
+    rows = run(go())
+    (ended,) = [
+        r["payload"]["text"]
+        for r in rows
+        if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended")
+    ]
+    assert "Tasks from the call: take, hand on or decline each in the thread it was asked in:" in ended
+    assert "- Fill the dossiers for each project (Valor)" in ended
+    assert "- Prepare the build of action results before replies (Valor)" in ended
+    assert "- Mark team lookup as something to improve\n" in ended + "\n"
+    assert "each task someone gave or asked Valor for, and each thing Valor said it would do" in call.SUMMARY
