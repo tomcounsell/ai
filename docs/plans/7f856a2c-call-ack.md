@@ -19,9 +19,9 @@ governance.
 2. `core/call.py:248`, the `joining` report: "Post nothing yet." becomes
    "Post nothing more yet: the thread already has your line that the call is
    starting." so a turn waking on that report does not post a second line.
-3. `tools/meet.py` `MeetJoin.usage`: add "With this request, post one line
-   in the thread that the call is starting, with no link." Module docstring
-   and `docs/bridges/meet.md` "The pieces" get the same one clause.
+3. `tools/meet.py` `MeetJoin.usage`: says the request comes a turn after the
+   thread's "Starting a call" line. `docs/bridges/meet.md` "The pieces"
+   gets the same one clause.
 
 The invited call is unchanged: its top-level "Joining <title> at <time>"
 post already acknowledges, and the `link` report needs no second post.
