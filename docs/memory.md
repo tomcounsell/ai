@@ -73,6 +73,17 @@ Mac's own kernel database, as memory's role.
   reason. A chat message's own words are not a record (a turn's prompt is
   left out of its transcript entries); `valor-record messages --search`
   finds them.
+- **The project's summary.** Recall and search find a record by its
+  words; neither says where a project stands. The `summary` routine
+  ([routines.md](routines.md)) keeps a page per project, rebuilt on a
+  night after work on it from the previous page and the record since, a
+  `summary.written` row on the ledger, not a memory record. Every working
+  and chat session of the project gets the latest in its Brief, after the
+  other chats' memory, as "Where the project stands"; fresh sessions and
+  tasks with no project get none. It is built from every task in the
+  project's reach, team rooms and DMs the spec takes alike, as other chats'
+  memory is, so its label says it is Valor's own: never posted, sent or
+  quoted, and the record wins where they differ.
 - **The old system's memory.** `scripts/cutover_export_memory.py` reads an
   old Redis (or a dump restored into a throwaway one) and dates each record
   from the best source it holds: its Telegram message, an extraction's

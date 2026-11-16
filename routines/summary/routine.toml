@@ -1,0 +1,15 @@
+name = "summary"
+runner = "summary"
+ceiling = "act"
+model = "frontier"
+mission_item = "Tom's ask (rule 2): Valor starts each day on a project knowing where it stands, without depending on the right keywords"
+need = [
+    "Tom, 2026-11-01 (Slack DM): a routine that rebuilds memory nightly, following Macro's practice (issue #3679)",
+    "Tom, calls 2026-11-16: weighted by actual progress, quiet stretches of up to a week merged into one entry; for Valor alone, never posted to the team or to Tom",
+]
+created = 2026-11-16
+instruction = "Rebuild the summary of each project placed on this Mac that had work since its last summary, on top of that summary, for Valor's own sessions. Send no one anything."
+
+[schedule]
+hour = 1
+minute = 30

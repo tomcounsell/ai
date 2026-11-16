@@ -85,7 +85,7 @@ from yarl import URL
 
 from core import binaries, credentials, db, record, spending, tasks
 from core.ledger import new_id
-from core.settings import settings
+from core.settings import resolve_model, settings
 
 # Hop-by-hop and length headers are recomputed on each side.
 # A proxy credential is never the upstream's business, on either route.
@@ -114,6 +114,35 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 class CredentialUnavailable(RuntimeError):
     """The kernel has no usable Claude credential; the message names the
     remedy and never any part of a credential."""
+
+
+class Unanswered(RuntimeError):
+    """A one-shot call (`ask`) did not answer."""
+
+
+async def ask(claude: str, base: str, home: Path, seat: str, system: str, text: str) -> str:
+    """One `claude -p` call with no tools, settings or MCP on the `seat`,
+    through the gateway at `base` (a runner's `issue`), so it is metered on
+    that run: the reply's text, or `Unanswered`."""
+    argv = [claude, "-p", "--model", resolve_model(seat), "--system-prompt", system, "--tools", "",
+            "--setting-sources", "", "--strict-mcp-config", "--output-format", "json", text]  # fmt: skip
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "ANTHROPIC_BASE_URL": base,
+           "CLAUDE_CONFIG_DIR": str(home), "CLAUDE_CODE_OAUTH_TOKEN": TURN_TOKEN}  # fmt: skip
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, env=env, cwd=str(home), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+    except OSError as exc:
+        raise Unanswered(f"claude: {exc}") from None
+    out, _ = await proc.communicate()
+    try:
+        got = json.loads(out)
+        said = str(got["result"]).strip()
+    except ValueError, KeyError:
+        raise Unanswered(f"claude returned {out.decode(errors='replace')[:200]!r}") from None
+    if proc.returncode != 0 or got.get("is_error") or not said:
+        raise Unanswered(f"claude failed: {said[:200]}")
+    return said
 
 
 class ClaudeLogin:

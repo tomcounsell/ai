@@ -413,8 +413,8 @@ async def dispatch(
     now, when it lists one) plus every
     correction in force, rendered from the ledger now, then what memory
     recalls for it (`core.memory.recall`; none for a fresh session), and the
-    memory index of each other chat session of its project (`core.record.memories`; none
-    for a fresh session), never from a copy
+    memory index of each other chat session of its project (`core.record.memories`) and
+    its project's latest nightly summary (`core.record.summary`; neither for a fresh session), never from a copy
     made when the task started, and for a task with a workspace, how the
     turn reaches Tom (`skills/sdlc/channel.md`, listing `offered`, the
     usage lines of the task's own performers) and the stage file for the state the task
@@ -482,6 +482,9 @@ async def dispatch(
         shared = await record.memories(conn, task_id)
         if shared:
             sections.append(shared)
+        stands = await record.summary(conn, task_id)
+        if stands:
+            sections.append(stands)
     lines: list[str] = []
     if fresh:
         if fresh not in ("advice", "call"):  # the advisor and a call's worker answer in prose

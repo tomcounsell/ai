@@ -710,6 +710,7 @@ def _routine_runners() -> dict:
     from routines.conditions import runner as conditions
     from routines.hours import runner as hours
     from routines.invites import runner as invites
+    from routines.summary import runner as summary
     from routines.verify import runner as verify
     from routines.watch import runner as watch
 
@@ -723,6 +724,7 @@ def _routine_runners() -> dict:
         "verify": verify.run,
         "hours": hours.runner(),
         "invites": invites.runner(),
+        "summary": summary.runner(),
         "update": update_runner,
         "watch": watch.runner(),
         "task": routines.task_runner,

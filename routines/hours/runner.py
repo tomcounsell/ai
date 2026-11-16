@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from core import ledger, record, routines, tasks, workspace
-from core.gateway import TURN_TOKEN, ClaudeLogin, Gateway
+from core.gateway import ClaudeLogin, Gateway, Unanswered, ask
 from core.record import TZ, Block
 from core.routines import Context, Ran
 from core.settings import resolve_model, settings
@@ -73,24 +73,12 @@ def clip(title: str) -> str:
 
 async def _title(claude: str, base: str, home: Path, block: Block) -> str:
     said = "\n\n".join(s[:1500] for s in block.said)[:6000] or "(nothing reported)"
-    argv = [claude, "-p", "--model", resolve_model("light"), "--system-prompt", TITLE, "--tools", "",
-            "--setting-sources", "", "--strict-mcp-config", "--output-format", "json", said]  # fmt: skip
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "ANTHROPIC_BASE_URL": base,
-           "CLAUDE_CONFIG_DIR": str(home), "CLAUDE_CODE_OAUTH_TOKEN": TURN_TOKEN}  # fmt: skip
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, env=env, cwd=str(home), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
-        )
-    except OSError as exc:
+        title = clip((await ask(claude, base, home, "light", TITLE, said)).splitlines()[0].strip().strip('"'))
+    except Unanswered as exc:
         raise Failed(f"the title call: {exc}") from None
-    out, _ = await proc.communicate()
-    try:
-        got = json.loads(out)
-        title = clip(str(got["result"]).strip().splitlines()[0].strip().strip('"'))
-    except ValueError, KeyError, IndexError:
-        raise Failed(f"the title call returned {out.decode(errors='replace')[:200]!r}") from None
-    if proc.returncode != 0 or got.get("is_error") or not title:
-        raise Failed(f"the title call failed: {str(got.get('result'))[:200]}")
+    if not title:
+        raise Failed("the title call returned no title")
     return title
 
 

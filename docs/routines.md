@@ -97,7 +97,7 @@ changes nothing. `python -m core routines` lists every routine with its last
 run and its period spending; a run stopped after its firing is listed
 `stopped`, whatever outcome the firing recorded.
 
-The six routines the kernel holds:
+The routines the kernel holds:
 
 - **expiry** (04:00 daily): `routines.due` folds the ledger and lists the
   guards and routines past their ninety days. The list is the run's summary,
@@ -159,6 +159,24 @@ The six routines the kernel holds:
   A fix that worked is only recorded; a target still broken after its fix,
   or unreachable for 24 h, is reported once to the operator chat's session,
   or as a fatal Sentry event on a Mac with no such session.
+- **summary** (01:30 daily, ceiling `act`, installed on every Mac; issue
+  #3679, [the plan](plans/78a8c31b-nightly-summary.md)): for each project
+  placed on this Mac, the Bangkok days after its last summary's `through`
+  (at most seven back) to yesterday. A project with no work in them
+  (`record.blocks` over its reach) gets nothing, so a summary is rebuilt on
+  a night after work, not every night: a quiet project's latest summary
+  stays in force with an older `through`, and a night with no work on any
+  project starts no run. Otherwise one run, and per project one call on the `frontier`
+  seat through a gateway the runner starts, metered on the run, given the
+  previous summary and the window's blocks (hours, the tasks' instructions,
+  what their turns said). It answers with "Where it stands" and a
+  "Progress" log weighted by progress, not by day: a day that delivered or
+  decided gets its own entry, quiet days within a week join one. The reply is
+  `summary.written` (`project`, `through`, `text`) on the run; a failed call
+  is `summary.unwritten`, so `through` stays and the next night covers the
+  days again. The latest is carried in every working and chat session's
+  Brief in that project (`core/record.py` `summary`); it is posted to no one
+  (Tom, 2026-11-16).
 - **update** (03:00 daily, ceiling `act`): asks the resident kernel to roll
   this Mac to its branch's tip (`intake.request_update`, `by: routine`), as
   `python -m core update` does, and starts no task. It also starts `uv cache prune`

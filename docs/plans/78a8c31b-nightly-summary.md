@@ -8,8 +8,8 @@ call 2026-11-16: not posted to the team or to Tom). **Appetite:** small.
 ## What is built
 
 1. **`routines/summary/`**: `routine.toml` (runner `summary`, ceiling `act`
-   like `hours`, model `frontier`, 03:00 daily, after `hours`/`verify` at
-   02:00; `need` cites Tom's ask of 2026-11-01 and the 2026-11-16 call) and
+   like `hours`, model `frontier`, 01:30 daily, clear of the 03:00 `update` that
+   rolls the checkout it runs from; `need` cites Tom's ask of 2026-11-01 and the 2026-11-16 call) and
    `runner.py`, wired in `core/__main__.py` beside `hours`. The runner is
    shaped like `routines/hours/runner.py`: no workspace task, one model call
    per project through a gateway the runner starts, metered on the run.
@@ -30,13 +30,17 @@ call 2026-11-16: not posted to the team or to Tom). **Appetite:** small.
    a light day joins the latest entry when that entry is a quiet stretch begun
    within seven days; never one entry per day; older entries are compressed;
    about one page in all. Input: the previous summary, then the window.
+   A failed call is `summary.unwritten`: `through` stays, the next night
+   covers those days again (at most seven back), the other projects go on.
+   Windows are read before any run starts, so an all-quiet night starts none.
 4. **Where it lives:** the record. A `summary.written` row on the run,
    `{project, through, text}`; the latest row for a project is its summary
    and earlier rows are its history. No new store, nothing in this public
    repository or the vault (the vault folder is missing for half the specs).
 5. **The Brief carries it.** `core/record.py` `summary(conn, task_id)`
    returns a `## Where the project stands` section (labelled a record, not
-   an instruction, with its `through` date) for the task's project, or "" when
+   an instruction, project-wide and never to be quoted or sent, with its
+   `through` date) for the task's project, or "" when
    it has none; `tasks.dispatch` appends it for working and chat sessions
    (not `fresh` ones), next to `record.memories`. Inline, since Tom's
    acceptance says the Brief carries it.
