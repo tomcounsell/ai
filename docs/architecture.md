@@ -333,8 +333,9 @@ mistakes and never what excellent looks like. Serves: Evidence, "Tom's feedback,
 Mission item 2; and corrections that are first-class, carry provenance, and reach every session and
 agent.
 
-**Built.** Every subagent Claude Code starts inside a turn but the web agent opens with the
-dispatched Brief, corrections included, through Valor's SubagentStart hook (`docs/harnesses.md`,
+**Built.** Every subagent Claude Code starts inside a turn but the web agent opens with a
+worker's cut of the dispatched Brief (its head, the corrections, the working rules) through Valor's
+SubagentStart hook (`docs/harnesses.md`,
 Corrections reaching subagents); Pi starts none.
 
 **Built.** A later `correction.withdrawn` row naming a correction's number withdraws it (`python -m

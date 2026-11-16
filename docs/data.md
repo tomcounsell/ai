@@ -398,8 +398,9 @@ the recorded Brief and in the system prompt argument that reached
 `claude -p` (rebuild-demonstration.md, Correction 1 rendering, verified).
 The same store state renders a byte-identical Brief, which is why the four
 turns shared one digest and why the prompt cache can hold across turns.
-Subagents Claude Code starts inside a turn, but the web agent, get the same
-Brief through the SubagentStart hook (`docs/harnesses.md`).
+Subagents Claude Code starts inside a turn, but the web agent, get a
+worker's cut of it (the Brief's head, the corrections and the working rules) through the
+SubagentStart hook (`docs/harnesses.md`).
 
 Rendering is the one place stored data becomes prompt text. Memory enters
 the same way: read through the port at render time, recorded in the
