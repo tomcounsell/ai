@@ -32,7 +32,9 @@ I answer it, and it still works after the Mac restarts.
    `~/.config/valor-gws-client.json` (mode 600) before anything else. If
    it were lost, getting it back would mean the Cloud console, which sits
    behind the policy that is failing now. After logout, confirm it is
-   still in place, and restore it if not.
+   still in place, and restore it if not. (Since 2026-10-26 the client
+   comes from 1Password, and rollout step 6 makes this copy from it each
+   time it runs.)
 2. **Re-consent with Workspace scopes only.** `gws auth logout`, then
    `gws auth login --scopes` with exactly gmail.modify, calendar, drive,
    documents, spreadsheets, presentations and tasks, plus openid and
@@ -92,10 +94,15 @@ restart, or a rerun of the checks. If `invalid_rapt` returns, Tom gets
 one question with these clicks:
 - admin.google.com → Security → Access and data control → API controls →
   Manage Third-Party App Access. Add the client
-  `376587595481-2ehqq9o8jb8t1s8ucb7ovsj57pnu4vrp.apps.googleusercontent.com`
-  as **Trusted**.
+  `224102219743-t4kcp78s5887es73qnp5uplbk3rb4sn9.apps.googleusercontent.com`
+  ("Valor Desktop Client", in use since 2026-10-26; it replaced
+  `376587595481-…`) as **Trusted**.
 - Security → Access and data control → Google Cloud session control →
   tick **Exempt trusted apps** → Save.
+
+**Done 2026-11-16.** Tom set `224102219743-…` to Trusted and ticked
+Exempt trusted apps (Slack DM, message 1794832143.904609); Gmail answered
+as valor@yuda.me after it.
 
 ## Tests
 

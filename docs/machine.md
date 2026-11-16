@@ -432,7 +432,11 @@ session's `email.send` (Tom, 2026-11-01,
 Client" in the Google Cloud project Yudame General
 (`quickstart-1586433403044`, owned by tom@yuda.me), whose consent screen,
 "Yudame Workspace", is Internal: only yuda.me accounts can sign in, with
-no Google review and no user cap (Tom, 2026-10-26). The refresh
+no Google review and no user cap (Tom, 2026-10-26). Tom set that client
+(`224102219743-…`) to Trusted in the admin console and ticked Exempt
+trusted apps under Google Cloud session control (2026-11-16, Slack DM
+1794832143.904609). `~/.config/valor-gws-client.json` is a spare copy of
+it, made by rollout step 6. The refresh
 token is `~/.config/gws/credentials.json`, mode 600: gws's plaintext
 store, so it does not depend on a keychain key and copies to any Mac.
 `token_cache.json` beside it holds the short-lived access token,

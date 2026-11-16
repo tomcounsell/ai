@@ -110,7 +110,9 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `ssh valorengels@valor-the-cowboy cat .config/gws/credentials.json > ~/.config/gws/credentials.json; chmod 600 ~/.config/gws/credentials.json`
    and the OAuth client from 1Password,
    `op read --out-file ~/.config/gws/client_secret.json 'op://Yudame Secrets/Google Oauth Client Valor Desktop Client/client_secret_json'`
-   (mode 600; anyone at yuda.me signs in their own account through it);
+   (mode 600; anyone at yuda.me signs in their own account through it),
+   and the spare copy made from that same client,
+   `install -m 600 ~/.config/gws/client_secret.json ~/.config/valor-gws-client.json`;
    `gws gmail users getProfile --params '{"userId":"me"}'` names valor@yuda.me.
    To sign in afresh (on the Cowboy, or after a revocation), Valor needs
    no one at the screen. When the old sign-in could send mail, first
