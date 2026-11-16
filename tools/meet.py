@@ -15,8 +15,9 @@ Mac's call profile is not signed in and Valor's own Google login is not in
 that signs it in, or when the Mac is in a call (naming it); otherwise it
 opens the call session and its first report, that Valor is joining
 (`core.call.begin`), then starts the call's process, `python -m core call
-SESSION`, detached, and returns the session. The link reaches the chat only
-in the call's `link` report, once Valor is in (`core.call.entered`). A failure is reported to the asking session too, so the chat
+SESSION`, detached, and returns the session. The link reaches the thread
+only once Valor is in (`core.call.entered`): the call posts it there for a
+call a chat asked for, and its `link` report says so. A failure is reported to the asking session too, so the chat
 hears why. `lookup` finds the session by the effect's key; a Meet made
 before a crash is left unused, its link given to no one.
 """
@@ -76,9 +77,10 @@ class MeetJoin:
         'asking message\'s id>", "topic_id": null, "prep": "<your notes on the topic or project, as your '
         'Calls section says: each recommendation with its case>", "starts": null}`, `starts` being an '
         "invited call's start (ISO), from which its waits for others count; Valor joins the call ready "
-        'on that topic; ask it a turn after the thread\'s "Starting a call" line (your Calls section). '
-        "Your next prompt says Valor is joining; the link comes only in a `link` report once Valor "
-        "is in, so post it only from that report, and post no link when the call reports it could not join."
+        'on that topic; ask it in the same turn as the thread\'s "Starting a call" line, with notes from what '
+        "you already hold (your Calls section): its worker reads up while Valor joins. Your next prompt says "
+        "Valor is joining; once Valor is in, the call posts the link in the thread itself, so post no link "
+        "yourself, and none when the call reports it could not join."
     )
 
     def __init__(self, brief: tasks.Brief, dsn: str | None = None, *, create=create_space, start=spawn):

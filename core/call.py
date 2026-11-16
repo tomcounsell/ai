@@ -7,12 +7,15 @@ its chat id the meeting code, under the asking chat's project and at its
 ceiling, so its worker has that chat's access (`tasks.dispatch` gives it
 the asking chat's room). Its `task.started` carries `call`: the link,
 this Mac, the chat and thread it was asked in (`asked_by`), and `prep`,
-the asking turn's notes on the topic. It runs no turn (`router.has_step`)
+the asking turn's notes on the topic, which a call asked for in a chat
+writes from what it holds and its worker's first turn adds to while
+Valor joins (`Call._read_up`, P-033). It runs no turn (`router.has_step`)
 and owes no report of its own (`notices.owe`); everything it says goes to the asking
 chat's session as a `child.reported` row of kind `call` (`report`): first
 that Valor is joining, which names the call session, so the chat can stop
 or steer it, and carries no link; then, once Valor is in (`entered`,
-`call.joined`), the link, which that session posts in the thread; and at
+`call.joined`), the link, which the call itself posts in the thread a chat
+asked it in (an invited call's own post has it already); and at
 the end what the call settled, or, for a call Valor never got into, why,
 with no link to post (Tom, 2026-11-13: "don't share a meet link if it
 doesn't work!"). A steer of it is posted in the call's chat while it is
@@ -269,8 +272,8 @@ async def entered(conn, session_id: str) -> None:
         conn,
         session_id,
         "link",
-        f"Valor is in the Meet: {call.get('url')}\nPost the link in the thread it was asked in ({where}), one "
-        "line; what the call writes is copied there.",
+        f"Valor is in the Meet: {call.get('url')}\nThe thread it was asked in ({where}) already has the link, "
+        "from the call or your own post: post nothing; what the call writes is copied there.",
     )
 
 
@@ -595,7 +598,7 @@ INSTRUCTIONS = (
     "call `settle` with the ids it settles. Only Tom settles decisions; a correction is a new `settle`.\n"
     "- Call `leave` when anyone in the call asks you to leave, or when everyone has wrapped up and said "
     "goodbye. Never leave because the meeting's scheduled time has passed: stay while people are still "
-    "talking.\n\n"
+    "talking.\n{reading}\n"
     "How you work, from your persona:\n\n{conduct}\n\n{process}\n\n"
     "Why you are in this call, from your notes before it:\n{prep}{so_far}"
 )
@@ -624,6 +627,22 @@ TOOLS = [
 # turn that has spoken, is silent; any other result is said.
 ASKED = "asked: the answer will be posted in the chat and noted to you"
 ACKNOWLEDGED = {"posted", "recorded", "leaving", ASKED}
+# A call asked for in a chat joins first and reads up after (P-033, Tom, 2026-11-16).
+READING_LINE = (
+    "- Your worker is still reading up for this call. Asked what that reading would hold, say you are still "
+    "reading up, and answer from `backlog`, `person` and `open_decisions` meanwhile. A note saying your "
+    "reading is in brings it: use it from then on, and say nothing about the note itself.\n"
+)
+READ_UP = (
+    "Read up for this call while Valor joins it: the thread it was asked in ({where}), the project's record "
+    "and memory on its topic, its open decisions and its priority queue (the product Sheet where it has one, "
+    "else its open tasks). Write short notes for the call, adding only what the notes before it lack: what it "
+    "is about, what is known and open, and what you would recommend, each recommendation with its concrete "
+    "case (what happened, when, where it is recorded; observed, reported or assumed) or saying there is no "
+    "case yet."
+)
+READ_IN = "Your reading for this call is in; use it from now on, and say nothing about this note:\n{notes}"
+READ_NONE = "Your reading for this call did not come back; `ask` your worker for what you need."
 # Offered when the call's project has a backlog Sheet (Tom, 2026-11-13).
 BACKLOG_LINE = (
     "- When someone asks about the backlog or an item on it (what is in it, the top priority, an item's size, "
@@ -639,7 +658,9 @@ BACKLOG = {"name": "backlog", "description": "Read the project's backlog Sheet. 
            "properties": {"about": {"type": "string"}}}}  # fmt: skip
 
 
-def live_config(project: str, prep: str, handle: str | None, so_far: str = "", sheet: bool = False) -> Any:
+def live_config(
+    project: str, prep: str, handle: str | None, so_far: str = "", sheet: bool = False, reading: bool = False
+) -> Any:
     """The Live session's settings: Valor's voice, transcripts both ways,
     proactive audio (it may stay silent), no cutting Valor off (Live's own
     barge-in stopped him for side talk, 2026-11-05: the call cuts him off
@@ -656,7 +677,8 @@ def live_config(project: str, prep: str, handle: str | None, so_far: str = "", s
     language did not change it, 2026-11-16), which the persona section keeps
     English.
     A fresh session in a call under way is told `so_far` (`Call.so_far`).
-    With a `sheet`, Valor has `backlog` and is told when to use it."""
+    With a `sheet`, Valor has `backlog` and is told when to use it; while
+    `reading`, that its reading is still coming."""
     from google.genai import types
 
     return types.LiveConnectConfig(
@@ -674,6 +696,7 @@ def live_config(project: str, prep: str, handle: str | None, so_far: str = "", s
             prep=prep.strip() or "(no notes)",
             so_far=f"\n\nThe call so far:\n{so_far}" if so_far else "",
             backlog=BACKLOG_LINE if sheet else "",
+            reading=READING_LINE if reading else "",
         ),
         tools=[
             types.Tool(
@@ -1009,6 +1032,7 @@ class Call:
         gemini,
         worker: Callable[[str], Awaitable[str]],
         worker_ready: Callable[[], Awaitable[bool]],
+        reader: Callable[[], Awaitable[str]] | None = None,
         project: str | None = None,
         socket=None,
         clock: Callable[[], float] = time.monotonic,
@@ -1020,6 +1044,10 @@ class Call:
         self.id, self.info, self.page, self.dsn, self.gemini = session_id, info, page, dsn, gemini
         self.held = held  # the call's locks (`core/__main__.py` `_call`), taken again after a restart
         self.worker, self.worker_ready, self.project = worker, worker_ready, project
+        # A call asked for in a chat joins first; its worker's first turn reads up (`_read_up`).
+        self.reader = reader if not info.get("starts") else None
+        self.reading, self.read_note = self.reader is not None, ""
+        self.read_told = False  # the Live session has the reading, in its config or a note
         self.sheet: str | None = None  # the project's backlog Sheet, read as the call starts (`live`)
         self.socket, self.clock = socket, clock
         # An invited call joined before its start waits for the others, and
@@ -1248,13 +1276,24 @@ class Call:
         )
         while not self.leaving.is_set():
             so_far = "" if self.handle else self.so_far()
+            fresh, reading = self.handle is None, self.reading
             config = live_config(
-                self.project or "", self.info.get("prep") or "", self.handle, so_far, bool(self.sheet)
+                self.project or "",
+                self.info.get("prep") or "",
+                self.handle,
+                so_far,
+                bool(self.sheet),
+                reading,
             )
             opened = False
             try:
                 async with self.gemini.connect(config) as session:
                     self.session, failed, opened = session, 0, True
+                    if fresh and not reading:  # its config carries what was read
+                        self.read_told = True
+                    elif self.read_note and not self.read_told:  # read while it opened, or between sessions
+                        await self._note(self.read_note)
+                        self.read_told = True
                     self.unheard, self.stalled = 0.0, asyncio.Event()
                     _log(f"call {self.id}: the Live session is open{' (resumed)' if self.handle else ''}")
                     receiving = asyncio.create_task(self._receive(session))
@@ -1690,7 +1729,9 @@ class Call:
     async def work(self) -> None:
         """The worker's questions, one at a time; an answer is posted
         naming its question and noted to the session, or after leaving goes
-        in the call's report."""
+        in the call's report. A call asked for in a chat reads up first."""
+        if self.reader is not None:
+            await self._read_up()
         while True:
             question = await self.questions.get()
             self.asking.append(question)
@@ -1712,6 +1753,28 @@ class Call:
                 self.asked[" ".join(re.findall(r"\w+", question.lower()))] = answer
                 self.posts.put_nowait(Post(None, f'On "{question}": {answer}', True))
                 await self._note(f'Your worker answered "{question}" (posted in the chat): {answer}')
+
+    async def _read_up(self) -> None:
+        """The worker's reading for a call asked in a chat, done while Valor
+        joins (P-033): added to the notes before the call, which a Live
+        session opened later starts with, and noted once to one open now;
+        never posted."""
+        try:
+            notes = (await self.reader()).strip()
+        except tasks.TaskStopped:
+            notes = ""
+        except Exception as exc:  # noqa: BLE001  a reading that fails leaves the chat's notes
+            _log(f"call {self.id}: the worker's reading failed: {exc!r}")
+            notes = ""
+        if notes:
+            self.info["prep"] = (
+                f"{self.info.get('prep') or ''}\n\nRead up while Valor joined:\n{notes}".strip()
+            )
+        self.read_note = READ_IN.format(notes=notes) if notes else READ_NONE
+        self.reading = False
+        if self.session is not None:
+            await self._note(self.read_note)
+            self.read_told = True
 
     # -- the call's life --
 
@@ -2023,6 +2086,9 @@ class Call:
             else:
                 async with await db.connect(self.dsn) as conn, conn.transaction():
                     await entered(conn, self.id)
+                if not self.info.get("starts"):  # an invited call's own post has its link
+                    kind, payload, chat = self._copy(f"I'm in: {self.info['url']}")
+                    await self._effect(kind, payload, "meet/link/copy", chat)
                 await self.page.ready()
                 self.store.parent.mkdir(parents=True, exist_ok=True)
                 self.staging = Path(tempfile.mkdtemp(prefix=".valor-call-", dir=self.store.parent))

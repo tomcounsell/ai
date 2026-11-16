@@ -30,14 +30,17 @@ against a new Meet with a second device of Valor's account
   the thread asked in (`reply_to`, `topic_id`) and `prep`, the session's
   notes on the topic. The asking session first answers the ask in its
   thread with one line, "Starting a call, link in a moment", and requests
-  `meet.join` a turn later, after its reading (Tom, 2026-11-16;
+  `meet.join` in the same turn, its notes from what it already holds; the
+  call's worker reads up while Valor joins, and the notes reach the voice
+  session as a note (`Call._read_up`; Tom, 2026-11-16, P-033;
   `skills/sdlc/converse.md` **Calls.**). It opens the call session (channel `meet`, chat id
   the meeting code), reports to the asking session that Valor is joining
   (naming the call session, so the chat can stop or steer it, with no
   link) and starts the call's process. Neither that report nor the
-  request's result carries the link: it reaches the asking session only in
-  the `link` report the call's process writes once Valor is in
-  (`call.entered`, with `call.joined`), and a call Valor never got into
+  request's result carries the link: once Valor is in (`call.entered`,
+  with `call.joined`) the call's process posts "I'm in: <link>" in the
+  asking thread itself (an invited call's own post already has it) and
+  writes the `link` report saying so, and a call Valor never got into
   ends saying why and not to post the link (Tom, 2026-11-13: "don't share
   a meet link if it doesn't work!").
 - **The call's process** holds `meet:call:<session>` and

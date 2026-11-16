@@ -539,6 +539,17 @@ async def _call(session_id: str) -> str:
         resume: str | None = None
 
         async def worker(question: str) -> str:
+            return await turn(
+                f"Asked in the call: {question}\n\nAnswer exactly that, with the specific it asks for (the "
+                "example, the number, the rule) and where it is recorded, or say plainly it is not known.\n\n"
+                "The call so far:\n" + "\n".join(the.lines[-40:])
+            )
+
+        async def read_up() -> str:
+            where = f"{asked['channel']}:{asked['chat_id']}, thread {info['asked_by'].get('reply_to')}"
+            return await turn(call.READ_UP.format(where=where))
+
+        async def turn(prompt: str) -> str:
             nonlocal resume
             while True:
                 async with await db.connect(dsn) as conn:
@@ -546,11 +557,6 @@ async def _call(session_id: str) -> str:
                 if now.workspace:
                     break
                 await asyncio.sleep(5)
-            prompt = (
-                f"Asked in the call: {question}\n\nAnswer exactly that, with the specific it asks for (the "
-                "example, the number, the rule) and where it is recorded, or say plainly it is not known.\n\n"
-                "The call so far:\n" + "\n".join(the.lines[-40:])
-            )
             if resume is None:
                 prompt += f"\n\nWhy the call was asked for, from the notes before it:\n{info.get('prep') or '(none)'}"
             ended = await runs.run_turn(gateway, session_id,
@@ -568,7 +574,7 @@ async def _call(session_id: str) -> str:
 
         the = call.Call(
             session_id, info, Page(settings.meet_profile), dsn=dsn, gemini=call.Gemini(key),
-            worker=worker, worker_ready=ready, project=(b.project or {}).get("name"), held=held,
+            worker=worker, worker_ready=ready, reader=read_up, project=(b.project or {}).get("name"), held=held,
         )  # fmt: skip
         socket = Socket(the.hear, the.chat, the.people)
         the.socket = socket

@@ -226,18 +226,26 @@ async def until(check, s=5.0):
     return False
 
 
-async def a_call_of(dsn, team, page, gemini, *, worker=None, ready=True):
+async def a_call_of(
+    dsn, team, page, gemini, *, worker=None, ready=True, reader=None, starts=None, target="new"
+):
     async def ready_now():
         return ready
 
     async def no_worker(question):
         raise AssertionError("no worker in this test")
 
-    brief, session_id = await a_call(dsn, team)
+    if target == "new":
+        brief, session_id = await a_call(dsn, team)
+    else:
+        brief = await test_meet.asking_session(dsn, team)
+        session_id = (await test_meet.join(dsn, brief, [], target=target)).result["session_id"]
     async with await db.connect(dsn) as conn:
         info = await call.marker(conn, session_id)
+    if starts:
+        info["starts"] = starts
     the = call.Call(session_id, info, page, dsn=dsn, gemini=gemini, worker=worker or no_worker,
-                    worker_ready=ready_now, project=team.project, store=str(team.profile.parent / "store" / "Meetings"))  # fmt: skip
+                    worker_ready=ready_now, reader=reader, project=team.project, store=str(team.profile.parent / "store" / "Meetings"))  # fmt: skip
     return brief, the
 
 
@@ -269,11 +277,12 @@ async def push(session, *messages):
     await asyncio.sleep(0.1)
 
 
-async def effects(dsn, session_id) -> list[dict]:
+async def effects(dsn, session_id, *, link=False) -> list[dict]:
     """The session's effects in order: type, payload, request id, and how
-    each stands."""
+    each stands; the link's post in the asking thread only with `link`."""
     rows = await bridges.rows(dsn, session_id)
-    held = [r["payload"] for r in rows if r["type"] == "effect.held"]
+    held = [r["payload"] for r in rows if r["type"] == "effect.held"
+            and (link or r["payload"].get("request_id") != "meet/link/copy")]  # fmt: skip
     out = {r["payload"]["effect_id"]: r["payload"] for r in rows if r["type"] == "effect.outcome"}
     refused = {r["payload"]["effect_id"]: r["payload"] for r in rows if r["type"] == "effect.refused"}
     return [
@@ -2167,20 +2176,26 @@ def test_a_spoken_answer_answers_what_was_asked_with_the_specific_or_says_it_doe
     assert "concrete case behind it" in calls and "How product decisions are made" in calls
 
 
-def test_a_call_ask_is_answered_at_once_in_its_thread_and_joined_a_turn_later():
-    """Tom, 2026-11-16: after a call ask the thread sat silent until Valor
-    was in. The asking turn posts one line with no link and wakes itself;
-    a later turn reads, requests `meet.join`, and posts no second line. An
-    invited call keeps its own post and gets no such line."""
+def test_a_call_ask_is_answered_and_joined_in_one_turn_with_notes_from_what_it_holds():
+    """Tom, 2026-11-16 (P-033): the link took 2-3 minutes, a wake and a
+    reading turn before the join. The turn that sees the ask sends the line
+    and requests `meet.join` together, its notes from its Brief's summary,
+    the open decisions and the thread; the call's worker reads the rest and
+    the call posts its own link. An invited call keeps its reading ahead
+    and its own post."""
     converse = " ".join((Path(__file__).parent.parent / "skills/sdlc/converse.md").read_text().split())
     calls = converse[converse.index("**Calls.**") : converse.index("**An invited call.**")]
-    ack = calls.index('"Starting a call, link in a moment", with no link')
-    assert ack < calls.index("Read first:") < calls.index("Then request `meet.join`")
-    assert "write `.valor/wake.md` at `30s`" in calls and "end the turn there" in calls
-    assert "posts no second line" in calls
-    assert "Post the link only from that report" in calls
+    ack = calls.index(
+        '"Starting a call, link in a moment", with no link, and in that same turn requests `meet.join`'
+    )
+    assert calls.index("with no reading first") < ack
+    assert "wake.md" not in calls and "Read first" not in calls
+    assert "summary page in your Brief" in calls and "with no tool reads for them" in calls
+    assert "worker reads the rest" in calls
+    assert "the call posts its link in that thread itself" in calls and "post no link yourself" in calls
     invited = converse[converse.index("**An invited call.**") : converse.index("**Voice notes.**")]
     assert "Starting a call" not in invited and "the `link` report needs no second post" in invited
+    assert "Prep it ahead" in invited and "its open decisions and its priority queue" in invited
 
 
 def test_every_managers_call_carries_valors_own_product_decision_process():
@@ -2234,3 +2249,188 @@ def test_a_call_looks_a_person_up_and_says_when_nobody_fits(dsn, team, quick):
     assert found.startswith("## Rowan Vale (external; person ")
     assert "[role], since 2026-10-20, inferred; source telegram:-1/3" in found
     assert none == "nobody recorded fits that"
+
+
+# -- join first, read up after (P-033) -------------------------------------------
+
+
+def _links(done_):
+    return [e for e in done_ if e["request_id"] == "meet/link/copy"]
+
+
+@pytest.mark.parametrize("target", ["new", "https://meet.google.com/xyz-abcd-efg"])
+def test_a_call_asked_in_a_chat_posts_its_link_in_the_thread_once_valor_is_in(dsn, team, quick, target):
+    """P-033: the call posts "I'm in: <link>" itself, after `call.joined`,
+    under one fixed request id, so a re-entered run sends it once; a Meet
+    link the chat gave is posted the same way."""
+    gate = asyncio.Event()
+
+    class Slow(Page):
+        async def join(self):
+            await gate.wait()
+
+    async def go():
+        page = Slow()
+        _brief, the = await a_call_of(dsn, team, page, Gemini(), target=target)
+        running = asyncio.create_task(the.run())
+        await asyncio.sleep(0.3)
+        before = await effects(dsn, the.id, link=True)
+        gate.set()
+        assert await until(lambda: call.JOIN_LINE in page.posts)
+        the.leave("done")
+        await asyncio.wait_for(running, 15)
+        return the, page, before, await effects(dsn, the.id, link=True), await bridges.rows(dsn, the.id)
+
+    the, page, before, after, rows = run(go())
+    assert not _links(before)
+    (link,) = _links(after)
+    assert link["type"] == "slack.send_message" and link["target"] == team.chat
+    assert link["payload"] == {"text": f"I'm in: {the.info['url']}", "reply_to": at(1)}
+    joined = next(r["id"] for r in rows if r["type"] == "call.joined")
+    held = next(
+        r["id"] for r in rows if r["type"] == "effect.held" and r["payload"]["request_id"] == "meet/link/copy"
+    )
+    assert joined < held
+    assert not [p for p in page.posts if the.info["url"] in p]  # the thread's line, not the call's chat
+
+
+def test_the_link_report_says_the_thread_has_the_link_and_to_post_nothing(dsn, team):
+    async def go():
+        brief, session_id = await a_call(dsn, team)
+        async with await db.connect(dsn) as conn, conn.transaction():
+            await call.entered(conn, session_id)
+        return await test_meet.reports(dsn, brief.id)
+
+    (link,) = [r for r in run(go()) if r["about_key"].endswith(":link")]
+    assert "already has the link" in link["text"] and "post nothing" in link["text"]
+
+
+def test_a_call_valor_never_got_into_posts_no_link(dsn, team, quick):
+    page = Page()
+    page.status = "denied"
+
+    async def go():
+        _brief, the = await a_call_of(dsn, team, page, Gemini())
+        await asyncio.wait_for(the.run(), 10)
+        return await effects(dsn, the.id, link=True)
+
+    assert not [e for e in run(go()) if e["type"] == "slack.send_message"]
+
+
+def test_an_invited_call_posts_no_link_and_reads_nothing(dsn, team, quick):
+    """Invited calls prep ahead and their own post has the link: no copy,
+    no reading, no "still reading" line."""
+
+    async def reader():
+        raise AssertionError("an invited call reads nothing")
+
+    async def go():
+        starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        _brief, the = await a_call_of(dsn, team, Page(), Gemini(), reader=reader, starts=starts)
+        running = asyncio.create_task(the.run())
+        assert await until(lambda: the.gemini.sessions and the.session is not None)
+        await settle(the)
+        the.leave("done")
+        await asyncio.wait_for(running, 15)
+        return the, await effects(dsn, the.id, link=True)
+
+    the, done_ = run(go())
+    assert not _links(done_) and not the.reading
+    assert "still reading up" not in the.gemini.configs[0].system_instruction
+
+
+def test_the_reading_reaches_the_open_call_once_as_a_note_never_posted(dsn, team, quick):
+    """P-033: while the worker reads up, Live is told it is still reading;
+    the reading is noted once with no reply asked, never posted, and added
+    to the notes, so a fresh session starts with it and is not noted again.
+    A question asked meanwhile waits for it on the one worker lane."""
+    gate, order = asyncio.Event(), []
+
+    async def reader():
+        await gate.wait()
+        order.append("read")
+        return "The launch moved to Friday (Logan, 2026-11-15)."
+
+    async def worker(question):
+        order.append(question)
+        return "Friday."
+
+    async def go():
+        c = await in_call(dsn, team, worker=worker, reader=reader)
+        await push(c.session, tool("ask", question="When is the launch?"), done())
+        await asyncio.sleep(0.2)
+        waited = list(order)
+        gate.set()
+        await settle(c.the)
+        await push(c.session, go_away())  # no handle: a fresh session
+        assert await until(lambda: len(c.gemini.sessions) == 2 and c.the.session is c.gemini.sessions[1])
+        await settle(c.the)
+        await finish(c)
+        return c, waited
+
+    c, waited = run(go())
+    assert waited == [] and order == ["read", "When is the launch?"]
+    first, second = c.gemini.configs[0].system_instruction, c.gemini.configs[1].system_instruction
+    assert "still reading up" in first and "moved to Friday" not in first
+    assert "still reading up" not in second and "moved to Friday" in second
+    noted = [t for t, complete in c.gemini.sessions[0].contents() if "reading for this call is in" in t]
+    assert len(noted) == 1 and "moved to Friday" in noted[0]
+    assert all(not complete for t, complete in c.gemini.sessions[0].contents() if t.startswith("[note]"))
+    assert not [t for t, _ in c.gemini.sessions[1].contents() if "reading for this call" in t]
+    assert not [p for p in c.page.posts if "moved to Friday" in p]
+    assert "moved to Friday" in c.the.info["prep"] and c.the.info["prep"].startswith("The launch")
+
+
+def test_a_reading_done_while_live_opens_is_noted_once(dsn, team, quick):
+    """The reading lands after the session's config was built and before
+    it is open: the session is noted once, on opening."""
+    opening, asked = asyncio.Event(), asyncio.Event()
+
+    class SlowGemini(Gemini):
+        @contextlib.asynccontextmanager
+        async def connect(self, config):
+            asked.set()
+            await opening.wait()
+            async with super().connect(config) as session:
+                yield session
+
+    async def reader():
+        await asked.wait()  # its config is built, still reading
+        return "Logan owns QA."
+
+    async def go():
+        gemini = SlowGemini()
+        _brief, the = await a_call_of(dsn, team, Page(), gemini, reader=reader)
+        running = asyncio.create_task(the.run())
+        assert await until(lambda: not the.reading)
+        opening.set()
+        assert await until(lambda: the.session is not None)
+        await settle(the)
+        the.leave("done")
+        await asyncio.wait_for(running, 15)
+        return gemini
+
+    gemini = run(go())
+    assert "still reading up" in gemini.configs[0].system_instruction
+    noted = [t for t, _ in gemini.sessions[0].contents() if "reading for this call is in" in t]
+    assert len(noted) == 1 and "Logan owns QA." in noted[0]
+
+
+def test_a_reading_that_fails_says_so_and_leaves_no_question_unanswered(dsn, team, quick):
+    gate = asyncio.Event()
+
+    async def reader():
+        await gate.wait()
+        raise RuntimeError("the worker's turn ended failed")
+
+    async def go():
+        c = await in_call(dsn, team, reader=reader)
+        gate.set()
+        assert await until(lambda: not c.the.reading)
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert (f"[note] {call.READ_NONE}", False) in c.session.contents()
+    assert not c.the.dropped and c.the.info["prep"].startswith("The launch")

@@ -190,10 +190,11 @@ def test_a_join_opens_one_call_session_reports_joining_with_no_link_and_starts_i
     assert session_id in reporting
 
 
-def test_meet_joins_usage_says_the_link_comes_only_in_the_link_report():
-    usage = meet.MeetJoin.usage
-    assert "the link comes only in a `link` report once Valor is in" in usage
-    assert "post no link when the call reports it could not join" in usage
+def test_meet_joins_usage_says_join_in_the_ack_turn_and_the_call_posts_its_link():
+    usage = " ".join(meet.MeetJoin.usage.split())
+    assert 'in the same turn as the thread\'s "Starting a call" line' in usage
+    assert "the call posts the link in the thread itself, so post no link yourself" in usage
+    assert "none when the call reports it could not join" in usage
 
 
 def test_the_link_is_reported_once_valor_is_in_and_only_once(dsn, team):
