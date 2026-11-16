@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from psycopg.rows import dict_row
+
 from core import db, findings, git, judgement, ledger, machine, tasks
 from core.judgement import UNANSWERED_RUNS, JudgementPort, Kind
 from core.judgement_tasks import BREADTH, BY_SITE, JUDGE, OPEN_LISTED, OVERLAP
@@ -656,3 +658,17 @@ def _record(task, port, results, task_id, calls) -> dict[str, Any]:
             "are counted apart and never in the entry check."
         ),
     }
+
+
+async def agreement(dsn: str, since: str | None = None) -> dict[str, dict[str, Any]]:
+    """`judgement.agreement` over every task's judgement rows, from `since`
+    (an ISO date, default all) on (`python -m core judgement-agreement`)."""
+    kinds = [*judgement.OUTCOMES, "judgement.shadowed"]
+    async with await db.connect(dsn) as conn, conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(
+            "SELECT type, payload FROM events WHERE type = ANY(%s) AND at >= COALESCE(%s::date, '-infinity') "
+            "ORDER BY id",
+            (kinds, since),
+        )
+        rows = await cur.fetchall()
+    return judgement.agreement(rows, BY_SITE)

@@ -18,7 +18,7 @@ from unittest import mock
 import psycopg
 import pytest
 
-from core import credentials, db, git, intake, ledger, rollout, serve
+from core import credentials, db, git, intake, judgement, ledger, rollout, serve
 from core.settings import settings
 from tests import bridges, scripted
 from tests.bridges import FakeBridge, new_task, of_type, rows, typed
@@ -185,7 +185,7 @@ def test_python_m_core_serve_exits_with_status_1_on_a_restart(monkeypatch):
     async def restarting(*args, **kw):
         raise rollout.Restart("a" * 40)
 
-    monkeypatch.setattr(main, "port", lambda: None)
+    monkeypatch.setattr(main, "port", lambda: judgement.JudgementPort({}))
     monkeypatch.setattr(main, "runners", lambda port: {})
     monkeypatch.setattr(serve, "serve", restarting)
     with pytest.raises(SystemExit) as exc:

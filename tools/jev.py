@@ -77,7 +77,9 @@ class Jev:
         return math.ceil(body * OVERHEAD_RATIO) + OVERHEAD_FIXED + OVERHEAD_PER_QUESTION * len(task.questions)
 
     async def ask(self, task: JudgementTask, inputs: Mapping[str, str]) -> LegAnswer | LegError:
-        got = await judgement.post(self.endpoint, self._key, self.body(task, inputs), self.timeout_s)
+        got = await judgement.post(
+            self.endpoint, {"Authorization": f"Bearer {self._key}"}, self.body(task, inputs), self.timeout_s
+        )
         if isinstance(got, LegError):
             return got
         status, raw = got

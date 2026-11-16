@@ -9,10 +9,14 @@ that leg's floor. At or above the floor the question proceeds; at or under
 one minus the floor it is cautious; between, the leg abstains on it. The
 argmax label is kept for the record and decides nothing.
 
-The router names two legs, the primary (Jev) and the fallback (an
-open-weight model on a second host). The primary answers; the fallback is
-asked once, for every question, only when the primary failed or abstained
-on one, and its answers are taken only for those questions. A question both
+The router names two legs, the primary (Jev) and the fallback (Google's
+Decisions API). Both are asked at once, every question, on every judgement.
+The primary's confident answers stand; the fallback's are taken only for the
+questions the primary failed or abstained on. When the primary answered
+every question, the judgement is recorded and returned at once, and the
+fallback's answer, still in flight, is written later as its own quiet
+`judgement.shadowed` row, so the two can be compared (`agreement`) without
+the fallback ever delaying or failing a judgement. A question both
 legs abstain on takes the task's abstain route; when both legs fail there
 is no answer, and the consumer applies the task's failure route. There is
 no third leg and never a frontier model.
@@ -21,7 +25,8 @@ Every call is metered on the task: both legs' calls are opened before the
 first call (so a stopped task's refusal comes before any provider is asked)
 and each is charged what it cost when it returns, as `gateway.opened` and
 `gateway.charged` rows with `route: judgement`.
-Each judgement writes one `judgement.answered` or `judgement.failed` row.
+Each judgement writes one `judgement.answered` or `judgement.failed` row;
+each attempt on it keeps its per-question answers.
 
 Adapters live in `tools/` and come in through `JudgementPort(legs, ...)`;
 nothing here imports them. Inputs are data: an adapter renders them where
@@ -31,6 +36,7 @@ the provider reads data, never into an instruction.
 import asyncio
 import contextlib
 import math
+import sys
 import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
@@ -39,6 +45,8 @@ from enum import StrEnum
 from ipaddress import ip_address
 from typing import Any, Protocol
 from urllib.parse import urlparse
+
+import sentry_sdk
 
 from core import db, ledger, spending, tasks
 from core.settings import settings
@@ -92,10 +100,10 @@ class NotRouted(ValueError):
 
 def route(task: JudgementTask) -> tuple[str, str]:
     """The primary leg and the fallback leg for a task. Pure. A task that
-    takes images has no leg yet (the Decisions API leg is not built)."""
+    takes images has no route: Jev takes text only, and no task takes images."""
     if task.images:
-        raise NotRouted(f"{task.site} takes images; no judgement leg takes images yet")
-    return ("jev", "open_weight")
+        raise NotRouted(f"{task.site} takes images; Jev, the primary, takes text only")
+    return ("jev", "gemini")
 
 
 def task_sha256(task: JudgementTask, legs: Mapping[str, Any]) -> str:
@@ -163,7 +171,7 @@ class LegError:
 
 
 class Leg(Protocol):
-    name: str  # "jev" or "open_weight"
+    name: str  # "jev" or "gemini"
     model: str  # the pinned id written on rows and priced
     endpoint: str
     max_output_tokens: int
@@ -295,6 +303,7 @@ class JudgementPort:
     def __init__(self, legs: Mapping[str, Leg], dsn: str | None = None):
         self.legs = dict(legs)
         self.dsn = dsn
+        self._held: set[asyncio.Task] = set()
         for leg in self.legs.values():
             if spending.judgement_price(leg.model) is None:
                 raise ValueError(f"judgement model {leg.model} has no price; it cannot be metered")
@@ -331,13 +340,55 @@ class JudgementPort:
         primary, fallback = (self.legs[n] for n in route(task))
         jid = ledger.new_id()
         calls = await self._open(dsn, task, inputs, task_id, jid, [primary, fallback])
-        first = await self._call(dsn, task, inputs, task_id, primary, calls[primary.name], "primary")
-        need = _need_fallback(task, first)
-        if need:
-            second = await self._call(dsn, task, inputs, task_id, fallback, calls[fallback.name], "fallback")
-        else:
-            second = await self._unused(dsn, task_id, fallback, calls[fallback.name])
-        return await self._record(dsn, task, inputs, task_id, ref, jid, [first, second], merge=True)
+        # Both legs at once: the fallback's answer is ready when the primary
+        # abstains, and never delays a judgement the primary answered.
+        second = asyncio.create_task(
+            self._call(dsn, task, inputs, task_id, fallback, calls[fallback.name], "fallback")
+        )
+        try:
+            first = await self._call(dsn, task, inputs, task_id, primary, calls[primary.name], "primary")
+        except BaseException:
+            self._hold(second)  # it still charges its call
+            raise
+        ready = second.done() and not second.cancelled() and second.exception() is None
+        if _need_fallback(task, first) or ready:
+            return await self._record(dsn, task, inputs, task_id, ref, jid, [first, await second], merge=True)
+        waiting = {"leg": fallback.name, "role": "fallback", "model": fallback.model, "outcome": "shadowed",
+                   "call_id": calls[fallback.name]["call_id"], "usd_micros": 0, "answers": None}  # fmt: skip
+        j = await self._record(dsn, task, inputs, task_id, ref, jid, [first, waiting], merge=True)
+        self._hold(asyncio.create_task(self._shadow(dsn, task, task_id, ref, jid, second)))
+        return j
+
+    def _hold(self, job: asyncio.Task) -> None:
+        """Keep a fallback call the judgement did not wait for until it
+        settles; one that raises is reported, never lost."""
+        self._held.add(job)
+        job.add_done_callback(self._settled)
+
+    def _settled(self, job: asyncio.Task) -> None:
+        self._held.discard(job)
+        if not job.cancelled() and job.exception() is not None:
+            exc = job.exception()
+            print(f"judgement: a shadowed fallback call failed: {exc!r}", file=sys.stderr, flush=True)
+            sentry_sdk.capture_exception(exc)
+
+    async def _shadow(self, dsn, task, task_id, ref, jid, call: asyncio.Task) -> None:
+        """The fallback's answer to a judgement the primary already
+        answered, as its own quiet row (`judgement.shadowed`)."""
+        attempt = await call
+        payload = {"judgement_id": jid, "site": task.site, "ref": ref, "attempt": attempt}
+        async with _connect(dsn) as conn:
+            await ledger.append(conn, task_id, "judgement.shadowed", payload)
+
+    async def drain(self, timeout_s: float | None = None) -> None:
+        """Wait for every held fallback call to write its row, at most
+        `timeout_s` (default the longest leg timeout and a second), so a
+        process that exits after its judgements keeps their rows."""
+        if not self._held:
+            return
+        if timeout_s is None:
+            timeout_s = max(getattr(leg, "timeout_s", 0) for leg in self.legs.values()) + 1
+        await asyncio.wait(set(self._held), timeout=timeout_s)
 
     async def ask_leg(
         self,
@@ -434,23 +485,10 @@ class JudgementPort:
         attempt["answers"] = answers
         return attempt
 
-    async def _unused(self, dsn, task_id, leg, call) -> dict[str, Any]:
-        async with _connect(dsn) as conn:
-            await spending.charge(conn, task_id, call["call_id"], 0, {**_detail(call), "unused": True})
-        return {
-            "leg": leg.name,
-            "role": "fallback",
-            "model": leg.model,
-            "outcome": "unused",
-            "call_id": call["call_id"],
-            "usd_micros": 0,
-            "answers": None,
-        }
-
     async def _record(self, dsn, task, inputs, task_id, ref, jid, attempts, *, merge) -> Judgement:
         answers, abstained = _merge(task, attempts) if merge else _single(task, attempts[0])
         spent = sum(a.get("usd_micros") or 0 for a in attempts)
-        public = [{k: v for k, v in a.items() if k != "answers"} for a in attempts]
+        public = list(attempts)
         payload: dict[str, Any] = {
             "judgement_id": jid,
             "site": task.site,
@@ -464,9 +502,7 @@ class JudgementPort:
         if answers is None:
             kind = "judgement.failed"
             payload["on_failure"] = task.on_failure
-            payload["too_large"] = all(
-                a.get("reason") == "input_too_large" for a in attempts if a["outcome"] != "unused"
-            )
+            payload["too_large"] = all(a.get("reason") == "input_too_large" for a in attempts)
             action: dict[str, str] = {}
             leg = model = None
         else:
@@ -481,7 +517,7 @@ class JudgementPort:
                 if legs_used == {"fallback"}
                 else ("primary" if legs_used == {"primary"} else "both")
             )
-            model = "+".join(sorted({a["model"] for a in attempts if a.get("answers")}))
+            model = "+".join(sorted({a["model"] for a in answers.values()}))
             payload.update(
                 {"answers": answers, "action": action, "abstained": abstained, "leg": leg, "model": model}
             )
@@ -619,6 +655,68 @@ def unanswered_count(rows: list[dict], site: str, key: Mapping[str, Any]) -> int
     return n
 
 
+def _action(question: Question, p: float, floor: float) -> str:
+    """`decide`'s decision for a stored `p_proceed` at another floor."""
+    if question.kind is Kind.PICK:
+        return "proceed" if p >= floor else "abstain"
+    return "proceed" if p >= floor else ("caution" if p <= 1 - floor else "abstain")
+
+
+def agreement(rows: list[dict], by_site: Mapping[str, JudgementTask]) -> dict[str, dict[str, Any]]:
+    """Per site, how Jev's and Gemini's answers to the same judgements
+    compare, from `judgement.answered`, `judgement.failed` and
+    `judgement.shadowed` rows. Only judgements Gemini was asked count; a
+    calibration's rows ask one leg each and never do. Per question both
+    answered: whether the actions agree (each at its own floor), whether
+    Gemini's action at the primary floor (where it would sit as first line)
+    agrees, and whether the argmax labels agree; each disagreement is
+    counted by its pair, `jev proceed / gemini abstain`."""
+    shadows = {r["payload"]["judgement_id"]: r["payload"]["attempt"] for r in rows
+               if r["type"] == "judgement.shadowed"}  # fmt: skip
+    out: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        if r["type"] not in OUTCOMES or r["payload"].get("site") not in by_site:
+            continue
+        p = r["payload"]
+        task = by_site[p["site"]]
+        attempts = {a["leg"]: a for a in p.get("attempts") or []}
+        if "gemini" not in attempts or "jev" not in attempts:
+            continue
+        gemini = attempts["gemini"]
+        if gemini.get("outcome") == "shadowed":
+            gemini = shadows.get(p["judgement_id"]) or {"outcome": "unsettled"}
+        site = out.setdefault(p["site"], {
+            "judgements": 0, "unsettled": 0, "failed": {"jev": 0, "gemini": 0}, "questions": 0,
+            "action_agree": 0, "action_agree_at_primary_floor": 0, "label_agree": 0,
+            "disagree": {}, "disagree_at_primary_floor": {},
+        })  # fmt: skip
+        site["judgements"] += 1
+        if gemini["outcome"] == "unsettled":
+            site["unsettled"] += 1
+            continue
+        for leg, a in (("jev", attempts["jev"]), ("gemini", gemini)):
+            if a["outcome"] == "failed":
+                site["failed"][leg] += 1
+        mine, theirs = attempts["jev"].get("answers"), gemini.get("answers")
+        if not mine or not theirs:
+            continue
+        for q in task.questions:
+            j, g = mine.get(q.id), theirs.get(q.id)
+            if j is None or g is None:
+                continue
+            site["questions"] += 1
+            raised = _action(q, g["p_proceed"], task.floor["primary"])
+            site["label_agree"] += j["label"] == g["label"]
+            for key, theirs_action in (("", g["decision"]), ("_at_primary_floor", raised)):
+                if j["decision"] == theirs_action:
+                    site["action_agree" + key] += 1
+                else:
+                    pair = f"jev {j['decision']} / gemini {theirs_action}"
+                    tally = site["disagree" + key]
+                    tally[pair] = tally.get(pair, 0) + 1
+    return out
+
+
 # A site whose judgement both legs failed is rerun at most this many times
 # before its consumer applies caution (a branch is never left without a
 # verdict for good).
@@ -653,8 +751,10 @@ def retry_after(value: str | None, now: float) -> float | None:
         return None
 
 
-async def post(url: str, key: str, body: dict, timeout_s: float) -> tuple[int, bytes] | LegError:
-    """One POST with a bearer key and one total timeout, no retry. Returns
+async def post(
+    url: str, headers: dict[str, str], body: dict, timeout_s: float
+) -> tuple[int, bytes] | LegError:
+    """One POST with the leg's key header and one total timeout, no retry. Returns
     the status and body, or the failure with whether the provider may have
     billed it. No exception text leaves here: aiohttp's can name headers.
     A 429 is `rate_limited`; when it names a `Retry-After`, the endpoint is
@@ -667,7 +767,7 @@ async def post(url: str, key: str, body: dict, timeout_s: float) -> tuple[int, b
     try:
         async with (
             aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_s)) as http,
-            http.post(url, json=body, headers={"Authorization": f"Bearer {key}"}) as r,
+            http.post(url, json=body, headers=headers) as r,
         ):
             if r.status == 429:
                 until = retry_after(r.headers.get("Retry-After"), time.time())

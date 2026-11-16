@@ -64,6 +64,10 @@ QUIET = (
     # What a Meet call heard and who came (`core/call.py`): its transcript.
     "call.heard",
     "call.participant",
+    # The judgement fallback's answer to a judgement the primary already
+    # answered (`core/judgement.py`): it may land after the step that asked
+    # has failed, and is a record for comparison, never a step.
+    "judgement.shadowed",
 )
 
 # Judgement sites whose rows sit beside a task's work without moving it:

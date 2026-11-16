@@ -256,30 +256,20 @@ class JudgementPrice:
     source: str
 
 
-# The judgement legs' pinned models (docs/judgement-layer.md). The fallback's
-# id names the weights, the host OpenRouter must use, and its quantization,
-# so a ledger row describes one fixed thing. Changing either is a new
-# calibration record before it routes work.
+# The judgement legs' pinned models (docs/judgement-layer.md). Changing
+# either is a new calibration record before it routes work.
 JEV_MODEL = "jev-1.13.0"
-OPEN_WEIGHT_MODEL = "qwen/qwen3-235b-a22b-2507"
-OPEN_WEIGHT_PROVIDER = "parasail/fp8"  # OpenRouter's endpoint tag
-OPEN_WEIGHT_PROVIDER_NAME = "Parasail"  # what OpenRouter names on the response
-OPEN_WEIGHT_PIN = f"{OPEN_WEIGHT_MODEL}@{OPEN_WEIGHT_PROVIDER}"
-# The most the pinned endpoint answers, in tokens, as OpenRouter lists it
-# (https://openrouter.ai/api/v1/models/qwen/qwen3-235b-a22b-2507/endpoints,
-# checked 2026-10-03): no call is billed more output than this. OpenRouter
-# refuses an input past the endpoint's context itself (`tools/open_weight.py`).
-OPEN_WEIGHT_MAX_COMPLETION = 117_964
+# Google's Decisions API (https://aistudio.google.com/docs/decisions-api,
+# beta on `v1beta`, read 2026-11-16): asked beside Jev on every judgement,
+# answering where Jev abstains or fails (docs/plans/gemini-decisions-fallback.md).
+GEMINI_DECISION_MODEL = "gemini-decision-1"
 
 # Kept apart from `PRICES`, so the gateway never prices a model it would
 # forward to Anthropic.
 JUDGEMENT_PRICES: dict[str, JudgementPrice] = {
     JEV_MODEL: JudgementPrice(0.042, 0.0, date(2026, 10, 2), "https://docs.typesafe.ai/models"),
-    OPEN_WEIGHT_PIN: JudgementPrice(
-        0.14,
-        0.80,
-        date(2026, 10, 2),
-        "https://openrouter.ai/api/v1/models/qwen/qwen3-235b-a22b-2507/endpoints (Parasail, fp8)",
+    GEMINI_DECISION_MODEL: JudgementPrice(
+        0.10, 0.0, date(2026, 11, 16), "https://aistudio.google.com/docs/pricing"
     ),
 }
 
@@ -287,10 +277,10 @@ JUDGEMENT_PRICES: dict[str, JudgementPrice] = {
 # other endpoint must be on loopback and gets a fixed placeholder key
 # (`core.judgement.endpoint_key`).
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
-OPEN_WEIGHT_URL = "https://openrouter.ai/api/v1/chat/completions"
-# The variables the kernel's judgement key file holds.
+GEMINI_DECISIONS_URL = "https://generativelanguage.googleapis.com/v1beta/decisions"
+# The variable the kernel's judgement key file holds; Gemini's key is the
+# Meet key (`Settings.google_keyfile`).
 JEV_KEY = "TYPESAFE_API_KEY"
-OPEN_WEIGHT_KEY = "OPENROUTER_API_KEY"
 
 
 def resolve_seat(name: str) -> tuple[str, str]:
@@ -416,9 +406,9 @@ class Settings:
 
     # -- the judgement legs ----------------------------------------------------
     jev_url: str = field(default_factory=lambda: _env("VALOR_JEV_URL", JEV_URL))
-    open_weight_url: str = field(default_factory=lambda: _env("VALOR_OPEN_WEIGHT_URL", OPEN_WEIGHT_URL))
+    gemini_url: str = field(default_factory=lambda: _env("VALOR_GEMINI_DECISIONS_URL", GEMINI_DECISIONS_URL))
     jev_timeout_s: float = 10.0
-    open_weight_timeout_s: float = 30.0
+    gemini_timeout_s: float = 10.0
     # Where `python -m core judgement-keys` copies the keys from.
     vault_env: str = field(
         default_factory=lambda: _env("VALOR_VAULT_ENV", str(Path.home() / "Desktop" / "Valor" / ".env"))

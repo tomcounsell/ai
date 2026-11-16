@@ -33,8 +33,8 @@ from tests import bridges, judgement_upstream, scripted
 from tests.bridges import rows
 from tests.ports import listen
 from tests.scripted import git
+from tools.gemini_decisions import GeminiDecisions
 from tools.jev import Jev
-from tools.open_weight import OpenWeight
 
 pytestmark = pytest.mark.spend(usd=0)
 
@@ -466,8 +466,8 @@ def test_an_ask_is_read_against_its_projects_open_tasks_and_the_judge_runs_as_wi
 
 def test_a_retried_judge_step_asks_no_second_overlap_and_a_failure_or_a_stop_holds_nothing(dsn):
     jev = Jev(f"http://127.0.0.1:{listen()}/jev", judgement.LOOPBACK_KEY, timeout_s=2)
-    ow = OpenWeight(f"http://127.0.0.1:{listen()}/ow", judgement.LOOPBACK_KEY, timeout_s=2)
-    dead = judgement.JudgementPort({"jev": jev, "open_weight": ow})
+    gemini = GeminiDecisions(f"http://127.0.0.1:{listen()}/gemini", judgement.LOOPBACK_KEY, timeout_s=2)
+    dead = judgement.JudgementPort({"jev": jev, "gemini": gemini})
 
     async def go():
         async with await db.connect(dsn) as conn:

@@ -1,10 +1,13 @@
-"""A real local HTTP upstream speaking Jev's and OpenRouter's wire formats
-for the scripted judge and checks, its bodies shaped like the live ones in
-`tests/fixtures/judgement_*.json`, on its own thread and loop.
+"""A real local HTTP upstream speaking Jev's and Google's Decisions API wire
+formats for the scripted judge and checks, its bodies shaped like the live
+ones in `tests/fixtures/judgement_*.json`, on its own thread and loop.
 
-`/fixed/<answer>/<leg>` (leg `jev` or `open_weight`) answers every question
+`/fixed/<answer>/<leg>` (leg `jev` or `gemini`) answers every question
 0.95 on one label: `precise`/`thin` (`one_line_ask`), `true`/`false`, or a
-comma list where each question takes the first it has, else its last label.
+comma list where each question takes the first it has, else its last label;
+`even` splits a question evenly (an abstain), as the whole answer or in the list. The query may add
+`delay` (seconds before answering), `status` (an error status instead), and
+`refuse=1` (the leg's own over-the-limit refusal).
 """
 
 import asyncio
@@ -16,7 +19,7 @@ from pathlib import Path
 from aiohttp import web
 
 from core.judgement import LOOPBACK_KEY, JudgementPort
-from core.settings import JEV_MODEL, OPEN_WEIGHT_MODEL, OPEN_WEIGHT_PROVIDER_NAME
+from core.settings import JEV_MODEL
 from tests import ports
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -32,28 +35,23 @@ JEV_TEMPLATE = _template(
     "judgement_jev.json",
     {"model": JEV_MODEL, "answers": {}, "usage": {"input_tokens": 0, "output_tokens": 0}},
 )
-OW_TEMPLATE = _template(
-    "judgement_open_weight.json",
-    {
-        "model": OPEN_WEIGHT_MODEL,
-        "provider": OPEN_WEIGHT_PROVIDER_NAME,
-        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "{}"}}],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0},
-    },
-)
+GEMINI_TEMPLATE = _template("judgement_gemini.json", {"answers": {}, "usage": {}})
 
 
 def questions_of(leg: str, body: dict) -> dict[str, list[str]]:
     """Each question's labels, read from the request."""
-    if leg == "jev":
-        qs = body["questions"]
-        return {k: list(q["criteria"]) if q["type"] == "choice" else ["true", "false"] for k, q in qs.items()}
-    schema = body["response_format"]["json_schema"]["schema"]
-    return {qid: list(s["properties"]) for qid, s in schema["properties"].items() if s["type"] == "object"}
+    qs = body["questions"]
+    return {k: list(q["criteria"]) if q["type"] == "choice" else ["true", "false"] for k, q in qs.items()}
 
 
 def fixed_probs(answer: str, labels: list[str]) -> dict[str, float]:
-    pick = next((p for p in (FIXED.get(a, a) for a in answer.split(",")) if p in labels), labels[-1])
+    pick = labels[-1]
+    for a in answer.split(","):
+        if a == "even":
+            return {label: 1 / len(labels) for label in labels}
+        if FIXED.get(a, a) in labels:
+            pick = FIXED.get(a, a)
+            break
     rest = [label for label in labels if label != pick]
     return {label: (0.95 if label == pick else round(0.05 / len(rest), 6)) for label in labels}
 
@@ -86,41 +84,59 @@ class Upstream:
             self._ready.set()
         self.loop.run_forever()
 
-    def port(self, *, fixed: str) -> JudgementPort:
+    def port(self, *, fixed: str, gemini: str | None = None, gemini_timeout_s: float = 5) -> JudgementPort:
+        """Both legs answering `fixed`; Gemini at `gemini` instead when given
+        (an answer and a query, `even?delay=1`). The shared fixtures' port
+        drains after every judgement, so a test reads the shadow row with
+        the rest."""
+        from tools.gemini_decisions import GeminiDecisions
         from tools.jev import Jev
-        from tools.open_weight import OpenWeight
 
-        base = f"{self.url}/fixed/{fixed}"
-        jev = Jev(f"{base}/jev", LOOPBACK_KEY, timeout_s=5)
-        ow = OpenWeight(f"{base}/open_weight", LOOPBACK_KEY, timeout_s=5)
-        return JudgementPort({"jev": jev, "open_weight": ow})
+        jev = Jev(f"{self.url}/fixed/{fixed}/jev", LOOPBACK_KEY, timeout_s=5)
+        g_answer, _, query = (gemini or fixed).partition("?")
+        g_url = f"{self.url}/fixed/{g_answer}/gemini" + (f"?{query}" if query else "")
+        legs = {"jev": jev, "gemini": GeminiDecisions(g_url, LOOPBACK_KEY, timeout_s=gemini_timeout_s)}
+        return DrainingPort(legs) if gemini is None else JudgementPort(legs)
 
     async def handle(self, request: web.Request) -> web.Response:
-        leg = request.match_info["leg"]
+        leg, q = request.match_info["leg"], request.query
         raw = await request.read()
+        await asyncio.sleep(float(q.get("delay", 0)))
+        if "status" in q:
+            return web.json_response({"error": {"message": "scripted"}}, status=int(q["status"]))
+        if q.get("refuse"):
+            if leg == "jev":
+                return web.json_response({"detail": {"error_type": "max_tokens_exceeded"}}, status=400)
+            message = "The input token count exceeds the maximum number of tokens allowed 262144."
+            return web.json_response({"error": {"message": message, "code": "invalid_request"}}, status=400)
         body = json.loads(raw)
         labels = questions_of(leg, body)
         answers = {qid: fixed_probs(request.match_info["answer"], ls) for qid, ls in labels.items()}
         tokens = math.ceil(len(raw) / 3)
+        out = json.loads(json.dumps(JEV_TEMPLATE if leg == "jev" else GEMINI_TEMPLATE))
+        out["answers"] = {}
+        for qid, p in answers.items():
+            if set(labels[qid]) == {"true", "false"}:
+                out["answers"][qid] = {"type": "noul", "noul": p.get("true"), "confidence": 0.5}
+            else:
+                choice = {"choice": max(p, key=p.get), "probabilities": p, "confidence": 0.5}
+                out["answers"][qid] = {"type": "choice", **choice}
         if leg == "jev":
-            out = json.loads(json.dumps(JEV_TEMPLATE))
             out["model"] = JEV_MODEL
-            out["answers"] = {}
-            for qid, p in answers.items():
-                if set(labels[qid]) == {"true", "false"}:
-                    out["answers"][qid] = {"type": "noul", "noul": p.get("true")}
-                else:
-                    choice = {"choice": max(p, key=p.get), "probabilities": p, "confidence": 0.5}
-                    out["answers"][qid] = {"type": "choice", **choice}
             out["usage"] = {"input_tokens": tokens, "output_tokens": 12}
         else:
-            out = json.loads(json.dumps(OW_TEMPLATE))
-            out["model"] = OPEN_WEIGHT_MODEL
-            out["provider"] = OPEN_WEIGHT_PROVIDER_NAME
-            out["choices"][0]["message"]["content"] = json.dumps({"notes": "compared", **answers})
-            cost = round(tokens * 0.14e-6 + 30 * 0.8e-6, 10)
-            out["usage"] = {"prompt_tokens": tokens, "completion_tokens": 30, "cost": cost}
+            out["usage"] = {"total_tokens": tokens, "total_input_tokens": tokens, "total_output_tokens": 0}
         return web.json_response(out)
+
+
+class DrainingPort(JudgementPort):
+    """The port the shared fixtures use: every judgement waits for its
+    shadowed fallback call before it returns."""
+
+    async def judge(self, *args, **kwargs):
+        j = await super().judge(*args, **kwargs)
+        await self.drain()
+        return j
 
 
 _SHARED: Upstream | None = None

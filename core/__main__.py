@@ -74,7 +74,7 @@ run TASK_ID                    run the task through the state machine until it
                                a leg pointed at its default endpoint needs its
                                key in the kernel's key file, and a missing one
                                refuses the run, naming it
-judgement-keys                 copy the judgement legs' keys from the vault
+judgement-keys                 copy Jev's key from the vault
                                .env into the kernel's key file (mode 600);
                                prints each name with written, kept, or
                                missing, never a value
@@ -83,13 +83,17 @@ openai-key [--name NAME]       copy the vault's NAME (default OPENAI_API_KEY)
                                replacing the key there; prints written,
                                kept, or missing, never a value
 google-key [--ref OP_REF]      read the Gemini key a Meet call speaks and is
-                               summarised with from 1Password (default
+                               summarised with, and the judgement fallback
+                               asks with, from 1Password (default
                                settings.google_key_ref) into the kernel's
                                key file (mode 600); prints written, kept, or
                                missing, never a value
 github-key                     copy GITHUB_PUSH_TOKEN from the vault .env into
                                the kernel's github-keys file (mode 600), the
                                same way
+judgement-agreement [--since YYYY-MM-DD]
+                               per judgement site, how often Jev and Gemini
+                               agree on the same judgements, as JSON
 calibrate CASES.json
                                both judgement legs alone on every labelled
                                case (at most 50), one
@@ -216,10 +220,9 @@ from core import (
 )
 from core.machine import Check, State
 from core.settings import (
+    GEMINI_DECISIONS_URL,
     JEV_KEY,
     JEV_URL,
-    OPEN_WEIGHT_KEY,
-    OPEN_WEIGHT_URL,
     VALOR_FOLDER,
     resolve_model,
     resolve_seat,
@@ -327,24 +330,28 @@ async def _working(ctx: router.Context) -> dict:
     )
 
 
-def port(keyfile: str | None = None) -> judgement.JudgementPort:
+def port(keyfile: str | None = None, google_keyfile: str | None = None) -> judgement.JudgementPort:
     """The judgement port with both legs. A leg at its default endpoint
-    reads its key from the kernel's key file, and a missing key raises
+    reads its key from the kernel's key file (Gemini's is the Meet key,
+    `google-key`), and a missing key raises
     `credentials.MissingKey` naming it, so the run refuses to start; a leg
     pointed at a loopback endpoint (tests) gets
     a placeholder and needs no key; any other endpoint is refused."""
+    from core.call import GOOGLE_KEY
+    from tools.gemini_decisions import GeminiDecisions
     from tools.jev import Jev
-    from tools.open_weight import OpenWeight
 
     keyfile = keyfile or settings.judgement_keyfile
     jev_key = judgement.endpoint_key(
         settings.jev_url, JEV_URL, lambda: credentials.read_key(keyfile, JEV_KEY)
     )
-    ow_key = judgement.endpoint_key(
-        settings.open_weight_url, OPEN_WEIGHT_URL, lambda: credentials.read_key(keyfile, OPEN_WEIGHT_KEY)
+    gemini_key = judgement.endpoint_key(
+        settings.gemini_url,
+        GEMINI_DECISIONS_URL,
+        lambda: credentials.read_key(google_keyfile or settings.google_keyfile, GOOGLE_KEY, "google-key"),
     )
     return judgement.JudgementPort(
-        {"jev": Jev(settings.jev_url, jev_key), "open_weight": OpenWeight(settings.open_weight_url, ow_key)}
+        {"jev": Jev(settings.jev_url, jev_key), "gemini": GeminiDecisions(settings.gemini_url, gemini_key)}
     )
 
 
@@ -476,6 +483,8 @@ async def _serve() -> None:
         await serve.serve(runners(judgement_port), _performers, setup=setup, judgement_port=judgement_port)
     except rollout.Restart as exc:
         raise SystemExit(str(exc)) from None  # status 1: launchd starts the merged code
+    finally:
+        await judgement_port.drain()
 
 
 async def _run_task(task_id: str) -> str:
@@ -496,6 +505,7 @@ async def _run_task(task_id: str) -> str:
     except claude_code.Unsandboxed as exc:
         raise SystemExit(f"task {task_id}: {exc}") from None
     finally:
+        await judgement_port.drain()
         await gateway.close()
     return _status_line(task_id, out)
 
@@ -945,13 +955,16 @@ async def _run(args) -> None:
     if args.command == "serve":
         await _serve()
         return
+    if args.command == "judgement-agreement":
+        print(json.dumps(await judgement_sites.agreement(settings.dsn(), args.since), indent=1))
+        return
     if args.command == "calibrate":
         try:
             judgement_sites.check_calibration(args.cases)
         except ValueError as exc:
             raise SystemExit(f"calibrate refused: {exc}") from None
         elsewhere = [
-            url for url, default in ((settings.jev_url, JEV_URL), (settings.open_weight_url, OPEN_WEIGHT_URL))
+            url for url, default in ((settings.jev_url, JEV_URL), (settings.gemini_url, GEMINI_DECISIONS_URL))
             if url != default
         ]  # fmt: skip
         if elsewhere:
@@ -967,6 +980,8 @@ async def _run(args) -> None:
             record = await judgement_sites.calibrate(judgement_port, settings.dsn(), args.cases)
         except ValueError as exc:
             raise SystemExit(f"calibrate refused: {exc}") from None
+        finally:
+            await judgement_port.drain()
         print(json.dumps(record, indent=2))
         return
     if args.command == "routine" and args.finding is None and (args.key or args.evidence):
@@ -1195,9 +1210,7 @@ def _sync(args) -> bool:
         raise SystemExit(call.sign_in())
     elif args.command == "judgement-keys":
         try:
-            status = credentials.copy_keys(
-                settings.vault_env, settings.judgement_keyfile, [JEV_KEY, OPEN_WEIGHT_KEY]
-            )
+            status = credentials.copy_keys(settings.vault_env, settings.judgement_keyfile, [JEV_KEY])
         except FileNotFoundError:
             raise SystemExit(f"no vault .env at {settings.vault_env}") from None
         for name, what in status.items():
@@ -1400,6 +1413,7 @@ def main() -> None:
     sub.add_parser("openai-key").add_argument("--name", default="OPENAI_API_KEY")
     sub.add_parser("google-key").add_argument("--ref", default=settings.google_key_ref)
     sub.add_parser("github-key")
+    sub.add_parser("judgement-agreement").add_argument("--since")
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("cases")
     routine = sub.add_parser("routine")
