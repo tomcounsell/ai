@@ -226,19 +226,24 @@ def test_a_killed_act_or_collect_leaves_a_start_that_recover_settles_live_or_not
 
 
 def test_a_chat_session_is_offered_no_task_effect_file_and_its_prompts_name_the_command(dsn, room):
+    site, app = names()
+    spec(app)
+    spec(site, projects=[app])
+
     async def brief():
         async with await db.connect(dsn) as conn:
             return await tasks.brief(conn, room)
 
     offered = kernel_main._performers(asyncio.run(brief())).offered()
     assert offered and not [u for u in offered if "task." in u]
-    effect = re.compile(r"`task\.(start|answer|steer|stop)`")
+    effect = re.compile(r"\btask\.(start|answer|steer|stop)\b(?!ed)")
     from core import notices
 
     prompts = ("skills/sdlc/converse.md", "skills/sdlc/roles/product.md", "skills/sdlc/roles/teammate.md",
                "skills/valor/skills/product-sheet/SKILL.md", "core/call.py")  # fmt: skip
     texts = {p: (REPO / p).read_text() for p in prompts}
     texts["notices.STALE"] = notices.STALE
+    texts["the Brief's Repos line"] = tasks.repos(site)
     for name, text in texts.items():
         assert "valor-record act" in text and not effect.search(
             text if name != "core/call.py" else text[text.index("Tom settled these") :]

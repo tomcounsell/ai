@@ -609,8 +609,10 @@ Tom's working hours too, Monday to Friday 09:00 to 18:00 his time), `memory WORD
 project's memory as recall reads it ([memory.md](memory.md), Search), and
 `facts`, `sources`, `fact add|supersede|confirm`, `entity add|alias`,
 `link` and `source`, which read and write what is true about the project
-over time ([memory.md](memory.md), Facts): the one write it makes, a POST
-of the gateway's `record/facts`; and `person WORDS`, the dossier of each of
+over time ([memory.md](memory.md), Facts), a POST of the gateway's
+`record/facts`; `act start|answer|steer|stop`, a chat session's task action
+done in the turn, a POST of `record/act` whose outcome it prints
+([plans/act-then-report.md](plans/act-then-report.md)); and `person WORDS`, the dossier of each of
 the project's people a name or loose description fits ([memory.md](memory.md),
 People). The kernel answers it: each harness sets `VALOR_RECORD_URL`, the
 turn's gateway base URL with `/record`, and the gateway's `record/` route

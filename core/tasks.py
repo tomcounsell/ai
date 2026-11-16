@@ -348,7 +348,7 @@ def stage_text(state: machine.State | str) -> str | None:
 def repos(name: str | None) -> str | None:
     """The chat's repositories, for a chat session whose project lists
     `projects`: its own first, each with its repository, and how
-    `task.start` chooses one. None for a project listing none."""
+    `valor-record act start --project` chooses one. None for a project listing none."""
     try:
         own = workspace.Spec.load(name) if name else None
     except workspace.Refused:
@@ -358,8 +358,8 @@ def repos(name: str | None) -> str | None:
     found = [f"{own.name} ({own.repo})"]
     found += [f"{listed} ({workspace.Spec.load(listed).repo})" for listed in own.projects]
     return (
-        "; ".join(found) + f". A task starts under {own.name} unless task.start names another of these in "
-        '"project"; pick the one the request is about, and ask in the chat when it is unclear.'
+        "; ".join(found) + f". A task starts under {own.name} unless `valor-record act start --project` "
+        "names another of these; pick the one the request is about, and ask in the chat when it is unclear."
     )
 
 

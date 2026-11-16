@@ -177,7 +177,7 @@ def test_every_chat_of_a_project_listing_projects_names_its_repositories(dsn, dm
     main, side, plain = run(go())
     line = f"\nRepos: {site} (https://example.com/site.git); {app} (https://example.com/app.git). "
     assert line in main and line in side
-    assert '"project"' in main.split("\nRepos: ", 1)[1].split("\n", 1)[0]
+    assert "valor-record act start --project" in main.split("\nRepos: ", 1)[1].split("\n", 1)[0]
     assert "\nRepos: " not in plain
 
 
