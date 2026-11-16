@@ -72,7 +72,7 @@ def test_a_daemon_the_turn_leaves_behind_is_reaped_and_ledgered(dsn, tmp_path):
     pidfile = tmp_path / "daemon.pid"
     bystander = subprocess.Popen(["sleep", "30"])
     try:
-        build = lambda url, brief, turn_id, news="": runs.TurnCommand(
+        build = lambda url, brief, turn_id, news="", subagent="": runs.TurnCommand(
             argv=[sys.executable, "-c", DAEMON, str(pidfile)], env={"PATH": os.environ["PATH"]},
             cwd=str(tmp_path), harness="daemonizer",
         )  # fmt: skip
@@ -127,7 +127,7 @@ async def _cancelled_turn(dsn, tmp_path, daemon: str, cancel_again: bool):
     gateway = await bridges.gateway(dsn)
     seen: dict = {}
 
-    def build(url, brief, turn_id, news=""):
+    def build(url, brief, turn_id, news="", subagent=""):
         seen.update(url=url, turn_id=turn_id)
         return runs.TurnCommand(
             argv=[sys.executable, "-c", HARNESS, str(tmp_path), daemon], env={"PATH": os.environ["PATH"]},
@@ -165,7 +165,7 @@ def test_a_cancelled_turn_kills_its_harness_and_children_and_ends_interrupted(ds
         )
         # The task's next turn on the same gateway runs: no fence, the slot is free.
         try:
-            done = lambda url, brief, turn_id, news="": runs.TurnCommand(
+            done = lambda url, brief, turn_id, news="", subagent="": runs.TurnCommand(
                 argv=[sys.executable, "-c", "pass"], env={}, cwd=str(tmp_path), harness="t"
             )
             nxt = await runs.run_turn(gateway, task, done, dsn=dsn)

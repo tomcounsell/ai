@@ -64,7 +64,7 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     from core import __main__ as kernel
 
     def turn_for(prompt, resume, b):
-        def build(url, brief, turn_id, news=""):
+        def build(url, brief, turn_id, news="", subagent=""):
             return runs.TurnCommand(argv=[sys.executable, "-c", "pass"], env={}, cwd=b.workspace, harness="stub",
                                     parse=lambda out: {"text": LOOKED_UP})  # fmt: skip
 

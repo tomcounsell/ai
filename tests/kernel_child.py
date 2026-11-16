@@ -29,7 +29,7 @@ urllib.request.urlopen(request, timeout=600)
 
 
 def hang_turn_for(prompt, resume, b):
-    def build(url, brief, turn_id, news=""):
+    def build(url, brief, turn_id, news="", subagent=""):
         return claude_code.TurnCommand(
             argv=[sys.executable, "-c", HANG, url, os.environ["KERNEL_PIDFILE"]],
             env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},

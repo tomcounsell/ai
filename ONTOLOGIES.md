@@ -60,12 +60,15 @@ Below it:
 
 The top agent is not the only one with the persona. `core/tasks.py`
 renders `persona/` first into every turn's text, chat session or task
-(the advisor's and a call worker's too). In a Claude Code turn that whole
-text, persona included, is `VALOR_SUBAGENT_START`
-(`harnesses/claude_code.py`), which `skills/valor/hooks/subagent_start.py`
-gives every subagent at every depth but `valor:web`, which gets only its
-prompt. What only the top agent does is speak as Valor to people.
+(the advisor's and a call worker's too). A subagent does not get it: in a
+Claude Code turn, `VALOR_SUBAGENT_START` (`harnesses/claude_code.py`) holds
+a worker's cut, the Brief's head, the corrections and the working rules
+(`persona.worker`), with no voice, delivery, `converse.md` or role.
+`skills/valor/hooks/subagent_start.py` gives it to every subagent at every
+depth, whatever the room's role, except `valor:web`, which gets only its
+prompt (Tom, 2026-11-16). What only the top agent does is speak as Valor to
+people.
 
-Not: "persona" (Valor's one identity, rendered into every turn and
-subagent above), "kernel" (the code that runs sessions and sends what
+Not: "persona" (Valor's one identity, rendered into every turn but not
+a subagent, above), "kernel" (the code that runs sessions and sends what
 they ask for; it has no model), "room" (the chat a top agent serves).

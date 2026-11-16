@@ -438,7 +438,11 @@ async def dispatch(
     Brief whose task has children ends with their Children section
     (`children_text`). Returns the text, the
     correction numbers it carries, the text's digest, the usage lines it
-    offered, and the persona's digest and size.
+    offered, the persona's digest and size, and `subagent`, the worker's
+    cut a Claude Code subagent opens with: the Brief's head and the
+    corrections from this turn's sections, then the working rules
+    (`persona.worker`), none of the persona's voice, delivery, chat-session
+    or role text.
 
     A chat session's working turn (`frozen`) keeps the cache of its whole
     conversation: its text is the Brief its last snapshot rendered, byte
@@ -525,12 +529,20 @@ async def dispatch(
             sections["children"] = children_text(found)
     sections = {k: v for k, v in sections.items() if v}
     text = "\n\n".join(sections.values())
+    # A subagent's worker's cut: this turn's head and corrections, then the working rules.
+    subagent = "\n\n".join(
+        [
+            *(sections[k] for k in ("brief", "corrections") if k in sections),
+            persona.worker(settings.persona_dir),
+        ]
+    )
     news = ""
     snapshot: dict[str, Any] = {}
     if b.chat and not fresh:
         text, news, snapshot = frozen(rows, f, sections, found, text, compaction)
     return {
         "text": text,
+        "subagent": subagent,
         "news": news,
         **snapshot,
         "corrections": [c["number"] for c in standing],

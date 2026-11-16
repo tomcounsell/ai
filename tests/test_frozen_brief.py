@@ -125,13 +125,18 @@ def test_fable_is_priced_and_compacted_like_opus():
     assert resolve_model("reviewer") == "claude-fable-5-2"
 
 
-def test_news_follows_the_prompt_and_reaches_subagents():
+def test_news_follows_the_prompt_and_subagents_get_the_cut_without_it():
     harness = {"sandbox_profile": "valor-turn"}
-    plain = claude_code.workspace_turn("hi", cwd=".", harness=harness)("http://h:1", "BRIEF", "t")
-    told = claude_code.workspace_turn("hi", cwd=".", harness=harness)("http://h:1", "BRIEF", "t", news="NEWS")
+    turn = claude_code.workspace_turn("hi", cwd=".", harness=harness)
+    plain = turn("http://h:1", "BRIEF", "t", subagent="CUT")
+    told = turn("http://h:1", "BRIEF", "t", news="NEWS", subagent="CUT")
     assert plain.argv[-1] == "hi" and told.argv[-1] == "hi\n\nNEWS"
-    assert "BRIEF" in told.env["VALOR_SUBAGENT_START"] and "NEWS" in told.env["VALOR_SUBAGENT_START"]
-    assert "NEWS" not in plain.env["VALOR_SUBAGENT_START"]
+    assert (
+        told.env["VALOR_SUBAGENT_START"]
+        == plain.env["VALOR_SUBAGENT_START"]
+        == claude_code.subagent_start("CUT")
+    )
+    assert "BRIEF" not in told.env["VALOR_SUBAGENT_START"] and "NEWS" not in told.env["VALOR_SUBAGENT_START"]
     assert plain.argv[plain.argv.index("--append-system-prompt") + 1] == "BRIEF"
     assert told.argv[told.argv.index("--append-system-prompt") + 1] == "BRIEF"
 

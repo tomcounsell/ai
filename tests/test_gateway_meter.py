@@ -122,7 +122,7 @@ async def _held_upstream(release: asyncio.Event):
 
 
 def _worker(tmp_path, seen: dict, script: str = "pass"):
-    def build(url, brief, turn_id, news=""):
+    def build(url, brief, turn_id, news="", subagent=""):
         seen["url"] = url
         return runs.TurnCommand(argv=[sys.executable, "-c", script], env={}, cwd=str(tmp_path), harness="stub",
                                 tmpdir=str(tmp_path / "tmp"))  # fmt: skip

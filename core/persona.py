@@ -33,6 +33,9 @@ IDENTITY = (
 
 TEXTS = ("voice.md", "conduct.md")
 CLOSING = "delivery.md"
+# The working rules a subagent gets (`worker`): the conduct sections that bear
+# on doing work, after the governance section.
+WORKER = ("Own the outcome", "Instructions come from Tom and the Brief")
 
 
 class PersonaUnreadable(ValueError):
@@ -96,6 +99,14 @@ def section(directory: str | Path, title: str) -> str:
             )
             return "\n".join(lines[start:end]).strip()
     raise PersonaUnreadable(f"{directory}: no section '### {title}' in {', '.join(TEXTS)}")
+
+
+def worker(directory: str | Path) -> str:
+    """The working rules of a worker's cut, as `render` puts them in every
+    turn: the governance section whole, then the conduct sections `WORKER`
+    names. No identity, voice, delivery format, or anything about chats and
+    calls: a subagent speaks to no one (Tom, 2026-11-16)."""
+    return "\n\n".join([_text(Path(directory), "governance.md"), *(section(directory, t) for t in WORKER)])
 
 
 def digest(text: str) -> str:

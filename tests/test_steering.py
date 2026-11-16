@@ -46,7 +46,7 @@ for n in range(steps):
 
 def stepper(tmp_path, steps: int, pause: float):
     log = tmp_path / "steps.jsonl"
-    build = lambda url, brief, turn_id, news="": runs.TurnCommand(
+    build = lambda url, brief, turn_id, news="", subagent="": runs.TurnCommand(
         argv=[sys.executable, "-c", STEPPER, str(HOOK), str(log), str(steps), str(pause)],
         env={}, cwd=str(tmp_path), harness="stepper", tmpdir=str(tmp_path / "tmp"), steerable=True,
     )  # fmt: skip

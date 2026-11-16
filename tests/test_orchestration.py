@@ -91,16 +91,17 @@ def test_the_web_guard_is_ledgered_with_its_grant_and_expiry(dsn):
     assert all(by_id[g]["expires"] == guards.EXPIRES.isoformat() for g in by_id if g not in own)
 
 
-def test_a_turn_loads_valors_plugin_first_and_gives_every_subagent_the_brief():
+def test_a_turn_loads_valors_plugin_first_and_gives_every_subagent_the_workers_cut():
     assert settings.plugin_dirs[0] == VALOR_PLUGIN
     made = claude_code.workspace_turn("p", cwd=".", harness={"sandbox_profile": "turn"})
-    argv_env = made("http://h:1", "the brief\nwith lines", "t")
+    argv_env = made("http://h:1", "the whole text", "t", subagent="the brief\nwith lines")
     argv = argv_env.argv
     assert argv[argv.index("--plugin-dir") + 1] == VALOR_PLUGIN
     assert argv_env.env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] == claude_code.SPAWN_DEPTH
     start = json.loads(argv_env.env["VALOR_SUBAGENT_START"])["hookSpecificOutput"]
     assert start["hookEventName"] == "SubagentStart"
     assert start["additionalContext"].endswith("\n\nthe brief\nwith lines")
+    assert "the whole text" not in start["additionalContext"]
     assert json.loads(argv[argv.index("--settings") + 1]) == {
         "disableAllHooks": False,
         "attribution": {"commit": "", "pr": ""},

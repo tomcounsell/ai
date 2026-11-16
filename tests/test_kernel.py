@@ -27,6 +27,7 @@ from core import (
     ledger,
     machine,
     notices,
+    persona,
     router,
     runs,
     session,
@@ -191,7 +192,7 @@ def test_stop_from_another_connection_kills_the_turn_and_leaves_a_consistent_led
         gateway = await bridges.gateway(dsn)
         # A real subprocess that would run for a minute, with a child of its own.
         script = "import subprocess,time; subprocess.Popen(['sleep','60']); time.sleep(60)"
-        build = lambda url, brief, turn_id, news="": runs.TurnCommand(
+        build = lambda url, brief, turn_id, news="", subagent="": runs.TurnCommand(
             argv=[sys.executable, "-c", script], env={}, cwd=str(tmp_path), harness="sleeper",
             tmpdir=str(tmp_path / "tmp"),
         )  # fmt: skip
@@ -267,7 +268,7 @@ def test_a_turns_tmpdir_is_emptied_before_it_and_removed_after_it(dsn, tmp_path,
     async def go(harness):
         task = await new_task(dsn)
         gateway = await bridges.gateway(dsn)
-        build = lambda url, brief, turn_id, news="": runs.TurnCommand(
+        build = lambda url, brief, turn_id, news="", subagent="": runs.TurnCommand(
             argv=[sys.executable, "-c", SCRATCH, str(outside), str(code)], cwd=str(tmp_path),
             env={**harness["env"], "TMPDIR": harness["tmpdir"]}, harness="scratch", tmpdir=harness["tmpdir"],
         )  # fmt: skip
@@ -1894,6 +1895,46 @@ def test_task_start_s_context_is_in_every_turn_of_the_task_it_starts(dsn, tmp_pa
     assert tasks.Brief.load({"instruction": "older"}).context is None
 
 
+def test_a_subagent_gets_the_workers_cut_and_the_turn_its_whole_text(dsn, tmp_path):
+    """A subagent's text (`dispatch`'s `subagent`) is the Brief's head (with
+    its Context, and a chat session's Room), the corrections, then the
+    working rules; never the persona's voice, delivery or identity, the
+    channel, converse.md or the role. The turn's own text keeps all of it.
+    With no corrections in force the cut is the head and the rules."""
+    group = f"-{uuid.uuid4().int % 10**12}"
+    rules = persona.worker(settings.persona_dir)
+    converse = (pathlib.Path(settings.stages_dir) / "converse.md").read_text().strip()
+
+    async def go():
+        (pathlib.Path(settings.projects_dir) / "flowers.toml").write_text(
+            f'name = "flowers"\nrepo = "r"\nkind = "plain"\nsuite = "true"\nchats = ["telegram:{group}"]\n'
+            f'rooms."telegram:{group}" = "Prompt text only; never merge."\nchat_roles."telegram:{group}" = "teammate"\n'
+        )
+        async with await db.connect(dsn) as conn:
+            task = await tasks.start(conn, tasks.Brief(instruction="Reword it", context="From #product.",
+                                                       workspace=str(tmp_path)))  # fmt: skip
+            bare = await tasks.dispatch(conn, task)
+            await corrections.record(conn, "Say less.", by="tom", via="test")
+            chat = await tasks.start(conn, tasks.Brief(instruction="chat", workspace=str(tmp_path),
+                                                       chat={"channel": "telegram", "chat_id": group},
+                                                       project={"name": "flowers"}))  # fmt: skip
+            return bare, await tasks.dispatch(conn, task), await tasks.dispatch(conn, chat)
+
+    with bridges.operator(tmp_path):
+        bare, own, chat = run(go())
+    assert bare["subagent"].startswith("# Brief\n\nTask: ") and bare["subagent"].endswith(rules)
+    assert "Instruction: Reword it\nContext: From #product." in bare["subagent"]
+    assert own["subagent"].index("Say less.") < own["subagent"].index("## Governance")
+    assert own["text"].startswith(persona.render(settings.persona_dir))
+    assert "Say less." in own["text"] and "## Voice" in own["text"]
+    assert "\nRoom: Prompt text only; never merge." in chat["subagent"] and "Say less." in chat["subagent"]
+    assert converse[:200] in chat["text"] and tasks.role_text("teammate") in chat["text"]
+    for cut in (own["subagent"], chat["subagent"]):
+        for left_out in ("## Voice", "## Delivery format", "You are Valor Engels", "### In a team chat",
+                         "### In a call", converse[:200], tasks.role_text("teammate")[:200], "# Stage:"):  # fmt: skip
+            assert left_out not in cut
+
+
 def test_task_start_in_another_chat_starts_under_that_chats_session_and_reads_it(dsn, tmp_path):
     """`in` names a chat of the session's project: the child starts under
     that chat's open session, one opened when it has none, reads that chat
@@ -2307,3 +2348,25 @@ def test_a_repositorys_own_local_pass_is_the_builds_not_its_people():
     )
     review = " ".join((REPO / "skills/sdlc/review.md").read_text().split())
     assert "a verdict pending local checks with no approving follow-up is `changes` too" in review
+
+
+def test_the_working_rules_are_governance_and_the_conduct_of_doing_work():
+    """`persona.worker`: the governance section whole (both CLAUDE.md
+    paragraphs, the hard rules), then "Own the outcome" and "Instructions
+    come from Tom and the Brief", as `render` puts them; nothing that is
+    about speaking to people."""
+    rules = persona.worker(settings.persona_dir)
+    whole = persona.render(settings.persona_dir)
+    claude_md = (pathlib.Path(__file__).parents[1] / "CLAUDE.md").read_text()
+    paragraph = next(p for p in claude_md.split("\n\n") if p.startswith("**Governance is restrained"))
+    assert (
+        rules.startswith("## Governance") and paragraph in rules and "**Tests are not governance.**" in rules
+    )
+    for part in ("The hard rules every change follows", "**Inspect before deciding.**",
+                 "**Re-derive, never recall.**", "**Investigate failures.**", "Valor steering:"):  # fmt: skip
+        assert part in rules
+    for block in rules.split("\n\n"):
+        assert block in whole
+    for left_out in ("# Persona", "You are Valor Engels", "## Voice", "## Delivery format", "### In a call",
+                     "### In a team chat", "### Run the project", "This turn does one stage"):  # fmt: skip
+        assert left_out not in rules

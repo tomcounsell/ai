@@ -16,6 +16,8 @@ directory, the machine cluster's data directory, and the backup disk.
 The dispatched text (the persona, the Brief, Tom's corrections, the
 channel and the stage, rendered by `core.tasks.dispatch`) is appended to
 Claude Code's own system prompt, byte for byte what `turn.started` records.
+A subagent gets only the worker's cut (`subagent_start`): the Brief's head,
+the corrections and the working rules, no persona voice, channel or role.
 """
 
 import functools
@@ -51,8 +53,10 @@ SPAWN_DEPTH = "1000"
 # attribution is passed here too.
 TURN_SETTINGS = json.dumps({"disableAllHooks": False, "attribution": {"commit": "", "pr": ""}})
 SUBAGENT_OPENING = (
-    "The Brief of the Valor session that started you follows. Its stage and channel are that "
-    "session's; your task is the prompt you were given, and what you find goes back to it."
+    "What the Valor turn that started you was asked, Tom's corrections in force, and the working "
+    "rules follow. Your task is the prompt you were given; what you find goes back to that turn, "
+    "and you speak to no one. If this arrives as a preview with a file path, read the file whole "
+    "before you start."
 )
 
 
@@ -76,9 +80,9 @@ def compact_text(channel: str) -> str:
     return (Path(settings.stages_dir) / "compact.md").read_text().strip().replace("{opening}", opening)
 
 
-def subagent_start(brief: str) -> str:
-    """The SubagentStart hook output that gives a subagent the dispatched text."""
-    context = f"{SUBAGENT_OPENING}\n\n{brief}"
+def subagent_start(cut: str) -> str:
+    """The SubagentStart hook output that gives a subagent the worker's cut."""
+    context = f"{SUBAGENT_OPENING}\n\n{cut}"
     return json.dumps(
         {"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": context}},
         ensure_ascii=False,
@@ -150,8 +154,9 @@ def workspace_turn(
 
     A new session gets `--session-id` with an id the kernel chose; a
     resumed one `--resume`. The builder's `news`, what changed in a chat
-    session's frozen Brief (`tasks.frozen`), follows the prompt and reaches
-    subagents after the Brief, leaving the system prompt as it was.
+    session's frozen Brief (`tasks.frozen`), follows the prompt, leaving the
+    system prompt as it was. Its `subagent`, the worker's cut
+    (`tasks.dispatch`), is what every subagent opens with.
     """
     harness = harness or {}
     if not harness.get("sandbox_profile"):
@@ -161,7 +166,7 @@ def workspace_turn(
         )
     max_output_tokens = harness.get("max_output_tokens", max_output_tokens)
 
-    def build(base_url: str, brief: str, turn_id: str, news: str = "") -> TurnCommand:
+    def build(base_url: str, brief: str, turn_id: str, news: str = "", subagent: str = "") -> TurnCommand:
         # What changed in a chat session's frozen Brief (`tasks.frozen`) follows the prompt.
         said = f"{prompt}\n\n{news}" if news else prompt
         env = environment(harness.get("env", {}))
@@ -177,9 +182,9 @@ def workspace_turn(
         # Subagents start subagents to any depth (Tom, 2026-10-16), so the web
         # agent is always one more away; Claude Code's own cap is 3.
         env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] = SPAWN_DEPTH
-        # Every subagent, at every depth, opens with the dispatched text: the
-        # SubagentStart hook of Valor's plugin prints this.
-        env["VALOR_SUBAGENT_START"] = subagent_start(f"{brief}\n\n{news}" if news else brief)
+        # Every subagent, at every depth, opens with the worker's cut
+        # (`tasks.dispatch`, `subagent`): the SubagentStart hook of Valor's plugin prints this.
+        env["VALOR_SUBAGENT_START"] = subagent_start(subagent)
         if channel := harness.get("chat_channel"):
             env["VALOR_COMPACT"] = compact_text(channel)
             if marks := compaction(model):

@@ -316,8 +316,9 @@ def workspace_turn(
     max_output_tokens = harness.get("max_output_tokens", max_output_tokens)
     agent_dir = harness["pi_agent_dir"]
 
-    def build(base_url: str, brief: str, turn_id: str, news: str = "") -> TurnCommand:
-        # What changed in a chat session's frozen Brief (`tasks.frozen`) follows the prompt.
+    def build(base_url: str, brief: str, turn_id: str, news: str = "", subagent: str = "") -> TurnCommand:
+        # What changed in a chat session's frozen Brief (`tasks.frozen`) follows the prompt;
+        # `subagent` is unused: this harness starts no Claude Code subagents.
         said = f"{prompt}\n\n{news}" if news else prompt
         write_config(agent_dir, {"models.json": models_json(base_url, model, max_output_tokens),
                                  "settings.json": settings_json(model), "mcp.json": mcp_json()})  # fmt: skip

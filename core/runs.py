@@ -225,7 +225,13 @@ async def _run_turn(
                     offered=offered,
                     compaction=compaction,
                 )
-                command = build(base_url, dispatched["text"], turn_id, news=dispatched["news"])
+                command = build(
+                    base_url,
+                    dispatched["text"],
+                    turn_id,
+                    news=dispatched["news"],
+                    subagent=dispatched["subagent"],
+                )
                 await ledger.append(
                     conn,
                     task_id,

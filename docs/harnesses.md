@@ -141,8 +141,8 @@ The wrapper then sets:
 - `GIT_TERMINAL_PROMPT=0`.
 - `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`: `claude_code.SPAWN_DEPTH`, so subagents start subagents
   past Claude Code's own cap of 3 (Skill rendering).
-- `VALOR_SUBAGENT_START`: the SubagentStart hook output carrying the dispatched text, and a chat
-  session's `news` after it, which Valor's
+- `VALOR_SUBAGENT_START`: the SubagentStart hook output carrying the worker's cut
+  (`tasks.dispatch`'s `subagent`), which Valor's
   plugin gives every subagent but the web agent (Corrections reaching subagents, below).
 - `VALOR_COMPACT`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`: for a
   chat session's turn only (`chat_channel` in the harness), its compaction instructions, which the
@@ -495,14 +495,23 @@ Two points the harness relies on and has to keep true:
   the system prompt of the main session. A subagent Claude Code starts
   inside a turn (`cc_is_subagent=true` on its requests) gets Claude Code's
   own subagent system prompt and the prompt the parent wrote, and, at every
-  depth, the Brief (with a chat session's `news` after it) as its opening context: the wrapper puts the
+  depth, a worker's cut of the turn's text as its opening context: the
+  Brief's head, the corrections, then the working rules (`persona.worker`),
+  with no voice, delivery, channel, `converse.md` or role (docs/persona.md,
+  Subagents). The wrapper puts the
   SubagentStart hook output in `VALOR_SUBAGENT_START`
   (`claude_code.subagent_start`), and Valor's plugin's SubagentStart hook
   (`skills/valor/hooks/subagent_start.py`) prints it for every subagent but
   the web agent, which reads untrusted pages and gets only its prompt.
-  Claude Code keeps a hook output of more than about 10,000 characters in a
-  file and gives the subagent a preview and the file's path, so a long
-  Brief arrives that way, read with the subagent's Read tool. Pi starts no
+  Claude Code keeps a hook output of 10,000 characters or more in a file
+  and gives the subagent only a 2 KB preview and the file's path (measured
+  2026-11-16: 9,800 characters arrived whole, 10,200 as a preview). Before
+  the cut, the whole text (about 53,000 characters) arrived that way, and
+  its preview ended in the persona's Voice section, with no instruction and
+  no corrections. The cut's working rules and opening come to about 4,800
+  characters, so a cut whose head and corrections stay under about 5,000
+  arrives whole. A longer one still opens with the instruction, and its
+  opening line tells the subagent to read the file whole. Pi starts no
   subagents.
 
 ## The turn sandbox

@@ -680,9 +680,19 @@ Legible); a chat session's turn also records its snapshot or its
 
 **Subagents.** Corrections and persona reach every Brief the kernel
 sends, and Pi's session gets the Brief appended to its system prompt. A
-subagent that Claude Code starts inside a turn opens with the same Brief
-through Valor's SubagentStart hook. The web agent is the exception: it reads
-untrusted pages, so it gets only its own prompt (see `docs/harnesses.md`).
+subagent that Claude Code starts inside a turn speaks to no one, so it gets
+a worker's cut of the turn's text, not the whole of it (Tom, 2026-11-16,
+for every room and role). The cut is the Brief's head (instruction,
+Context, Room, Repos, ceiling, Workspace, Plan), then the corrections in
+force, then the working rules, `persona.worker`: `governance.md` whole and
+the conduct sections `persona.WORKER` names ("Own the outcome",
+"Instructions come from Tom and the Brief"). It holds no identity, voice,
+delivery format, chat or call conduct, Remembered, channel or stage text,
+`converse.md`, or role. `tasks.dispatch` renders it from the same files and
+sections as the turn's own text, which is unchanged. A chat session's news
+is left out, since the cut is rendered fresh each turn. The web agent is the
+exception: it reads untrusted pages, so it gets only its own prompt (see
+`docs/harnesses.md`).
 
 ## What the persona holds and what it leaves out
 

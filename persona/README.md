@@ -6,7 +6,7 @@ Everything that defines Valor as one identity.
 
 - Identity, voice, and conduct.
 - What acting as Valor means for tone and for what may be sent under Valor's name.
-- One persona: `identity.toml`, `turn.md`, `voice.md`, `conduct.md`, `governance.md`, and `delivery.md`. `core/persona.py` renders them at the head of every turn's text, reading nothing outside this directory. `governance.md` holds the governance paragraph and the "Tests are not governance." paragraph in the same words as `CLAUDE.md`. Every fresh session (critique, review, docs) gets the same persona.
+- One persona: `identity.toml`, `turn.md`, `voice.md`, `conduct.md`, `governance.md`, and `delivery.md`. `core/persona.py` renders them at the head of every turn's text, reading nothing outside this directory. `governance.md` holds the governance paragraph and the "Tests are not governance." paragraph in the same words as `CLAUDE.md`. Every fresh session (critique, review, docs) gets the same persona. A Claude Code subagent gets none of it but the working rules: `governance.md` and the conduct sections `core/persona.py` `WORKER` names (`persona.worker`).
 - This README is not rendered.
 
 Every outbound message and PR leaves as Valor. There is no per-space identity and no mode that sends as anyone else.

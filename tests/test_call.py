@@ -1786,7 +1786,7 @@ def test_a_calls_worker_takes_no_turn_slot(dsn, tmp_path, monkeypatch):
         async with await db.connect(dsn) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="a call", max_effect_class="act"))
         gateway = await bridges.gateway(dsn)
-        build = lambda url, brief, turn_id, news="": runs.TurnCommand(
+        build = lambda url, brief, turn_id, news="", subagent="": runs.TurnCommand(
             argv=[sys.executable, "-c", "print('{}')"], env={}, cwd=str(tmp_path), harness="answer"
         )
         try:
