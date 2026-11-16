@@ -331,7 +331,7 @@ async def end(
     *,
     late: list[dict[str, str]] | None = None,
     unanswered: list[str] | None = None,
-    summary: dict[str, str] | None = None,
+    summary: dict[str, Any] | None = None,
 ) -> bool:
     """Write the call's end once (module docstring). False when it had
     already ended. `summary` is Gemini's summary document (`path`) and its
@@ -625,7 +625,8 @@ TOOLS = [
          "required": ["ids", "readback"]}},
     {"name": "person", "description": "A person's dossier on this project, by their name or a loose description: "
      "internal or external, and their dated facts (role, organisation, asks, decisions, what is owed and "
-     "delivered).", "parameters": {"type": "object", "properties": {"about": {"type": "string"}},
+     'delivered). With "everyone", the project\'s people, its own team first, with role and organisation.',
+     "parameters": {"type": "object", "properties": {"about": {"type": "string"}},
      "required": ["about"]}},
     {"name": "leave", "description": "Leave the call: when someone asks you to, or everyone has said goodbye.",
      "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {}}},

@@ -2469,6 +2469,8 @@ def test_a_call_asked_who_is_on_the_team_looks_up_everyone_and_gets_the_roster(d
         memory.reset()
     told = " ".join(c.gemini.configs[0].system_instruction.split())
     assert 'Asked who is on the team or who you have records of, call `person` with "everyone"' in told
+    (person,) = [t for t in call.TOOLS if t["name"] == "person"]
+    assert 'With "everyone", the project\'s people, its own team first' in person["description"]
     roster, again = [
         kw["function_responses"][0].response["result"] for k, kw in c.session.sent if k == "tool"
     ]
