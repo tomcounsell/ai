@@ -77,7 +77,7 @@
   <p>Valor's record of his work stays in Postgres on his own machines: who asked for what, what was done, what it cost and what Tom corrected. Some of the work leaves:</p>
   <ul class="tight">
     <li>Each model call goes to the model provider, Anthropic by default, through the kernel's gateway, which records it.</li>
-    <li>Classification calls, such as triaging a request, go to Jev, a hosted model, with an open-weight model on OpenRouter as the fallback.</li>
+    <li>Classification calls, such as triaging a request, send the text being classified to both Jev, a hosted model, and Google's Gemini; Jev's answer decides where it is confident, and Gemini's otherwise.</li>
     <li>Messages pass through Telegram, Slack and email, and code goes to GitHub.</li>
   </ul>
   <p>This means the model provider sees every prompt it answers.</p>
