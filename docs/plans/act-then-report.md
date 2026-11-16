@@ -26,12 +26,16 @@ Again 2026-11-16 13:16 UTC: "passed to the build", then the steer was refused.
    (`core/gateway.py:500`), the route `valor-record` already uses. `Gateway`
    takes an optional `performers: router.PerformersFactory` (wired at its
    three constructions: `core/__main__.py:492`, `:536`, `core/serve.py:1442`,
-   from `_performers`). In its own connection and thread, as `record.answer`
-   does: `broker.request(conn, performers(await tasks.brief(conn,
-   grant.task_id)), grant.task_id, Action(type, target, payload),
-   request_id=f"{grant.turn_id}/act/{key}")`. Answers `kind`, `error`,
-   `result`, `effect_id`. Same broker, intent and outcome rows, performers
-   and ceilings; only the moment moves.
+   from `_performers`). The body is `{verb, target, payload, key}` with
+   `verb` one of `start|answer|steer|stop`; the route builds
+   `task.<verb>` itself, so a merge, push or send cannot be named through it
+   (the route's definition, not a refusal: any other verb is the 404 an
+   unknown record verb gets today). In its own connection and thread, as
+   `record.answer` does: `broker.request(conn, performers(await
+   tasks.brief(conn, grant.task_id)), grant.task_id, Action(f"task.{verb}",
+   target, payload), request_id=f"{grant.turn_id}/act/{key}")`. Answers
+   `kind`, `error`, `result`, `effect_id`. Same broker, intent and outcome
+   rows, performers and ceilings; only the moment moves.
 2. **`valor-record act start|answer|steer|stop`** (`tools/valor_record.py`),
    its own branch, not `fact_write`. Flags map to today's payloads
    (`--instruction`, `--by`, `--context`, `--project`, `--in`, `--text`, a
@@ -40,18 +44,27 @@ Again 2026-11-16 13:16 UTC: "passed to the build", then the steer was refused.
    start answers its task id again, no second task. Output: `done` and the
    result (a start prints the child's id), or the error and exit 1. The
    broker's `refused: in flight` and a timeout or dropped connection print
-   "outcome not known yet; read `valor-record task <id>` before you report
-   it" and exit 1.
+   "outcome not known yet (effect <effect_id> when the route answered);
+   read `valor-record task <this session's id>` before you report it" and
+   exit 1: an unsettled start has no child id, and the session's own
+   ledger holds the intent and, later, its outcome. The session id is the
+   Brief's `Task:` line.
 3. **A killed kernel's in-turn intent settles.** `serve.recover`'s
    `kernel_types` (`core/serve.py:257`) gains the four `task.*` types;
-   `chat_tasks`' `lookup` already reconciles each from the ledger. The
-   end-of-turn path never needed this because recollect replays it.
+   `chat_tasks`' `lookup` already reconciles each from the ledger. This also
+   settles an end-of-turn `task.*` intent a killed collect left (recollect
+   gets `in flight` from `_prior` and never settles it today), and runs on
+   the live path too (`Kernel.regain`, `core/serve.py:815`).
 4. **One home for the usage.** The four `chat_tasks` performers drop their
    `usage` attribute, so `Performers.offered` (`core/broker.py:145`) stops
    listing them in `{effects}`; the text, rewritten for the command, lives
    only in `skills/sdlc/converse.md`'s `valor-record` section. Every
-   `task.*` effect mention in `converse.md` (14), `roles/product.md:68`,
-   `roles/teammate.md:24` and `core/intake.py:95-98` becomes the command,
+   `task.*` effect mention a chat session reads becomes the command:
+   `converse.md` (14), `roles/product.md:68`, `roles/teammate.md:24`,
+   `skills/valor/skills/product-sheet/SKILL.md:135` (the approval step, the
+   path of the 2026-11-16 case), `core/notices.py:59` (STALE's
+   `task.stop`), `core/call.py:422` (`task.answer`); and the
+   `core/intake.py:95-98` docstring for accuracy. Each
    with the order spelled out: act, read the outcome, then write the send
    that reports it; a failed action is reported as failed, in the same turn.
    The effect-file path itself is not refused or removed (no new refusal);
@@ -72,16 +85,26 @@ Builder confirms: nothing holds `task:<session>` while a turn runs
   prints it; no `task.started` row.
 - The same `act start` twice in a turn starts one task and prints one id.
 - `act steer` on a task that does not report to the session: refused, error printed.
-- A dangling `task.start` intent plus `serve.recover` writes its outcome.
+- `POST /record/act` with verb `merge` or a send type is not performed: no
+  intent row, the 404 answer.
+- A dangling in-turn `task.start` intent plus `serve.recover` writes its
+  outcome; so does a dangling end-of-turn one (request id `turn/file`);
+  and both settle with `live` set, as `Kernel.regain` calls it.
+- A timed-out or in-flight act prints the not-known message naming the
+  session's id, and exits 1.
 - A chat session's `offered()` list has no `task.*` line; `converse.md`,
-  `product.md`, `teammate.md` name `valor-record act` and no `task.*` effect file.
+  `product.md`, `teammate.md`, product-sheet `SKILL.md`, `notices.STALE`
+  and the call prompt name `valor-record act` and no `task.*` effect.
 - `valor-record task ID` and `valor-record act start …` both parse.
 - A turn whose Bash ran `valor-record act start` gets `task` activity.
 
 ## Out of scope / no-gos
 
 - Sends stay end-of-turn effects. Nothing reads or checks the reply's text.
-- No refusal of a stale `task.*` effect file; the broker performs it as today.
+- No refusal of a stale `task.*` effect file; the broker performs it as
+  today. A turn that both acts and writes the file starts two tasks;
+  accepted, since no prompt offers the file. In-turn acts stay out of the
+  next prompt's effects report: the turn read them when it acted.
 - Not here: waking a session on a later outcome, call sessions' own paths.
 
 ## Governance
