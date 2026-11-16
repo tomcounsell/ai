@@ -190,3 +190,34 @@ all four Macs' ledgers, each Mac's kernel ingesting its own: what is taken
 is kept per ledger, so one Mac's ingest never passes over another's rows.
 A store written before records named their ledger and client is dropped
 by `python -m core migrate` and rebuilt by the next ingest.
+
+## People
+
+P-005, issue #3622 (docs/plans/089fc115-person-dossier.md); Tom's call,
+2026-11-16. Case (observed, 2026-11-10): a client's DM reply reached a
+session that knew nothing of the report Valor had sent them, and it denied
+sending it. A dossier per person, per project and client like every fact,
+built on Facts with no model of its own:
+
+- **A person** is an entity of kind `person`, under every alias. Facts
+  `--about` them carry free-text kinds a dossier shows first, in order:
+  `team` (`internal` or `external`), `role`, `organisation`, `ask`,
+  `decision`, `owed`, `delivered`; any other kind follows. A send of
+  something owed supersedes the `owed` fact with a `delivered` one, so
+  the live dossier says what was sent and when.
+- **Internal** is a live `team` fact `internal`, or the operator by name
+  or alias (`persona/identity.toml`); anyone else, unmarked included, is
+  external. Internal ranks 0.5 higher on a loose match.
+- **The lookup** (`memory/facts.py` `people`, `core/memory.py` `people`):
+  an exact name or alias returns that person; otherwise each word of the
+  description, filler dropped, scores where it best appears: a name 3, a
+  `team`, `role` or `organisation` claim 2, any other live claim 0.5; the
+  best five, each with its live facts as `entry` prints them, dated and
+  sourced. A turn runs `valor-record person WORDS`; a call has a `person`
+  tool. Facts are written as Valor works, from 2026-11-16 (the persona's
+  "Know the people"); nothing was read back from past chats.
+- **Never injected.** No Brief, chat prompt or call instruction carries a
+  dossier: someone only mentioned brings none into context until looked
+  up (`tests/test_facts.py`). No one is shown their own dossier; asked what
+  Valor knows about them, a person hears their name, role and organisation
+  (persona text, not a filter).

@@ -375,3 +375,121 @@ def test_a_turn_writes_and_reads_its_projects_facts_and_the_command_line_writes_
 
 def db_name(dsn: str) -> str:
     return psycopg.conninfo.conninfo_to_dict(dsn)["dbname"]
+
+
+# -- people (docs/memory.md, People; P-005) ------------------------------------------
+
+
+def person(name: str, *aliases: str) -> dict:
+    return {"op": "entity", "kind": "person", "name": name, "aliases": list(aliases)}
+
+
+def about(who: str, kind: str, claim: str, since: str, source: str = "telegram:-200/7", **more) -> dict:
+    return {
+        "op": "fact",
+        "kind": kind,
+        "claim": claim,
+        "source": source,
+        "since": since,
+        "about": [who],
+        **more,
+    }
+
+
+def people(dsn: str, name: str, words: str) -> list[dict]:
+    return run(dsn, lambda conn: memory.people(conn, spec(name), words))["people"]
+
+
+def test_a_dossier_by_name_or_alias_holds_the_persons_live_facts_dated_in_order(world):
+    """The 2026-11-10 case's shape: a report owed to a client, then sent; the
+    dossier says it was delivered, and when."""
+    dsn = world
+    write(dsn, "a",
+          person("Rowan Vale", "Rowan"),
+          about("Rowan", "ask", "a weekly usage report", "2026-11-01"),
+          about("Rowan", "owed", "the first usage report", "2026-11-01", **{"as": "owed"}),
+          about("Rowan", "role", "finance lead at the client", "2026-10-20"),
+          about("Rowan", "organisation", "Fernhill Ltd", "2026-10-20"),
+          {"op": "supersede", "old": "@owed", "kind": "delivered", "claim": "the first usage report, by DM",
+           "source": "telegram:-200/41", "since": "2026-11-10", "reason": "sent", "about": ["Rowan"]})  # fmt: skip
+    (d,) = people(dsn, "a", "rowan vale")
+    assert people(dsn, "a", "Rowan") == [d]
+    assert (d["name"], d["aliases"], d["team"]) == ("Rowan Vale", ["Rowan"], "external")
+    assert [(f["kind"], f["claim"], f["since"]) for f in d["facts"]] == [
+        ("role", "finance lead at the client", "2026-10-20"),
+        ("organisation", "Fernhill Ltd", "2026-10-20"),
+        ("ask", "a weekly usage report", "2026-11-01"),
+        ("delivered", "the first usage report, by DM", "2026-11-10"),
+    ]
+    assert d["entry"].startswith("## Rowan Vale (external; person ")
+    assert "since 2026-11-10, inferred; source telegram:-200/41" in d["entry"]
+    assert "owed" not in [f["kind"] for f in d["facts"]]
+
+
+def test_a_loose_description_matches_who_they_are_and_internal_ranks_first(world):
+    dsn = world
+    write(dsn, "a",
+          person("Rowan Vale"), about("Rowan Vale", "role", "finance lead at the client", "2026-10-20"),
+          person("Sam Ito"), about("Sam Ito", "role", "finance lead for Yudame", "2026-10-20"),
+          about("Sam Ito", "team", "internal", "2026-10-20"),
+          # A frequent asker whose asks name the role word outranks no one by it.
+          person("Pat Moss"), *[about("Pat Moss", "ask", f"finance question {n}", f"2026-11-0{n}") for n in range(1, 6)],
+          person("Tom Counsell", "Tom"), person("Lee Park"))  # fmt: skip
+    found = [d["name"] for d in people(dsn, "a", "the finance lead")]
+    assert found == ["Sam Ito", "Rowan Vale", "Pat Moss"]
+    # Marked internal, or the operator by name; unmarked is external.
+    teams = {d["name"]: d["team"] for n in ("Sam", "Rowan", "Tom", "Lee") for d in people(dsn, "a", n)}
+    assert teams == {"Sam Ito": "internal", "Rowan Vale": "external", "Tom Counsell": "internal",
+                     "Lee Park": "external"}  # fmt: skip
+    assert people(dsn, "a", "the plumber") == []
+    assert people(dsn, "a", "who is the") == []  # filler alone fits no one
+    with pytest.raises(record.NotFound, match="by name or description"):
+        asyncio.run(record.answer(dsn, started(dsn, "a"), "people", {"about": " "}))
+
+
+def test_another_projects_or_clients_people_never_return(world):
+    dsn = world
+    write(dsn, "a", person("Rowan Vale"), about("Rowan Vale", "role", "finance lead", "2026-10-20"))
+    for other in ("b", "c", "d"):
+        assert people(dsn, other, "Rowan Vale") == []
+        assert people(dsn, other, "finance lead") == []
+    assert [d["name"] for d in people(dsn, "a", "finance lead")] == ["Rowan Vale"]
+
+
+def test_a_turn_looks_a_person_up_and_a_person_only_mentioned_brings_no_dossier(world, monkeypatch, tmp_path):
+    """Tom, 2026-11-16: no dossier when a name is mentioned; a turn looks the
+    person up. A chat session's Brief and next prompt, for a message naming
+    someone with a dossier, carry none of it; `valor-record person` does."""
+    from core import ledger, session
+
+    dsn = world
+    monkeypatch.setenv("VALOR_RECORD_URL", "")
+    write(dsn, "a", person("Rowan Vale", "Rowan"),
+          about("Rowan", "owed", "the usage report for October", "2026-11-01"))  # fmt: skip
+    client, r = PROJECTS["a"]
+
+    async def chat(conn):
+        b = tasks.Brief(instruction="chat -200", project={"name": "a", "repo": repo(r), "client": client},
+                        chat={"channel": "telegram", "chat_id": "-200"})  # fmt: skip
+        task = await tasks.start(conn, b)
+        # The row intake's `_chat` writes on the session for a message that wakes it.
+        await ledger.append(conn, task, "message.steered", {
+            "received_id": ledger.new_id(), "message_id": "9", "reply_to": None, "sender_id": "7",
+            "sender_name": "Kim", "sent_at": "2026-11-16T08:00:00+00:00",
+            "text": "Rowan replied, can you check?", "provenance": ledger.provenance("Kim", "telegram", False),
+        })  # fmt: skip
+        await memory.ingest(conn)
+        prompt, _, _ = await session.next_prompt(conn, task)
+        text = (await tasks.dispatch(conn, task))["text"]
+        return task, prompt, text
+
+    task, prompt, text = run(dsn, chat)
+    assert "Rowan replied, can you check?" in prompt
+    assert "usage report for October" not in prompt and "usage report for October" not in text
+    assert "valor-record person" in text  # the persona says to look them up
+    ((rc, shown), _) = valor(dsn, task, ["person", "the", "Rowan"])
+    assert rc == 0 and shown.startswith("## Rowan Vale (external; person ")
+    assert "[owed], since 2026-11-01, inferred; source telegram:-200/7" in shown
+    assert "  > the usage report for October" in shown
+    ((_, none), _) = valor(dsn, task, ["person", "the", "plumber"])
+    assert none.strip() == "nobody fits"

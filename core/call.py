@@ -582,6 +582,10 @@ INSTRUCTIONS = (
     "- For anything you would have to look up (code, records, documents, figures), call `ask` and say you "
     "will check: your worker, who reads the project's code, records and chats, answers in the call's chat, "
     "and you get a note. Never guess a fact.\n{backlog}"
+    "- Before saying anything about a person (who they are, what they asked for or decided, what they are owed "
+    "or were sent), call `person` with their name or how they were described, and answer from the dated facts "
+    "it returns; when it returns nobody, say you have nothing recorded about them. Asked what you know about "
+    "themselves, a person hears only their name, role and organisation.\n"
     "- When someone asks what is open, call `open_decisions` and go through what is theirs to decide as "
     '"In a call" below says, and let them choose. With anyone but Tom in the call, a decision about a client '
     "relationship (pricing, terms, its people) is one line: it is for Tom. Never say an id aloud.\n"
@@ -605,6 +609,10 @@ TOOLS = [
      "`task id/question id` it settles.", "parameters": {"type": "object", "properties": {
          "ids": {"type": "array", "items": {"type": "string"}}, "readback": {"type": "string"}},
          "required": ["ids", "readback"]}},
+    {"name": "person", "description": "A person's dossier on this project, by their name or a loose description: "
+     "internal or external, and their dated facts (role, organisation, asks, decisions, what is owed and "
+     "delivered).", "parameters": {"type": "object", "properties": {"about": {"type": "string"}},
+     "required": ["about"]}},
     {"name": "leave", "description": "Leave the call: when someone asks you to, or everyone has said goodbye.",
      "parameters": {"type": "object", "properties": {}}},
 ]  # fmt: skip
@@ -1501,6 +1509,8 @@ class Call:
                 result = "posted"
             elif fc.name == "backlog" and self.sheet:
                 result = await self._backlog(str(args.get("about") or "").strip())
+            elif fc.name == "person" and str(args.get("about") or "").strip():
+                result = await self._person(str(args["about"]).strip())
             elif fc.name == "open_decisions":
                 async with await self._connect() as conn:
                     result = await decisions(conn, self.project)
@@ -1520,6 +1530,21 @@ class Call:
             out.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result}))
         if out:
             await session.send_tool_response(function_responses=out)
+
+    async def _person(self, about: str) -> str:
+        """The dossiers of the call's project's people `about` fits
+        (`memory.people`), as text; nobody, said so."""
+        from core import memory
+
+        spec = self._spec("no people to look up")
+        if spec is None:
+            return "this call has no project, so no one to look up"
+        try:
+            async with await self._connect() as conn:
+                found = await memory.people(conn, spec, about)
+        except memory.Unavailable as exc:
+            return f"the people records could not be read: {exc}"
+        return "\n\n".join(d["entry"] for d in found["people"]) or "nobody recorded fits that"
 
     async def _backlog(self, about: str) -> str:
         """`sheet.py lookup` on what was described, or the whole Queue in

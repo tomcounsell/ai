@@ -35,7 +35,10 @@ and a rebuild is every Mac ingesting its own again.
   the scratch database `scratch`, never the live store.
 - `fact_write(conn, spec, writes)` appends a project's fact, entity,
   link and source rows and takes each at once, so a later write can name
-  it; `facts_read(conn, spec, query)` reads them (docs/memory.md, Facts).
+  it; `facts_read(conn, spec, query)` reads them (docs/memory.md, Facts),
+  and `people(conn, spec, about)` reads the dossiers of the project's
+  people a name or description fits (docs/memory.md, People), only when a
+  turn or a call looks one up: nothing puts a dossier in a Brief.
   These are the one place memory's port writes the ledger, through a
   turn's gateway (`valor-record`) or the command line, not an effect:
   effects run after the turn, and the writer reads back what it wrote.
@@ -380,6 +383,27 @@ async def facts_read(conn, spec, query: dict[str, Any]) -> dict[str, Any]:
     return await asyncio.to_thread(
         lambda: f.read(mdsn, ledger=name, project=spec.repo, client=spec.client or "", query=query)
     )
+
+
+async def people(conn, spec, about: str) -> dict[str, Any]:
+    """The dossiers of `spec`'s project's people that `about` (a name, an
+    alias or a loose description) fits, as `memory.facts.people` answers;
+    the operator, by name, is internal."""
+    if not on():
+        raise Unavailable("memory is off on this Mac")
+    mdsn = dsn_for(conn)
+    why = await asyncio.to_thread(unreachable, mdsn)
+    if why:
+        raise Unavailable(f"the memory store could not be reached ({why})")
+    from core import persona
+    from memory import facts as f
+
+    name = ledger_name(conn)
+    operator = persona.identity(settings.persona_dir)["operator"]
+    return await asyncio.to_thread(
+        lambda: f.people(mdsn, ledger=name, project=spec.repo, client=spec.client or "", about=about,
+                         internal=(operator,))
+    )  # fmt: skip
 
 
 async def ingest(conn) -> dict[str, Any]:

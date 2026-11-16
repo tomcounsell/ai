@@ -255,6 +255,19 @@ async def facts(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], qu
         raise NotFound(str(exc)) from None
 
 
+async def people(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query) -> dict[str, Any]:
+    """The dossiers of the project's people that `about` fits, by name,
+    alias or loose description (docs/memory.md, People)."""
+    from core import memory
+
+    if not (query.get("about") or "").strip():
+        raise NotFound("look a person up by name or description")
+    try:
+        return await memory.people(conn, spec, query["about"])
+    except memory.Unavailable as exc:
+        raise NotFound(str(exc)) from None
+
+
 async def facts_write(conn, spec: workspace.Spec, task_id: str, body: Any) -> dict[str, Any]:
     """Append the turn's `writes` to the project's facts; each one's name,
     by label or position."""
@@ -533,6 +546,7 @@ VERBS = {
     "task": task,
     "memory": memory_search,
     "facts": facts,
+    "people": people,
     "call": call,
     "hours": hours,
 }

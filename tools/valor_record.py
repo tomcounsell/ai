@@ -9,6 +9,7 @@ valor-record hours [--since DATE] [--until DATE] [--json]
 valor-record waits [--json]
 valor-record facts [--as-of DATE] [--kind K] | --history FACT | --related FACT_OR_ENTITY [--depth N] [--json]
 valor-record sources [--json]
+valor-record person NAME_OR_DESCRIPTION [--json]
 valor-record fact add CLAIM --kind K --source CITE --since DATE [--source-at DATE] [--about ENTITY]...
              [--reported R --evidence E --why-differs W]
 valor-record fact supersede FACT CLAIM --reason R (and add's options)
@@ -37,6 +38,10 @@ history, or what a fact or entity links to; `fact`, `entity`, `link` and
 `source` write them (docs/memory.md, Facts), each printing the name of
 what it wrote; the same write asked twice writes once. Everything starts
 inferred; only `fact confirm`, naming a person's answer, confirms.
+`person` prints the dossier of each of the project's people a name, an
+alias or a loose description fits, best first: internal or external, and
+their live facts (team, role, organisation, asks, decisions, what is owed
+and delivered), each dated and sourced (docs/memory.md, People).
 Standard library only, and Python 3.9 (macOS's own `python3`), so it runs
 in any workspace.
 """
@@ -171,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
     facts.add_argument("--related", help="what a fact or entity links to")
     facts.add_argument("--depth", type=int, help="how many hops --related walks (default 2, at most 6)")
     sub.add_parser("sources", help="each source of the project's facts and how far it was read")
+    person = sub.add_parser("person", help="a person's dossier, by name or loose description")
+    person.add_argument("about", nargs="+", help="their name, another name, or how you would describe them")
     leaves = list(sub.choices.values())
     fact = sub.add_parser("fact", help="add, supersede or confirm a fact").add_subparsers(
         dest="op", required=True
@@ -239,6 +246,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.verb == "sources":
         args.verb, query["sources"] = "facts", "1"
+    if args.verb == "person":
+        args.verb, query["about"] = "people", " ".join(args.about)
     write = fact_write(args)
     url = f"{base}/{'facts' if write else args.verb}?" + urllib.parse.urlencode(
         {k: v for k, v in query.items() if v is not None and not write}
@@ -276,6 +285,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"link {x['kind']}: {x['a']} - {x['b']}" + (f" ({x['source']})" if x["source"] else ""))
         for x in out["related"]:
             print(f"[{x['hops']} hop{'s' if x['hops'] > 1 else ''}] {x['entry']}")
+    elif args.verb == "people":
+        print("\n\n".join(x["entry"] for x in out["people"]) or "nobody fits")
     elif args.verb == "facts":
         for x in out["facts"]:
             print(x["entry"])

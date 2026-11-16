@@ -19,6 +19,7 @@ it does not.
 """
 
 import math
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -492,3 +493,149 @@ def _related(ledger, project, client, query, successors, confirmed, names) -> di
         ],
         "related": found,
     }
+
+
+# -- people -------------------------------------------------------------------------
+
+# A dossier's fact kinds, in the order it shows them; any other kind follows.
+DOSSIER = ("team", "role", "organisation", "ask", "decision", "owed", "delivered")
+# The kinds that say who a person is, so a description matches them.
+WHO = ("team", "role", "organisation")
+# Words a description drops before matching: filler, and the words of asking.
+FILLER = frozenset(
+    [
+        "a",
+        "an",
+        "the",
+        "of",
+        "at",
+        "in",
+        "on",
+        "for",
+        "to",
+        "from",
+        "with",
+        "and",
+        "or",
+        "who",
+        "whom",
+        "whose",
+        "that",
+        "this",
+        "is",
+        "was",
+        "are",
+        "were",
+        "be",
+        "been",
+        "our",
+        "their",
+        "his",
+        "her",
+        "its",
+        "my",
+        "your",
+        "me",
+        "us",
+        "them",
+        "they",
+        "he",
+        "she",
+        "it",
+        "person",
+        "people",
+        "someone",
+        "guy",
+        "one",
+        "what",
+        "which",
+        "know",
+        "about",
+        "do",
+        "does",
+        "did",
+        "has",
+        "have",
+        "had",
+    ]
+)
+# Most dossiers a lookup returns.
+PEOPLE = 5
+
+
+def _words(text: str) -> set[str]:
+    """Text's words, case folded, filler and single letters dropped, a
+    plural `s` stripped."""
+    out = set()
+    for w in re.findall(r"\w+", str(text).casefold()):
+        if len(w) > 1 and w not in FILLER:
+            out.add(w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w)
+    return out
+
+
+def people(
+    dsn: str, *, ledger: str, project: str, client: str, about: str, internal: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """The dossiers of the project's people (entities of kind `person`) a
+    name, alias or loose description fits, best first, at most `PEOPLE`.
+    An exact name or alias returns that person alone. Otherwise each query
+    word (`_words`: `FILLER` dropped) scores once per person, by where it
+    best appears: a name or alias 3, a live `team`, `role` or
+    `organisation` claim 2, any other live claim about them 0.5; an
+    internal person scores 0.5 more, and a person no word fits is no match.
+    Internal: a live `team` fact whose claim is `internal`, or a name in
+    `internal` (the operator's). Each dossier holds the person's live facts,
+    `DOSSIER` kinds first, oldest first within a kind."""
+    use(dsn)
+    where = {"project": project, "client": client}
+    persons = {ref(e.ledger, e.key): e for e in Entity.query.filter(**where) if fold(e.kind) == "person"}
+    aliases: dict[str, list[str]] = {}
+    for a in Alias.query.filter(**where):
+        if a.entity in persons:
+            aliases.setdefault(a.entity, []).append(a.name)
+    _, successors, confirmed, names = _context(project, client)
+    live: dict[str, list[Fact]] = {}
+    for f in Fact.query.filter(**where, validity__current=True):
+        for a in f.about or []:
+            if a in persons:
+                live.setdefault(a, []).append(f)
+    ours = {fold(n) for n in internal if fold(n)}
+
+    def inside(name: str) -> bool:
+        team = [f for f in live.get(name, []) if fold(f.kind) == "team"]
+        if team:
+            return fold(max(team, key=lambda f: f.since).claim) == "internal"
+        return any(fold(a) in ours for a in aliases.get(name, []))
+
+    exact = entity(ledger, project, client, about) if fold(about) else None
+    if exact is not None and ref(exact.ledger, exact.key) in persons:
+        chosen = [ref(exact.ledger, exact.key)]
+    else:
+        asked, scored = _words(about), []
+        for name, e in persons.items():
+            score = 0.0
+            for w in asked:
+                if any(w in _words(a) for a in aliases.get(name, [])):
+                    score += 3
+                elif any(w in _words(f.claim) for f in live.get(name, []) if fold(f.kind) in WHO):
+                    score += 2
+                elif any(w in _words(f.claim) for f in live.get(name, [])):
+                    score += 0.5
+            if score:
+                scored.append((-(score + (0.5 if inside(name) else 0)), e.name, name))
+        chosen = [n for *_, n in sorted(scored)[:PEOPLE]]
+
+    def dossier(name: str) -> dict[str, Any]:
+        e, team = persons[name], "internal" if inside(name) else "external"
+        order = {k: i for i, k in enumerate(DOSSIER)}
+        facts = sorted(
+            live.get(name, []), key=lambda f: (order.get(fold(f.kind), len(DOSSIER)), f.since, int(f.key))
+        )
+        shown = [_shown(f, successors, confirmed, names) for f in facts]
+        also = sorted(a for a in aliases.get(name, []) if a != e.name)
+        head = f"## {e.name} ({team}; person {name}" + (f"; also {', '.join(also)}" if also else "") + ")"
+        body = "\n".join(s["entry"] for s in shown) or "(no facts about them yet)"
+        return {"person": name, "name": e.name, "aliases": also, "team": team, "facts": shown,
+                "entry": f"{head}\n{body}"}  # fmt: skip
+
+    return {"people": [dossier(n) for n in chosen]}

@@ -767,6 +767,7 @@ def test_the_live_session_is_told_valors_voice_tools_and_how_to_wait_its_turn():
         "post",
         "open_decisions",
         "settle",
+        "person",
         "leave",
     ]
     assert (
@@ -2065,3 +2066,37 @@ def test_every_managers_call_carries_valors_own_product_decision_process():
         assert rule in text
     assert "give the rule and the item's case" in text
     assert len(text.split()) < 2000  # an instruction, not a document
+
+
+def test_a_call_looks_a_person_up_and_says_when_nobody_fits(dsn, team, quick):
+    """P-005 (Tom, 2026-11-16): a call looks a person up before saying
+    anything about them, from their dated facts; nobody recorded is a result
+    the call can speak, not an error."""
+    from core import memory, workspace
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            await memory.fact_write(conn, workspace.Spec.load(team.project), [
+                {"op": "entity", "kind": "person", "name": "Rowan Vale"},
+                {"op": "fact", "kind": "role", "claim": "finance lead at the client", "source": "telegram:-1/3",
+                 "since": "2026-10-20", "about": ["Rowan Vale"]},
+            ])  # fmt: skip
+        c = await in_call(dsn, team)
+        await push(c.session, tool("person", about="the finance lead"), done())
+        await push(c.session, tool("person", about="the plumber"), done())
+        assert await until(lambda: len([k for k, _ in c.session.sent if k == "tool"]) == 2)
+        await finish(c)
+        return c
+
+    memory.reset()
+    try:
+        c = run(go())
+    finally:
+        memory.reset()
+    told = " ".join(c.gemini.configs[0].system_instruction.split())
+    assert "call `person` with their name or how they were described" in told
+    assert "a person hears only their name, role and organisation" in told
+    found, none = [kw["function_responses"][0].response["result"] for k, kw in c.session.sent if k == "tool"]
+    assert found.startswith("## Rowan Vale (external; person ")
+    assert "[role], since 2026-10-20, inferred; source telegram:-1/3" in found
+    assert none == "nobody recorded fits that"
