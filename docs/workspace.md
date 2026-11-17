@@ -96,6 +96,14 @@ running (its Postgres or Redis, a setup command, its git) and frees its
 ports: the sweep never sees them, since the task has a row and no record
 names its services.
 
+The same pass then removes the copies of Chrome.app that Chrome leaves under
+`X/com.google.Chrome.code_sign_clone` beside the user's temp dir
+(`workspace.chrome_clones`). Chrome copies its bundle at each launch and deletes
+the copy only on a clean exit, so every Chrome stopped by a signal (a reaped
+turn's, a call's, one a Homebrew upgrade kills) leaves one of about 730 MB. A
+copy is removed once it is ten minutes old and no process holds it open, by
+`lsof`; a failure is logged to Sentry and tried again on the next pass.
+
 A service program (`initdb`, `pg_ctl`, `redis-server`) runs to its own end,
 with no time limit of Valor's; `pg_ctl` waits up to its own default of 60
 seconds. A run starts the services before its first runner (the resident kernel
