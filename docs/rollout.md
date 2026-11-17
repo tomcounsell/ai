@@ -284,3 +284,37 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
 
 A Mac with no Telegram session or mailbox can run with only the local
 chat bridge ([bridges/local.md](bridges/local.md)).
+
+## Moving a project to another Mac
+
+A project's chats belong to the Mac its spec's `machine` names, read live
+from each Mac's synced copy on every message (`core/intake.py`), so the
+handover happens when the edit syncs, not on a restart. First get the new
+Mac ready for the project: Python, Postgres and its extensions, the
+checkout and its `.env` files. Then move it in this order, which drops no
+message and answers none twice (first done 2026-11-17):
+
+1. Let the project's tasks and waits on the old Mac finish, or name what
+   carries over. A running task keeps its Brief and finishes where it
+   started.
+2. On the new Mac, `launchctl bootout` `com.valor.kernel.telegram` and
+   `com.valor.kernel.slack`.
+3. Edit the spec's `machine`.
+4. Through Valor.app on each Mac (over ssh, a one-off `gui/` launchd job
+   running `valor-run`), check that `intake.owned('telegram')` and
+   `intake.owned('slack')` list the chats on the new Mac and not on the
+   old one.
+5. Set each chat's entry in the new Mac's `telegram-seen.json` and
+   `slack-seen.json` to the later of two values: the old Mac's entry, and
+   the newest `message.received` id or ts in the old Mac's ledger for
+   that chat. Seen moves only at the end of a gap-fill pass, so messages
+   taken live lie past it.
+6. Bootstrap the two bridges again.
+
+Slack's gap fill reads replies only in threads the Mac's own ledger knows,
+so after the move read, without posting, the threads that had replies
+during the pause. The board finds its canvas by its tab but rebuilds it
+from the new Mac's ledger. Chat sessions do not move; the shared memory
+already does. Homebrew's `pgvector` no longer builds for `postgresql@15`,
+so a 15 database using `vector` cannot be dumped. Copy local databases
+from 18.
