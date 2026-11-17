@@ -225,7 +225,8 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     session, asking_id, reason, url = asyncio.run(go())
     rows = asyncio.run(bridges.rows(dsn, session))
     # The call posts its own link in the asking thread, once Valor is in.
-    joined = next(i for i, r in enumerate(rows) if r["type"] == "call.joined")
+    joined = next((i for i, r in enumerate(rows) if r["type"] == "call.joined"), None)
+    assert joined is not None, f"Valor never joined: {reason}"
     (link,) = [i for i, r in enumerate(rows) if r["type"] == "effect.held"
                and r["payload"]["request_id"] == "meet/link/copy"]  # fmt: skip
     assert joined < link and f"I'm in: {url}" in json.dumps(rows[link]["payload"])
