@@ -272,10 +272,9 @@ reviewer_openai; the judgement legs are pinned beside the seats.
   runs every chat session's working turn on it whatever model its Brief
   was written with, so sessions started on Opus moved too. A call's worker
   is a fresh turn and keeps its Brief's model.
-- **Effort**: `EFFORT` in `core/settings.py`, passed as `--effort`. `chat`
-  is low since 2026-11-17 (docs/research/effort-levels.md); `frontier`,
-  `critique`, `docs` and `review` are unset, so Claude Code's default,
-  medium. A task keeps the level it started with; a chat turn reads its
+- **Effort**: `EFFORT` in `core/settings.py`, passed as `--effort`. No entry
+  is set (docs/research/effort-levels.md), so every turn runs at Claude
+  Code's default, medium. A task keeps the level it started with; a chat turn reads its
   entry each turn; the call worker, routines and the advisor take none.
   Deleting an entry undoes it.
 - **Light**: Haiku 5.5, the default of a bare builder turn. No task runs on

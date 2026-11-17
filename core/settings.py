@@ -232,11 +232,10 @@ SEATS: dict[str, tuple[str, str]] = {
 # `review`), read when it runs. A name absent here passes none and runs at
 # Claude Code's default, medium on Fable 5.2 and Opus 5.5 (measured
 # 2026-11-17). The call worker, routines, the advisor and `gateway.ask` take
-# none. `chat` is low from replays where Fable low tied medium and high;
-# `frontier` stays unset (docs/research/effort-levels.md). Delete a line to
-# undo it.
+# none. Every entry is unset: in replays low did not clearly tie medium
+# (docs/research/effort-levels.md). Add a line to set one.
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-EFFORT: dict[str, str] = {"chat": "low"}
+EFFORT: dict[str, str] = {}
 
 
 def seat_effort(name: str) -> dict[str, str]:

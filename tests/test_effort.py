@@ -53,7 +53,7 @@ def test_a_chat_turn_first_and_resumed_runs_at_the_chat_entrys_level_whatever_it
         effort="max",
         chat={"channel": "slack", "chat_id": "C1"},
     )
-    monkeypatch.delitem(settings.EFFORT, "chat")
+    monkeypatch.delitem(settings.EFFORT, "chat", raising=False)
     assert tasks.turn_effort(b) is None
     monkeypatch.setitem(settings.EFFORT, "chat", "medium")
     # `session.run` gives each turn its level as it gives it its model.

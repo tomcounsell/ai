@@ -58,7 +58,8 @@ other and all pass the test.
 ## Decision, by Tom's rule
 
 Two arms tie when suite and acceptance match and each score is within 1.
-- Fable: low, medium and high tie on all three tasks. Low wins. High costs
+- Fable: low, medium and high tie on the bug fix and the feature; on the
+  answer low stated a wrong fact (the default effort), so it does not tie. High costs
   1.6-3x for nothing. Low saved little against medium here (-8% to +17%).
 - Opus: low ties medium on all three by the rule and costs 9-61% less (44-61%
   on the feature and the answer), but it was the lowest scorer on both judged
@@ -68,13 +69,15 @@ Two arms tie when suite and acceptance match and each score is within 1.
 - Tasks stay on Opus (Tom, 2026-11-16). For Tom: Fable low matched Opus
   medium's results at 0-28% more cost.
 
-Set: `EFFORT = {"chat": "low"}` in `core/settings.py`, a small saving for a
-tie. `frontier` stays unset (medium). Critique, docs and review are keyed by
+Set: nothing; `EFFORT` in `core/settings.py` is empty. Chat was set to low,
+then put back to medium on review (2026-11-17): on the chat stand-in Fable low
+stated a wrong fact where medium was right, which is not a tie, and it saved
+nothing. `frontier` stays unset (medium). Critique, docs and review are keyed by
 their own stage names and stay unset (medium): they are the revision rounds
 that caught what every level missed.
 
-Undo: delete `"chat": "low"`; chat turns go back to medium from their next
-turn. To try tasks at low, add `"frontier": "low"` (new tasks only; a running
+To try a level, add an entry: `"chat": "low"` reaches chat turns from their
+next turn; `"frontier": "low"` (new tasks only; a running
 task keeps the level it started with).
 
 ## Not tested
