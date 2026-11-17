@@ -65,12 +65,12 @@ change is expected. A defect found on the way gets a fix and a test.
      The overwrite in step 5 replaces any entry it finds.
    - **Board:** the Bald finds the existing `BOARD` canvas by its tab
      (`bridges/slack/send.py` `write_canvas`), so no second canvas is
-     made. But its first write replaces the canvas whole from the Bald's
-     ledger, which holds no Cuttlefish questions. So the open questions
-     and recent answers are re-recorded on the Bald, each naming its
-     Captain source, through the path chat sessions record them, before
-     the Bald's bridges start. If no such path exists, the build names
-     what the first board write will drop.
+     made. Questions are **not** re-recorded on the Bald: the board
+     session knows what it already posted only from this Mac's ledger
+     (`core/board.py` `_posts`), so re-recorded questions would be posted
+     again in the board channel. Open questions are settled or carried
+     with their tasks on the Captain in step 5.1, and the build names
+     what the Bald's first canvas write leaves off.
    - **Chat sessions:** they do not move. Say what their loss costs.
      Memory is already shared.
 5. **Switch, ordered around the sync.**
@@ -84,11 +84,20 @@ change is expected. A defect found on the way gets a fix and a test.
       `intake.owned('slack')` through Valor.app on each Mac. The Captain
       must list none of the three chats and the Bald must list all
       three.
-   5. Copy the Captain's final entries for the three chats from
-      `telegram-seen.json` and `slack-seen.json` into the Bald's files
-      (mode 600), overwriting what is there.
+   5. For each of the three chats, set the Bald's mark (in
+      `telegram-seen.json` or `slack-seen.json`, mode 600, overwriting
+      what is there) to the **later** of two values: the Captain's seen
+      entry, and the newest `message.received` id or ts in the Captain's
+      ledger for that chat. The mark is exclusive. Seen moves only when a
+      gap-fill pass ends, so messages the Captain took live lie past its
+      entry and would otherwise be answered again.
    6. Bootstrap the Bald's bridges. Their gap fill picks up messages
-      posted during the pause, for the Bald's other projects too.
+      posted during the pause, for the Bald's other projects too. Slack
+      gap fill reads replies only in threads this Mac's ledger knows, and
+      the Bald knows no Cuttlefish threads. So after the start, read
+      (no post) the threads in both Slack channels that had replies in
+      the pause window. Compare them with the Bald's ledger and name any
+      message that neither Mac received.
    7. Run `intake.owned` again on both Macs, and check each bridge's log
       for a clean start. That check is the evidence. Do not count
       `core update --wait` on a Mac already at tip as a restart.
@@ -130,7 +139,8 @@ change is expected. A defect found on the way gets a fix and a test.
   and on the Captain it lists none.
 - **Read marks:** the Bald's seen files hold the Captain's final marks
   for the three chats.
-- **Board:** the board canvas still shows its open items.
+- **Board:** the canvas still shows its open items, and a read of the
+  board channel shows no new board post during or after the switch.
 - **Suite:** the Bald's Cuttlefish suite results, with pre-existing
   failures separated out.
 - **Spec folder:** the Cuttlefish spec loads with the Bald as its
