@@ -15,9 +15,10 @@ it rewrites "Answer what was asked" as two if-then lines (a fact not held:
 say so and ask the worker that turn; asked again or told they're confused:
 ask the worker, never say it again in other words), adds Google's English
 sentence, `tests/test_live_call_voice.py` and docs on why Live's end of turn
-is kept. The build starts from main with 3143cda3e in; if it has not landed,
-the branch merges 3143cda3e (a merge, not a cherry-pick, so the two land as
-one history). Its lines are kept as written; nothing below rewrites them.
+is kept. Critique 2 (Request (c), nothing on turn detection): the build
+carries only its persona lines, its wording test and its two ask-the-worker
+live tests, as written; its pause measurement, end-of-turn prose and pause
+plan stay on its branch, which should not also merge.
 
 ## Cases (observed, call records)
 

@@ -556,7 +556,9 @@ async def _call(session_id: str) -> str:
         async def worker(question: str) -> str:
             return await turn(
                 f"Asked in the call: {question}\n\nAnswer exactly that, with the specific it asks for (the "
-                "example, the number, the rule) and where it is recorded, or say plainly it is not known.\n\n"
+                "example, the number, the rule) and where it is recorded, or say plainly it is not known. When "
+                "the call so far already answered it, give what that answer lacked (an example, another angle, "
+                "the next level down), never the same answer.\n\n"
                 "The call so far:\n" + "\n".join(the.lines[-40:])
             )
 
@@ -589,7 +591,7 @@ async def _call(session_id: str) -> str:
 
         the = call.Call(
             session_id, info, Page(settings.meet_profile), dsn=dsn, gemini=call.Gemini(key),
-            worker=worker, worker_ready=ready, reader=read_up, project=(b.project or {}).get("name"), held=held,
+            worker=worker, worker_ready=ready, reader=read_up, preparer=turn, project=(b.project or {}).get("name"), held=held,
         )  # fmt: skip
         socket = Socket(the.hear, the.chat, the.people)
         the.socket = socket

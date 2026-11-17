@@ -51,7 +51,13 @@ against a new Meet with a second device of Valor's account
   the worker's answers and, for a call asked for in a chat, the worker's
   reading once it is in (until then the instruction says it is still
   reading up, while asking the worker and taking tasks go on as usual;
-  the note bringing the reading says it no longer is). Live decides when Valor is addressed and
+  the note bringing the reading says it no longer is), and the worker's
+  prep on the items still to come: one after the reading (or as an
+  invited call starts) and one after each `settle`, `backlog` or
+  `open_decisions`, never on a timer, a question asked meanwhile going
+  first (`Call.prepare`; Tom, 2026-11-17, P-038). With one other person,
+  Valor leads: a settled item's read-back opens the next; with more, the
+  who-is-here note says the next item waits until someone asks for it. Live decides when Valor is addressed and
   speaks; its tools ask the worker (a fresh `call` turn in the session's
   checkout, on the call's gateway), post, read the open decisions,
   record Tom's read-backs and, when the project's spec names a backlog

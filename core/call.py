@@ -583,9 +583,11 @@ INSTRUCTIONS = (
     "- Speak only when someone addresses you (by name, or by asking you something directly), or asks what only "
     "you would know. Otherwise stay silent: talk between the others is not to you, even about the work, money "
     "or something you know, and you never answer or comment on it. When a note "
-    "says only one person is here with you, everything they say is to you: answer it.\n"
+    "says only one person is here with you, everything they say is to you: answer it, and lead the call as "
+    '"In a call" below says.\n'
     "- Lines that begin `[note]` tell you about the call (who is speaking, who is here, what your worker "
-    "found). Never answer a note or read one out.\n"
+    'found). Never answer a note or read one out. A note opening "Your worker prepared" is depth on items '
+    "still to come: use it when the call reaches them.\n"
     "- A line that begins `[typed by NAME]` was typed in the call's chat: answer it only by calling `post`, "
     "never aloud.\n"
     "- For anything you would have to look up (code, records, documents, figures), call `ask` and say you "
@@ -601,10 +603,12 @@ INSTRUCTIONS = (
     "ordinary work: say in a sentence that it is noted. Your notes on the call carry it to your chat "
     "session after the call.\n"
     "- When someone asks what is open, call `open_decisions` and go through what is theirs to decide as "
-    '"In a call" below says, and let them choose. With anyone but Tom in the call, a decision about a client '
+    '"In a call" below says, and let them decide each one. With anyone but Tom in the call, a decision about a client '
     "relationship (pricing, terms, hiring or pay) is one line: it is for Tom. Never say an id aloud.\n"
     "- When Tom settles open decisions (one idea may settle several), read his answer back in a sentence and "
-    "call `settle` with the ids it settles. Only Tom settles decisions; a correction is a new `settle`.\n"
+    "call `settle` with the ids it settles. Only Tom settles decisions; a correction is a new `settle`. With "
+    "only one person here, that read-back ends by opening the next item: no later turn comes for it. With more "
+    "people here, it ends with the read-back: the next item waits until someone asks for it.\n"
     "- Call `leave` when anyone in the call asks you to leave, or when everyone has wrapped up and said "
     "goodbye. Never leave because the meeting's scheduled time has passed: stay while people are still "
     "talking.\n{reading}\n"
@@ -652,6 +656,17 @@ READ_UP = (
     "case (what happened, when, where it is recorded; observed, reported or assumed) or saying there is no "
     "case yet."
 )
+# The worker's depth on what is coming, prepared on the call's events (P-038, Tom, 2026-11-17).
+PREPARE = (
+    "Prepare ahead for this call; nothing you write is posted, it reaches Valor's voice as a note. From the "
+    "call so far and the notes before it, take the next two items or open questions the call has not reached "
+    "yet. For each, in short notes: its case (what happened, when, where it is recorded; observed, reported "
+    "or assumed), the numbers, and the two or three follow-ups likely asked, each answered a level below the "
+    "last (an example, the mechanism, the step). Answer only `nothing ahead` when nothing is left.\n\n"
+    "The call so far:\n{so_far}"
+)
+PREPARED = "Your worker prepared, for when the call reaches it (say nothing about this note):\n{notes}"
+PREP = object()  # a prep turn on the worker's lane (`Call.prepare`)
 READ_IN = (
     "Your reading for this call is in: you are no longer reading up, so never say you are. Use it from now "
     "on, and say nothing about this note:\n{notes}"
@@ -1052,6 +1067,7 @@ class Call:
         worker: Callable[[str], Awaitable[str]],
         worker_ready: Callable[[], Awaitable[bool]],
         reader: Callable[[], Awaitable[str]] | None = None,
+        preparer: Callable[[str], Awaitable[str]] | None = None,
         project: str | None = None,
         socket=None,
         clock: Callable[[], float] = time.monotonic,
@@ -1067,6 +1083,8 @@ class Call:
         self.reader = reader if not info.get("starts") else None
         self.reading, self.read_note = self.reader is not None, ""
         self.read_told = False  # the Live session has the reading, in its config or a note
+        self.preparer, self.prep_queued = preparer, False
+        self.prep_note = ""  # a prep done while no session was open, for the next to open
         self.sheet: str | None = None  # the project's backlog Sheet, read as the call starts (`live`)
         self.socket, self.clock = socket, clock
         # An invited call joined before its start waits for the others, and
@@ -1313,6 +1331,9 @@ class Call:
                     elif self.read_note and not self.read_told:  # read while it opened, or between sessions
                         await self._note(self.read_note)
                         self.read_told = True
+                    if self.prep_note:
+                        await self._note(self.prep_note)
+                        self.prep_note = ""
                     self.unheard, self.stalled = 0.0, asyncio.Event()
                     _log(f"call {self.id}: the Live session is open{' (resumed)' if self.handle else ''}")
                     receiving = asyncio.create_task(self._receive(session))
@@ -1600,6 +1621,8 @@ class Call:
                 result = "leaving"
             else:
                 result = f"not done: {fc.name} needs its arguments"
+            if fc.name in ("settle", "backlog", "open_decisions"):
+                self.prepare()  # the call is moving through its queue
             scheduling = None
             if fc.name in quiet:
                 scheduling = (
@@ -1748,11 +1771,20 @@ class Call:
     async def work(self) -> None:
         """The worker's questions, one at a time; an answer is posted
         naming its question and noted to the session, or after leaving goes
-        in the call's report. A call asked for in a chat reads up first."""
+        in the call's report. A call asked for in a chat reads up first.
+        Between questions, the preps `prepare` asks for."""
         if self.reader is not None:
             await self._read_up()
+        self.prepare()
         while True:
             question = await self.questions.get()
+            if question is PREP:
+                if not self.questions.empty():  # a question asked meanwhile goes first
+                    self.questions.put_nowait(PREP)
+                    continue
+                self.prep_queued = False
+                await self._prepare()
+                continue
             self.asking.append(question)
             try:
                 answer = await self.worker(question)
@@ -1794,6 +1826,36 @@ class Call:
         if self.session is not None:
             await self._note(self.read_note)
             self.read_told = True
+
+    def prepare(self) -> None:
+        """Ask for a prep turn: after the reading (or as an invited call
+        starts), and each time the voice moves through the queue (`settle`,
+        `backlog`, `open_decisions`); never on a timer. Asks while one waits
+        are one."""
+        if self.preparer is not None and not self.prep_queued:
+            self.prep_queued = True
+            self.questions.put_nowait(PREP)
+
+    async def _prepare(self) -> None:
+        """The worker's notes on the items still to come, noted to the
+        session with no reply asked (P-038), or to the next one to open when
+        none is; never posted. "nothing ahead" notes nothing."""
+        if self.left:
+            return
+        try:
+            notes = (
+                await self.preparer(PREPARE.format(so_far="\n".join(self.lines[-40:]) or "(nothing yet)"))
+            ).strip()
+        except tasks.TaskStopped:
+            return
+        except Exception as exc:  # noqa: BLE001  a prep that fails leaves the call as it was
+            _log(f"call {self.id}: the worker's prep failed: {exc!r}")
+            return
+        if notes and "nothing ahead" not in notes.lower()[:40] and not self.left:
+            if self.session is None:
+                self.prep_note = PREPARED.format(notes=notes)
+            else:
+                await self._note(PREPARED.format(notes=notes))
 
     # -- the call's life --
 
@@ -1876,9 +1938,15 @@ class Call:
     @staticmethod
     def _here(names: list[str]) -> str:
         """Who is in the call. With one other person, whatever they say is
-        to Valor (Tom's "Hello", unanswered, 2026-11-05)."""
+        to Valor (Tom's "Hello", unanswered, 2026-11-05); with more, the next
+        item waits to be asked for (a settled item's reply opened it, live
+        test, 2026-11-17)."""
         if len(names) == 1:
             return f"Only {names[0]} is here with you: everything they say is to you, so answer it."
+        if len(names) > 1:  # a group call: Valor does not lead it (Tom, 2026-11-17)
+            return (
+                f"In the call with you: {', '.join(names)}. Open the next item only when someone asks for it."
+            )
         return f"In the call with you: {', '.join(names) or 'no one yet'}."
 
     async def orders(self) -> None:
@@ -2131,7 +2199,8 @@ class Call:
                 await asyncio.sleep(0.2)
         unanswered = [*self.asking, *self.dropped]
         while not self.questions.empty():
-            unanswered.append(self.questions.get_nowait())
+            if (q := self.questions.get_nowait()) is not PREP:
+                unanswered.append(q)
         jobs = [*lanes, *self.jobs]
         for job in jobs:
             job.cancel()

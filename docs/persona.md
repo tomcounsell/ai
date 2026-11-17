@@ -514,6 +514,13 @@ two "if x, do y" lines in the shape Google's Live API guide recommends: a
 fact the notes and tools don't give is asked of the worker in that turn,
 and a repeat or a confused listener sends it to the worker, never the same
 answer reworded. **English, always** opens with Google's own sentence.
+Tom, 2026-11-17 (P-038): in a 1:1 he had to ask "what's next?" once an
+item was settled, and asked for more detail he got the same answer again.
+So **Lead a 1:1; wait in a group**: with one other person, the reply that
+settles an item opens the next, never asking which; with more, it ends at
+the read-back ("Short and plain" no longer says not to steer). And **More
+detail means more** quotes the present skill's teaching lines, drawing on
+the notes the call's worker prepares ahead (`Call.prepare`).
 
 ### Instructions come from Tom and the Brief
 

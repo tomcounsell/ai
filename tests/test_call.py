@@ -18,6 +18,7 @@ import asyncio
 import base64
 import contextlib
 import dataclasses
+import inspect
 import json
 import shutil
 import sys
@@ -227,7 +228,7 @@ async def until(check, s=5.0):
 
 
 async def a_call_of(
-    dsn, team, page, gemini, *, worker=None, ready=True, reader=None, starts=None, target="new"
+    dsn, team, page, gemini, *, worker=None, ready=True, reader=None, preparer=None, starts=None, target="new"
 ):
     async def ready_now():
         return ready
@@ -245,7 +246,7 @@ async def a_call_of(
     if starts:
         info["starts"] = starts
     the = call.Call(session_id, info, page, dsn=dsn, gemini=gemini, worker=worker or no_worker,
-                    worker_ready=ready_now, reader=reader, project=team.project, store=str(team.profile.parent / "store" / "Meetings"))  # fmt: skip
+                    worker_ready=ready_now, reader=reader, preparer=preparer, project=team.project, store=str(team.profile.parent / "store" / "Meetings"))  # fmt: skip
     return brief, the
 
 
@@ -517,7 +518,13 @@ def test_who_is_here_is_a_note_and_with_one_other_person_all_they_say_is_to_valo
         f"[note] Only {TOM} is here with you: everything they say is to you, so answer it.",
         False,
     ) in notes
-    assert (f"[note] In the call with you: Logan, {TOM}, Valor Engels (another device).", False) in notes
+    assert (
+        (
+            f"[note] In the call with you: Logan, {TOM}, Valor Engels (another device). Open the next item only "
+            "when someone asks for it."
+        ),
+        False,
+    ) in notes
     assert all(not complete for text, complete in notes if text.startswith("[note]"))
 
 
@@ -2559,3 +2566,136 @@ def test_the_persona_says_when_the_call_asks_its_worker_as_if_then_lines():
         assert line in flat
         assert line in " ".join(call.live_config("acme", "", None).system_instruction.split())
         assert line not in " ".join(call.INSTRUCTIONS.split())
+
+
+def test_in_a_one_to_one_valor_opens_the_next_item_and_more_detail_is_taught_not_repeated():
+    """Tom, #valor-product 2026-11-17 04:25 UTC: in a 1:1 he had to ask
+    "what's next?" once an item was settled (2026-11-16, #117966, #118033,
+    #118640), and Valor handed the pick back ("What priority should we review
+    next?", #118046); asked for more, Valor repeated itself. The persona's
+    one text says to lead a 1:1 and wait in a group, and to teach a second
+    answer in the present skill's words; the call's mechanics point at it."""
+    flat = " ".join(persona.section(settings.persona_dir, "In a call").split())
+    assert "With one other person in the call you lead it as the project's manager (Tom, 2026-11-17)" in flat
+    assert "a short question confirming it is settled is always fine" in flat
+    assert (
+        "the same reply that reads it back or answers their confirmation ends by opening the next item"
+        in flat
+    )
+    assert "open it, never ask which to take next" in flat
+    assert (
+        "With two or more others, don't steer the call: a settled item's reply ends with its read-back"
+        in flat
+    )
+    assert "the next item waits until someone asks for it" in flat
+    assert flat.count("steer the call") == 1 and "Follow what they want to discuss." in flat
+    # The present skill's own lines (yudame present, Page form), not a second version.
+    for quoted in ('"a taught explanation, not the same prose in a nicer font"',
+                   '"a concrete example before the abstraction"', '"one hard concept an analogy and then the mechanism"',
+                   "Each answer adds what the last one lacked; when your notes hold nothing new, ask your worker"):  # fmt: skip
+        assert quoted in flat
+    told = " ".join(call.live_config("acme", "", None).system_instruction.split())
+    assert 'everything they say is to you: answer it, and lead the call as "In a call" below says' in told
+    assert "With only one person here, that read-back ends by opening the next item" in told
+    assert "and let them decide each one" in told and "let them choose" not in told
+    assert 'A note opening "Your worker prepared" is depth on items still to come' in told
+    assert call.PREPARED.startswith("Your worker prepared")
+    from core import __main__ as kernel
+
+    source = " ".join(inspect.getsource(kernel._call).replace('"\n', "").replace('"', "").split())
+    assert (
+        "When the call so far already answered it, give what that answer lacked (an example, another"
+        in source
+    )
+    assert "never the same answer" in source and "preparer=turn" in source
+    worker = " ".join((Path(__file__).parent.parent / "skills/sdlc/call.md").read_text().split())
+    assert "A turn that asks you to prepare ahead is not a question" in worker and "never posted" in worker
+
+
+def _prepared(session) -> list[tuple[str, bool]]:
+    return [
+        (t, complete) for t, complete in session.contents() if t.startswith("[note] Your worker prepared")
+    ]
+
+
+def test_the_worker_prepares_after_the_reading_as_a_note_never_posted(dsn, team, quick):
+    """P-038: the depth is ready before the call reaches it: the first prep
+    follows the reading on the one worker lane, reaches the voice as a note
+    asking no reply, and is never posted."""
+    order = []
+
+    async def reader():
+        order.append("read")
+        return "Two items: the import error, then the dossiers."
+
+    async def preparer(prompt):
+        order.append("prep")
+        assert "next two items or open questions" in prompt and "The call so far:" in prompt
+        return "Dossiers: 14 people recorded, 3 internal (ledger, 2026-11-16)."
+
+    async def go():
+        c = await in_call(dsn, team, reader=reader, preparer=preparer)
+        assert await until(lambda: _prepared(c.session))
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert order == ["read", "prep"]
+    ((text, complete),) = _prepared(c.session)
+    assert "14 people recorded" in text and complete is False
+    assert not [p for p in c.page.posts if "14 people" in p]
+
+
+def test_prep_runs_on_the_queue_moving_not_on_talk_and_questions_go_first(dsn, team, quick):
+    """Preps come on events (an invited call's start, `settle`, `backlog`,
+    `open_decisions`), in a group call too, never because the call talked
+    on; events during a prep are one more prep; a question asked meanwhile
+    is answered first, posted and noted as ever. "nothing ahead" notes
+    nothing."""
+    gate, order = asyncio.Event(), []
+    replies = iter(["nothing ahead", "Item two: 0.4 percent of imports fail.", "Item three: blocked on QA."])
+
+    async def preparer(prompt):
+        order.append("prep")
+        if len(order) == 2:
+            await gate.wait()
+        return next(replies)
+
+    async def worker(question):
+        order.append(question)
+        return "Tuesday."
+
+    async def go():
+        starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        c = await in_call(dsn, team, worker=worker, preparer=preparer, starts=starts)
+        assert await until(lambda: order == ["prep"])
+        await settle(c.the)
+        c.the.present = {"d1", "d2"}  # a group call
+        for i in range(5):
+            await c.the._heard("d1", "Tom", f"talking on {i}", "spoke")
+        await asyncio.sleep(0.3)
+        talked = list(order)
+        await push(c.session, tool("settle", ids=["t1/q1"], readback="Ship Monday."), done())
+        assert await until(lambda: len(order) == 2)  # the second prep, held at the gate
+        await push(c.session, tool("open_decisions"), done())
+        await push(c.session, tool("settle", ids=["t2/q2"], readback="Drop IE."), done())
+        await push(c.session, tool("ask", question="When did the import ship?"), done())
+        gate.set()
+        assert await until(lambda: len(order) == 4)
+        await settle(c.the)
+        await asyncio.sleep(0.3)
+        await finish(c)
+        return c, talked
+
+    c, talked = run(go())
+    assert talked == ["prep"]  # talk alone starts no prep, and "nothing ahead" was noted as nothing
+    assert order == ["prep", "prep", "When did the import ship?", "prep"]
+    notes = [t for t, _ in _prepared(c.session)]
+    assert len(notes) == 2 and "0.4 percent" in notes[0] and "blocked on QA" in notes[1]
+    assert not [p for p in c.page.posts if "0.4 percent" in p or "nothing ahead" in p]
+    assert any("Tuesday." in p for p in c.page.posts)
+    assert (
+        '[note] Your worker answered "When did the import ship?" (posted in the chat): Tuesday.',
+        False,
+    ) in (c.session.contents())
