@@ -26,7 +26,7 @@ amends: docs/plans/meet.md (items 4, 5, 7)
 2. **Session** (google-genai, `settings.call_model` = `gemini-3.8-live`).
    - The voice is Charon (amended 2026-11-16: Tom picked Alnilam). Transcription in and out, resumption and compression are on.
    - The tracks are mixed to 16 kHz mono and sent with `send_realtime_input`. Valor's own audio is not sent.
-   - Activity detection: start sensitivity LOW, prefix padding 300 ms, interruptions kept.
+   - Activity detection: start sensitivity LOW, prefix padding 300 ms, interruptions kept (amended 2026-11-05: Live's own start and end of a turn are kept, and the call, not Live, cuts Valor off; 2026-11-17, P-038: a longer end of turn was tried again and is not set, `core/call.py` `live_config`).
    - Instructions: the call's mechanics (answer only when addressed, or when asked what only Valor holds; a line tagged "typed" is answered with `post()`; the tools), then the persona's own "In a call" section (`persona/conduct.md`, read by `persona.section` as the call starts; docs/plans/call-persona.md), then `prep`. Proactive audio is on.
    - Heard speech is transcribed with `language_codes=["en-US"]`. That shapes the transcript only; the reply's language is the model's, kept English by the persona section.
 3. **Notes.** These are context only, sent as `send_client_content(turn_complete=False)`:

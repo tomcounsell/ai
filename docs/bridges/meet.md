@@ -64,7 +64,11 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   a typed line is answered in the chat, never aloud, until someone
   speaks. A Live turn of silence ("<no speech>", "...", or near-silent
   audio) is never said. Live itself never cuts Valor off; the call does,
-  when the person he answers speaks over him, and side talk does not. With
+  when the person he answers speaks over him, and side talk does not.
+  Live's own end of a turn is kept: it waits out a pause of a second
+  inside a thought, and answers one of 1.5 s; no setting tried waited that
+  out and still answered within 2 s (2026-11-17,
+  `tests/test_live_call_voice.py`). With
   one other person in the call, a silence after their words asks Live for
   the answer, unless a reply already answered them. `ask`, `post`, `settle`
   and `leave` don't block: a result that only acknowledges, in a turn that

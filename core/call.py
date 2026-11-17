@@ -679,10 +679,14 @@ def live_config(
     proactive audio (it may stay silent), no cutting Valor off (Live's own
     barge-in stopped him for side talk, 2026-11-05: the call cuts him off
     only for the person he answers), compression that bounds what each
-    turn bills, and resumption from `handle`. Live's own sensitivity to the
-    start and end of speech is kept: at its lowest it missed a short
-    "Hello.", and 500 ms to end a turn gained nothing measurable in a live
-    call (the live tests, 2026-11-05). The instruction carries the
+    turn bills, and resumption from `handle`. Live's own start and end of
+    speech are kept: at its lowest start sensitivity it missed a short
+    "Hello.", and 500 ms to end a turn gained nothing measurable (the live
+    tests, 2026-11-05). Kept on its own end of turn it waits out a pause of
+    a second inside a thought and answers one of 1.5 s; 1200 ms of silence or
+    its low end sensitivity still answered 1.5 s, a third of a second later,
+    and 1600 ms answered nothing in two runs (tests/test_live_call_voice.py,
+    2026-11-17). The instruction carries the
     persona's "In a call" section and its "How product decisions are
     made" (Valor's own process as the project's manager, Tom, 2026-11-13),
     read as the call starts. What Valor

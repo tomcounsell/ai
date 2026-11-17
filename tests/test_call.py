@@ -2535,3 +2535,27 @@ def test_the_tasks_from_a_call_reach_the_chat_session_in_its_report(dsn, team, q
     assert "- Prepare the build of action results before replies (Valor)" in ended
     assert "- Mark team lookup as something to improve\n" in ended + "\n"
     assert "each task someone gave or asked Valor for, and each thing Valor said it would do" in call.SUMMARY
+
+
+def test_the_persona_says_when_the_call_asks_its_worker_as_if_then_lines():
+    """P-038: asked what an error meant, Valor explained it five times in
+    other words before asking (2026-11-16); asked for the criteria behind an
+    order, it restated the order (2026-11-13). The persona's own rule, as
+    Google's Live API guide shapes one ("if x, do y"), reaches the call's
+    instruction, and Google's English sentence with it; the call's template
+    keeps no copy."""
+    flat = " ".join(persona.section(settings.persona_dir, "In a call").split())
+    for line in (
+        (
+            "If you are asked for a fact your notes and tools don't give (a figure, what an error means, why an "
+            "item ranks where it does), say plainly you don't know and ask your worker in that same turn."
+        ),
+        (
+            "If you are asked again, or told they are confused, and your answer would say what you already said, "
+            "ask your worker. Never say it again in other words."
+        ),
+        "RESPOND IN ENGLISH. YOU MUST RESPOND UNMISTAKABLY IN ENGLISH.",
+    ):
+        assert line in flat
+        assert line in " ".join(call.live_config("acme", "", None).system_instruction.split())
+        assert line not in " ".join(call.INSTRUCTIONS.split())
