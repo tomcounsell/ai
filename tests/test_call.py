@@ -2699,3 +2699,43 @@ def test_prep_runs_on_the_queue_moving_not_on_talk_and_questions_go_first(dsn, t
         '[note] Your worker answered "When did the import ship?" (posted in the chat): Tuesday.',
         False,
     ) in (c.session.contents())
+
+
+def test_a_prep_done_while_no_session_is_open_is_noted_once_to_the_next(dsn, team, quick):
+    """A prep that lands before Live is open (the call joining, or between
+    sessions) waits for the next session to open, is noted to it once with
+    no reply asked, and not again to a session after."""
+    opening, asked = asyncio.Event(), asyncio.Event()
+
+    class SlowGemini(Gemini):
+        @contextlib.asynccontextmanager
+        async def connect(self, config):
+            asked.set()
+            await opening.wait()
+            async with super().connect(config) as session:
+                yield session
+
+    async def preparer(prompt):
+        await asked.wait()  # no session open yet
+        return "Item two: 0.4 percent of imports fail."
+
+    async def go():
+        gemini = SlowGemini()
+        starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        _brief, the = await a_call_of(dsn, team, Page(), gemini, preparer=preparer, starts=starts)
+        running = asyncio.create_task(the.run())
+        assert await until(lambda: the.prep_note)
+        opening.set()
+        assert await until(lambda: the.session is not None and _prepared(the.session))
+        await settle(the)
+        await push(the.session, go_away())  # no handle: a fresh session
+        assert await until(lambda: len(gemini.sessions) == 2 and the.session is gemini.sessions[1])
+        await settle(the)
+        the.leave("done")
+        await asyncio.wait_for(running, 15)
+        return the, gemini
+
+    the, gemini = run(go())
+    ((text, complete),) = _prepared(gemini.sessions[0])
+    assert "0.4 percent" in text and complete is False
+    assert not _prepared(gemini.sessions[1]) and not the.prep_note

@@ -81,7 +81,12 @@ plan stay on its branch, which should not also merge.
 Turn detection, cut-offs, the nudge, rocky-after-a-while (Tom); an
 extended-thinking model; prep notes carried into a fresh session after a
 refused handle (no case). Cost named: a lookup asked during a prep waits for
-it; the live test reports that wait.
+it. Measured 2026-11-17: two prep turns on the worker's model
+(claude-haiku-5-5, `PREPARE` on a recorded 1:1) took 11 s and 14 s; the
+recorded call worker turns of 2026-11-13 to 16 took 11, 25, 27, 27, 28 and
+75 s. So a lookup asked mid-prep waits the rest of one prep, typically
+under 15 s, at worst one long turn; one prep runs at a time and events
+coalesce, which is what bounds it.
 
 ## Tests
 
