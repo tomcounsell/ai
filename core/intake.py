@@ -906,15 +906,13 @@ def addressed_inputs(rows: list[dict], item: dict[str, Any], received: dict[str,
             lines.append((f"Valor: {_said(texts[q['effect_id']])}", r["at"]))
     room = lines[-ROOM_LINES:]
     mine = [i for i, (line, _) in enumerate(lines) if line.startswith("Valor: ")]
-    here = next((r["at"] for r in rows if r["id"] == upto), None)
     if not mine:
         last = "Valor has not posted in the chat this session"
     else:
-        after = len(lines) - 1 - mine[-1]
-        when = lines[mine[-1]][1]
-        mins = round((here - when).total_seconds() / 60) if here and when else None
-        last = f"Valor last posted {after} messages ago" + (
-            f", {mins} minutes before this message" if mins is not None else ""
+        here = next(r["at"] for r in rows if r["id"] == upto)
+        mins = round((here - lines[mine[-1]][1]).total_seconds() / 60)
+        last = (
+            f"Valor last posted {len(lines) - 1 - mine[-1]} messages ago, {mins} minutes before this message"
         )
     thread = [_said(m.get("text")) for m in received.get("thread") or []]
     return {

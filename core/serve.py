@@ -771,36 +771,24 @@ class Kernel:
 
     async def react(self, conn) -> None:
         """A job of its own for each message's next reaction not already
-        being written (`reactions.pending`)."""
-        for item in await reactions.pending(conn):
-            rid = item["row"]["received_id"]
-            if rid in self.reacting:
+        being written (`reactions.pending`), and for each heard message
+        still to be asked whether it is meant for Valor (`intake.address`)."""
+        due = [(i["row"]["received_id"], self._react, i) for i in await reactions.pending(conn)]
+        if self.judgement_port is not None:
+            due += [(f"addressed:{i['id']}", self._address, i) for i in await intake.unaddressed(conn)]
+        for key, run, item in due:
+            if key in self.reacting:
                 continue
-            job = asyncio.create_task(self._react(item))
-            self.reacting[rid] = job
+            job = asyncio.create_task(run(item))
+            self.reacting[key] = job
 
-            def finished(job, rid=rid):
-                self.reacting.pop(rid, None)
+            def finished(job, key=key):
+                self.reacting.pop(key, None)
                 if not job.cancelled() and (e := job.exception()) is not None:
-                    _log(f"reaction for message {rid}: {e!r}")
+                    _log(f"reaction job for message {key}: {e!r}")
                     sentry_sdk.capture_exception(e)
 
             job.add_done_callback(finished)
-        # And each heard message still to be asked whether it is meant for
-        # Valor (`intake.address`), a job of its own beside them.
-        for item in await intake.unaddressed(conn) if self.judgement_port is not None else ():
-            key = f"addressed:{item['id']}"
-            if key in self.reacting:
-                continue
-            self.reacting[key] = asyncio.create_task(self._address(item))
-
-            def asked(job, key=key):
-                self.reacting.pop(key, None)
-                if not job.cancelled() and (e := job.exception()) is not None:
-                    _log(f"addressed for message {key}: {e!r}")
-                    sentry_sdk.capture_exception(e)
-
-            self.reacting[key].add_done_callback(asked)
 
     async def _react(self, item: dict[str, Any]) -> None:
         async with await db.connect(self.dsn) as conn:
