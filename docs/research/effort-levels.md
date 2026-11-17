@@ -64,21 +64,23 @@ Two arms tie when suite and acceptance match and each score is within 1.
 - Opus: low ties medium on all three by the rule and costs 9-61% less (44-61%
   on the feature and the answer), but it was the lowest scorer on both judged
   tasks (feature 2/2/5 against 3/3/4, answer 3/3/3 against 4/4/3), with one
-  run per arm and no revision rounds measured. Not clear enough to set:
-  recommended to Tom, not changed.
-- Tasks stay on Opus (Tom, 2026-11-16). For Tom: Fable low matched Opus
-  medium's results at 0-28% more cost.
+  run per arm and no revision rounds measured. Tom: "Keep Opus on Medium all
+  the time" (2026-11-17).
+- Tasks stay on Opus (Tom, 2026-11-16). Fable low matched Opus medium's
+  results on the bug fix and the feature at 27-28% more cost; on the answer
+  it stated a wrong fact at about the same cost.
 
-Set: nothing; `EFFORT` in `core/settings.py` is empty. Chat was set to low,
+Set: `EFFORT = {"frontier": "medium", "critique": "medium", "docs": "medium"}`
+in `core/settings.py`, Tom's medium for Opus made explicit. Chat was set to low,
 then put back to medium on review (2026-11-17): on the chat stand-in Fable low
 stated a wrong fact where medium was right, which is not a tie, and it saved
-nothing. `frontier` stays unset (medium). Critique, docs and review are keyed by
-their own stage names and stay unset (medium): they are the revision rounds
-that caught what every level missed.
+nothing; it is unset (medium). Critique, docs and review are keyed by their own
+stage names: they are the revision rounds that caught what every level missed.
+Review, on Fable, is unset (medium).
 
-To try a level, add an entry: `"chat": "low"` reaches chat turns from their
-next turn; `"frontier": "low"` (new tasks only; a running
-task keeps the level it started with).
+To change a level, edit its entry: `"chat"` reaches chat turns from their next
+turn; `"frontier"` new tasks only (a running task keeps the level it started
+with).
 
 ## Not tested
 

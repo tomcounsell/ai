@@ -156,3 +156,8 @@ def test_an_unknown_level_is_refused(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         __main__.main()
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_opus_turns_are_medium_by_name_and_chat_and_review_unset():
+    """Tom, 2026-11-17: "Keep Opus on Medium all the time"; chat back at the default."""
+    assert settings.EFFORT == {"frontier": "medium", "critique": "medium", "docs": "medium"}

@@ -232,10 +232,13 @@ SEATS: dict[str, tuple[str, str]] = {
 # `review`), read when it runs. A name absent here passes none and runs at
 # Claude Code's default, medium on Fable 5.2 and Opus 5.5 (measured
 # 2026-11-17). The call worker, routines, the advisor and `gateway.ask` take
-# none. Every entry is unset: in replays low did not clearly tie medium
-# (docs/research/effort-levels.md). Add a line to set one.
+# none. Chat is unset (medium): in replays Fable low did not tie medium
+# (docs/research/effort-levels.md). The turns on Opus 5.5 that read an
+# entry (a task's own, critique, docs) are medium by name, so a change of
+# Claude Code's default cannot move them: "Keep Opus on Medium all the
+# time" (Tom, 2026-11-17).
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-EFFORT: dict[str, str] = {}
+EFFORT: dict[str, str] = {"frontier": "medium", "critique": "medium", "docs": "medium"}
 
 
 def seat_effort(name: str) -> dict[str, str]:
