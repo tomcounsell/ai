@@ -377,10 +377,11 @@ def case_shape(site: str, c: dict[str, Any]) -> tuple[dict[str, str], dict[str, 
     case shape:
 
     - judge: `{"id", "request" or "item", "label": precise|thin, "sub_label", "source"}`;
-    - breadth: `{"id", "inputs": {"diff", "tests"}, "labels": {question: {"value", "source", "evidence"}}}`.
+    - any other: `{"id", "inputs": {its task's inputs}, "labels": {question: {"value", "source", "evidence"}}}`.
 
     A label `false` expects proceed and `true` caution (each question's own
-    `proceed` set); a `pick` question expects its label itself. Raises
+    `proceed` set); a `pick` question's value is one of its labels, and it
+    expects that label itself. Raises
     `ValueError` naming what is wrong."""
     task = BY_SITE[site]
     if site == JUDGE.site:
@@ -397,6 +398,13 @@ def case_shape(site: str, c: dict[str, Any]) -> tuple[dict[str, str], dict[str, 
     expected = {}
     for q in task.questions:
         lab = labels.get(q.id)
+        if q.kind is Kind.PICK:
+            if not isinstance(lab, dict) or lab.get("value") not in q.labels or not lab.get("source"):
+                raise ValueError(
+                    f"case {c.get('id')}: no label of {sorted(q.labels)} with a source for {q.id}"
+                )
+            expected[q.id] = Expected(lab["value"], lab["value"], str(lab["source"]))
+            continue
         if not isinstance(lab, dict) or not isinstance(lab.get("value"), bool) or not lab.get("source"):
             raise ValueError(f"case {c.get('id')}: no true or false label with a source for {q.id}")
         label = "true" if lab["value"] else "false"
@@ -446,7 +454,7 @@ async def calibrate(port: JudgementPort, dsn: str, cases_path: str | Path) -> di
         for leg in judgement.route(task):
             j = await port.ask_leg(leg, task, inputs, task_id=task_id, ref={"case": c["id"]}, dsn=dsn)
             per_leg[leg] = _scored(task, j, expected, asked_again=0)
-        label = c["label"] if site != BREADTH.site else {q: e.label for q, e in expected.items()}
+        label = c["label"] if site == JUDGE.site else {q: e.label for q, e in expected.items()}
         results.append(
             {"case": c["id"], "label": label, "sub_label": c.get("sub_label"), "source": c.get("source"),
              **per_leg}

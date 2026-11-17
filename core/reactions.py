@@ -10,7 +10,9 @@ a new task) and a `none` owe their `done` at once (`reaction.owed`); a
 `stop` gets 👌 as its done at once. A message bound `none` with no task, or
 `heard`, and any message on a channel that does not react (email, local),
 gets nothing; so in a team chat whose spec lists it under `mentions`, only
-a message that names Valor or replies to him is marked.
+a message that names Valor or replies to him is marked, until the
+`intake.addressed` question judges a heard one meant for him (👀, as a
+steer) or worth an emoji (its done owed at once, `acknowledge`).
 
 When a turn of the task is collected (`core/session.py`, `record`),
 `owe` writes, in the collection's transaction, a `reaction.owed` row for
@@ -177,6 +179,14 @@ async def on_bound(conn, p: dict[str, Any], task_id: str | None, as_: str) -> No
         await _request(conn, task_id, p, "ok", "done", why="done: you stopped the work, as asked")
     elif as_ in BOUND:
         await _owe(conn, task_id, p, "done", outcome=BOUND[as_], did=[], replied="no text sent")
+
+
+async def acknowledge(conn, task_id: str, p: dict[str, Any], *, outcome: str) -> None:
+    """A heard message judged worth an emoji alone (`intake.address`): its
+    done owed now, told `outcome`, on a channel that reacts."""
+    row = channels.get(p["channel"])
+    if row is not None and row.reacts:
+        await _owe(conn, task_id, p, "done", outcome=outcome, did=[], replied="no text sent")
 
 
 def _message(p: dict[str, Any]) -> dict[str, Any]:
@@ -453,9 +463,13 @@ async def inputs(conn, item: dict[str, Any]) -> dict[str, str]:
             (rid,),
         )
     ).fetchone()
+    # Its binding, or the steer a heard message was later judged worth.
     bound = await (
         await conn.execute(
-            "SELECT payload->>'as' FROM events WHERE type = 'message.bound' AND payload->>'received_id' = %s",
+            "SELECT CASE WHEN type = 'message.bound' THEN payload->>'as' WHEN payload->>'addressed' = 'aside' "
+            "THEN 'steer (aside)' ELSE 'steer' END FROM events WHERE payload->>'received_id' = %s "
+            "AND (type = 'message.bound' OR (type = 'message.steered' AND payload ? 'addressed')) "
+            "ORDER BY id DESC LIMIT 1",
             (rid,),
         )
     ).fetchone()

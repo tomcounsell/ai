@@ -338,11 +338,14 @@ def mid_turn(rows: list[dict], read_upto: int, chat: bool) -> list[tuple[int, st
     from core import intake
 
     shown = reactions.shown(rows)
+    later = _steered_later(rows)
     owed, heard = [], []
     for r in rows:
         if int(r.get("id") or 0) <= read_upto:
             continue
         p = r["payload"]
+        if r["type"] == "message.heard" and p.get("received_id") in later:
+            continue
         if chat and r["type"] in ("message.heard", "message.steered"):
             heard.append(f"- {intake.chat_line(p, shown.get(p.get('received_id')))}")
         if r["type"] != "message.steered":
@@ -369,6 +372,7 @@ def chat_prompt(rows: list[dict]) -> str:
     # heard messages before it (`mid_turn`): the session has read them.
     upto = max((i for i in f.spent if i > since), default=since)
     shown = reactions.shown(rows)
+    later = _steered_later(rows)
     now = reactions.current(rows)
     read = {
         r["payload"].get("received_id"): r["payload"].get("message_id")
@@ -380,7 +384,7 @@ def chat_prompt(rows: list[dict]) -> str:
         if int(r.get("id") or 0) <= since or r["id"] in f.spent:
             continue
         p = r["payload"]
-        if r["type"] == "message.heard" and r["id"] < upto:
+        if r["type"] == "message.heard" and (r["id"] < upto or p.get("received_id") in later):
             continue
         if r["type"] == "reaction.failed" and p.get("gone") and p.get("received_id") in read:
             lines.append(f"- Message {read[p['received_id']]} is {reactions.GONE}")
@@ -405,6 +409,16 @@ def chat_prompt(rows: list[dict]) -> str:
         else:
             lines.append(f"- {intake.chat_line(p, shown.get(p.get('received_id')))}")
     return "\n".join(["# In the chat since your last turn", "", *lines]) if lines else ""
+
+
+def _steered_later(rows: list[dict]) -> set[str]:
+    """The heard messages later judged meant for Valor (`intake.address`):
+    each is read once, as its steer."""
+    return {
+        r["payload"].get("received_id")
+        for r in rows
+        if r["type"] == "message.steered" and "addressed" in r["payload"]
+    }
 
 
 def _reporter(p: dict[str, Any]) -> str:

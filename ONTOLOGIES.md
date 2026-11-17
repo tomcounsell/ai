@@ -39,8 +39,9 @@ one per environment and topic; the hat is the role-in-room.
 
 Not: "persona" (Valor's one identity, the same in every room; the old
 system called roles "personas"), `roles` in a project spec (the
-project's Postgres roles), `mentions` (whether a room waits to be named,
-which is separate from its role).
+project's Postgres roles), `mentions` (whether a room waits to be named
+or replied to, directly or down a reply chain from Valor's post, with each
+other message asked `intake.addressed`; separate from its role).
 
 ## Top agent
 

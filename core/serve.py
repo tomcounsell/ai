@@ -27,8 +27,10 @@ On start it recovers (`recover`) what a killed kernel left:
 Then it starts the gateway, listens on `valor_events`, and on each wake (a
 row, or `settings.serve_tick_s` with none) binds every recorded message
 (`intake.bind`), starts a job for each message's next reaction
-(`reactions.pending`; kept in `reacting`, apart from the task jobs, so a
-task's step never waits on one), requests the notices each task owes (`notices.owe`),
+(`reactions.pending`), and one for each heard message to be asked
+whether it is meant for Valor (`intake.unaddressed`; both kept in
+`reacting`, apart from the task jobs, so a task's step never waits on
+one), requests the notices each task owes (`notices.owe`),
 writes the end of each Meet call whose process is gone (`core.call.sweep`),
 rolls the kernel forward to its own merges (`roll`), and schedules jobs
 (`schedule`). A job is one step of one task
@@ -784,10 +786,29 @@ class Kernel:
                     sentry_sdk.capture_exception(e)
 
             job.add_done_callback(finished)
+        # And each heard message still to be asked whether it is meant for
+        # Valor (`intake.address`), a job of its own beside them.
+        for item in await intake.unaddressed(conn) if self.judgement_port is not None else ():
+            key = f"addressed:{item['id']}"
+            if key in self.reacting:
+                continue
+            self.reacting[key] = asyncio.create_task(self._address(item))
+
+            def asked(job, key=key):
+                self.reacting.pop(key, None)
+                if not job.cancelled() and (e := job.exception()) is not None:
+                    _log(f"addressed for message {key}: {e!r}")
+                    sentry_sdk.capture_exception(e)
+
+            self.reacting[key].add_done_callback(asked)
 
     async def _react(self, item: dict[str, Any]) -> None:
         async with await db.connect(self.dsn) as conn:
             await reactions.react(self.judgement_port, conn, item, self.dsn)
+
+    async def _address(self, item: dict[str, Any]) -> None:
+        async with await db.connect(self.dsn) as conn:
+            await intake.address(self.judgement_port, conn, item, self.dsn)
 
     async def drain(self, conn) -> None:
         """When Homebrew moved the interpreter this process runs on, hold new

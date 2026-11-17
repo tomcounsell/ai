@@ -21,7 +21,9 @@ the Mac that runs that client's project). A Mac's one bridge serves every
 workspace in its `slack-keys`, each on its own internal app (below). Once
 the app is installed and its pair is in the vault, a channel there is
 only an entry in that project's private spec, `slack:<team>/<channel>`,
-with its room, role and `mentions` as for any chat.
+with its room, role and `mentions` as for any chat. In a `mentions`
+channel a reply in a thread with Valor's post wakes him, and an untagged
+message is asked `intake.addressed`, as on Telegram (docs/bridges/telegram.md).
 
 **Dev channels** (Tom, 2026-10-25: "private dev channels for each
 project ... named like x-dev. They are equivalent to Eng: x telegram

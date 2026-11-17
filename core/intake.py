@@ -35,7 +35,9 @@ with the next one that wakes it. Each names its sender (`by` is the
 display name, `tom` for Tom; the received row keeps the `sender_id`).
 Every message wakes it, except in a chat the spec lists under
 `mentions`, where only one naming Valor (`MENTION`) or replying to a
-post of Valor's does. The session decides whether to answer
+post of Valor's, or to a message up a reply chain from one, does; each
+other is then asked whether it is meant for him (`address`, the
+`intake.addressed` question), which may steer it after all. The session decides whether to answer
 (`skills/sdlc/converse.md`).
 
 An *email thread* is a chat too (Tom, 2026-10-17: "email threads are chat
@@ -121,7 +123,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-from core import channels, ledger, machine, notices, reactions, tasks, workspace
+from core import channels, judgement, ledger, machine, notices, reactions, tasks, workspace
 from core.settings import resolve_seat, settings
 
 
@@ -599,7 +601,9 @@ async def _replied(conn, p: dict[str, Any]) -> tuple[str | None, dict[str, Any] 
 
     On a threaded channel `reply_to` is the thread's root, so the newest
     of Valor's posts in the thread older than the reply binds, the root
-    included; on any other, the post `reply_to` names."""
+    included; on any other, the post `reply_to` names, else the newest of
+    his posts up its reply chain (`thread`, which the bridge fetched from
+    the chat itself, so a link never recorded here still counts)."""
     if not p.get("reply_to"):
         return None, None
     row = None
@@ -615,8 +619,12 @@ async def _replied(conn, p: dict[str, Any]) -> tuple[str | None, dict[str, Any] 
                 (p["channel"], p["chat_id"], p["topic_id"], p["topic_id"], p["message_id"]),
             )
         ).fetchone()
-    if row is None:
-        sent = Jsonb([{"channel": p["channel"], "chat_id": p["chat_id"], "message_id": p["reply_to"]}])
+    # The post replied to first, then up the chain, nearest first.
+    chain = [str(p["reply_to"])] + [
+        str(m["id"]) for m in reversed(p.get("thread") or []) if isinstance(m, dict) and m.get("id")
+    ]
+    for mid in dict.fromkeys(chain) if row is None else ():
+        sent = Jsonb([{"channel": p["channel"], "chat_id": p["chat_id"], "message_id": mid}])
         row = await (
             await conn.execute(
                 "SELECT task_id, type, payload FROM events WHERE type IN ('notice.sent', 'effect.outcome') "
@@ -624,6 +632,8 @@ async def _replied(conn, p: dict[str, Any]) -> tuple[str | None, dict[str, Any] 
                 (sent,),
             )
         ).fetchone()
+        if row is not None:
+            break
     if row is None:
         return None, None
     task_id, type_, payload = row
@@ -771,6 +781,8 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
             "thread_tag": thread_tag(p),
             **({"posted": posted} if posted else {}),
             **({"replying_to": under} if under else {}),
+            # A heard message is asked whether it is meant for Valor (`address`).
+            **({} if wakes else {"addressed": ASKED}),
             "provenance": ledger.provenance(by, channel, False),
         },
     )
@@ -826,6 +838,155 @@ async def _replying_to(conn, task_id: str | None, post: dict[str, Any] | None) -
     except KeyError:
         session = True  # a stream's post: no task to reach
     return {"text": text, **({} if session else {"task_id": task_id})}
+
+
+# -- an untagged message meant for Valor (docs/plans/3138d3b5-addressed.md) ----
+
+# The mark on a heard message that `address` asks of.
+ASKED = "asked"
+# The messages of the chat before it that the question reads, each cut at.
+ROOM_LINES, ROOM_CHARS = 8, 300
+# What `reaction.completed` is told of a message judged worth only an emoji.
+ACKNOWLEDGED = "an untagged remark worth a reaction, not a reply: acknowledge its mood"
+
+UNADDRESSED = (
+    "SELECT h.id, h.task_id, h.payload FROM events h WHERE h.type = 'message.heard' "
+    'AND h.payload @> \'{"addressed": "asked"}\' '
+    "AND NOT EXISTS (SELECT 1 FROM events s WHERE s.task_id = h.task_id AND s.type = 'task.stopped') "
+    "AND NOT EXISTS (SELECT 1 FROM events s WHERE s.task_id = h.task_id AND s.type = 'message.steered' "
+    "AND s.payload->>'received_id' = h.payload->>'received_id') "
+    "AND NOT EXISTS (SELECT 1 FROM events j WHERE j.task_id = h.task_id AND j.type = 'judgement.answered' "
+    "AND j.payload->>'site' = 'intake.addressed' AND j.payload->'ref'->>'received_id' = h.payload->>'received_id') "
+    "AND (SELECT count(*) FROM events j WHERE j.task_id = h.task_id AND j.type = 'judgement.failed' "
+    "AND j.payload->>'site' = 'intake.addressed' "
+    "AND j.payload->'ref'->>'received_id' = h.payload->>'received_id') < %s ORDER BY h.id"
+)
+
+
+async def unaddressed(conn) -> list[dict[str, Any]]:
+    """Each heard message still to be asked whether it is meant for Valor:
+    marked `asked`, on a session not stopped, not since steered, with no
+    answer and fewer than `judgement.UNANSWERED_RUNS` failed asks.
+    `{"id", "task_id", "payload"}` of its `message.heard` row, oldest first."""
+    rows = await (await conn.execute(UNADDRESSED, (judgement.UNANSWERED_RUNS,))).fetchall()
+    return [{"id": i, "task_id": t, "payload": p} for i, t, p in rows]
+
+
+def _said(text: Any) -> str:
+    text = " ".join(str(text or "").split()) or "(no text)"
+    return text if len(text) <= ROOM_CHARS else text[: ROOM_CHARS - 3] + "..."
+
+
+def addressed_inputs(rows: list[dict], item: dict[str, Any], received: dict[str, Any]) -> dict[str, str]:
+    """The question's inputs for a heard message (`item`, its
+    `message.received` payload `received`), from its session's ledger: the
+    message, the chat's messages before it with Valor's sends into that chat
+    (`ROOM_LINES`), how long since Valor posted there, and its reply chain
+    as the bridge fetched it."""
+    p, upto, chat = item["payload"], item["id"], str(received.get("chat_id"))
+    texts = {
+        r["payload"].get("effect_id"): (r["payload"].get("payload") or {}).get("text")
+        for r in rows
+        if r["type"] == "effect.intent" and r["payload"].get("action_type") in reactions.SENDS
+    }
+    lines: list[tuple[str, Any]] = []
+    seen: set[str] = set()
+    for r in rows:
+        if r["id"] >= upto:
+            break
+        q = r["payload"]
+        if r["type"] in ("message.heard", "message.steered") and q.get("received_id") not in seen:
+            seen.add(q.get("received_id"))
+            lines.append((f"{q.get('sender_name') or q.get('sender_id') or 'someone'}: {_said(q.get('text'))}",
+                          r["at"]))  # fmt: skip
+        elif (
+            r["type"] == "effect.outcome"
+            and q.get("kind") == "done"
+            and q.get("effect_id") in texts
+            and any(str(e.get("chat_id")) == chat for e in (q.get("result") or {}).get("sent") or [])
+        ):
+            lines.append((f"Valor: {_said(texts[q['effect_id']])}", r["at"]))
+    room = lines[-ROOM_LINES:]
+    mine = [i for i, (line, _) in enumerate(lines) if line.startswith("Valor: ")]
+    here = next((r["at"] for r in rows if r["id"] == upto), None)
+    if not mine:
+        last = "Valor has not posted in the chat this session"
+    else:
+        after = len(lines) - 1 - mine[-1]
+        when = lines[mine[-1]][1]
+        mins = round((here - when).total_seconds() / 60) if here and when else None
+        last = f"Valor last posted {after} messages ago" + (
+            f", {mins} minutes before this message" if mins is not None else ""
+        )
+    thread = [_said(m.get("text")) for m in received.get("thread") or [] if isinstance(m, dict)]
+    return {
+        "message": f"{p.get('sender_name') or p.get('sender_id') or 'someone'}: {_said(p.get('text'))}",
+        "room": "\n".join(line for line, _ in room) or "(nothing before it)",
+        "valor_last": last,
+        "thread": "\n".join(thread) or "none",
+    }
+
+
+def _read(rows: list[dict], heard_id: int) -> bool:
+    """Whether the session already read a heard row: a turn's prompt read
+    up to it (`chat_prompt`'s window, and a turn still running), or a turn
+    took it mid-turn with a later steer (`mid_turn`)."""
+    f = machine.fold(rows)
+    prompts = [
+        n for t, n in f.turn_rows.items() if f.turn_states.get(t) not in (machine.FRESH, machine.COMPACTION)
+    ]
+    taken = set().union(f.spent, *f.taken.values())
+    return heard_id <= max([f.steer_since, *prompts]) or any(heard_id < i for i in taken)
+
+
+async def address(port, conn, item: dict[str, Any], dsn: str) -> str | None:
+    """Ask whether a heard message (`unaddressed`) is meant for Valor, and
+    do what the answer says: `engaged` steers the session with it as a
+    mention does, 👀 and all; `aside` steers it marked not addressed to
+    him; `react` owes it a done reaction; `none`, or an abstain, leaves it
+    heard. A message the session already read is not steered again. The
+    label, or None when no judgement answered (asked again on a later
+    wake, up to `judgement.UNANSWERED_RUNS`)."""
+    from core.judgement_tasks import ADDRESSED
+
+    task_id, p = item["task_id"], item["payload"]
+    received = await (
+        await conn.execute(
+            "SELECT payload FROM events WHERE type = 'message.received' AND payload->>'received_id' = %s",
+            (p["received_id"],),
+        )
+    ).fetchone()
+    inputs = addressed_inputs(await ledger.read(conn, task_id), item, received[0])
+    try:
+        j = await port.judge(
+            ADDRESSED, inputs, task_id=task_id, ref={"received_id": p["received_id"]}, dsn=dsn
+        )
+    except tasks.TaskStopped:
+        return None
+    if not j.answered:
+        return None
+    label = (j.payload.get("picked") or {}).get(ADDRESSED.questions[0].id) or "none"
+    if label == "none":
+        return label
+    async with conn.transaction():
+        await ledger.lock(conn, f"task:{task_id}")
+        rows = await ledger.read(conn, task_id)
+        if any(
+            r["type"] == "message.steered" and r["payload"].get("received_id") == p["received_id"]
+            for r in rows
+        ):
+            return label
+        if label == "react":
+            await reactions.acknowledge(conn, task_id, received[0], outcome=ACKNOWLEDGED)
+            return label
+        if _read(rows, item["id"]):
+            return label
+        payload = {k: v for k, v in p.items() if k != "addressed"}
+        await ledger.append(conn, task_id, "message.steered",
+                            {**payload, "addressed": label, "judgement_id": j.judgement_id})  # fmt: skip
+        if label == "engaged":
+            await reactions.on_bound(conn, received[0], task_id, "steer")
+    return label
 
 
 def _mentions_only(spec: workspace.Spec, p: dict[str, Any]) -> bool:
@@ -979,6 +1140,7 @@ def chat_line(m: dict[str, Any], reaction: str | None = None) -> str:
     ids = f"message {m.get('message_id')}" + (f", replying to {m['reply_to']}" if m.get("reply_to") else "")
     where = m["thread_tag"] if "thread_tag" in m else thread_tag(m)
     ids += f", {where}" if where else ""
+    ids += "; not addressed to you" if m.get("addressed") == "aside" else ""
     ids += f"; {reaction}" if reaction else ""
     files = _files(m.get("attachments") or [])
     said = (m.get("text") or "").strip() or "(no text)"

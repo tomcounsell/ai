@@ -273,5 +273,64 @@ COMPLETED = JudgementTask(
     calibrated=None,
 )
 
-TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, OVERLAP, HANDLING, COMPLETED)
+# Whether an untagged message in a mentions-only team chat is for Valor
+# (docs/plans/3138d3b5-addressed.md). Four labels; the top one is taken at a
+# floor over half, so an unsure leg abstains and the message stays heard.
+ADDRESSED_LABELS = {
+    "engaged": (
+        "plainly in response to something Valor was already engaged in here (it answers or follows up "
+        "his post or the work he is doing), or plainly asks him: he handles it as if he were named"
+    ),
+    "aside": (
+        "not for Valor, but a teammate in his seat would add one short line: a question to the group "
+        "he can clearly answer, or a wrong claim about his own work. Rare"
+    ),
+    "react": "not for Valor, but a teammate would acknowledge it with an emoji: good news, thanks, a nod",
+    "none": "talk between others, a link or a share with no ask, chit-chat: Valor stays out. The usual answer",
+}
+ADDRESSED = JudgementTask(
+    site="intake.addressed",
+    questions=(
+        Question(
+            id="addressed",
+            text=(
+                "Valor is a teammate in this group chat, woken when someone names him or replies to his "
+                "post. This message did neither. Who is it for, and what would a teammate in Valor's "
+                "seat do? Most messages are between others: none is the usual answer, then react; aside "
+                "is rare; engaged only when the message is clearly in response to something Valor was "
+                "already engaged in, or clearly asks him."
+            ),
+            kind=Kind.PICK,
+            labels=dict(ADDRESSED_LABELS),
+            proceed=frozenset(ADDRESSED_LABELS),
+        ),
+    ),
+    inputs={
+        "message": "the message, as `sender: text`, from its message.received row",
+        "room": "the chat's messages before it in the session's ledger, Valor's sends as Valor, one per line",
+        "valor_last": "how many messages and minutes since Valor last posted in the chat",
+        "thread": "the earlier messages of its reply chain, oldest first, one per line, or none",
+    },
+    error_cost="low",
+    floor={"primary": 0.5, "fallback": 0.5},
+    on_abstain="caution",
+    on_failure="caution",
+    consumer={
+        "proceed": (
+            "engaged steers the chat session with the message as a mention does; aside steers it marked "
+            "not addressed to you; react owes the message a done reaction; none leaves it heard "
+            "(core/intake.py, address)"
+        ),
+        "caution": "the message stays heard, as before",
+    },
+    serves="Mission items 1 and 6",
+    guard="none: a label that adds a wake or a reaction, no gate",
+    calibrated=None,
+    # Gemini first: on the private cases (2026-11-17) it caught 4 of 5 messages
+    # meant for Valor, case 1 among them, where Jev caught 2 and missed case 1
+    # (docs/plans/3138d3b5-addressed.md).
+    primary="gemini",
+)
+
+TASKS: tuple[JudgementTask, ...] = (JUDGE, BREADTH, OVERLAP, HANDLING, COMPLETED, ADDRESSED)
 BY_SITE = {t.site: t for t in TASKS}

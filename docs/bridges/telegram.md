@@ -180,8 +180,8 @@ section counts "decisions escalated to Tom per finished task".
 
 The kernel marks a message Valor reads (`core/reactions.py`): every
 message of Tom's in his own chat, every message in a team chat that wakes
-its session (in a `mentions` chat, one naming Valor or replying to him), and
-none that is only heard. Binding writes `reaction.requested` with 👀, and
+its session (in a `mentions` chat, one naming Valor or replying to him, or
+one `intake.addressed` judged meant for him), and none that is only heard. Binding writes `reaction.requested` with 👀, and
 the outbox places it at once: on a row's wake it yields before it
 reconciles and runs the gap fill. Then the reaction classifier (the
 judgement port, `reaction.handling`) picks a handling reaction that shows
@@ -389,8 +389,13 @@ message with the chat's last 20 recorded messages, and resumed for every
 message after, anyone's, with no rights by sender. A message that wakes it
 is a steer; in a chat the spec lists under `mentions` (the old teammate
 groups) only one naming Valor ("valor", "@valor", "@valorengels", or a Slack tag of Valor, which the Slack bridge labels `<@U..|valor>`) or replying to his post
-wakes it, and the rest are heard (`message.heard`, quiet) and reach it
-with the next. Each turn's prompt is what came in since the last, with
+wakes it, the post replied to or any up its reply chain (`thread`, which
+the bridge fetches from Telegram), and the rest are heard
+(`message.heard`, quiet) and reach it with the next. Each heard one is
+then asked `intake.addressed` (`intake.address`, a kernel job): `engaged`
+steers the session with it as a mention does, `aside` steers it marked
+`not addressed to you`, `react` owes it a done reaction, and `none`, an
+abstain or a failure leaves it heard ([docs/plans/3138d3b5-addressed.md](../plans/3138d3b5-addressed.md)). Each turn's prompt is what came in since the last, with
 when, who and message ids; a message that wakes it during a turn reaches
 that turn after its current step, with the heard messages before it, and
 one the turn did not take goes in at the next

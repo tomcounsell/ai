@@ -104,9 +104,11 @@ constraint "16 GB of RAM" (no resident model) and Mission item 6 (a failed vendo
 become a frontier call).
 
 1. Every judgement task routes to the primary leg, Jev, with Google's
-   Decisions API (`gemini`) as its fallback. A task that takes images
-   raises `NotRouted`: Jev, the primary, takes text only, and no task
-   takes images.
+   Decisions API (`gemini`) as its fallback, unless its declaration names
+   `primary="gemini"`, where its calibration record showed Gemini answering
+   it better; then Jev is the fallback, and the digest names the primary.
+   One site does: `intake.addressed` (2026-11-17). A task that takes
+   images raises `NotRouted`: Jev takes text only, and no task takes images.
 2. Both legs are asked at once, on the same inputs, on every judgement.
    The primary's confident answers stand; the fallback's are taken only
    for the questions the primary failed or abstained on; each records its
@@ -228,12 +230,13 @@ mean no calibration record covers the task as asked; that blocks nothing.
 Serves: Mission item 6; the row is how a later reader sees why the kernel
 chose what it chose.
 
-When Jev answered every question outside its abstain band, the row is
-written and `judge` returns at once. If Gemini had already answered, its
-attempt is on the row; if not, the row's Gemini attempt has `outcome:
-"shadowed"`, and when Gemini's answer or failure arrives it charges its own
-call and appends a `judgement.shadowed` row (`judgement_id`, `site`, `ref`,
-`attempt`). A Gemini error or timeout never fails or delays a judgement Jev
+When the primary (Jev, or Gemini for a site routed Gemini first) answered
+every question outside its abstain band, the row is written and `judge`
+returns at once. If the fallback had already answered, its attempt is on
+the row; if not, the row's fallback attempt has `outcome: "shadowed"`, and
+when its answer or failure arrives it charges its own call and appends a
+`judgement.shadowed` row (`judgement_id`, `site`, `ref`, `attempt`). A
+fallback's error or timeout never fails or delays a judgement the primary
 answered. `judgement.shadowed` is quiet (`ledger.QUIET`): it can land after
 the step that asked has failed, and it never counts as a task's latest row.
 It is not an outcome row. `JudgementPort.drain()` waits for held Gemini
@@ -243,7 +246,8 @@ stderr and sent to Sentry. A process killed outright leaves that call's
 `gateway.opened` open, and holder recovery charges it at its estimate.
 
 `python -m core judgement-agreement [--since YYYY-MM-DD]` (from the start of that UTC day) prints, per
-declared site, over the judgements where Gemini was asked, JSON counts:
+declared site, over the judgements where both legs were asked (a shadowed
+leg read from its own row, whichever it is), JSON counts:
 judgements, unsettled (no shadow row came), failures per leg, questions
 both answered, `action_agree` (each leg at its own floor),
 `action_agree_at_primary_floor` (Gemini's `p_proceed` re-gated at Jev's
@@ -382,6 +386,7 @@ holds or redirects work. Status says where each stands.
 | 11 | Response shape | What activity will Valor's response to this message mainly take? | `reply`, `task`, `code`, `web_search`, `lookup`, `document`, `present`, `issue`, `schedule`, `send` (a `pick`) | no | Mission 6 | Retired 2026-10-17: it guessed on arrival and got plain questions wrong; until 2026-10-26 the reaction came from what a turn did, and shape 13 now picks it |
 | 13 | Reaction | Which emoji shows Valor understood this message (`reaction.handling`), and which shows what came of it once a turn handled it (`reaction.completed`)? | the palette's labels, about forty (`reactions.PICKS`; a `pick`, floor 0.08) | no | Mission 6 | Built 2026-10-26 (Tom: "the classifier should choose reactions for both handling and completed in all cases"), uncalibrated; an abstain or a failure gives 📝 |
 | 12 | Ask overlap | Does an open task on the ask's project already do what it asks, or touch the same work? Which listed task, and should the ask run before or after it? | `decision`: `covered`, `supersedes`, `overlaps`, `split`, `distinct`; `task`: `1` to `8` (the numbered open tasks, the 8 most recently active) or `none`; `placement`: `before`, `after`, `none` (each a `pick`) | no, in shadow | Mission 6, 1 | Built (`intake.overlap`), uncalibrated: asked in the `judge` step before the judge, recorded as `reconcile.decided` (an abstain or both legs failing is `distinct` with a note), and holds nothing; its placement proposes a queue place when the writer gives none. Holding an ask for the writer waits for its calibration record and Tom's grant ([docs/plans/ask-reconciliation.md](plans/ask-reconciliation.md)) |
+| 15 | Addressed | In a mentions-only team chat, is this untagged message for Valor, and what would a teammate in his seat do (`intake.addressed`)? | `engaged`, `aside`, `react`, `none` (a `pick`, floor 0.5) | no | Mission 1, 6 | Built 2026-11-17 ([docs/plans/3138d3b5-addressed.md](plans/3138d3b5-addressed.md)), Tom: "usually nothing, half the time an emoji. sometimes a short line. and a full handling when it's clearly in response to something you were already engaged in"; Gemini first; on 71 private cases, as the port runs it: 4 of 5 messages meant for Valor caught (Jev first: 2), **1 of 59 messages between others falsely woken** as engaged, `aside` 0 of 3, `react` 2 of 4; uncalibrated (the labels are Valor's); an abstain or a failure leaves the message heard |
 | 14 | Call turn | Someone in a Meet call just finished a turn: should Valor answer it now (`meet.speak`)? | `asked_valor`, `useful_post`, `someone_else`, `nothing` (a `pick`, floor 0.60) | no | Mission 4, 6 | Built 2026-10-31 for Valor in Google Meet ([docs/plans/meet.md](plans/meet.md)), uncalibrated; retired 2026-11-05, when Gemini Live took on when to speak ([docs/plans/gemini-live.md](plans/gemini-live.md)); its rows stay quiet in the ledger |
 
 Notes per shape:
@@ -448,7 +453,17 @@ Notes per shape:
     others, an abstain and a failure are silence. A label that picks what
     Valor says, not a gate. Rows are quiet (`ledger.QUIET_SITES`).
 
-Shapes 2 to 5, 10, 11, 13, and 14 label and route; they add no governance. Shapes 7 and 8 are checks the plan
+15. Asked by the resident kernel's job per heard message (`intake.address`)
+    in a mentions-only team chat, metered on the chat's session, Gemini
+    first (`JudgementTask.primary`). It reads the message, the chat's last
+    8 messages with Valor's sends into it, how long since he posted there,
+    and the reply chain. `engaged` steers the session as a mention does,
+    `aside` steers it marked not addressed to Valor, `react` owes a done
+    reaction; `none`, an abstain and a failure leave the message heard, as
+    before. It only adds wakes and reactions. Rows are quiet
+    (`ledger.QUIET_SITES`).
+
+Shapes 2 to 5, 10, 11, 13, 14, and 15 label and route; they add no governance. Shapes 7 and 8 are checks the plan
 or Tom's decisions already require. Shape 1 is the one guard granted on its own incident.
 
 ## The first task: the request-underspecification classifier
