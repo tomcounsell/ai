@@ -1217,6 +1217,21 @@ class WebSocketClient {
   };
 
   constructor() {
+      // Valor's edit (2026-11-17): the socket opens once the document has
+      // loaded. Opened while Meet's page was still loading, it aborted that
+      // load (net::ERR_ABORTED, a blank page: the Captain's calls of
+      // 2026-11-17 timed out there); opened after DOMContentLoaded it
+      // connects. Until then `ws` is null and every send says not connected.
+      this.ws = null;
+      if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', () => this.connect(), { once: true });
+      } else {
+          this.connect();
+      }
+      this.mediaSendingEnabled = false;
+  }
+
+  connect() {
       const url = `ws://localhost:${window.initialData.websocketPort}`;
       console.log('WebSocketClient url', url);
       this.ws = new WebSocket(url);
@@ -1237,8 +1252,6 @@ class WebSocketClient {
       this.ws.onclose = () => {
           console.log('WebSocket Disconnected');
       };
-
-      this.mediaSendingEnabled = false;
       
       /*
       We no longer need this because we're not using MediaStreamTrackProcessor's
@@ -1339,7 +1352,7 @@ class WebSocketClient {
   }
   
   sendJson(data) {
-      if (this.ws.readyState !== WebSocket.OPEN) {
+      if (this.ws?.readyState !== WebSocket.OPEN) {
           console.error('WebSocket is not connected');
           return;
       }
@@ -1377,8 +1390,8 @@ class WebSocketClient {
   }
 
   sendEncodedMP4Chunk(encodedMP4Data) {
-    if (this.ws.readyState !== WebSocket.OPEN) {
-      console.error('WebSocket is not connected for video chunk send', this.ws.readyState);
+    if (this.ws?.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket is not connected for video chunk send', this.ws?.readyState);
       return;
     }
 
@@ -1403,8 +1416,8 @@ class WebSocketClient {
   }
 
   sendPerParticipantAudio(participantId, audioData) {
-    if (this.ws.readyState !== WebSocket.OPEN) {
-      console.error('WebSocket is not connected for per participant audio send', this.ws.readyState);
+    if (this.ws?.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket is not connected for per participant audio send', this.ws?.readyState);
       return;
     }
 
@@ -1441,8 +1454,8 @@ class WebSocketClient {
   }
 
   sendPerParticipantVideo(participantId, isScreenShare, videoData) {
-    if (this.ws.readyState !== WebSocket.OPEN) {
-      console.error('WebSocket is not connected for per participant video send', this.ws.readyState);
+    if (this.ws?.readyState !== WebSocket.OPEN) {
+      console.error('WebSocket is not connected for per participant video send', this.ws?.readyState);
       return;
     }
 
@@ -1485,8 +1498,8 @@ class WebSocketClient {
   }
 
   sendMixedAudio(timestamp, audioData) {
-      if (this.ws.readyState !== WebSocket.OPEN) {
-          console.error('WebSocket is not connected for audio send', this.ws.readyState);
+      if (this.ws?.readyState !== WebSocket.OPEN) {
+          console.error('WebSocket is not connected for audio send', this.ws?.readyState);
           return;
       }
 
@@ -1513,8 +1526,8 @@ class WebSocketClient {
   }
 
   sendVideo(timestamp, streamId, width, height, videoData) {
-      if (this.ws.readyState !== WebSocket.OPEN) {
-          console.error('WebSocket is not connected for video send', this.ws.readyState);
+      if (this.ws?.readyState !== WebSocket.OPEN) {
+          console.error('WebSocket is not connected for video send', this.ws?.readyState);
           return;
       }
 

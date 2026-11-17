@@ -351,6 +351,72 @@ def test_a_lock_no_chrome_on_this_profile_holds_signals_nothing_and_launches(tmp
     assert launch == [str(profile)]
 
 
+# -- the page's socket opens once the document has loaded (2026-11-17) --------------
+
+# A page that, while it is still loading, notes whether the payload's socket
+# exists yet and sends on it, as Meet's own code may before it loads.
+LOADING = """<!doctype html><html><head><script>
+window.early = { socket: window.ws.ws, threw: null };
+try { window.ws.sendJson({ type: "Early" }); } catch (e) { window.early.threw = String(e); }
+</script></head><body>a page</body></html>"""
+
+
+def test_the_pages_socket_opens_after_the_document_loads_in_every_frame_and_the_top_one_says_hello():
+    """Opened while Meet's page was loading, the socket aborted the load
+    (the Captain's calls, 2026-11-17). The whole `script(port)` in a real
+    Chrome: no socket while loading, a send then is only "not connected",
+    the payloads after it still run, the top frame's hello makes `Socket.up`,
+    and a frame made after load connects too."""
+    from aiohttp import web
+    from playwright.async_api import async_playwright
+
+    async def go():
+        sock = meet.Socket(lambda *a: None, lambda *a: None, lambda *a: None)
+        port = await sock.start()
+
+        async def loading(_):
+            return web.Response(text=LOADING, content_type="text/html")
+
+        app = web.Application()
+        app.router.add_get("/", loading)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    channel="chrome", headless=True, args=list(meet.CHROME_ARGS)
+                )
+                page = await browser.new_page()
+                await page.add_init_script(meet.script(port))
+                await page.goto(f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/")
+                for _ in range(100):
+                    if sock.up:
+                        break
+                    await asyncio.sleep(0.05)
+                early = await page.evaluate("window.early")
+                ran = await page.evaluate("typeof window.valorState")
+                await page.evaluate(
+                    "document.body.appendChild(Object.assign(document.createElement('iframe'), {srcdoc: 'later'}))"
+                )
+                frame = page.frames[1]
+                await frame.wait_for_function("window.ws && window.ws.ws && window.ws.ws.readyState === 3")
+                up = sock.up
+                await browser.close()
+            return early, ran, up
+        finally:
+            await runner.cleanup()
+            await sock.close()
+
+    early, ran, up = asyncio.run(go())
+    assert early == {"socket": None, "threw": None}  # none while loading; the send only says not connected
+    assert ran == "function"  # page.js, the last payload, ran
+    # The top frame's hello set `up`; the later frame connected and said
+    # hello as not the top, which the call closes, leaving `up` as it was.
+    assert up
+
+
 # -- a navigation under the call's page (a rejoin, 2026-11-05) ----------------------
 
 

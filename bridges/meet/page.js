@@ -4,11 +4,15 @@
 // where the page stands. Speech goes out only through the microphone: Chrome runs muted,
 // so nothing plays on the Mac's speakers.
 (() => {
-    if (!window.ws || !window.ws.ws) return;
-    // Every frame runs the payloads; the call reads the top frame's socket.
-    window.ws.ws.addEventListener("open", () => {
+    if (!window.ws) return;
+    // Every frame runs the payloads; the call reads the top frame's socket,
+    // which the payload opens once the document has loaded (its own
+    // DOMContentLoaded listener, registered before this one).
+    const hello = () => window.ws.ws.addEventListener("open", () => {
         window.ws.sendJson({ type: "ValorHello", top: window.top === window });
     });
+    if (window.ws.ws) hello();
+    else document.addEventListener("DOMContentLoaded", hello, { once: true });
 
     // Each media connection's state, for the call's log: a call that joined
     // and saw who was in it but never heard anyone (the Cowboy, 2026-11-05)
