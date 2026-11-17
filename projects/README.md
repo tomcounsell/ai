@@ -66,9 +66,10 @@ it (they come from settings), and loading a spec names the folder.
   ([ONTOLOGIES.md](../ONTOLOGIES.md)). Tom's own chats have none. A role
   named with no file fails that chat's turns, so after editing it render a
   dispatch for each listed chat.
-- `mentions` lists those chats where only a message naming Valor, or a
-  reply to his post, wakes the chat session, as the old teammate groups
-  did; the rest reach it with the next.
+- `mentions` lists those chats where only a message naming Valor, a
+  reply to his post or down a reply chain from it, or an untagged message
+  the `intake.addressed` question judges meant for him wakes the chat
+  session, as the old teammate groups did; the rest reach it with the next.
 - `board` names the one of its Slack channels whose canvas is the
   project's decision board: that chat's session keeps it, from the
   project's open questions and recent answers in the ledger

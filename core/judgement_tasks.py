@@ -301,7 +301,7 @@ ADDRESSED = JudgementTask(
                 "already engaged in, or clearly asks him."
             ),
             kind=Kind.PICK,
-            labels=dict(ADDRESSED_LABELS),
+            labels=ADDRESSED_LABELS,
             proceed=frozenset(ADDRESSED_LABELS),
         ),
     ),

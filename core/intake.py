@@ -620,9 +620,7 @@ async def _replied(conn, p: dict[str, Any]) -> tuple[str | None, dict[str, Any] 
             )
         ).fetchone()
     # The post replied to first, then up the chain, nearest first.
-    chain = [str(p["reply_to"])] + [
-        str(m["id"]) for m in reversed(p.get("thread") or []) if isinstance(m, dict) and m.get("id")
-    ]
+    chain = [str(p["reply_to"])] + [str(m["id"]) for m in reversed(p.get("thread") or [])]
     for mid in dict.fromkeys(chain) if row is None else ():
         sent = Jsonb([{"channel": p["channel"], "chat_id": p["chat_id"], "message_id": mid}])
         row = await (
@@ -918,7 +916,7 @@ def addressed_inputs(rows: list[dict], item: dict[str, Any], received: dict[str,
         last = f"Valor last posted {after} messages ago" + (
             f", {mins} minutes before this message" if mins is not None else ""
         )
-    thread = [_said(m.get("text")) for m in received.get("thread") or [] if isinstance(m, dict)]
+    thread = [_said(m.get("text")) for m in received.get("thread") or []]
     return {
         "message": f"{p.get('sender_name') or p.get('sender_id') or 'someone'}: {_said(p.get('text'))}",
         "room": "\n".join(line for line, _ in room) or "(nothing before it)",
@@ -981,9 +979,8 @@ async def address(port, conn, item: dict[str, Any], dsn: str) -> str | None:
             return label
         if _read(rows, item["id"]):
             return label
-        payload = {k: v for k, v in p.items() if k != "addressed"}
         await ledger.append(conn, task_id, "message.steered",
-                            {**payload, "addressed": label, "judgement_id": j.judgement_id})  # fmt: skip
+                            {**p, "addressed": label, "judgement_id": j.judgement_id})  # fmt: skip
         if label == "engaged":
             await reactions.on_bound(conn, received[0], task_id, "steer")
     return label

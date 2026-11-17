@@ -250,8 +250,8 @@ declared site, over the judgements where both legs were asked (a shadowed
 leg read from its own row, whichever it is), JSON counts:
 judgements, unsettled (no shadow row came), failures per leg, questions
 both answered, `action_agree` (each leg at its own floor),
-`action_agree_at_primary_floor` (Gemini's `p_proceed` re-gated at Jev's
-floor, where it would sit as first line), `label_agree`, and each
+`action_agree_at_primary_floor` (Gemini's `p_proceed` re-gated at the
+task's primary floor, `floor["primary"]`, where it sits as first line), `label_agree`, and each
 disagreement by its pair, such as `jev proceed / gemini abstain`.
 
 ## Confidence gating
