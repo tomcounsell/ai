@@ -769,7 +769,7 @@ skill it can load is listed to every session.
 
 **Specialist summaries** ([plans/specialist-memory.md](plans/specialist-memory.md)).
 A specialist in Valor's plugin with `memory: user` in its definition
-(`valor:mac-app`, `valor:researcher`; not `valor:web`) keeps one summary of
+(`valor:mac-app`, `valor:researcher`, `valor:gtm`; not `valor:web`) keeps one summary of
 its past work per project, through Claude Code's own agent memory. Claude
 Code (2.1.325, read and run) loads `$CLAUDE_CONFIG_DIR/agent-memory/<agent
 type>/MEMORY.md` (`valor-mac-app/`; first 200 lines or 25 KB) into the
