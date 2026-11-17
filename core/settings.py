@@ -226,6 +226,20 @@ SEATS: dict[str, tuple[str, str]] = {
 }
 
 
+# The effort level (`claude --effort`) a seat's turns run at, by seat name;
+# a seat absent here passes none and runs at Claude Code's default for its
+# model. Read for a task when it starts (`Brief.effort`), and for a chat,
+# critique, docs or review turn when it runs. The call worker, routines, the
+# advisor and `gateway.ask` take none (docs/plans/effort-levels.md).
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+EFFORT: dict[str, str] = {}
+
+
+def seat_effort(seat: str) -> dict[str, str]:
+    """The harness entry giving `seat`'s effort level, or nothing."""
+    return {"effort": EFFORT[seat]} if seat in EFFORT else {}
+
+
 # The model windows a chat session compacts against, by pinned id. Claude
 # Code's calls on the frontier seat reached 947,155 input tokens before a
 # compaction (docs/harnesses.md), so it has the 1M window.

@@ -124,7 +124,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from core import channels, judgement, ledger, machine, notices, reactions, tasks, workspace
-from core.settings import resolve_seat, settings
+from core.settings import EFFORT, resolve_seat, settings
 
 
 @dataclass(frozen=True)
@@ -718,6 +718,7 @@ async def _start(conn, p: dict[str, Any]) -> str | None:
         instruction=text,
         model=model,
         harness_name=harness_name,
+        effort=EFFORT.get("frontier"),
         project={"name": spec.name} if spec else None,
         max_effect_class="act",
     )

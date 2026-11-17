@@ -41,7 +41,7 @@ by the question it answered, a steer by its key on the `message.steered`,
 
 from core import board, call, channels, db, intake, ledger, machine, session, tasks, workspace
 from core.machine import State
-from core.settings import resolve_seat
+from core.settings import EFFORT, resolve_seat
 
 
 class _ChatTask:
@@ -95,6 +95,7 @@ class TaskStart(_ChatTask):
                 context=str(action.payload.get("context") or "").strip() or None,
                 model=model,
                 harness_name=seat,
+                effort=EFFORT.get("frontier"),
                 project=self._child_project(action.payload.get("project"), chat),
             )
         return {"task_id": child}

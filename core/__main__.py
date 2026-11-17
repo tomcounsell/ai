@@ -221,6 +221,8 @@ from core import (
 )
 from core.machine import Check, State
 from core.settings import (
+    EFFORT,
+    EFFORTS,
     GEMINI_DECISIONS_URL,
     JEV_KEY,
     JEV_URL,
@@ -286,6 +288,7 @@ def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
             workspace.specialist_memory(harness["claude_config_dir"], b.project.get("name"))
     if b.chat:
         harness = {**harness, "chat_channel": b.chat["channel"]}
+    harness = {**harness, **tasks.turn_effort(b)}
     return _harnesses()[b.harness_name].workspace_turn(
         prompt, cwd=b.workspace, resume=resume, model=b.model, harness=harness
     )
@@ -693,6 +696,7 @@ async def _start_project(conn, args) -> str:
                 instruction=args.instruction,
                 model=resolve_model(args.model),
                 harness_name=args.harness or resolve_seat(args.model)[0],
+                effort=getattr(args, "effort", None),
                 **made.brief_fields(),
                 **getattr(args, "extra", {}),
             )
@@ -1030,6 +1034,9 @@ async def _run(args) -> None:
             except routines.Refused as exc:
                 raise SystemExit(f"routine refused: {exc}") from None
         return
+    if args.command == "start" and not args.effort:
+        # A seat's level, when it names one; a bare model id names none.
+        args.effort = EFFORT.get(args.model)
     async with await db.connect() as conn:
         if args.command == "routines":
             for rep in await routines.reports(conn):
@@ -1055,6 +1062,7 @@ async def _run(args) -> None:
                     workspace=workspace,
                     model=resolve_model(args.model),
                     harness_name=args.harness or resolve_seat(args.model)[0],
+                    effort=args.effort,
                     harness=harness,
                     **where,
                 )
@@ -1325,6 +1333,9 @@ def main() -> None:
     start.add_argument("--parent", help="start a child of this task, at or below its ceiling")
     start.add_argument("--workspace")
     start.add_argument("--model", default="frontier")
+    start.add_argument(
+        "--effort", choices=EFFORTS, help="the task's own turns' effort (default: the --model seat's, if any)"
+    )
     start.add_argument("--harness", choices=("claude_code", "pi", "codex"))
     start.add_argument("--harness-config")
     start.add_argument("--target-branch")

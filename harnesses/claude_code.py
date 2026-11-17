@@ -140,7 +140,8 @@ def workspace_turn(
     the gateway's port as `GATEWAY_PORT` and the turn's id as `VALOR_TURN`,
     which the profile names its processes by so `core.runs` can reap them;
     `env`, variables added to the turn's environment; `max_output_tokens`,
-    set as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when given; `tmpdir`, the turn's
+    set as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` when given; `effort`, passed as
+    `--effort` when given (`core.settings.EFFORT`); `tmpdir`, the turn's
     own `TMPDIR`, which `core.runs` empties at the turn's start and removes
     at its end; `claude_config_dir`, its own Claude Code config directory,
     which holds no login and where its transcript lies; `chat_channel`,
@@ -204,6 +205,7 @@ def workspace_turn(
             "json",
             "--model",
             model,
+            *(["--effort", harness["effort"]] if harness.get("effort") else []),
             "--permission-mode",
             "bypassPermissions",
             "--system-prompt-snapshot",

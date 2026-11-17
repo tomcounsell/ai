@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from core import corrections, git, ledger, machine, memory, outcomes, persona, record, workspace
-from core.settings import resolve_model, settings
+from core.settings import resolve_model, seat_effort, settings
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
 
@@ -68,6 +68,7 @@ class Brief:
     model: str = resolve_model("frontier")
     harness_name: str = "claude_code"
     harness: dict[str, Any] = field(default_factory=dict)
+    effort: str | None = None
     target_branch: str | None = None
     origin_url: str | None = None
     base_sha: str | None = None
@@ -335,6 +336,15 @@ def turn_model(b: Brief) -> str:
     2026-11-16), else the Brief's own. A call's worker is a fresh turn and
     keeps the Brief's."""
     return resolve_model("chat") if b.chat else b.model
+
+
+def turn_effort(b: Brief) -> dict[str, str]:
+    """The harness entry giving the effort a working-session turn of `b`
+    runs at: the `chat` seat's for a chat session, read each turn as
+    `turn_model` is, else the level the task started with."""
+    if b.chat:
+        return seat_effort("chat")
+    return {"effort": b.effort} if b.effort else {}
 
 
 def stage_text(state: machine.State | str) -> str | None:
