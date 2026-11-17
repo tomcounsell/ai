@@ -181,7 +181,9 @@ section counts "decisions escalated to Tom per finished task".
 The kernel marks a message Valor reads (`core/reactions.py`): every
 message of Tom's in his own chat, every message in a team chat that wakes
 its session (in a `mentions` chat, one naming Valor or replying to him, or
-one `intake.addressed` judged meant for him), and none that is only heard. Binding writes `reaction.requested` with 👀, and
+one `intake.addressed` labels `engaged`), and none that is only heard; an
+`aside` wakes it with no 👀, and a heard one labelled `react` gets only a
+done reaction, picked as an acknowledgement. Binding writes `reaction.requested` with 👀, and
 the outbox places it at once: on a row's wake it yields before it
 reconciles and runs the gap fill. Then the reaction classifier (the
 judgement port, `reaction.handling`) picks a handling reaction that shows
