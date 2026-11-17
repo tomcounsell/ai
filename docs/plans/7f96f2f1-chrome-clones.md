@@ -35,12 +35,20 @@ nightly Homebrew upgrade. Nothing ever removes the copies.
 
 `core/workspace.py`: `chrome_clones(root=None)` removes each directory under
 Chrome's `code_sign_clone` root (`getconf DARWIN_USER_TEMP_DIR`, parent, `X/…`) that
-no process holds open (`lsof -Fn +D root`; exit 1 means none held) and that is older
-than ten minutes (a Chrome launching holds its copy within seconds), with the
-existing `rmtree`. A missing root is nothing to do; any other lsof failure raises, and
-`Kernel.reclaim`'s existing except logs it to Sentry. `Kernel.reclaim` calls it each
-pass (every `RECLAIM_EVERY_S`). No new job, check or limit: the existing reclaim pass
-gains one more thing it reclaims. Bug fix under hard rule 9.
+no process holds open and that is older than ten minutes (a launching Chrome holds
+its copy within seconds), with the existing `rmtree`.
+- The root is `Path.resolve()`d before lsof runs and before matching: `getconf` gives
+  `/var/folders/…`, lsof prints `/private/var/folders/…` (`/var` is a link). Each name
+  lsof prints is mapped to its copy by its first path part under the resolved root.
+  The live Chrome holds its copy only as its executable (FD `txt`, pid 30700).
+- Held is read from what `lsof -Fn +D root` printed, whatever its exit code (it exits 1
+  on some errors while still printing matches). It raises only when the exit is
+  non-zero, stdout is empty and stderr is not. A missing root is nothing to do.
+- `Kernel.reclaim` runs it off the event loop (`git.threaded`, as `remove` runs), after
+  the workspace loop and in its own `try`, so an lsof failure never skips removing
+  finished workspaces; the failure is logged to Sentry as reclaim's are.
+No new job, check or limit: the existing reclaim pass gains one more thing it
+reclaims. Bug fix under hard rule 9.
 
 ## Free now (build stage, by hand, measuring `df` before and after each)
 
@@ -61,6 +69,16 @@ Cowboy, then the Captain (under 10 GB) by the same rules:
    edits; task 85b4425898c9 noted main may not compile). A compile error is reported
    as such, not as done.
 
+Does it reach 30 GB? From 12 GiB: Chrome copies 4-5 (shared blocks; 16 du at most),
+Homebrew cache up to 6.1 (`brew cleanup -s --prune=all`, then the rest of
+`$(brew --cache)`, all re-downloadable), Google cache 1.4, Ollama 4.5, uv prune ~1, npm
+0.7, merged and qualifying ended workspaces ~8 (0ba539d217b1, 32168c317ab5, eecfb20133de,
+356ab49a64e1, 3d6ea8902d1a, b79a39ee853d, babffe7623c2, 9f86499288a2, 96a09c7b8a53,
+85b4425898c9, 2db971a45354, plus any others the ledger shows finished). Total 37-38,
+lower bound ~35. If df still reads under 30, the build does not report done: it writes
+`.valor/question.md` with the measured gap and the out-of-scope items below, sized,
+for Tom to pick from. The bar stays at 30.
+
 ## Out of scope (listed for Tom, not deleted)
 
 tev1:0.8b; huggingface 3.4 G and codex runtimes 1.6 G (may be in use); `~/src`
@@ -72,7 +90,12 @@ the sweep, and the user's Chrome and Homebrew kills would still leak.
 
 - an old unheld copy is removed; an old copy a child process holds a file open in is
   kept; a copy younger than ten minutes is kept; files beside the copies untouched;
-- a missing root does nothing; `Kernel.reclaim` calls it on its pass (root patched).
+- the held case again with the root passed through a symlink to `tmp_path` (the
+  `/var` case: fails if names are matched unresolved);
+- lsof exiting 1 with matches printed keeps them; non-zero, empty stdout and stderr
+  raises; a missing root does nothing;
+- `Kernel.reclaim` calls it on its pass, and a raising `chrome_clones` still lets the
+  pass remove a finished workspace.
 
 Full suite before merge. After rollout: each Mac's copy count drops to its live
 Chromes on the next pass, the user's Chrome keeps running, and a Meet call still joins.
