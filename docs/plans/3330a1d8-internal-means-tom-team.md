@@ -16,10 +16,14 @@ holding it (`python -m core start --project <spec> --by valor` over ssh),
 because `valor-record` answers only for its turn's own project and client data
 stays on its own Mac. This does the same.
 
-1. **Which projects.** On each Mac, for each project the fill filled (its
-   delivery's table: Cowboy 1 plus Yudame project 6 if it has filled since,
-   Pirate 6, Captain 5), count internal `team` facts with
-   `python -m core facts --project <spec> read --kind team --json` over ssh,
+1. **Which projects.** Exactly the rows of the fill delivery's per-Mac table
+   (task 32168c317ab5, turn 542be1c83259): Cowboy: valor, and "Yudame
+   project 6" (fill task 3eaef1e2cf96) only if that task's ledger shows it
+   finished, else reported as not filled; Pirate: valor, Yudame projects 1-4,
+   client project A; Captain: valor, client B projects 1 and 2, client C,
+   Yudame project 5. For each, count people whose roster entry reads internal
+   (`valor-record person everyone`, or `python -m core facts --project <spec>
+   read --kind team --json` folded per person by newest live fact) over ssh,
    printing counts only. A project whose only internal person is Tom needs
    nothing and is reported as 0/1/0. Valor's own project on the Cowboy is this
    task's project: done here directly.
@@ -27,8 +31,19 @@ stays on its own Mac. This does the same.
    instruction: this rule; list internal people with
    `valor-record person everyone`; for each, decide from the project's own
    record (room texts, email domains, organisation and role facts, how Tom or
-   the room describes them) whether they are Tom's team or the client's staff;
-   for a client's staff member, `valor-record fact supersede <team fact>
+   the room describes them) by this table, carried word for word in every
+   task's instruction so every project decides alike:
+
+   | Evidence in the project's record | Mark |
+   |---|---|
+   | Email at the client's domain, or Tom or the room calls them the client's | external (change) |
+   | yuda.me address, Tom names them as his team, or a contractor Yudame engaged | internal (keep) |
+   | Hired by the client through Yudame, no record of who pays them | unresolved |
+   | No evidence either way | unresolved |
+   | Tom | internal (keep) |
+
+   For an external one, supersede the newest live internal `team` fact (the
+   one the dossier shows): `valor-record fact supersede <team fact>
    external --kind team --about <name> --since 2026-11-17 --source <this
    task's started row> --reason "<rule; task 3330a1d8f6c4>" --evidence "<the
    message or fact showing who they work for>"`; where the record does not
@@ -50,18 +65,16 @@ unfilled projects; copying any record between Macs.
 
 ## Checks (no tests: no code changes)
 
-- Per project, before and after, counts by fact kind from `core facts read
-  --json` on its Mac: only `team` changes; the live `team` count is unchanged
-  (each supersede replaces one); live internal count falls by exactly the
-  "changed" number; no other kind's count moves.
+- Per project, before and after: people whose roster entry reads internal
+  fall by exactly the "changed" number (count people, not facts: a person may
+  hold more than one live `team` fact); counts by fact kind from `core facts
+  read --json` move only for `team`.
 - `facts --history <new fact>` for one changed person per project shows the
   old `internal` fact superseded, not removed, citing this task and evidence.
 - Tom is internal in every project afterwards (`valor-record person "Tom
   Counsell"` in each task).
 - Captain "client B, project 1": the 22 internal are each changed, kept with a
   reason (works for Yudame), or unresolved; changed + kept + unresolved = 22.
-- A person on both sides (e.g. a contractor the client hired through Yudame)
-  stays as is, counted unresolved, unless the record says who pays them.
 - Grep of the commit and `.valor/` report for any name other than Tom, Valor,
   Yudame: none.
 
