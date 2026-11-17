@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from core import __main__, db, routines, settings, tasks
+from core import __main__, db, gateway, routines, settings, tasks
 from harnesses import claude_code
 from tests import bridges
 
@@ -39,9 +39,10 @@ def turn(b: tasks.Brief, resume: str | None = None) -> list[str]:
     return __main__._turn_for("p", resume, b)("http://h:1", "b", "t").argv
 
 
-def test_a_task_turn_runs_at_its_briefs_level_and_a_brief_stored_without_one_at_none():
-    body = {"instruction": "x", "workspace": ".", "harness": PROFILE}
+def test_a_task_turn_runs_at_its_briefs_level_and_a_brief_stored_without_one_at_its_models():
+    body = {"instruction": "x", "workspace": ".", "harness": PROFILE, "model": "claude-fable-5-2"}
     assert effort(turn(tasks.Brief.load(body))) is None
+    assert effort(turn(tasks.Brief.load({**body, "model": "claude-opus-5-5"}))) == "medium"
     assert effort(turn(tasks.Brief.load({**body, "effort": "high"}))) == "high"
 
 
@@ -51,6 +52,7 @@ def test_a_chat_turn_first_and_resumed_runs_at_the_chat_entrys_level_whatever_it
         workspace=".",
         harness=PROFILE,
         effort="max",
+        model="claude-fable-5-2",
         chat={"channel": "slack", "chat_id": "C1"},
     )
     monkeypatch.delitem(settings.EFFORT, "chat", raising=False)
@@ -61,16 +63,16 @@ def test_a_chat_turn_first_and_resumed_runs_at_the_chat_entrys_level_whatever_it
     assert effort(turn(run)) == effort(turn(run, resume="s")) == "medium"
 
 
-def test_a_call_workers_turn_carries_no_level_with_frontier_and_chat_set(monkeypatch):
+def test_a_call_workers_turn_runs_at_its_models_level_not_frontiers_or_chats(monkeypatch):
     """The worker runs `_turn_for` on the call session's Brief with its asking
     chat laid on (`core.__main__._call`); that Brief, as `call.py` writes it,
-    has no level."""
+    has no level, so it runs at Opus's."""
     monkeypatch.setitem(settings.EFFORT, "frontier", "high")
     monkeypatch.setitem(settings.EFFORT, "chat", "low")
     worker = tasks.Brief(
         instruction="x", workspace=".", harness=PROFILE, chat={"channel": "slack", "chat_id": "C1"}
     )
-    assert effort(turn(worker)) is None
+    assert effort(turn(worker)) == "medium"
 
 
 def test_a_routines_objective_and_run_start_with_no_level_with_frontier_set(dsn, monkeypatch):
@@ -158,6 +160,25 @@ def test_an_unknown_level_is_refused(monkeypatch, capsys):
     assert "invalid choice" in capsys.readouterr().err
 
 
-def test_opus_turns_are_medium_by_name_and_chat_and_review_unset():
+def test_every_seat_on_opus_runs_at_medium_by_name_and_no_other_is_set(monkeypatch, tmp_path):
     """Tom, 2026-11-17: "Keep Opus on Medium all the time"; chat back at the default."""
-    assert settings.EFFORT == {"frontier": "medium", "critique": "medium", "docs": "medium"}
+    assert settings.EFFORT == {}
+    opus = [seat for seat, (harness, model) in settings.SEATS.items() if model == "claude-opus-5-5"]
+    assert opus and all(settings.SEATS[s][0] == "claude_code" for s in opus)
+    for seat in opus:
+        assert effort(claude_code.workspace_turn("p", cwd=".", resume="s", model=settings.resolve_model(seat),
+                                                 harness=PROFILE)("http://h:1", "b", "t").argv) == "medium"  # fmt: skip
+    assert effort(argv(PROFILE)) is None  # another model keeps Claude Code's default
+
+    seen = []
+
+    async def exec_(*a, **kw):
+        seen.extend(a)
+        raise OSError("stop")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_)
+    for seat in opus:
+        with pytest.raises(gateway.Unanswered):
+            asyncio.run(gateway.ask("claude", "http://h:1", tmp_path, seat, "s", "t"))
+        assert effort(seen) == "medium"
+        seen.clear()

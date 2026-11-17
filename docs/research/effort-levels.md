@@ -70,8 +70,8 @@ Two arms tie when suite and acceptance match and each score is within 1.
   results on the bug fix and the feature at 27-28% more cost; on the answer
   it stated a wrong fact at about the same cost.
 
-Set: `EFFORT = {"frontier": "medium", "critique": "medium", "docs": "medium"}`
-in `core/settings.py`, Tom's medium for Opus made explicit. Chat was set to low,
+Set: `MODEL_EFFORT = {"claude-opus-5-5": "medium"}` and `EFFORT = {}`
+in `core/settings.py`: every Claude Code call on Opus (tasks, critique, docs, the call worker, routines, the advisor's fallback) passes medium unless its turn names a level. Chat was set to low,
 then put back to medium on review (2026-11-17): on the chat stand-in Fable low
 stated a wrong fact where medium was right, which is not a tie, and it saved
 nothing; it is unset (medium). Critique, docs and review are keyed by their own

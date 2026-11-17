@@ -88,7 +88,7 @@ from yarl import URL
 
 from core import binaries, broker, credentials, db, record, spending, tasks
 from core.ledger import new_id
-from core.settings import resolve_model, settings
+from core.settings import model_effort, resolve_model, settings
 
 # Hop-by-hop and length headers are recomputed on each side.
 # A proxy credential is never the upstream's business, on either route.
@@ -127,7 +127,8 @@ async def ask(claude: str, base: str, home: Path, seat: str, system: str, text: 
     """One `claude -p` call with no tools, settings or MCP on the `seat`,
     through the gateway at `base` (a runner's `issue`), so it is metered on
     that run: the reply's text, or `Unanswered`."""
-    argv = [claude, "-p", "--model", resolve_model(seat), "--system-prompt", system, "--tools", "",
+    model = resolve_model(seat)
+    argv = [claude, "-p", "--model", model, *model_effort(model), "--system-prompt", system, "--tools", "",
             "--setting-sources", "", "--strict-mcp-config", "--output-format", "json", text]  # fmt: skip
     env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "ANTHROPIC_BASE_URL": base,
            "CLAUDE_CONFIG_DIR": str(home), "CLAUDE_CODE_OAUTH_TOKEN": TURN_TOKEN}  # fmt: skip

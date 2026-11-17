@@ -30,7 +30,7 @@ from urllib.parse import urlparse
 from core import binaries, transcripts
 from core.gateway import TURN_TOKEN
 from core.runs import TurnCommand
-from core.settings import compaction, resolve_model, settings
+from core.settings import compaction, model_effort, resolve_model, settings
 from core.workspace import current_profile, environment
 
 # The model a turn runs when none is given: the light seat's pinned id, never
@@ -205,7 +205,7 @@ def workspace_turn(
             "json",
             "--model",
             model,
-            *(["--effort", harness["effort"]] if harness.get("effort") else []),
+            *(["--effort", harness["effort"]] if harness.get("effort") else model_effort(model)),
             "--permission-mode",
             "bypassPermissions",
             "--system-prompt-snapshot",

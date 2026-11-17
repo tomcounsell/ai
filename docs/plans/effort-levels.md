@@ -101,8 +101,10 @@ request's effort field read at the gateway) and writes it in the results.
   revision rounds stay at medium unless named.
 - Set on the result: chat unset (medium). It was set to low, then put back
   on feedback (2026-11-17): on the chat stand-in Fable low stated a wrong
-  fact where medium was right. Tom kept Opus at medium (2026-11-17), so
-  `frontier`, `critique` and `docs` are `medium` by name.
+  fact where medium was right. Tom kept Opus at medium "all the
+  time" (2026-11-17): `MODEL_EFFORT` passes medium on every Claude Code call
+  on Opus that names no level, the call worker, routines, the advisor's
+  fallback and `gateway.ask` included.
 - `core run` needs the kernel's Claude login, which a turn does not hold, so
   each replay was one `claude -p` plan-and-build run in a throwaway clone on
   this turn's gateway (`docs/research/effort-levels.md`); revision rounds

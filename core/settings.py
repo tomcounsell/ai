@@ -233,12 +233,18 @@ SEATS: dict[str, tuple[str, str]] = {
 # Claude Code's default, medium on Fable 5.2 and Opus 5.5 (measured
 # 2026-11-17). The call worker, routines, the advisor and `gateway.ask` take
 # none. Chat is unset (medium): in replays Fable low did not tie medium
-# (docs/research/effort-levels.md). The turns on Opus 5.5 that read an
-# entry (a task's own, critique, docs) are medium by name, so a change of
-# Claude Code's default cannot move them: "Keep Opus on Medium all the
-# time" (Tom, 2026-11-17).
+# (docs/research/effort-levels.md).
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-EFFORT: dict[str, str] = {"frontier": "medium", "critique": "medium", "docs": "medium"}
+EFFORT: dict[str, str] = {}
+# The level every Claude Code call on a model runs at when its turn names
+# none, so a change of Claude Code's default cannot move it: "Keep Opus on
+# Medium all the time" (Tom, 2026-11-17).
+MODEL_EFFORT: dict[str, str] = {"claude-opus-5-5": "medium"}
+
+
+def model_effort(model: str) -> list[str]:
+    """The `--effort` arguments a call on `model` takes when its turn names no level."""
+    return ["--effort", MODEL_EFFORT[model]] if model in MODEL_EFFORT else []
 
 
 def seat_effort(name: str) -> dict[str, str]:
