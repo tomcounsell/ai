@@ -26,10 +26,12 @@ to compact when a subagent ends, so it does not fit; what is reused is its
 form: one instruction file and Claude Code doing the work.
 
 **Choice.** Claude Code's own agent memory (`memory: user`), with Valor
-deciding only where the directory is and what goes in it. No summarizer, no
-second store. A SubagentStop hook that blocks to force the rewrite was
-rejected: the agent's last message is what its caller gets back, and a forced
-extra step replaces the report.
+deciding where the directory is and what goes in it; no second store. The
+summary is written by a non-blocking SubagentStop hook (one `claude -p` call
+with `summary.md` as its instructions), not left to the agent, which wrote it
+in 4 to 9 runs of 10 (item 3). A SubagentStop hook that blocks to force the
+agent to rewrite it was rejected: the agent's last message is what its caller
+gets back, and a forced extra step replaces the report.
 
 ## What is built
 
