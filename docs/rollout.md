@@ -317,4 +317,4 @@ during the pause. The board finds its canvas by its tab but rebuilds it
 from the new Mac's ledger. Chat sessions do not move; the shared memory
 already does. Homebrew's `pgvector` no longer builds for `postgresql@15`,
 so a 15 database using `vector` cannot be dumped. Copy local databases
-from 18.
+from a `postgresql@18` cluster.
