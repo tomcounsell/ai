@@ -421,8 +421,11 @@ def test_the_asking_chat_sends_geminis_summary_unchanged_as_one_file_with_at_mos
         [settings.claude, "-p", "--model", "claude-opus-5-5", "--append-system-prompt", skill,
          "--permission-mode", "bypassPermissions", "--setting-sources", "", "--strict-mcp-config", "--", report],
         cwd=work, capture_output=True, text=True, timeout=600, check=False,
+        # A chat's turn signs in with the kernel's token, not the Mac's own
+        # Claude Code login, which had expired on the Captain (2026-11-17).
+        env={**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": Path(settings.claude_token_file).read_text().strip()},
     )  # fmt: skip
-    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.returncode == 0, (done.stderr or done.stdout)[-2000:]
     sends = [json.loads(p.read_text()) for p in (work / ".valor" / "effects").glob("*.json")]
     sends = [s for s in sends if s["action_type"] == "slack.send_message"]
     print(json.dumps(sends, indent=1))
