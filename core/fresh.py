@@ -204,7 +204,7 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None, seat: str | N
                 services=False,
                 project=(b.project or {}).get("name"),
             )
-            harness.update(seat_effort(seat or SEATS["critique"]))
+            harness.update(seat_effort("critique"))
             harness_name, seat_model = resolve_seat(seat or SEATS["critique"])
             model = model_ or seat_model
             if not await ctx.alive():
@@ -651,7 +651,7 @@ async def _docs_turn(
             lay, check_dir, [], env, services=False, project=(b.project or {}).get("name")
         )
         harness["env"].update(DOCS_IDENTITY)
-        harness.update(seat_effort(SEATS["docs"]))
+        harness.update(seat_effort("docs"))
         if not await ctx.alive():
             return {"status": "lock lost"}
         try:
@@ -995,7 +995,7 @@ def review_runner(fresh_for: FreshFor, model: str | None = None, seat: str = SEA
                             prompt(files),
                             str(checkout),
                             model,
-                            {**harness, **seat_effort(seat)},
+                            {**harness, **seat_effort("review")},
                             harness_name,
                         ),
                         dsn=ctx.dsn,

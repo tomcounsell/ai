@@ -50,6 +50,7 @@ def test_a_chat_turn_first_and_resumed_runs_at_the_chat_seats_level_whatever_its
         effort="max",
         chat={"channel": "slack", "chat_id": "C1"},
     )
+    monkeypatch.delitem(settings.EFFORT, "chat")
     assert effort(turn(b)) is None
     monkeypatch.setitem(settings.EFFORT, "chat", "medium")
     assert effort(turn(b)) == effort(turn(b, resume="s")) == "medium"

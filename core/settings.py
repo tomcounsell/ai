@@ -226,18 +226,21 @@ SEATS: dict[str, tuple[str, str]] = {
 }
 
 
-# The effort level (`claude --effort`) a seat's turns run at, by seat name;
-# a seat absent here passes none and runs at Claude Code's default for its
-# model. Read for a task when it starts (`Brief.effort`), and for a chat,
-# critique, docs or review turn when it runs. The call worker, routines, the
-# advisor and `gateway.ask` take none (docs/plans/effort-levels.md).
+# The effort level (`claude --effort`) turns run at: a task's own turns by
+# the seat that started it (`frontier`, read once into `Brief.effort`), a
+# chat turn by `chat`, and a fresh turn by its stage (`critique`, `docs`,
+# `review`), read when it runs. A name absent here passes none and runs at
+# Claude Code's default, medium on Fable 5.2 and Opus 5.5 (measured
+# 2026-11-17). The call worker, routines, the advisor and `gateway.ask` take
+# none. Set from replays of three past tasks, where low tied medium and high
+# on both models (docs/research/effort-levels.md); delete a line to undo it.
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-EFFORT: dict[str, str] = {}
+EFFORT: dict[str, str] = {"chat": "low", "frontier": "low"}
 
 
-def seat_effort(seat: str) -> dict[str, str]:
-    """The harness entry giving `seat`'s effort level, or nothing."""
-    return {"effort": EFFORT[seat]} if seat in EFFORT else {}
+def seat_effort(name: str) -> dict[str, str]:
+    """The harness entry giving `name`'s effort level, or nothing."""
+    return {"effort": EFFORT[name]} if name in EFFORT else {}
 
 
 # The model windows a chat session compacts against, by pinned id. Claude

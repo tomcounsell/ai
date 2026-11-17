@@ -94,6 +94,16 @@ request's effort field read at the gateway) and writes it in the results.
    defaults, the test's own spend, and the one line that undoes each seat
    changed.
 
+## As built (2026-11-17)
+
+- Critique, docs and review take `EFFORT` by their stage names, not their
+  seats, so `EFFORT["frontier"]` reaches a task's own turns only and the
+  revision rounds stay at medium unless named.
+- `core run` needs the kernel's Claude login, which a turn does not hold, so
+  each replay was one `claude -p` plan-and-build run in a throwaway clone on
+  this turn's gateway (`docs/research/effort-levels.md`); revision rounds
+  were not measured. Opus low ran on all three tasks.
+
 ## Out of scope
 
 Changing any seat's model; levels for the reviewer, call worker, routines,
