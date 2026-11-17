@@ -34,7 +34,9 @@ def holder():
         p = subprocess.Popen(["/bin/sh", "-c", 'exec 3<"$0"; sleep 60', str(path)])
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            out = subprocess.run(["/usr/sbin/lsof", "-Fn", "-p", str(p.pid)], capture_output=True, text=True)
+            out = subprocess.run(
+                ["/usr/sbin/lsof", "-Fn", "-p", str(p.pid)], capture_output=True, text=True, check=False
+            )
             if os.path.realpath(path) in out.stdout:
                 break
             time.sleep(0.05)
@@ -66,6 +68,7 @@ def test_a_copy_held_through_a_linked_root_stays(tmp_path, holder):
 
 def test_what_lsof_printed_is_held_whatever_its_exit(tmp_path, monkeypatch):
     held, old = copy(tmp_path, "c.held"), copy(tmp_path, "c.old")
+    assert old.exists()
     out = f"p1\nn{held}/Google Chrome.app/Contents/MacOS/Google Chrome\n"
     real_run = subprocess.run
 
@@ -75,7 +78,7 @@ def test_what_lsof_printed_is_held_whatever_its_exit(tmp_path, monkeypatch):
         return real_run(argv, **kw)
 
     monkeypatch.setattr(workspace.subprocess, "run", run)
-    assert workspace.chrome_clones(tmp_path) == ["c.old"] and held.exists()
+    assert workspace.chrome_clones(tmp_path) == ["c.old"] and held.exists() and not old.exists()
     out = ""
     with pytest.raises(RuntimeError):
         workspace.chrome_clones(tmp_path)
@@ -92,7 +95,9 @@ def test_reclaim_sweeps_the_copies_and_a_failed_sweep_still_removes_workspaces(d
 
     async def finished(conn, name):
         (tmp_path / name / "kernel.git").mkdir(parents=True)
-        task = await tasks.start(conn, tasks.Brief(instruction="x", mirror=str(tmp_path / name / "kernel.git")))
+        task = await tasks.start(
+            conn, tasks.Brief(instruction="x", mirror=str(tmp_path / name / "kernel.git"))
+        )
         await tasks.stop(conn, task, reason="done")
 
     async def go():

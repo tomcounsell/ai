@@ -2084,12 +2084,16 @@ def chrome_clones(root: Path | None = None) -> list[str]:
     as its executable). The root is resolved first: `/var` is a link and
     lsof prints `/private/var`. Returns the names removed."""
     if root is None:
-        tmp = subprocess.run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True)
+        tmp = subprocess.run(
+            ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True, check=True
+        )
         root = Path(tmp.stdout.strip()).parent / "X" / "com.google.Chrome.code_sign_clone"
     root = root.resolve()
     if not root.is_dir():
         return []
-    out = subprocess.run(["/usr/sbin/lsof", "-Fn", "+D", str(root)], capture_output=True, text=True)
+    out = subprocess.run(
+        ["/usr/sbin/lsof", "-Fn", "+D", str(root)], capture_output=True, text=True, check=False
+    )
     if out.returncode and not out.stdout and out.stderr.strip():
         raise RuntimeError(f"lsof +D {root}: {out.stderr.strip()}")
     held = {
