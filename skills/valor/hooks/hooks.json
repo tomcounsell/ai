@@ -25,8 +25,13 @@
       {
         "hooks": [
           {"type": "command", "command": "/usr/bin/python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent_start.py\""},
-          {"type": "command", "command": "/usr/bin/python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/summary_start.py\""}
+          {"type": "command", "command": "/usr/bin/python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/summary.py\""}
         ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [{"type": "command", "command": "/usr/bin/python3 -I \"${CLAUDE_PLUGIN_ROOT}/hooks/summary.py\"", "timeout": 300}]
       }
     ]
   }

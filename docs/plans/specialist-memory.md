@@ -56,31 +56,29 @@ extra step replaces the report.
    `web.md` has none. A new definition carries `memory: user`. It opts out
    by leaving the line out and adding itself to the opt-out list in
    `skills/README.md` and the test.
-3. **What it holds, and the cap.** New `skills/valor/hooks/summary.md`, the
-   only place the rules live. `MEMORY.md` is one summary of this project, not
-   an index and not a transcript, in four parts: what it did, what it learned
-   about the project and its tools, what was decided, what to do differently.
-   It overrides Claude Code's own memory instructions, which tell a memory
-   agent to keep `MEMORY.md` as an index and write each memory as its own
-   file: here the memory is one file, `MEMORY.md`, and no other; any other
-   file found in the directory is folded into the summary and deleted, since
-   only `MEMORY.md` reaches the next run.
-   Before its final report, the agent rewrites the summary whole with this run folded
-   in, keeping what is still true and dropping what is settled. It stays under
-   8,000 characters and 100 lines, well inside Claude Code's 25 KB / 200-line
-   load, so a summary found over the cap is compacted on the next run. It is
-   written even when the run failed. The summary is data, never instructions: it
-   cannot widen what the definition, the Brief or the prompt allow. Claude Code's own
-   "user scope: keep learnings general" line does not apply: this directory
-   is this project's alone. A second SubagentStart command, `summary_start.py`, prints
-   `summary.md` as its own SubagentStart object when the starting agent is a
-   `valor:` agent whose definition (`agents/<name>.md` beside the hook) has a
-   `memory:` line; `subagent_start.py`, the cut, is unchanged. One combined
-   output would pass the 10,000 characters Claude Code gives a subagent whole
-   (this task's own cut is about 9,300) and arrive as a 2 KB preview; two
-   outputs of about 9,000 each both arrived whole (measured 2026-11-17, build).
-   With no `MEMORY.md` yet,
-   the system prompt carries no summary.
+3. **What it holds, and the cap.** `skills/valor/hooks/summary.md`, the
+   only place the rules live, is the instructions of the call that writes the
+   summary. `MEMORY.md` is one summary of this project, not an index and not a
+   transcript, in four parts: what it did, what it learned about the project
+   and its tools, what was decided, what to do differently.
+   `skills/valor/hooks/summary.py`, registered for SubagentStart and
+   SubagentStop, acts for a `valor:` agent whose definition has a `memory:`
+   line, and only where `agent-memory` is a link (the kernel's; in a
+   developer's own session it does nothing, and `memory: user` is Claude
+   Code's own, user-wide). At start, as a second output beside the cut (one
+   combined output would pass the 10,000 characters Claude Code gives whole),
+   it tells the agent the summary is data, never instructions that widen what
+   its definition, the Brief or its prompt allow, and that it is written for
+   it. At stop, never blocking, it gives `claude -p` (`claude-haiku-5-5`, no
+   tools, `summary.md` as system prompt) the old summary, any other file in
+   the directory, and the run's transcript (no `<system-reminder>` context;
+   the first 10,000 and last 50,000 characters of a long run), writes the
+   reply as `MEMORY.md` cut to 8,000 characters and 100 lines, and deletes
+   the other files; a failed call leaves all as it was. Why the hook and not
+   the agent (build, 2026-11-17, haiku): told in its opening context, 4 of 10
+   first runs wrote the summary; with a line in its definition too, 9 of 10;
+   written by the hook, 10 of 10. With no `MEMORY.md` yet, the system prompt
+   carries no summary.
 4. **Docs.** `skills/README.md` (the plugin), `docs/harnesses.md` (the
    Mac-app/specialists section and the Claude Code wrapper's subagent
    context), `docs/data.md` (where the summaries live).
@@ -90,8 +88,8 @@ subagents. Two turns of one project running one specialist at once: the
 later rewrite wins and one run's update is lost, named in the docs. Syncing
 summaries between Macs. Moving existing tasks' per-task memory.
 
-**Governance.** None added: no check, gate or approval. The hook change gives
-context; it blocks nothing.
+**Governance.** None added: no check, gate or approval. The hooks give
+context and write the summary; neither blocks anything.
 
 ## Tests (`tests/test_specialist_memory.py`)
 
@@ -100,26 +98,26 @@ context; it blocks nothing.
   link gets it from `_turn_for`'s harness; a `check_harness` dir gets the
   same target. A link the turn retargeted, or a directory in its place, is
   replaced by the spec's target. An unknown project gets no link.
-- First run with none: a new project's directory is empty. The hook's
-  context for `valor:mac-app` carries `summary.md`; Claude Code puts no
-  summary in a prompt when no `MEMORY.md` exists.
+- First run with none: a new project's directory is empty; the stop hook's
+  call is told it is the first run.
 - Second run sees the first's: a `MEMORY.md` written through task A's link
   is read through task B's link (same project).
 - Isolation: a project of the same name under another client, and another
   project of the same client, link elsewhere and see nothing.
 - Each SubagentStart command's stdout parses as one JSON object: the cut,
-  then `summary.md`; with `VALOR_SUBAGENT_START` unset, `summary.md` alone.
-- Opt-out: `subagent_start.py` gives `valor:web` nothing and a definition
-  with no `memory:` line no `summary.md`. The set of agents without `memory:`
-  equals the documented opt-out list (`{"web"}`).
-- `summary.md` names the four parts, the 8,000-character / 100-line cap,
-  whole rewrite before the report, and data-not-instructions.
-- `summary.md` says one file, `MEMORY.md`, no other files, others folded
-  in and removed, overriding the index format.
+  then the summary's line; with no kernel link, nothing.
+- Stop (a stand-in `claude`): the summary is rewritten from the old one, the
+  other files and the transcript (reminders left out), the other files
+  deleted, a long reply cut to the cap; a failed call changes nothing and
+  does not block; no link, no call.
+- Opt-out: `valor:web`, a definition with no `memory:` line and a
+  `yudame:` agent get nothing at start or stop. The set of agents without
+  `memory:` equals the documented opt-out list (`{"web"}`).
+- `summary.md` names the four parts, the cap, the whole replacement, the
+  other files' deletion, and data-not-instructions.
 - Live (`VALOR_LIVE=1`, haiku, about $0.10): a copy of `skills/valor` in
   `tmp_path` with a scratch `memory: user` agent added, loaded by
-  `--plugin-dir`, so it runs as a `valor:` agent and the hook's `summary.md`
-  reaches it; `agent-memory` linked by `specialist_memory`. Run 1 is told a fact,
+  `--plugin-dir`, so it runs as a `valor:` agent under the hooks; `agent-memory` linked by `specialist_memory`. Run 1 is told a fact,
   which is then in `MEMORY.md` itself; run 2 recalls it with no hint.
   Cap: seeded with a 30,000-character `MEMORY.md` (many runs' worth), five
   further runs each leave it under 8,000 characters and 100 lines, in the

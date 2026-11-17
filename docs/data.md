@@ -405,8 +405,8 @@ SubagentStart hook (`docs/harnesses.md`).
 A specialist's summary of its past work on a project is a file outside the
 ledger and the Brief: `<work_dir>/specialists/<client>/<project>/<agent
 type>/MEMORY.md`, which Claude Code loads into the specialist's own system
-prompt (`docs/harnesses.md`, Specialist summaries). It is data the
-specialist wrote, not store state, and it never reaches the main session.
+prompt (`docs/harnesses.md`, Specialist summaries). It is data written
+from the specialist's runs, not store state, and it never reaches the main session.
 
 Rendering is the one place stored data becomes prompt text. Memory enters
 the same way: read through the port at render time, recorded in the

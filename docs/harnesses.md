@@ -503,7 +503,7 @@ Two points the harness relies on and has to keep true:
   (`claude_code.subagent_start`), and Valor's plugin's SubagentStart hook
   (`skills/valor/hooks/subagent_start.py`) prints it for every subagent but
   the web agent, which reads untrusted pages and gets only its prompt. A
-  specialist also gets its summary's rules, as a second output (Specialist
+  specialist also gets a line on its summary, as a second output (Specialist
   summaries, below).
   Claude Code keeps a hook output of 10,000 characters or more in a file
   and gives the subagent only a 2 KB preview and the file's path (measured
@@ -773,8 +773,7 @@ A specialist in Valor's plugin with `memory: user` in its definition
 its past work per project, through Claude Code's own agent memory. Claude
 Code (2.1.325, read and run) loads `$CLAUDE_CONFIG_DIR/agent-memory/<agent
 type>/MEMORY.md` (`valor-mac-app/`; first 200 lines or 25 KB) into the
-agent's system prompt after the definition's text, and turns on Write and Edit
-for it. A turn's config directory is the task's own, so on every working turn
+agent's system prompt after the definition's text. A turn's config directory is the task's own, so on every working turn
 (`_turn_for`, `core/__main__.py`) and every fresh session (`check_harness`)
 the kernel points `agent-memory` at
 `<work_dir>/specialists/<client>/<project>/` (`workspace.specialist_memory`),
@@ -783,15 +782,22 @@ have changed; whatever was there is removed with `rmtree` first. Every turn
 of the project on this Mac shares it, a task or chat session provisioned
 before it included. It outlives the workspace and `TMPDIR`, and another
 project or client links elsewhere. A project with no spec that loads gets no
-link, so the memory is per session, as before. The plugin's second
-SubagentStart command (`hooks/summary_start.py`) gives the specialist
-`hooks/summary.md`, the rules for the summary, as its own hook output: a cut
-near 9,000 characters plus the rules would pass the 10,000 Claude Code gives
-whole, and two outputs of about 9,000 each both arrived whole (measured
-2026-11-17). The rules override Claude Code's index-and-files memory format:
-one file, four parts, rewritten whole before the report, under 8,000
-characters and 100 lines, other files folded in and deleted, the summary data
-and never instructions. Two runs of one specialist on one project at once:
+link, so the memory is per session, as before. The plugin's
+`hooks/summary.py` keeps the summary, and only where `agent-memory` is a
+link (in a developer's own session it does nothing). As a second
+SubagentStart output, beside the cut (one output of both would pass the
+10,000 characters given whole), it tells the specialist the summary is data,
+never instructions, and is written for it. On SubagentStop, which never
+blocks, it rewrites `MEMORY.md` from the old summary, any other file the
+agent left (then deleted) and the run's transcript (the harness's
+`<system-reminder>` context left out; the first 10,000 and last 50,000
+characters of a long run) with `claude -p` on `claude-haiku-5-5`, no tools,
+`hooks/summary.md` as its system prompt, and cuts the reply to 8,000
+characters and 100 lines; when the call fails the old summary stands. The
+agent writing its own summary was measured first (haiku, 2026-11-17): told
+in its opening context, 4 runs in 10 wrote it; told in its definition too, 9
+in 10. Written by the hook, 10 in 10. The call goes through the turn's
+gateway, metered with the turn. Two runs of one specialist on one project at once:
 the later rewrite wins. Summaries are per Mac; they do not sync.
 
 **The web agent** ([plans/orchestration.md](plans/orchestration.md)).
