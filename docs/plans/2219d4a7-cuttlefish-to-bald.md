@@ -55,30 +55,43 @@ change is expected. A defect found on the way gets a fix and a test.
      or this is named as what cannot move and what it stops.
    - **Captain checkout:** kept on the Captain, since research may run
      there.
-4. **Kernel state.** Read `core/board.py`, the chat-session store and the
-   Telegram seen marks first:
-   - **Board canvas:** the Bald's ledger has no Cuttlefish questions, so
-     the board must not be rewritten empty. Carry open questions over,
-     re-recorded on the Bald with their source, or establish that the
-     board keeps them.
-   - **Telegram seen mark:** carry the chat's mark into the Bald's
-     `telegram-seen.json`, so no message is dropped or answered twice.
-   - **Chat sessions:** if a chat session cannot move, say what its loss
-     costs.
-   - **Memory:** the shared store already crosses machines.
-5. **Switch.**
-   - **Wait for in-flight work:** list open Cuttlefish tasks and waits on
-     the Captain, and wait for each to finish, or name what was carried
-     over.
-   - **Edit the spec:** set `machine = "Valor the Bald"` and fix its
-     header comment, then `Spec.load` it.
-   - **Confirm the sync:** check, through Valor.app on each Mac, that the
-     edit has synced.
-   - **Restart:** run the normal update (`core update --wait` in each
-     kernel job's launchctl env) on the Bald, then the Captain.
-   - **Confirm ownership:** the Bald's bridges own the three chats and
-     the Captain's do not. Evidence is bridge logs and settings, and
-     nothing is posted in the rooms.
+4. **Kernel state, read before the switch.** Ownership is read live
+   from the synced spec on every message (`core/intake.py` `_taking`,
+   `owned`), so a Mac switches when its iCloud copy syncs, not when it
+   restarts.
+   - **Stale marks on the Bald:** read the Bald's `telegram-seen.json`,
+     `slack-seen.json` and `intake.lowest`/`lowest_ts` for the three
+     chats. An old entry would make gap fill answer months of history.
+     The overwrite in step 5 replaces any entry it finds.
+   - **Board:** the Bald finds the existing `BOARD` canvas by its tab
+     (`bridges/slack/send.py` `write_canvas`), so no second canvas is
+     made. But its first write replaces the canvas whole from the Bald's
+     ledger, which holds no Cuttlefish questions. So the open questions
+     and recent answers are re-recorded on the Bald, each naming its
+     Captain source, through the path chat sessions record them, before
+     the Bald's bridges start. If no such path exists, the build names
+     what the first board write will drop.
+   - **Chat sessions:** they do not move. Say what their loss costs.
+     Memory is already shared.
+5. **Switch, ordered around the sync.**
+   1. List open Cuttlefish tasks and waits on the Captain, then let them
+      finish or name what was carried over.
+   2. On the Bald, `launchctl bootout` the telegram and slack bridge jobs,
+      after recording their plists.
+   3. Set `machine = "Valor the Bald"` and fix the header comment, then
+      `Spec.load` it.
+   4. Wait for the sync. Run `intake.owned('telegram')` and
+      `intake.owned('slack')` through Valor.app on each Mac. The Captain
+      must list none of the three chats and the Bald must list all
+      three.
+   5. Copy the Captain's final entries for the three chats from
+      `telegram-seen.json` and `slack-seen.json` into the Bald's files
+      (mode 600), overwriting what is there.
+   6. Bootstrap the Bald's bridges. Their gap fill picks up messages
+      posted during the pause, for the Bald's other projects too.
+   7. Run `intake.owned` again on both Macs, and check each bridge's log
+      for a clean start. That check is the evidence. Do not count
+      `core update --wait` on a Mac already at tip as a restart.
 6. **Prove it on the Bald.** Provision a Cuttlefish workspace through
    the kernel's provisioning path, run its setup, and run the spec's
    suite. Report the result. For any failure, rerun it on the Captain at
@@ -113,8 +126,10 @@ change is expected. A defect found on the way gets a fix and a test.
 
 - **The Bald's jobs:** every job's `launchctl list` exit is 0 after the
   update, and `core settings` names the Bald.
-- **Chat ownership:** the Bald's Telegram and Slack bridges list the
-  Telegram group and both Slack channels, and the Captain's list none.
+- **Chat ownership:** `intake.owned` on the Bald lists all three chats,
+  and on the Captain it lists none.
+- **Read marks:** the Bald's seen files hold the Captain's final marks
+  for the three chats.
 - **Board:** the board canvas still shows its open items.
 - **Suite:** the Bald's Cuttlefish suite results, with pre-existing
   failures separated out.
@@ -122,5 +137,6 @@ change is expected. A defect found on the way gets a fix and a test.
   machine, no spec names the client, and the backup folder holds the
   deleted files.
 - **Repo suite:** Valor's suite still passes after the doc edit.
-- **Undo:** the switch is undone by setting the machine back to the
-  Captain and rerunning the update.
+- **Undo:** reverse step 5: stop the Captain's bridges, set the machine
+  back, wait for the sync, copy the marks back, and start the Captain's
+  bridges.
