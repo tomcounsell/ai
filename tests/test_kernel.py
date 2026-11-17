@@ -1610,6 +1610,39 @@ def test_an_email_is_drafted_in_full_then_edited_against_the_guide(dsn, team, tm
     assert flow in " ".join(tasks.channel_text([]).split())
 
 
+def test_a_teammate_writes_like_the_chat_and_moves_a_long_answer_into_a_made_thing():
+    """Tom, 2026-11-17 (valor team chat): in team chats short casual messages like everyone
+    else's; a long answer as a short reply and a made thing whose form is Valor's call.
+    Only the teammate role: engineer, product and Tom's rooms keep the ordinary document."""
+    from core import persona
+
+    teammate = " ".join(tasks.role_text("teammate").split())
+    for line in (
+        "## How you sound here",
+        "Write like the people around you",
+        "yours should be about as long",
+        "One thought per message: say the one thing",
+        "No bullet lists, headers, bold labels or wrap-up summaries in chitchat",
+        "the opposite of the casual down to earth that people prefer",
+        "longer than the chat's own messages",
+        "told it comes from a teammate room",
+    ):
+        assert line in teammate, line
+    for role in ("engineer", "product"):
+        assert "How you sound here" not in tasks.role_text(role)
+    flat = " ".join(persona.render(REPO / "persona").split())
+    assert 'Where you play the teammate role, the role\'s "How you sound here" says how.' in flat
+    assert "Casual, plain, down to earth" not in flat  # one home: the role, not the persona
+    assert "In a room where you play the teammate role, and in a task started from one" in flat
+    assert "made with the present skill and using the medium" in flat
+    assert "not paragraphs printed to a page" in flat
+    assert "may merit a full deck or a narrated video, unasked" in flat
+    assert "Every other room keeps the ordinary document above." in flat
+    assert "When it is too long for a chat (past about 600 words" in flat
+    chat = " ".join((REPO / "skills/sdlc/converse.md").read_text().split())
+    assert "From a room where you play the teammate role, say so in its context" in chat
+
+
 def test_the_persona_runs_projects_and_writes_for_how_technical_the_reader_is():
     """Tom, 2026-11-06 (#makes-good-project): project-manager heuristics are general
     practice in every room; a repo path to a CEO is as bad as vagueness to an engineer;

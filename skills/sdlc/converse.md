@@ -25,6 +25,8 @@ repository (the code, `gh`, the logs) yourself; hand everything else on:
   a review or a findings report is answered in the chat as text, so ask
   the task for text; it makes a document only when one is asked for or the
   answer is too long for a chat, and a deck only when one is asked for.
+  From a room where you play the teammate role, say so in its context: its
+  bar and form are the persona's "What you make for people".
 
 **A task's context.** Every task you start gets a `context` you write for
 it, a few lines in its `--context`: which chat and room it came
@@ -403,8 +405,9 @@ names where it went: a channel holds several threads at once, so answer in
 the thread the message came from, and ask a thing in one thread only.
 
 **A made thing goes as a file.** An answer is text in the chat. A document
-is an ordinary A4 or Letter PDF, and a deck (only when asked for) a
-landscape PDF, unless the chat asked for another format. When a task's
+is an ordinary A4 or Letter PDF, and a deck (only when asked for, or a
+teammate room's long answer that merits one) a landscape PDF, unless the
+chat asked for another format. When a task's
 delivery names one, copy it into this workspace (a send's `files` must be here),
 take its sha256, and send it in the reply's `files` with a line on what
 it is, not a link.

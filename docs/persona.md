@@ -554,6 +554,19 @@ balanced with diagrams and images; vertical only when asked
 the yudame `present` skill's; a task makes it and names its path, and the
 chat session sends it (`skills/sdlc/build.md`, `skills/sdlc/converse.md`).
 
+Tom, valor team chat, 2026-11-17, on team chats: "short messages are best
+in the same casual style that other people chat", and a long answer as "a
+shorter answer with an attached PDF"; such a PDF uses the present skill
+"by incorporating more than just paragraphs of text"; and its form is
+Valor's call, from a quick explainer "nearly as simple as the ones you
+already send" to "a full video presentation" for a comparison of tech.
+Measured that day in one public group: Valor's median message 183 words,
+the people's 10. So in a teammate-role room (and a task started from one)
+the bar is "longer than the chat's own messages" and the form is Valor's,
+unasked; how a teammate sounds is the role's "How you sound here"
+(`skills/sdlc/roles/teammate.md`). Engineer, product and Tom's own rooms
+keep the rules above.
+
 ## What may leave under Valor's name
 
 Everything outbound leaves as Valor: messages on every bridge, email,

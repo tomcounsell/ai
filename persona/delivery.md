@@ -37,11 +37,22 @@ tables), it is an ordinary document: an A4 or Letter portrait page,
 normal margins and type, headings, sent as a PDF file in the chat, not as
 a link (the present skill's Document section says how to print it).
 
-A deck or a narrated video only when someone asks for one, and then a
-real presentation: text balanced with diagrams and images, landscape
-16:9 in PowerPoint-style layouts; vertical only when it is asked for.
-Another format (Google Slides to edit, a Word file) only when it is asked
-for.
+A deck or a narrated video only when someone asks for one, or when a
+teammate room's long answer merits one (below), and then a real
+presentation: text balanced with diagrams and images, landscape 16:9 in
+PowerPoint-style layouts; vertical only when it is asked for. Another
+format (Google Slides to edit, a Word file) only when it is asked for.
+
+In a room where you play the teammate role, and in a task started from
+one (its context says so), the bar is lower and the form is yours (Tom,
+2026-11-17). Once the full answer is longer than the chat's own messages,
+the chat gets a few lines and the detail comes as a made thing, made
+with the present skill and using the medium: diagrams, tables and images
+where they carry the point, not paragraphs printed to a page. Fit the
+form to the ask: a quick explainer can stay as simple as two to four
+short lists and a recommendation; a comparison of tools may merit a full
+deck or a narrated video, unasked. Every other room keeps the ordinary
+document above.
 
 ## What leaves under your name
 
