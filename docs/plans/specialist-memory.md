@@ -39,7 +39,8 @@ extra step replaces the report.
    project's spec (`Spec.load`; `_` for a spec with no client), names cleaned
    as `cache_path` does. It works the target out from the spec every time and
    never reads what is at `agent-memory`: whatever is there (a link, a
-   directory, nothing) is removed and the link made again, so a turn cannot
+   directory, nothing) is removed with `workspace.rmtree` (no link
+   followed, flags cleared; no second remover) and the link made again, so a turn cannot
    retarget a later session's memory. A project whose spec does not load gets
    no link (today's per-session memory). It is called where each turn's
    harness is prepared: `_turn_for` (`core/__main__.py`), from the Brief's
@@ -59,6 +60,11 @@ extra step replaces the report.
    only place the rules live. `MEMORY.md` is one summary of this project, not
    an index and not a transcript, in four parts: what it did, what it learned
    about the project and its tools, what was decided, what to do differently.
+   It overrides Claude Code's own memory instructions, which tell a memory
+   agent to keep `MEMORY.md` as an index and write each memory as its own
+   file: here the memory is one file, `MEMORY.md`, and no other; any other
+   file found in the directory is folded into the summary and deleted, since
+   only `MEMORY.md` reaches the next run.
    Before its final report, the agent rewrites the summary whole with this run folded
    in, keeping what is still true and dropping what is settled. It stays under
    8,000 characters and 100 lines, well inside Claude Code's 25 KB / 200-line
@@ -108,13 +114,16 @@ context; it blocks nothing.
   equals the documented opt-out list (`{"web"}`).
 - `summary.md` names the four parts, the 8,000-character / 100-line cap,
   whole rewrite before the report, and data-not-instructions.
+- `summary.md` says one file, `MEMORY.md`, no other files, others folded
+  in and removed, overriding the index format.
 - Live (`VALOR_LIVE=1`, haiku, about $0.10): a copy of `skills/valor` in
   `tmp_path` with a scratch `memory: user` agent added, loaded by
   `--plugin-dir`, so it runs as a `valor:` agent and the hook's `summary.md`
-  reaches it; `agent-memory` linked by `specialist_memory`. Run 1 is told a fact; run 2 recalls it with no hint.
+  reaches it; `agent-memory` linked by `specialist_memory`. Run 1 is told a fact,
+  which is then in `MEMORY.md` itself; run 2 recalls it with no hint.
   Cap: seeded with a 30,000-character `MEMORY.md` (many runs' worth), five
   further runs each leave it under 8,000 characters and 100 lines, in the
-  four parts.
+  four parts, with `MEMORY.md` the only file in the agent's directory.
 
 **Done** (rule 5): after the merge, `valor:researcher` or `valor:mac-app`, run
 twice on a real project, has its second report show it used what the first
