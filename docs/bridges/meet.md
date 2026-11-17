@@ -103,7 +103,11 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   one, naming its pid), muted,
   with Attendee's payloads (vendored, ELv2) and `page.js`. Chrome
   runs with its local network checks off, since the payloads' socket to
-  `127.0.0.1` is refused from Meet's page otherwise. Each of Meet's media
+  `127.0.0.1` is refused from Meet's page otherwise. The socket opens
+  once the page's document has loaded: opened while Meet was still
+  loading, it aborted the load and left the page blank (the Captain's
+  calls, 2026-11-17), so the payload connects on `DOMContentLoaded` (a
+  local edit to the vendored payload) and `page.js` says hello then. Each of Meet's media
   connections writes its state to `meet.log` ("media connection 2:
   connected"): audio, the call's chat and who sends which stream come
   over them; who is in the call does not. Live's speech is streamed into
