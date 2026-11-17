@@ -548,8 +548,9 @@ vertical default for decks and videos.
 So an answer, report or review is text in the chat, with effort in
 proportion to the ask. One too long for a chat is an ordinary A4 or
 Letter document sent as a PDF file. A deck or narrated video is made
-only when asked for: landscape 16:9, PowerPoint-style layouts, text
-balanced with diagrams and images; vertical only when asked
+only when asked for (a teammate room aside, below): landscape 16:9,
+PowerPoint-style layouts, text balanced with diagrams and images;
+vertical only when asked
 (`persona/delivery.md`). How a document or deck is printed and checked is
 the yudame `present` skill's; a task makes it and names its path, and the
 chat session sends it (`skills/sdlc/build.md`, `skills/sdlc/converse.md`).
