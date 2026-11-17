@@ -29,9 +29,10 @@ import numpy as np
 import pytest
 
 from bridges.meet import Page, Socket
-from core import call, credentials, db, intake, ledger, runs, tasks
+from core import broker, call, credentials, db, intake, ledger, runs, tasks
 from core.settings import settings
 from tests import bridges
+from tools import meet
 
 pytestmark = [
     pytest.mark.spend(usd=0.50),
@@ -136,13 +137,25 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                     text="Can we hop on a call about the launch?"))  # fmt: skip
                 await intake.bind(conn)
                 asking = await tasks.brief(conn, await intake.chat_session(conn, "slack", chat))
-            url, code = await meet_space()
-            async with await db.connect(dsn) as conn, conn.transaction():
-                session = await call.begin(
-                    conn, asking, url=url, code=code, reply_to="1790000000.000100", topic_id=None,
-                    prep="Logan wants to talk about the launch: the import shipped Tuesday, the launch is Monday.",
-                    effect_key=uuid.uuid4().hex,
-                )  # fmt: skip
+
+            # Asked as a chat's turn asks (join-first, P-033): `meet.join` for a
+            # new Meet; the kernel's start is the `_call` below.
+            async def created():
+                nonlocal url
+                url, code = await meet_space()
+                return url, code
+
+            url, opened = None, []
+            async with await db.connect(dsn) as conn:
+                out = await broker.request(conn, broker.Performers(meet.MeetJoin(asking, dsn, create=created,
+                                                                                 start=opened.append)),
+                                           asking.id, broker.Action("meet.join", "new", {
+                                               "reply_to": "1790000000.000100", "topic_id": None, "starts": None,
+                                               "prep": "Logan wants to talk about the launch: the import shipped "
+                                                       "Tuesday, the launch is Monday."}),
+                                           request_id=f"{uuid.uuid4().hex}/join.json")  # fmt: skip
+            assert out.kind == "done", out
+            (session,) = opened
             work = tmp_path / "worker-copy"
             work.mkdir()
             async with await db.connect(dsn) as conn:
@@ -207,10 +220,15 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
             finally:
                 await a.close()
                 await b.close()
-            return session, asking.id, reason
+            return session, asking.id, reason, url
 
-    session, asking_id, reason = asyncio.run(go())
+    session, asking_id, reason, url = asyncio.run(go())
     rows = asyncio.run(bridges.rows(dsn, session))
+    # The call posts its own link in the asking thread, once Valor is in.
+    joined = next(i for i, r in enumerate(rows) if r["type"] == "call.joined")
+    (link,) = [i for i, r in enumerate(rows) if r["type"] == "effect.held"
+               and r["payload"]["request_id"] == "meet/link/copy"]  # fmt: skip
+    assert joined < link and f"I'm in: {url}" in json.dumps(rows[link]["payload"])
     report = next(r["payload"]["text"] for r in asyncio.run(bridges.rows(dsn, asking_id))
                   if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended"))  # fmt: skip
     says = [
