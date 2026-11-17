@@ -753,7 +753,8 @@ class Kernel:
 
     async def reclaim(self, conn) -> None:
         """Every `RECLAIM_EVERY_S`, remove the workspace of each task that
-        finished `RECLAIM_AFTER_S` ago and runs no job here."""
+        finished `RECLAIM_AFTER_S` ago and runs no job here, then the copies
+        of Chrome.app its launches left (`workspace.chrome_clones`)."""
         if time.monotonic() - self.reclaimed_at < RECLAIM_EVERY_S:
             return
         self.reclaimed_at = time.monotonic()
@@ -763,6 +764,12 @@ class Kernel:
                 continue
             if await workspace.reclaim(conn, task_id, by="kernel", via="serve", before=before):
                 _log(f"task {task_id}: removed its finished workspace")
+        try:
+            if gone := await git.threaded(workspace.chrome_clones):
+                _log(f"removed {len(gone)} copies of Chrome.app its launches left")
+        except Exception as exc:  # noqa: BLE001  tried again on the next pass
+            _log(f"chrome copies: {exc!r}")
+            sentry_sdk.capture_exception(exc)
 
     async def react(self, conn) -> None:
         """A job of its own for each message's next reaction not already

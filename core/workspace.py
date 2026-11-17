@@ -2071,6 +2071,41 @@ async def reclaim(conn, task_id: str, *, by: str, via: str, before=None) -> bool
     return True
 
 
+CHROME_CLONE_AGE_S = 600.0
+
+
+def chrome_clones(root: Path | None = None) -> list[str]:
+    """Remove the copies of Chrome.app that Chrome makes at each launch
+    (`X/com.google.Chrome.code_sign_clone` beside the user's temp dir) and
+    deletes only on a clean exit: every Chrome a signal stops, a reaped
+    turn's or a call's, leaves one of ~730 MB (16 GB on the Cowboy,
+    2026-11-17). Removes each copy older than `CHROME_CLONE_AGE_S` that no
+    process holds open, by what `lsof` prints (a live Chrome holds its copy
+    as its executable). The root is resolved first: `/var` is a link and
+    lsof prints `/private/var`. Returns the names removed."""
+    if root is None:
+        tmp = subprocess.run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True)
+        root = Path(tmp.stdout.strip()).parent / "X" / "com.google.Chrome.code_sign_clone"
+    root = root.resolve()
+    if not root.is_dir():
+        return []
+    out = subprocess.run(["/usr/sbin/lsof", "-Fn", "+D", str(root)], capture_output=True, text=True)
+    if out.returncode and not out.stdout and out.stderr.strip():
+        raise RuntimeError(f"lsof +D {root}: {out.stderr.strip()}")
+    held = {
+        Path(line[1:]).relative_to(root).parts[0]
+        for line in out.stdout.splitlines()
+        if line.startswith("n") and Path(line[1:]).is_relative_to(root) and Path(line[1:]) != root
+    }
+    removed = []
+    for copy in root.iterdir():
+        if copy.name in held or time.time() - copy.lstat().st_mtime < CHROME_CLONE_AGE_S:
+            continue
+        rmtree(copy)
+        removed.append(copy.name)
+    return removed
+
+
 def remove(task_id: str, lay: Layout | None = None) -> None:
     """Remove the task's directory: a stopped or merged task's workspace, an
     orphan's, or one a provisioning that died left. What could still write
