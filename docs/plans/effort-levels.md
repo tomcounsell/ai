@@ -103,6 +103,10 @@ request's effort field read at the gateway) and writes it in the results.
   back to medium on feedback (2026-11-17): on the chat stand-in Fable low
   stated a wrong fact where medium was right. `frontier` stays unset: Opus low
   scored lowest on both judged tasks, so it goes to Tom as a recommendation.
+- `core run` needs the kernel's Claude login, which a turn does not hold, so
+  each replay was one `claude -p` plan-and-build run in a throwaway clone on
+  this turn's gateway (`docs/research/effort-levels.md`); revision rounds
+  were not measured. Opus low ran on all three tasks.
 
 ## Out of scope
 
