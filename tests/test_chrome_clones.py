@@ -111,7 +111,8 @@ def test_reclaim_sweeps_the_copies_and_a_failed_sweep_still_removes_workspaces(d
 
             monkeypatch.setattr(workspace, "chrome_clones", fail)
             await finished(conn, "b")
-            await serve.Kernel(None, {}, None, dsn).reclaim(conn)  # does not raise
+            with pytest.raises(RuntimeError):
+                await serve.Kernel(None, {}, None, dsn).reclaim(conn)
             assert not (tmp_path / "b").exists()
 
     asyncio.run(go())

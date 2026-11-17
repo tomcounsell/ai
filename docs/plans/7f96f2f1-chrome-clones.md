@@ -45,8 +45,8 @@ its copy within seconds), with the existing `rmtree`.
   on some errors while still printing matches). It raises only when the exit is
   non-zero, stdout is empty and stderr is not. A missing root is nothing to do.
 - `Kernel.reclaim` runs it off the event loop (`git.threaded`, as `remove` runs), after
-  the workspace loop and in its own `try`, so an lsof failure never skips removing
-  finished workspaces; the failure is logged to Sentry as reclaim's are.
+  the workspace loop, so an lsof failure never skips removing finished workspaces;
+  the caller's existing handler logs it to Sentry and the next pass retries.
 No new job, check or limit: the existing reclaim pass gains one more thing it
 reclaims. Bug fix under hard rule 9.
 

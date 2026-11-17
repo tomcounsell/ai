@@ -764,12 +764,8 @@ class Kernel:
                 continue
             if await workspace.reclaim(conn, task_id, by="kernel", via="serve", before=before):
                 _log(f"task {task_id}: removed its finished workspace")
-        try:
-            if gone := await git.threaded(workspace.chrome_clones):
-                _log(f"removed {len(gone)} copies of Chrome.app its launches left")
-        except Exception as exc:  # noqa: BLE001  tried again on the next pass
-            _log(f"chrome copies: {exc!r}")
-            sentry_sdk.capture_exception(exc)
+        if gone := await git.threaded(workspace.chrome_clones):
+            _log(f"removed {len(gone)} copies of Chrome.app its launches left")
 
     async def react(self, conn) -> None:
         """A job of its own for each message's next reaction not already
