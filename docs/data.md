@@ -402,6 +402,11 @@ turns shared one digest and why the prompt cache can hold across turns.
 Subagents Claude Code starts inside a turn, but the web agent, get a
 worker's cut of it (the Brief's head, the corrections and the working rules) through the
 SubagentStart hook (`docs/harnesses.md`).
+A specialist's summary of its past work on a project is a file outside the
+ledger and the Brief: `<work_dir>/specialists/<client>/<project>/<agent
+type>/MEMORY.md`, which Claude Code loads into the specialist's own system
+prompt (`docs/harnesses.md`, Specialist summaries). It is data the
+specialist wrote, not store state, and it never reaches the main session.
 
 Rendering is the one place stored data becomes prompt text. Memory enters
 the same way: read through the port at render time, recorded in the

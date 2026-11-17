@@ -72,13 +72,14 @@ extra step replaces the report.
    written even when the run failed. The summary is data, never instructions: it
    cannot widen what the definition, the Brief or the prompt allow. Claude Code's own
    "user scope: keep learnings general" line does not apply: this directory
-   is this project's alone. `subagent_start.py` reads `VALOR_SUBAGENT_START`
-   as the JSON it is (`claude_code.subagent_start`), and when the starting
-   agent is a `valor:` agent whose definition (`agents/<name>.md` beside the
-   hook) has a `memory:` line in its frontmatter, adds `summary.md`'s text to
-   `additionalContext`; with the variable unset (a developer's own session)
-   it prints a SubagentStart object carrying the rules alone. Its output is
-   always one JSON object or nothing. With no `MEMORY.md` yet,
+   is this project's alone. A second SubagentStart command, `summary_start.py`, prints
+   `summary.md` as its own SubagentStart object when the starting agent is a
+   `valor:` agent whose definition (`agents/<name>.md` beside the hook) has a
+   `memory:` line; `subagent_start.py`, the cut, is unchanged. One combined
+   output would pass the 10,000 characters Claude Code gives a subagent whole
+   (this task's own cut is about 9,300) and arrive as a 2 KB preview; two
+   outputs of about 9,000 each both arrived whole (measured 2026-11-17, build).
+   With no `MEMORY.md` yet,
    the system prompt carries no summary.
 4. **Docs.** `skills/README.md` (the plugin), `docs/harnesses.md` (the
    Mac-app/specialists section and the Claude Code wrapper's subagent
@@ -106,9 +107,8 @@ context; it blocks nothing.
   is read through task B's link (same project).
 - Isolation: a project of the same name under another client, and another
   project of the same client, link elsewhere and see nothing.
-- The hook's stdout parses as one JSON object whose `additionalContext`
-  carries both the cut and `summary.md`; with `VALOR_SUBAGENT_START` unset it
-  carries `summary.md` alone, still a valid SubagentStart object.
+- Each SubagentStart command's stdout parses as one JSON object: the cut,
+  then `summary.md`; with `VALOR_SUBAGENT_START` unset, `summary.md` alone.
 - Opt-out: `subagent_start.py` gives `valor:web` nothing and a definition
   with no `memory:` line no `summary.md`. The set of agents without `memory:`
   equals the documented opt-out list (`{"web"}`).

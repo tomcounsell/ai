@@ -502,7 +502,9 @@ Two points the harness relies on and has to keep true:
   SubagentStart hook output in `VALOR_SUBAGENT_START`
   (`claude_code.subagent_start`), and Valor's plugin's SubagentStart hook
   (`skills/valor/hooks/subagent_start.py`) prints it for every subagent but
-  the web agent, which reads untrusted pages and gets only its prompt.
+  the web agent, which reads untrusted pages and gets only its prompt. A
+  specialist also gets its summary's rules, as a second output (Specialist
+  summaries, below).
   Claude Code keeps a hook output of 10,000 characters or more in a file
   and gives the subagent only a 2 KB preview and the file's path (measured
   2026-11-16: 9,800 characters arrived whole, 10,200 as a preview). Before
@@ -764,6 +766,33 @@ loaded as skills: Claude Code, Codex and Pi list only a plugin's `skills/`,
 so no session sees them. Claude Code's agent `skills:` preload, measured on
 2.1.309, does not load a skill marked `disable-model-invocation`, and any
 skill it can load is listed to every session.
+
+**Specialist summaries** ([plans/specialist-memory.md](plans/specialist-memory.md)).
+A specialist in Valor's plugin with `memory: user` in its definition
+(`valor:mac-app`, `valor:researcher`; not `valor:web`) keeps one summary of
+its past work per project, through Claude Code's own agent memory. Claude
+Code (2.1.325, read and run) loads `$CLAUDE_CONFIG_DIR/agent-memory/<agent
+type>/MEMORY.md` (`valor-mac-app/`; first 200 lines or 25 KB) into the
+agent's system prompt after the definition's text, and turns on Write and Edit
+for it. A turn's config directory is the task's own, so on every working turn
+(`_turn_for`, `core/__main__.py`) and every fresh session (`check_harness`)
+the kernel points `agent-memory` at
+`<work_dir>/specialists/<client>/<project>/` (`workspace.specialist_memory`),
+worked out from the project's spec and never read from the link a turn could
+have changed; whatever was there is removed with `rmtree` first. Every turn
+of the project on this Mac shares it, a task or chat session provisioned
+before it included. It outlives the workspace and `TMPDIR`, and another
+project or client links elsewhere. A project with no spec that loads gets no
+link, so the memory is per session, as before. The plugin's second
+SubagentStart command (`hooks/summary_start.py`) gives the specialist
+`hooks/summary.md`, the rules for the summary, as its own hook output: a cut
+near 9,000 characters plus the rules would pass the 10,000 Claude Code gives
+whole, and two outputs of about 9,000 each both arrived whole (measured
+2026-11-17). The rules override Claude Code's index-and-files memory format:
+one file, four parts, rewritten whole before the report, under 8,000
+characters and 100 lines, other files folded in and deleted, the summary data
+and never instructions. Two runs of one specialist on one project at once:
+the later rewrite wins. Summaries are per Mac; they do not sync.
 
 **The web agent** ([plans/orchestration.md](plans/orchestration.md)).
 WebFetch and WebSearch run only inside `valor:web`, the leaf agent in Valor's

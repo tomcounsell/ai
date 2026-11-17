@@ -776,7 +776,9 @@ async def suite(ctx, lay: workspace.Layout, b: tasks.Brief, sha: str, role: str,
         try:
             names = list(project.get("services") or ())
             ports = [int((project.get("ports") or {})[n]) for n in names]
-            harness = workspace.check_harness(lay, check_dir, ports, env, services=True)
+            harness = workspace.check_harness(
+                lay, check_dir, ports, env, services=True, project=project.get("name")
+            )
             commands = list(project.get("setup") or ())
             setup = await _setup(checkout, harness, commands, f"{mark}-setup", stop, out)
             payload["setup"] = setup

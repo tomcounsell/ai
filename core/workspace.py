@@ -1554,7 +1554,13 @@ async def fresh(check_dir: Path) -> AsyncIterator[Path]:
 
 
 def check_harness(
-    lay: Layout, check_dir: Path, ports: list[int], env: dict[str, str], *, services: bool = False
+    lay: Layout,
+    check_dir: Path,
+    ports: list[int],
+    env: dict[str, str],
+    *,
+    services: bool = False,
+    project: str | None = None,
 ) -> dict[str, Any]:
     """The harness settings of one fresh session: the turn profile, its own
     Claude Code config directory and TMPDIR. A session that runs nothing against the
@@ -1562,10 +1568,12 @@ def check_harness(
     of the task's environment, so no database credential. With `services`
     (test, review) the session gets the environment `check_services` made
     for its fresh instances; its package caches are the Mac's, as the
-    builder's are."""
+    builder's are. Its Claude Code config directory links to `project`'s
+    specialist memory (`specialist_memory`)."""
     path = lay.profiles / "turn.sb"
     _write(path, turn_profile())
     fresh_env = dict(env) if services else {"PATH": env.get("PATH", "/usr/bin:/bin")}
+    specialist_memory(check_dir / "claude", project)
     return {
         "sandbox_profile": str(path),
         "claude_config_dir": str(check_dir / "claude"),
@@ -1574,6 +1582,34 @@ def check_harness(
         "tmpdir": str(check_dir / "tmp"),
         "env": fresh_env,
     }
+
+
+def _name(s: str) -> str:
+    """`s` as one path segment: no separator, no dot."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", s)
+
+
+def specialist_memory(config_dir: str | Path, project: str | None) -> None:
+    """Point `<config_dir>/agent-memory`, where Claude Code keeps a `memory:
+    user` agent's memory, at the project's own directory under the work
+    directory, `specialists/<client>/<project>/`, which outlives every
+    workspace and TMPDIR (docs/plans/specialist-memory.md). The target comes
+    from the project's spec every time, never from what is at
+    `agent-memory`, which a turn writes: that is removed (`rmtree`, no link
+    followed) and the link made again. A project with no spec that loads
+    gets no link."""
+    if not project:
+        return
+    try:
+        spec = Spec.load(project)
+    except Refused:
+        return
+    target = work_dir() / "specialists" / _name(spec.client or "_") / _name(spec.name)
+    target.mkdir(parents=True, exist_ok=True)
+    link = Path(config_dir) / "agent-memory"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    rmtree(link)
+    os.symlink(target, link)
 
 
 def setup_harness(lay: Layout, check_dir: Path, ports: list[int], harness: dict[str, Any]) -> dict[str, Any]:

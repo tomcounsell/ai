@@ -280,6 +280,10 @@ def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
         harness = {**harness, "env": {**harness.get("env", {}), **_reading_env(b)}}
     if b.project:
         harness = {**harness, "env": {**harness.get("env", {}), **_client_env(b)}}
+        # The project's specialist memory, linked on every turn, so a task or
+        # chat session provisioned before it existed has it too.
+        if harness.get("claude_config_dir"):
+            workspace.specialist_memory(harness["claude_config_dir"], b.project.get("name"))
     if b.chat:
         harness = {**harness, "chat_channel": b.chat["channel"]}
     return _harnesses()[b.harness_name].workspace_turn(

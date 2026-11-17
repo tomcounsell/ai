@@ -196,7 +196,14 @@ def critique_runner(fresh_for: FreshFor, model: str | None = None, seat: str | N
                 files = critique_inputs(checkout, rows, f, b, diff)
             except (OSError, ValueError) as exc:
                 return {"status": "failed", "state": state, "turn": {"result": f"critique inputs: {exc}"}}
-            harness = workspace.check_harness(lay, check_dir, [], b.harness.get("env", {}), services=False)
+            harness = workspace.check_harness(
+                lay,
+                check_dir,
+                [],
+                b.harness.get("env", {}),
+                services=False,
+                project=(b.project or {}).get("name"),
+            )
             harness_name, seat_model = resolve_seat(seat or SEATS["critique"])
             model = model_ or seat_model
             if not await ctx.alive():
@@ -352,7 +359,14 @@ def advise(fresh_for: FreshFor):
                 await asyncio.to_thread(workspace.write_inputs, checkout, files)
             except (git.GitError, OSError, ValueError) as exc:
                 return await record(error=f"the advisor's checkout: {exc}")
-            harness = workspace.check_harness(lay, check_dir, [], b.harness.get("env", {}), services=False)
+            harness = workspace.check_harness(
+                lay,
+                check_dir,
+                [],
+                b.harness.get("env", {}),
+                services=False,
+                project=(b.project or {}).get("name"),
+            )
             if not await alive():
                 return {"status": "lock lost"}
             try:
@@ -632,7 +646,9 @@ async def _docs_turn(
         except (git.GitError, OSError, ValueError) as exc:
             return {"status": "failed", "state": state, "turn": {"result": f"docs checkout: {exc}"}}
         env = {**b.harness.get("env", {}), **DOCS_IDENTITY}
-        harness = workspace.check_harness(lay, check_dir, [], env, services=False)
+        harness = workspace.check_harness(
+            lay, check_dir, [], env, services=False, project=(b.project or {}).get("name")
+        )
         harness["env"].update(DOCS_IDENTITY)
         if not await ctx.alive():
             return {"status": "lock lost"}
@@ -936,7 +952,9 @@ def review_runner(fresh_for: FreshFor, model: str | None = None, seat: str = SEA
             try:
                 names = list(project.get("services") or ())
                 ports = [int((project.get("ports") or {})[n]) for n in names]
-                harness = workspace.check_harness(lay, check_dir, ports, env, services=True)
+                harness = workspace.check_harness(
+                    lay, check_dir, ports, env, services=True, project=project.get("name")
+                )
                 setup_harness = workspace.setup_harness(lay, check_dir, ports, harness)
                 commands = list(project.get("setup") or ())
                 if not await ctx.alive():
