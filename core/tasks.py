@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from core import corrections, git, ledger, machine, memory, outcomes, persona, record, workspace
-from core.settings import resolve_model, seat_effort, settings
+from core.settings import EFFORT, resolve_model, settings
 
 EFFECT_RANK = {"read": 0, "propose": 1, "act": 2}
 
@@ -338,13 +338,12 @@ def turn_model(b: Brief) -> str:
     return resolve_model("chat") if b.chat else b.model
 
 
-def turn_effort(b: Brief) -> dict[str, str]:
-    """The harness entry giving the effort a working-session turn of `b`
-    runs at: the `chat` seat's for a chat session, read each turn as
-    `turn_model` is, else the level the task started with."""
-    if b.chat:
-        return seat_effort("chat")
-    return {"effort": b.effort} if b.effort else {}
+def turn_effort(b: Brief) -> str | None:
+    """The effort a working-session turn of `b` runs at: the `chat` entry's
+    for a chat session, read each turn as `turn_model` is, else the level
+    the task started with. A call's worker keeps the Brief's, as for its
+    model."""
+    return EFFORT.get("chat") if b.chat else b.effort
 
 
 def stage_text(state: machine.State | str) -> str | None:

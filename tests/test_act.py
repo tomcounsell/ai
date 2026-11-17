@@ -98,6 +98,20 @@ def test_an_act_start_prints_the_childs_id_and_the_child_exists_before_the_turn_
     assert started[0]["type"] == "task.started"
 
 
+def test_a_task_a_chat_starts_takes_the_frontier_entrys_level(dsn, room, monkeypatch):
+    """docs/plans/effort-levels.md: `TaskStart` writes `EFFORT["frontier"]` on the child's Brief."""
+    from core import settings
+
+    monkeypatch.setitem(settings.EFFORT, "frontier", "high")
+    ((rc, _, kids),), _ = asyncio.run(acting(dsn, room, START))
+
+    async def brief():
+        async with await db.connect(dsn) as conn:
+            return await tasks.brief(conn, kids[0])
+
+    assert rc == 0 and asyncio.run(brief()).effort == "high"
+
+
 def test_the_same_act_twice_in_a_turn_starts_one_task(dsn, room):
     out, _ = asyncio.run(acting(dsn, room, START, START))
     (rc1, said1, _), (rc2, said2, kids) = out

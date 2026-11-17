@@ -295,3 +295,41 @@ def test_the_docs_commit_reaches_the_mirror_before_its_folder_goes(dsn, provisio
     assert git(t.lay.mirror, "rev-parse", f"refs/valor/docs/{kept['turn_id']}") == kept["kept"]
     assert git(t.lay.mirror, "show", f"{kept['kept']}:docs.md") == "documented"
     assert left(t.lay) == []
+
+
+@pytest.fixture
+def levels(monkeypatch):
+    """docs/plans/effort-levels.md: each fresh turn takes `EFFORT` by its
+    stage's name, not the task's seat's or the reviewer seat's. Returns the
+    level each fresh turn was built with, in order."""
+    from core import settings as s
+
+    for name, level in (("frontier", "max"), ("reviewer", "max"), ("critique", "low"), ("docs", "medium"),
+                        ("review", "high")):  # fmt: skip
+        monkeypatch.setitem(s.EFFORT, name, level)
+    seen: list[str | None] = []
+
+    def watching(verdict: dict, commit: bool = False):
+        inner = fresh_for(verdict, commit)
+
+        def for_(prompt, checkout, model, harness, harness_name):
+            seen.append(harness.get("effort"))
+            return inner(prompt, checkout, model, harness, harness_name)
+
+        return for_
+
+    return SimpleNamespace(seen=seen, watching=watching)
+
+
+def test_a_critique_turn_runs_at_the_critique_entrys_level(dsn, provisioned, levels):
+    provisioned.to(State.CRITIQUE)
+    step(dsn, provisioned.task, fresh.critique_runner(levels.watching({"verdict": "sound", "findings": []})))
+    assert levels.seen == ["low"]
+
+
+def test_review_and_docs_turns_run_at_their_own_entrys_levels(dsn, provisioned, levels):
+    provisioned.to(State.CHECKS)
+    step(dsn, provisioned.task, fresh.review_runner(levels.watching({"verdict": "pass", "findings": []})))
+    docs = fresh.docs_runner(levels.watching({"verdict": "updated", "findings": []}, commit=True))
+    step(dsn, provisioned.task, docs)
+    assert levels.seen == ["high", "medium"]

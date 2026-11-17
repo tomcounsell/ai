@@ -3,12 +3,15 @@ a task's turns at the level it started with, a chat turn at the `chat` seat's,
 and an unset seat at today's argv."""
 
 import asyncio
+import dataclasses
 import sys
+import uuid
 
 import pytest
 
-from core import __main__, db, settings, tasks
+from core import __main__, db, routines, settings, tasks
 from harnesses import claude_code
+from tests import bridges
 
 PROFILE = {"sandbox_profile": "turn"}
 
@@ -42,7 +45,7 @@ def test_a_task_turn_runs_at_its_briefs_level_and_a_brief_stored_without_one_at_
     assert effort(turn(tasks.Brief.load({**body, "effort": "high"}))) == "high"
 
 
-def test_a_chat_turn_first_and_resumed_runs_at_the_chat_seats_level_whatever_its_brief_says(monkeypatch):
+def test_a_chat_turn_first_and_resumed_runs_at_the_chat_entrys_level_whatever_its_brief_says(monkeypatch):
     b = tasks.Brief(
         instruction="x",
         workspace=".",
@@ -51,9 +54,70 @@ def test_a_chat_turn_first_and_resumed_runs_at_the_chat_seats_level_whatever_its
         chat={"channel": "slack", "chat_id": "C1"},
     )
     monkeypatch.delitem(settings.EFFORT, "chat")
-    assert effort(turn(b)) is None
+    assert tasks.turn_effort(b) is None
     monkeypatch.setitem(settings.EFFORT, "chat", "medium")
-    assert effort(turn(b)) == effort(turn(b, resume="s")) == "medium"
+    # `session.run` gives each turn its level as it gives it its model.
+    run = dataclasses.replace(b, effort=tasks.turn_effort(b))
+    assert effort(turn(run)) == effort(turn(run, resume="s")) == "medium"
+
+
+def test_a_call_workers_turn_carries_no_level_with_frontier_and_chat_set(monkeypatch):
+    """The worker runs `_turn_for` on the call session's Brief with its asking
+    chat laid on (`core.__main__._call`); that Brief, as `call.py` writes it,
+    has no level."""
+    monkeypatch.setitem(settings.EFFORT, "frontier", "high")
+    monkeypatch.setitem(settings.EFFORT, "chat", "low")
+    worker = tasks.Brief(
+        instruction="x", workspace=".", harness=PROFILE, chat={"channel": "slack", "chat_id": "C1"}
+    )
+    assert effort(turn(worker)) is None
+
+
+def test_a_routines_objective_and_run_start_with_no_level_with_frontier_set(dsn, monkeypatch):
+    monkeypatch.setitem(settings.EFFORT, "frontier", "high")
+
+    async def go():
+        async with await db.connect(dsn) as conn:
+            objective, _ = await routines.ensure(conn, routines.load("hours"))
+            return await tasks.brief(conn, objective)
+
+    assert asyncio.run(go()).effort is None
+    given = {}
+
+    async def captured(conn, args):
+        given["effort"] = getattr(args, "effort", None)
+        return "t"
+
+    monkeypatch.setattr(__main__, "_start_project", captured)
+    asyncio.run(
+        __main__._routine_project(
+            None,
+            parent="p",
+            instruction="i",
+            routine="hours",
+            ceiling="act",
+            model="frontier",
+            project="valor",
+            branch=None,
+            marker={},
+        )
+    )
+    assert given == {"effort": None}
+
+
+def test_a_task_tom_starts_by_message_takes_the_frontier_entrys_level(dsn, monkeypatch, tmp_path):
+    from tests.test_kernel import at, tom_says
+
+    monkeypatch.setitem(settings.EFFORT, "frontier", "high")
+    tom = f"T0ABC/U{uuid.uuid4().hex[:8].upper()}"
+
+    async def go():
+        bound = await tom_says(dsn, tom, "write a haiku", at(11))
+        async with await db.connect(dsn) as conn:
+            return await tasks.brief(conn, bound["task_id"])
+
+    with bridges.operator(tmp_path, operator_slack_ids=(tom,)):
+        assert asyncio.run(go()).effort == "high"
 
 
 def test_a_seat_without_a_level_adds_nothing():

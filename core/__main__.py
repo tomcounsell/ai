@@ -288,7 +288,8 @@ def _turn_for(prompt: str, resume: str | None, b: tasks.Brief):
             workspace.specialist_memory(harness["claude_config_dir"], b.project.get("name"))
     if b.chat:
         harness = {**harness, "chat_channel": b.chat["channel"]}
-    harness = {**harness, **tasks.turn_effort(b)}
+    if b.effort:
+        harness = {**harness, "effort": b.effort}
     return _harnesses()[b.harness_name].workspace_turn(
         prompt, cwd=b.workspace, resume=resume, model=b.model, harness=harness
     )

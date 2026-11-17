@@ -148,7 +148,7 @@ async def run(
             if now["state"] != state.value:
                 return {"status": "moved", "state": now}
             b = await tasks.brief(conn, task_id)
-            b = dataclasses.replace(b, model=tasks.turn_model(b))
+            b = dataclasses.replace(b, model=tasks.turn_model(b), effort=tasks.turn_effort(b))
             asked = pending_advice(await ledger.read(conn, task_id)) if advise else None
             stale = None
             if b.chat and asked is None:

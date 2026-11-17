@@ -99,6 +99,9 @@ request's effort field read at the gateway) and writes it in the results.
 - Critique, docs and review take `EFFORT` by their stage names, not their
   seats, so `EFFORT["frontier"]` reaches a task's own turns only and the
   revision rounds stay at medium unless named.
+- Set on the result: `chat` at low only. `frontier` stays unset: Opus low
+  tied by the rule but scored lowest on both judged tasks with no revision
+  rounds measured, so it goes to Tom as a recommendation (review, 2026-11-17).
 - `core run` needs the kernel's Claude login, which a turn does not hold, so
   each replay was one `claude -p` plan-and-build run in a throwaway clone on
   this turn's gateway (`docs/research/effort-levels.md`); revision rounds
@@ -116,12 +119,15 @@ advisor or `gateway.ask`; more than one run per arm; replaying client work.
 - A task started on seat `frontier` gets `EFFORT["frontier"]` on its Brief;
   one started with a bare model id and no `--effort` gets none; `--effort`
   wins over the seat's level. The argument parser refuses an unknown level.
+- A task started from Tom's message (`intake._start`) or by a chat
+  (`TaskStart`) gets `EFFORT["frontier"]` on its Brief.
 - A chat turn, first and resumed, carries `EFFORT["chat"]` whatever its Brief
   says.
-- Critique, docs and review turns carry their seat's level and ignore the
-  task's `--effort`.
-- With `EFFORT["frontier"]` set, a call worker's and a routine's argv carry no
-  `--effort`.
+- Critique, docs and review turns carry their own stage's entry
+  (`EFFORT["critique"]`, `["docs"]`, `["review"]`), not the task's level or a
+  seat's.
+- With `EFFORT["frontier"]` and `["chat"]` set, a call worker's turn carries no
+  `--effort`, and a routine's objective and run start with none.
 
 No check, gate or limit is added. The setting passes a flag Claude Code
 already takes, and an empty `EFFORT` is today's behaviour.
