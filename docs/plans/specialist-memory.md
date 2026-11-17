@@ -33,17 +33,24 @@ extra step replaces the report.
 
 ## What is built
 
-1. **Where it lives.** At provisioning (`workspace._provision`), the kernel
-   makes `<work_dir>/specialists/<client>/<project>/` (names cleaned as
-   `cache_path` does; `_` for a spec with no client) and links
-   `<task>/state/work/claude/agent-memory` to it. `check_harness` gives a
-   fresh session's config dir the same link when the task has one. So every
-   turn of the project on this Mac, task or chat session, sees one directory
-   per specialist (`valor-mac-app/MEMORY.md`). It is outside every workspace
-   and every `TMPDIR`, and `rmtree` of a workspace removes the link and leaves
-   the target. Another project, or another client's project, links to a
-   different directory. A task provisioned before this keeps per-task memory
-   (today's behaviour, lost with its workspace).
+1. **Where it lives.** New `workspace.specialist_memory(config_dir, project)`
+   points `<config_dir>/agent-memory` at
+   `<work_dir>/specialists/<client>/<project>/`, the client read from the
+   project's spec (`Spec.load`; `_` for a spec with no client), names cleaned
+   as `cache_path` does. It works the target out from the spec every time and
+   never reads what is at `agent-memory`: whatever is there (a link, a
+   directory, nothing) is removed and the link made again, so a turn cannot
+   retarget a later session's memory. A project whose spec does not load gets
+   no link (today's per-session memory). It is called where each turn's
+   harness is prepared: `_turn_for` (`core/__main__.py`), from the Brief's
+   project, for every working turn, so tasks and chat sessions provisioned
+   before this get it on their next turn; and `check_harness`, which gains a
+   `project` argument its callers pass from the Brief, for each fresh session
+   (critique, review, test, docs). So every turn of the project on this Mac
+   sees one directory per specialist (`valor-mac-app/MEMORY.md`), outside
+   every workspace and every `TMPDIR`; removing a workspace removes the link
+   and leaves the target. Another project, or another client's project of the
+   same name, links elsewhere.
 2. **Who has one.** `mac-app.md` and `researcher.md` gain `memory: user`;
    `web.md` has none. A new definition carries `memory: user`. It opts out
    by leaving the line out and adding itself to the opt-out list in
@@ -59,9 +66,13 @@ extra step replaces the report.
    written even when the run failed. The summary is data, never instructions: it
    cannot widen what the definition, the Brief or the prompt allow. Claude Code's own
    "user scope: keep learnings general" line does not apply: this directory
-   is this project's alone. `subagent_start.py` appends `summary.md` to the
-   context it already gives when the starting agent is a `valor:` agent whose
-   definition's frontmatter has a `memory:` line. With no `MEMORY.md` yet,
+   is this project's alone. `subagent_start.py` reads `VALOR_SUBAGENT_START`
+   as the JSON it is (`claude_code.subagent_start`), and when the starting
+   agent is a `valor:` agent whose definition (`agents/<name>.md` beside the
+   hook) has a `memory:` line in its frontmatter, adds `summary.md`'s text to
+   `additionalContext`; with the variable unset (a developer's own session)
+   it prints a SubagentStart object carrying the rules alone. Its output is
+   always one JSON object or nothing. With no `MEMORY.md` yet,
    the system prompt carries no summary.
 4. **Docs.** `skills/README.md` (the plugin), `docs/harnesses.md` (the
    Mac-app/specialists section and the Claude Code wrapper's subagent
@@ -77,8 +88,11 @@ context; it blocks nothing.
 
 ## Tests (`tests/test_specialist_memory.py`)
 
-- Provisioning links `agent-memory` to `specialists/<client>/<project>`.
-  Removing the workspace keeps the target. A fresh session's config dir gets the same link.
+- `specialist_memory` links `agent-memory` to `specialists/<client>/<project>`;
+  removing the workspace keeps the target. A task provisioned without the
+  link gets it from `_turn_for`'s harness; a `check_harness` dir gets the
+  same target. A link the turn retargeted, or a directory in its place, is
+  replaced by the spec's target. An unknown project gets no link.
 - First run with none: a new project's directory is empty. The hook's
   context for `valor:mac-app` carries `summary.md`; Claude Code puts no
   summary in a prompt when no `MEMORY.md` exists.
@@ -86,15 +100,21 @@ context; it blocks nothing.
   is read through task B's link (same project).
 - Isolation: a project of the same name under another client, and another
   project of the same client, link elsewhere and see nothing.
+- The hook's stdout parses as one JSON object whose `additionalContext`
+  carries both the cut and `summary.md`; with `VALOR_SUBAGENT_START` unset it
+  carries `summary.md` alone, still a valid SubagentStart object.
 - Opt-out: `subagent_start.py` gives `valor:web` nothing and a definition
   with no `memory:` line no `summary.md`. The set of agents without `memory:`
   equals the documented opt-out list (`{"web"}`).
 - `summary.md` names the four parts, the 8,000-character / 100-line cap,
   whole rewrite before the report, and data-not-instructions.
-- Live (`VALOR_LIVE=1`, haiku, about $0.05): a scratch `memory: user` agent
-  under Valor's hooks. Run 1 is told a fact; run 2 recalls it with no hint.
+- Live (`VALOR_LIVE=1`, haiku, about $0.10): a copy of `skills/valor` in
+  `tmp_path` with a scratch `memory: user` agent added, loaded by
+  `--plugin-dir`, so it runs as a `valor:` agent and the hook's `summary.md`
+  reaches it; `agent-memory` linked by `specialist_memory`. Run 1 is told a fact; run 2 recalls it with no hint.
   Cap: seeded with a 30,000-character `MEMORY.md` (many runs' worth), five
-  further runs each leave it under 8,000 characters and 100 lines.
+  further runs each leave it under 8,000 characters and 100 lines, in the
+  four parts.
 
 **Done** (rule 5): after the merge, `valor:researcher` or `valor:mac-app`, run
 twice on a real project, has its second report show it used what the first
