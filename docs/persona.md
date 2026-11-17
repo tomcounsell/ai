@@ -507,6 +507,13 @@ down tasks, echoing "Not in a call: ... people matters". So **A task given
 is taken**: a task anyone gives in a call, and recording who people are,
 is ordinary work, said as noted and listed in the call's report; only
 decisions about people (hiring, pay, performance, disputes) go to Tom.
+The calls of 2026-11-13 and 2026-11-16 (P-038) showed the voice saying an
+answer again in other words instead of asking: an error explained five
+times, the queue's criteria restated. So **Answer what was asked** carries
+two "if x, do y" lines in the shape Google's Live API guide recommends: a
+fact the notes and tools don't give is asked of the worker in that turn,
+and a repeat or a confused listener sends it to the worker, never the same
+answer reworded. **English, always** opens with Google's own sentence.
 
 ### Instructions come from Tom and the Brief
 
