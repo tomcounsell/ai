@@ -373,3 +373,40 @@ def test_the_gemini_leg_reads_the_meet_key_and_a_missing_one_refuses(tmp_path, m
     )
     with pytest.raises(ValueError, match="loopback"):
         build(str(jev), str(google))
+
+
+GEMINI_FIRST = dataclasses.replace(TWO, site="test.gemini_first", primary="gemini")
+
+
+def test_a_site_routed_gemini_first_takes_gemini_and_counts_agreement_with_jev(dsn):
+    async def go():
+        t = await a_task(dsn)
+        p = port("b", "a")
+        j = await p.judge(GEMINI_FIRST, INPUTS, task_id=t, ref={"case": "x"}, dsn=dsn)
+        await p.drain()
+        return j, await rows(dsn, t)
+
+    j, found = run(go())
+    assert judgement.route(GEMINI_FIRST) == ("gemini", "jev") and judgement.route(TWO) == ("jev", "gemini")
+    assert j.leg == "primary" and j.model == GEMINI_DECISION_MODEL and j.answers["q2"]["label"] == "a"
+    roles = {a["leg"]: a["role"] for a in j.payload["attempts"]}
+    assert roles == {"gemini": "primary", "jev": "fallback"}
+    got = judgement.agreement(found, {GEMINI_FIRST.site: GEMINI_FIRST})[GEMINI_FIRST.site]
+    assert (got["judgements"], got["unsettled"], got["questions"]) == (1, 0, 2) and got["label_agree"] < 2
+    legs = {"jev": {"model": JEV_MODEL}, "gemini": {"model": GEMINI_DECISION_MODEL}}
+    assert judgement.task_sha256(GEMINI_FIRST, legs) != judgement.task_sha256(
+        dataclasses.replace(GEMINI_FIRST, primary="jev"), legs
+    )
+
+
+def test_agreement_reads_a_shadowed_jev_from_its_own_row():
+    confident = {"q2": _answer("a", 0.95, "proceed"), "q1": _answer("false", 0.9, "proceed")}
+    found = [
+        {"type": "judgement.answered", "payload": {"judgement_id": "g1", "site": GEMINI_FIRST.site, "attempts": [
+            {"leg": "gemini", "outcome": "answered", "answers": confident},
+            {"leg": "jev", "outcome": "shadowed", "answers": None}]}},
+        {"type": "judgement.shadowed", "payload": {"judgement_id": "g1", "attempt": {
+            "leg": "jev", "outcome": "answered", "answers": confident}}},
+    ]  # fmt: skip
+    got = judgement.agreement(found, {GEMINI_FIRST.site: GEMINI_FIRST})[GEMINI_FIRST.site]
+    assert (got["judgements"], got["unsettled"], got["questions"], got["action_agree"]) == (1, 0, 2, 2)

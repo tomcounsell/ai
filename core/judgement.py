@@ -92,6 +92,9 @@ class JudgementTask:
     guard: str
     calibrated: str | None = None  # the task_sha256 of the record it landed on
     images: bool = False
+    # The leg whose confident answers stand; the other is its fallback. Jev,
+    # unless a site's calibration record showed Gemini answering it better.
+    primary: str = "jev"
 
 
 class NotRouted(ValueError):
@@ -99,11 +102,12 @@ class NotRouted(ValueError):
 
 
 def route(task: JudgementTask) -> tuple[str, str]:
-    """The primary leg and the fallback leg for a task. Pure. A task that
-    takes images has no route: Jev takes text only, and no task takes images."""
+    """The primary leg and the fallback leg for a task: its `primary`, then
+    the other. Pure. A task that takes images has no route: Jev takes text
+    only, and no task takes images."""
     if task.images:
-        raise NotRouted(f"{task.site} takes images; Jev, the primary, takes text only")
-    return ("jev", "gemini")
+        raise NotRouted(f"{task.site} takes images; Jev takes text only")
+    return (task.primary, "gemini" if task.primary == "jev" else "jev")
 
 
 def task_sha256(task: JudgementTask, legs: Mapping[str, Any]) -> str:
@@ -126,6 +130,8 @@ def task_sha256(task: JudgementTask, legs: Mapping[str, Any]) -> str:
             "inputs": sorted(task.inputs),
             "floor": task.floor,
             "legs": dict(legs),
+            # Named only when not Jev, so the records that landed before it keep their digest.
+            **({"primary": task.primary} if task.primary != "jev" else {}),
         }
     )
 
@@ -673,16 +679,18 @@ def agreement(rows: list[dict], by_site: Mapping[str, JudgementTask]) -> dict[st
         attempts = {a["leg"]: a for a in p.get("attempts") or []}
         if "gemini" not in attempts or "jev" not in attempts:
             continue
+        # The fallback's answer, whichever leg that is, may be in its own row.
+        for leg, a in list(attempts.items()):
+            if a.get("outcome") == "shadowed":
+                attempts[leg] = shadows.get(p["judgement_id"]) or {"outcome": "unsettled"}
         gemini = attempts["gemini"]
-        if gemini.get("outcome") == "shadowed":
-            gemini = shadows.get(p["judgement_id"]) or {"outcome": "unsettled"}
         site = out.setdefault(p["site"], {
             "judgements": 0, "unsettled": 0, "failed": {"jev": 0, "gemini": 0}, "questions": 0,
             "action_agree": 0, "action_agree_at_primary_floor": 0, "label_agree": 0,
             "disagree": {}, "disagree_at_primary_floor": {},
         })  # fmt: skip
         site["judgements"] += 1
-        if gemini["outcome"] == "unsettled":
+        if "unsettled" in (gemini["outcome"], attempts["jev"].get("outcome")):
             site["unsettled"] += 1
             continue
         for leg, a in (("jev", attempts["jev"]), ("gemini", gemini)):
