@@ -2781,6 +2781,8 @@ def test_prep_runs_on_the_queue_moving_not_on_talk_and_questions_go_first(dsn, t
         await push(c.session, tool("open_decisions"), done())
         await push(c.session, tool("settle", ids=["t2/q2"], readback="Drop IE."), done())
         await push(c.session, tool("ask", question="When did the import ship?"), done())
+        # Tool calls are handled in order: once the question is taken, so are the two before it.
+        assert await until(lambda: "when did the import ship" in c.the.asked)
         gate.set()
         assert await until(lambda: len(order) == 4)
         await settle(c.the)
