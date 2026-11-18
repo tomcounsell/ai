@@ -521,9 +521,37 @@ SPEAKING = 0.01  # a person's RMS above this is speech, for who is speaking
 CHANGE_S = 0.3  # someone else this long the loudest is a change of speaker
 LAG_S = 0.8  # Live's transcript of a stretch lags its audio by up to this
 QUIET_S = 1.5  # this long with no one speaking ends a stretch of the transcript
+# A person's sound reaches Live only from their first speech until this long
+# after their last: faint speech under `SPEAKING` from the others (someone
+# off-mic, a room behind a microphone) kept Live's own end of turn from ever
+# coming, so it answered no one, silent 8 of 8 under it and answering 3 of 3
+# once it stopped (tests/test_live_call_voice.py, 2026-11-18; the likely
+# cause, inferred, of the group call's two requests by name unanswered that
+# day). The recording keeps everyone's sound. A person who never reaches
+# `SPEAKING` is not heard by Live, as they were never counted as speaking.
+HOLD_S = 0.6
 # Meet sends 48 kHz: a low-pass at 7.2 kHz, then every third sample.
 LOWPASS = (np.hamming(49) * np.sinc((np.arange(49) - 24) * 2 * 7200 / 48_000)).astype(np.float32)
 LOWPASS /= LOWPASS.sum()
+
+
+def mixed(
+    takes: dict[str, np.ndarray], due: int, spoke_at: dict[str, float], now: float
+) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
+    """`due` samples of everyone's sound summed for Live, each person's only
+    while they speak (`HOLD_S`, `spoke_at` kept across frames); all of it
+    summed, for the recording; and how loud each was."""
+    heard, whole = np.zeros(due, np.float32), np.zeros(due, np.float32)
+    loud: dict[str, float] = {}
+    for who, take in takes.items():
+        if len(take):
+            loud[who] = float(np.sqrt(np.mean(take**2)))
+            if loud[who] >= SPEAKING:
+                spoke_at[who] = now
+        whole[: len(take)] += take
+        if now - spoke_at.get(who, -HOLD_S - 1) <= HOLD_S:
+            heard[: len(take)] += take
+    return heard, whole, loud
 
 
 class Down:
@@ -580,13 +608,10 @@ class Recording:
 INSTRUCTIONS = (
     "You are {name}, in a live Google Meet call as yourself, on the {project} project. You are an AI "
     "coworker; everyone in the call knows. You hear everyone in the call in one stream.\n\n"
-    "- Speak only when someone addresses you (by name, or by asking you something directly), or asks what only "
-    "you would know. Otherwise stay silent: talk between the others is not to you, even about the work, money "
-    "or something you know, and you never answer or comment on it. When a note "
-    "says only one person is here with you, everything they say is to you: answer it, and lead the call as "
-    '"In a call" below says.\n'
+    '- When to speak is "In a call" below. When a note says only one person is here with you, everything they '
+    'say is to you: answer it, and lead the call as "In a call" says.\n'
     "- Lines that begin `[note]` tell you about the call (who is speaking, who is here, what your worker "
-    'found). Never answer a note or read one out. A note opening "Your worker prepared" is depth on items '
+    'found). Never answer a note or read one out, except as a note asks you to. A note opening "Your worker prepared" is depth on items '
     "still to come: use it when the call reaches them.\n"
     "- A line that begins `[typed by NAME]` was typed in the call's chat: answer it only by calling `post`, "
     "never aloud.\n"
@@ -609,8 +634,8 @@ INSTRUCTIONS = (
     "call `settle` with the ids it settles. Only Tom settles decisions; a correction is a new `settle`. With "
     "only one person here, that read-back ends by opening the next item: no later turn comes for it. With more "
     "people here, it ends with the read-back: the next item waits until someone asks for it.\n"
-    "- Call `leave` when anyone in the call asks you to leave, or when everyone has wrapped up and said "
-    "goodbye. Never leave because the meeting's scheduled time has passed: stay while people are still "
+    '- Call `leave` when anyone in the call asks you to leave (`why` "asked"), or when everyone has wrapped up '
+    'and said goodbye (`why` "wrapped up"). Never leave because the meeting\'s scheduled time has passed: stay while people are still '
     "talking.\n{reading}\n"
     "How you work, from your persona:\n\n{conduct}\n\n{process}\n\n"
     "Why you are in this call, from your notes before it:\n{prep}{so_far}"
@@ -633,7 +658,8 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"about": {"type": "string"}},
      "required": ["about"]}},
     {"name": "leave", "description": "Leave the call: when someone asks you to, or everyone has said goodbye.",
-     "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {}}},
+     "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {
+         "why": {"type": "string", "enum": ["asked", "wrapped up"]}}, "required": ["why"]}},
 ]  # fmt: skip
 # A non-blocking tool's response asks Live for a turn of its own: after a
 # readback and its `post`, or "I'll check" and its `ask`, Valor said a second
@@ -667,6 +693,23 @@ PREPARE = (
     "The call so far:\n{so_far}"
 )
 PREPARED = "Your worker prepared, for when the call reaches it (say nothing about this note):\n{notes}"
+# Kept for a fresh session (`Call.told`): the newest within a quarter of `CALL_SO_FAR`.
+ANSWERED = 'Your worker answered "{question}" (posted in the chat): {answer}'
+# Built on the chat session's stated default, no objection from Tom in five minutes, 2026-11-18; his to reverse.
+# Said aloud at the next pause when it was asked aloud (2026-11-18: an answer
+# asked for aloud was posted only, and said 11 minutes later).
+SAY_ANSWER = (
+    'Your worker\'s answer to "{question}", asked aloud, is in and posted in the chat: {answer}\nSay it aloud '
+    "now in one short sentence, and say the chat has the detail."
+)
+# A steer from the chat session reaches the voice as well as the chat (2026-11-18: a corrected
+# answer reached only the call's chat).
+STEERED = "Your chat session sent the call this, posted in the chat: {text}\nUse it from now on."
+# A steer opening this passes a question asked in the call to its worker: the chat
+# session's own lookup gave the room a second figure (2026-11-18). Built on
+# the chat session's stated default, no objection from Tom in five minutes, 2026-11-18; his to reverse.
+LOOK_UP = "look up:"
+LEAVES = {"asked": "Valor was asked to leave", "wrapped up": "everyone wrapped up and said goodbye"}
 PREP = object()  # a prep turn on the worker's lane (`Call.prepare`)
 READ_IN = (
     "Your reading for this call is in: you are no longer reading up, so never say you are. Use it from now "
@@ -979,6 +1022,16 @@ MARKUP_PART = re.compile(r"<[^>]*>|\{[^}]*\}")
 # sound he did not go on from; the one he meant ran 0.5 s and on.
 BARGE_S = 0.4
 UNANSWERED_S = 2.0  # with one other person, this long with no answer to them asks for one
+# In a group, a stretch naming Valor with no turn of his this long after it asks Live
+# whether it was to him (2026-11-18: two requests by name unanswered). Built on
+# the chat session's stated default, no objection from Tom in five minutes, 2026-11-18; his to reverse.
+NAMED_S = 3.0
+NAMED_NOTE = (
+    '{name} said your name: "{text}". If they asked you something, answer it now; if they only spoke about '
+    "you, stay silent."
+)
+# Valor's name as Live writes it down, misheard too ("Val", "Valer", 2026-11-18).
+MISHEARD = ("valer", "val")
 # Characters of the call so far told to a fresh session: at about four a
 # token, a quarter of the context that triggers compression.
 CALL_SO_FAR = CALL_CONTEXT
@@ -998,7 +1051,8 @@ class Post:
     text: str
     copy: bool
     settles: list[dict[str, str]] = field(default_factory=list)
-    note: str = ""  # told to the session once the whole post is in the chat
+    note: str = ""  # told to the session once the whole post is in the chat, and kept (`Call.told`)
+    say: tuple[str, str] | None = None  # instead said at the next pause (`Call._say_answer`), kept as noted
 
 
 @dataclass
@@ -1087,7 +1141,13 @@ class Call:
         self.reading, self.read_note = self.reader is not None, ""
         self.read_told = False  # the Live session has the reading, in its config or a note
         self.preparer, self.prep_queued = preparer, False
-        self.prep_note = ""  # a prep done while no session was open, for the next to open
+        self.told: list[str] = []  # the notes kept for a fresh session (`so_far`): answers, steers, the prep
+        self.pending: list[str] = []  # those noted while no session was open, for the next to open
+        self.answers: list[tuple[str, str]] = []  # answers to asks made aloud, said at the next pause
+        self.aloud: set[str] = set()  # the questions asked aloud, by their words
+        self.sessions = 0  # Live sessions opened
+        first = persona.identity(settings.persona_dir)["name"].split()[0].lower()
+        self.named = re.compile(rf"\b(?:{'|'.join(map(re.escape, (first, *MISHEARD)))})\b", re.IGNORECASE)
         self.sheet: str | None = None  # the project's backlog Sheet, read as the call starts (`live`)
         self.socket, self.clock = socket, clock
         # An invited call joined before its start waits for the others, and
@@ -1105,6 +1165,7 @@ class Call:
         self.handle: str | None = None  # Live's resumption handle
         self.downs: dict[str, Down] = {}
         self.buffers: dict[str, np.ndarray] = {}
+        self.spoke_at: dict[str, float] = {}  # when each person last spoke, for what reaches Live (`HOLD_S`)
         self.mine = np.zeros(0, np.float32)  # Valor's own speech, for the recording
         self.names: dict[str, str] = {}
         self.first_names: list[str] = []  # who was in the call, for its title
@@ -1179,8 +1240,8 @@ class Call:
                 self.names[p["deviceId"]] = p.get("fullName") or p.get("displayName") or "someone"
 
     async def mix(self) -> None:
-        """Every `MIX_S`, what everyone said since, summed, to the session
-        and the recording (silence too, which tells Live a turn ended);
+        """Every `MIX_S`, what everyone said since, summed (`mixed`), to the
+        session and the recording (silence too, which tells Live a turn ended);
         who is loudest is who is speaking."""
         sent, start = 0, self.clock()
         while not self.leaving.is_set():
@@ -1192,16 +1253,13 @@ class Call:
             await self._tick(due)
 
     async def _tick(self, due: int) -> None:
-        frame = np.zeros(due, np.float32)
-        loud: dict[str, float] = {}
+        takes = {}
         for who, buf in list(self.buffers.items()):
-            take, self.buffers[who] = buf[:due], buf[due:]
-            frame[: len(take)] += take
-            if len(take):
-                loud[who] = float(np.sqrt(np.mean(take**2)))
+            takes[who], self.buffers[who] = buf[:due], buf[due:]
+        frame, whole, loud = mixed(takes, due, self.spoke_at, self.now())
         mine, self.mine = self.mine[:due], self.mine[due:]
         if self.recording is not None:
-            self.recording.write(np.pad(mine, (0, due - len(mine))), frame)
+            self.recording.write(np.pad(mine, (0, due - len(mine))), whole)
         if self.session is not None:
             from google.genai import types
 
@@ -1245,9 +1303,10 @@ class Call:
                         self.close_at, self.energy = (now + LAG_S, self.energy), {}
                     self.speaking, self.rival = top, (None, 0.0)
                     await self._note(f"{self.names.get(top, 'someone')} is speaking.")
-        if not voiced:
-            await self._answer_alone(UNANSWERED_S)
+        await self._answer_alone(None if voiced else UNANSWERED_S)
         await self._say_unposted()
+        if not voiced and now - self.last_voice >= QUIET_S:
+            await self._say_answer()
         if self.close_at is not None and now >= self.close_at[0]:
             await self._close_stretch(self.close_at[1])
         elif self.heard and now - self.last_voice >= QUIET_S:
@@ -1272,10 +1331,18 @@ class Call:
         who = max(energy, key=energy.get) if energy else self.speaking
         self.last_who = who
         name = self.names.get(who, "someone") if who else "someone"
-        # Owed an answer only when said with no one else there: side talk
-        # with Sam, answered once Sam had left (the live test, 2026-11-05), was not.
+        # Owed an answer only when said with no one else there, or naming
+        # Valor in a group: side talk with Sam, answered once Sam had left
+        # (the live test, 2026-11-05), was not.
         # Set before the row's write, which a reply can finish during.
-        self.unanswered = (name, text, self.now()) if who is not None and self.present == {who} else None
+        # In a group, a stretch not naming Valor leaves a named one waiting:
+        # the others talk on after a request to him (2026-11-18).
+        owed = who is not None and (self.present == {who} or bool(self.named.search(text)))
+        waiting = (
+            self.unanswered is not None and len(self.present) > 1 and self.named.search(self.unanswered[1])
+        )
+        if owed or not waiting:
+            self.unanswered = (name, text, self.now()) if owed else None
         await self._heard(who or "", name, text, "spoke")
         self.segments.append({"speaker": name, "start": round(at or 0.0, 2), "end": round(self.now(), 2),
                               "text": text, "channel": "call"})  # fmt: skip
@@ -1294,14 +1361,29 @@ class Call:
         if self.leaving.is_set() or self.session is None:
             return
         self.typed, self.typed_posted, self.unanswered = True, False, None
-        await self.session.send_client_content(
-            turns={"role": "user", "parts": [{"text": f"[typed by {name}] {text}"}]}, turn_complete=True
-        )
+        await self._tell({"turns": {"role": "user", "parts": [{"text": f"[typed by {name}] {text}"}]},
+                          "turn_complete": True})  # fmt: skip
 
-    async def _note(self, text: str) -> None:
+    async def _note(self, text: str, *, keep: bool = False) -> None:
+        """A note to the session, asking no reply. One kept (a worker's
+        answer, a steer, the newest prep) is told again to a fresh session
+        (`so_far`), and with no session open is noted to the next to open."""
+        if keep:
+            self.told.append(text)
         if self.session is not None:
-            with contextlib.suppress(Exception):
-                await self.session.send_client_content(**note(text))
+            await self._tell(note(text))
+        elif keep:
+            self.pending.append(text)
+
+    async def _tell(self, content: dict[str, Any]) -> None:
+        """Text to the session, each logged with whether it asks a reply,
+        so a turn Live never took can be read beside what it was told."""
+        text = content["turns"]["parts"][0]["text"]
+        _log(
+            f"call {self.id}: told Live{' (a reply asked)' if content['turn_complete'] else ''}: {text[:80]!r}"
+        )
+        with contextlib.suppress(Exception):  # no session, or a dropped one: the receiver's to resume
+            await self.session.send_client_content(**content)
 
     # -- the session --
 
@@ -1317,7 +1399,8 @@ class Call:
             (m[1] for t in (spec.rooms.values() if spec else []) if (m := SHEET_URL.search(t))), None
         )
         while not self.leaving.is_set():
-            so_far = "" if self.handle else self.so_far()
+            # A session reopened fresh is told the call so far, the kept notes in it.
+            so_far = "" if self.handle or not (self.lines or self.sessions) else self.so_far()
             fresh, reading = self.handle is None, self.reading
             config = live_config(
                 self.project or "",
@@ -1331,14 +1414,15 @@ class Call:
             try:
                 async with self.gemini.connect(config) as session:
                     self.session, failed, opened = session, 0, True
+                    self.sessions += 1
                     if fresh and not reading:  # its config carries what was read
                         self.read_told = True
                     elif self.read_note and not self.read_told:  # read while it opened, or between sessions
                         await self._note(self.read_note)
                         self.read_told = True
-                    if self.prep_note:
-                        await self._note(self.prep_note)
-                        self.prep_note = ""
+                    pending, self.pending = [t for t in self.pending if t not in so_far], []
+                    for text in pending:
+                        await self._note(text)
                     self.unheard, self.stalled = 0.0, asyncio.Event()
                     _log(f"call {self.id}: the Live session is open{' (resumed)' if self.handle else ''}")
                     receiving = asyncio.create_task(self._receive(session))
@@ -1375,17 +1459,24 @@ class Call:
 
     def so_far(self) -> str:
         """What a fresh session in a call under way is told: that Valor is
-        in it, who is here, and the newest of the transcript, at most
-        `CALL_SO_FAR` characters; empty before anything was said."""
-        if not self.lines:
+        in it, who is here, the newest kept notes (`told`, within a quarter
+        of `CALL_SO_FAR`) and the newest of the transcript in the rest;
+        empty before anything was said or kept."""
+        if not self.lines and not self.told:
             return ""
+        kept: list[str] = []
+        for text in reversed(self.told):
+            if sum(len(t) + 9 for t in [*kept, text]) > CALL_SO_FAR // 4:
+                break
+            kept.insert(0, text)
+        notes = "".join(f"[note] {t}\n" for t in kept)
         tail = "\n".join(self.lines)
-        if len(tail) > CALL_SO_FAR:
-            tail = tail[-CALL_SO_FAR:]
+        if len(tail) > CALL_SO_FAR - len(notes):
+            tail = tail[len(tail) - (CALL_SO_FAR - len(notes)) :]
             tail = tail.partition("\n")[2] or tail
         here = self._here(sorted(self.names.get(i, "someone") for i in self.present))
         return ("You are already in this call and have greeted everyone: do not greet them again; carry on "
-                f"from here.\n{here}\n{tail}")  # fmt: skip
+                f"from here.\n{here}\n{notes}{tail}")  # fmt: skip
 
     async def _receive(self, session) -> None:
         while not self.leaving.is_set():
@@ -1420,6 +1511,8 @@ class Call:
                 await self._close_stretch(self.energy)
             self.reply = Reply(ledger.new_id(), self.typed)
             self.replies[self.reply.id] = self.reply
+            _log(f"call {self.id}: Live began turn {self.reply.id}, answering "
+                 f"{self.names.get(self.answering, 'someone') if self.answering else 'no one'}")  # fmt: skip
             await self._open(self.reply.id)
         return self.reply
 
@@ -1441,10 +1534,17 @@ class Call:
             for part in sc.model_turn.parts or []:
                 if part.inline_data and part.inline_data.data:
                     await self._audio(await self._begin(), part.inline_data.data)
+        if sc.interrupted or sc.generation_complete:
+            _log(f"call {self.id}: Live's turn {self.reply.id if self.reply else '(none)'}: "
+                 f"{'interrupted' if sc.interrupted else 'generated'}")  # fmt: skip
+        if sc.turn_complete and self.reply is None:
+            _log(f"call {self.id}: Live completed a turn with nothing in it")
         if sc.turn_complete and self.reply is not None:
             reply, self.reply = self.reply, None
             reply.generated = True
             text = MARKUP_PART.sub("", reply.text).strip()
+            _log(f"call {self.id}: Live's turn {reply.id} complete: "
+                 f"{'silent' if wordless(text) else 'spoke' if reply.said else 'unsaid'}, {text[:80]!r}")  # fmt: skip
             if reply.typed and not self.typed_posted and not wordless(text):
                 self.posts.put_nowait(Post(reply.id, text, True))
             if reply.said is None:
@@ -1454,27 +1554,32 @@ class Call:
             elif reply.released:
                 self._spawn(self._played_out(reply))
 
-    async def _answer_alone(self, after_s: float) -> None:
+    async def _answer_alone(self, after_s: float | None) -> None:
         """With one other person in the call, all they say is to Valor
         (Tom's "Hello", unanswered, 2026-11-05; Live kept silent on "Hello."
         with only one person there, or gave no transcript of it, in the live
         tests, 2026-11-05): a turn of silence after their words, or
-        `after_s` with no turn, asks for the answer, once."""
+        `after_s` quiet with no turn (None while someone speaks), asks for
+        the answer, once. In a group, a stretch naming Valor with no turn
+        `NAMED_S` after it asks Live whether it was to him, once, while others talk too: talk Live heard under
+        theirs kept its turn from ending (`HOLD_S`)."""
+        alone = len(self.present) == 1
         if (
-            len(self.present) != 1 or self.unanswered is None or self.session is None
-            or self.reply is not None or self.out is not None or self.now() - self.unanswered[2] < after_s
+            self.unanswered is None or self.session is None or self.reply is not None or self.out is not None
+            or (alone and after_s is None)
+            or self.now() - self.unanswered[2] < (after_s if alone else NAMED_S)
         ):  # fmt: skip
             return
         name, text, _ = self.unanswered
         self.unanswered = None
-        said = (
-            f'said to you: "{text}". Answer it.'
-            if text
-            else "spoke to you, words you did not catch: answer them."
-        )
-        await self.session.send_client_content(
-            turns={"role": "user", "parts": [{"text": f"[note] {name}, the only one here, {said}"}]},
-            turn_complete=True,
+        if not alone:
+            said = NAMED_NOTE.format(name=name, text=text)
+        elif text:
+            said = f'{name}, the only one here, said to you: "{text}". Answer it.'
+        else:
+            said = f"{name}, the only one here, spoke to you, words you did not catch: answer them."
+        await self._tell(
+            {"turns": {"role": "user", "parts": [{"text": f"[note] {said}"}]}, "turn_complete": True}
         )
 
     async def _say_unposted(self) -> None:
@@ -1486,9 +1591,16 @@ class Call:
         if not self.unposted or self.session is None or self.reply is not None or self.out is not None:
             return
         text, self.unposted, self.typed = " ".join(self.unposted), [], False
-        await self.session.send_client_content(
-            turns={"role": "user", "parts": [{"text": UNPOSTED.format(text=text)}]}, turn_complete=True
-        )
+        await self._tell({"turns": {"role": "user", "parts": [{"text": UNPOSTED.format(text=text)}]},
+                          "turn_complete": True})  # fmt: skip
+
+    async def _say_answer(self) -> None:
+        """At a pause, the worker's answer to something asked aloud is said
+        in a sentence, the detail in the chat."""
+        if self.answers and self.session is not None and self.reply is None and self.out is None:
+            question, answer = self.answers.pop(0)
+            text = f"[note] {SAY_ANSWER.format(question=question, answer=answer)}"
+            await self._tell({"turns": {"role": "user", "parts": [{"text": text}]}, "turn_complete": True})
 
     async def _audio(self, reply: Reply, data: bytes) -> None:
         """A chunk of Live's speech: once the turn shows speech, in Live's
@@ -1596,20 +1708,22 @@ class Call:
         # Live's lagging transcript of it), or, its turn complete, while it plays.
         spoke = self.reply.said is not None if self.reply is not None else self.out is not None
         quiet = {t["name"] for t in TOOLS if t.get("behavior") == "NON_BLOCKING"}
+        _log(f"call {self.id}: Live called {', '.join(fc.name for fc in calls)}")
         for fc in calls:
             args = dict(fc.args or {})
             reply = await self._begin()
             if fc.name == "ask" and str(args.get("question") or "").strip():
                 question = str(args["question"]).strip()
-                key = " ".join(re.findall(r"\w+", question.lower()))
+                key = self._key(question)
+                if not reply.typed:
+                    self.aloud.add(key)
                 if key in self.asked:
                     # Live asked again in the turn after its tool response
                     # (the live test, 2026-11-05): one worker turn, one post.
                     answer = self.asked[key]
                     result = f"already asked; {f'the answer: {answer}' if answer else 'the answer is coming'}"
                 else:
-                    self.asked[key] = None
-                    self.questions.put_nowait(question)
+                    self._ask(question)
                     result = ASKED
                 if not await self.worker_ready():
                     result += (
@@ -1635,7 +1749,7 @@ class Call:
                 self.posts.put_nowait(Post(reply.id, str(args["readback"]).strip(), True, settles))
                 result = "recorded"
             elif fc.name == "leave":
-                self.leave("Valor was asked to leave")
+                self.leave(LEAVES.get(str(args.get("why") or ""), "Valor left the call"))
                 result = "leaving"
             else:
                 result = f"not done: {fc.name} needs its arguments"
@@ -1653,6 +1767,9 @@ class Call:
                     id=fc.id, name=fc.name, response={"result": result}, scheduling=scheduling
                 )
             )
+        self.unanswered = (
+            None  # a tool called is an answer begun (after `_begin` closed the stretch it answers)
+        )
         if out:
             await session.send_tool_response(function_responses=out)
 
@@ -1743,8 +1860,11 @@ class Call:
             (done if out.kind == "done" else failed).append(part)
         if failed:
             self.unposted.append(" ".join(failed))
+        elif post.say:
+            self.told.append(post.note)
+            self.answers.append(post.say)
         elif post.note:
-            await self._note(post.note)
+            await self._note(post.note, keep=True)
         if post.copy and done:
             kind, payload, chat = self._copy(" ".join(done))
             await self._effect(kind, payload, f"meet/{turn}/copy", chat)
@@ -1818,13 +1938,16 @@ class Call:
                 self.asking.remove(question)
             if not answer:
                 self.dropped.append(question)
-                self.asked.pop(" ".join(re.findall(r"\w+", question.lower())), None)  # may be asked again
+                self.asked.pop(self._key(question), None)  # may be asked again
             elif self.left:
                 self.late.append({"question": question, "answer": answer})
             else:
-                self.asked[" ".join(re.findall(r"\w+", question.lower()))] = answer
+                key = self._key(question)
+                self.asked[key] = answer
+                # Once posted: asked aloud, said at the next pause; else noted. Kept for a fresh session.
                 self.posts.put_nowait(Post(None, f'On "{question}": {answer}', True,
-                                           note=f'Your worker answered "{question}" (posted in the chat): {answer}'))  # fmt: skip
+                                           note=ANSWERED.format(question=question, answer=answer),
+                                           say=(question, answer) if key in self.aloud else None))  # fmt: skip
 
     async def _read_up(self) -> None:
         """The worker's reading for a call asked in a chat, done while Valor
@@ -1873,10 +1996,10 @@ class Call:
             _log(f"call {self.id}: the worker's prep failed: {exc!r}")
             return
         if notes and "nothing ahead" not in notes.lower()[:40] and not self.left:
-            if self.session is None:
-                self.prep_note = PREPARED.format(notes=notes)
-            else:
-                await self._note(PREPARED.format(notes=notes))
+            head = PREPARED.partition("{")[0]  # only the newest prep is kept
+            self.told = [t for t in self.told if not t.startswith(head)]
+            self.pending = [t for t in self.pending if not t.startswith(head)]
+            await self._note(PREPARED.format(notes=notes), keep=True)
 
     # -- the call's life --
 
@@ -1961,18 +2084,21 @@ class Call:
         """Who is in the call. With one other person, whatever they say is
         to Valor (Tom's "Hello", unanswered, 2026-11-05); with more, the next
         item waits to be asked for (a settled item's reply opened it, live
-        test, 2026-11-17)."""
+        test, 2026-11-17), and a question not naming Valor is not to him
+        (the persona's line alone, it took one, 3 of 3, 2026-11-18)."""
         if len(names) == 1:
             return f"Only {names[0]} is here with you: everything they say is to you, so answer it."
         if len(names) > 1:  # a group call: Valor does not lead it (Tom, 2026-11-17)
             return (
-                f"In the call with you: {', '.join(names)}. Open the next item only when someone asks for it."
+                f"In the call with you: {', '.join(names)}. Open the next item only when someone asks for it. "
+                "Answer only what names you or follows straight on from your answer; a question without your "
+                "name is to the person they were talking with."
             )
         return f"In the call with you: {', '.join(names) or 'no one yet'}."
 
     async def orders(self) -> None:
         """A stop of the session leaves at once; a steer is posted in the
-        call's chat. A listening session the database dropped (a restart of
+        call's chat and noted to Live. A listening session the database dropped (a restart of
         the server, `core/health.py`) is listened again on a new one, the
         call's locks taken again (`db.Held`), and a stop or steer written
         meanwhile caught up: the call stays (2026-11-13, the Cowboy's
@@ -2021,8 +2147,19 @@ class Call:
         finally:
             await listener.close()
 
+    @staticmethod
+    def _key(question: str) -> str:
+        """A question by its words, so one asked twice is one worker turn."""
+        return " ".join(re.findall(r"\w+", question.lower()))
+
+    def _ask(self, question: str) -> None:
+        self.asked[self._key(question)] = None
+        self.questions.put_nowait(question)
+
     async def _steers(self, seen: int, upto: int | None = None) -> int:
-        """Post each steer of the call after row `seen` (up to `upto`); the last row posted."""
+        """Post each steer of the call after row `seen` (up to `upto`), and
+        note it to Live; one opening `LOOK_UP` goes to the worker instead,
+        never posted. The last row read."""
         async with await self._connect() as conn:
             rows = await (
                 await conn.execute(
@@ -2032,8 +2169,14 @@ class Call:
                 )
             ).fetchall()
         for row_id, text in rows:
-            if text:
+            question = text[len(LOOK_UP) :].strip() if text and text.lower().startswith(LOOK_UP) else ""
+            if question:  # the call's worker looks it up; its answer is posted and said
+                self.aloud.add(self._key(question))
+                if self._key(question) not in self.asked:
+                    self._ask(question)
+            elif text:
                 self.posts.put_nowait(Post(None, text, False))
+                await self._note(STEERED.format(text=text), keep=True)
             seen = max(seen, row_id)
         return max(seen, upto or 0)
 

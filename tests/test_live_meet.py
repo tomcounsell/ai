@@ -65,9 +65,13 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     from core import __main__ as kernel
 
     def turn_for(prompt, resume, b):
+        # A reading or prep holding the answer let Live say it without asking (2026-11-18): only a
+        # question gets it.
+        text = LOOKED_UP if prompt.startswith("Asked in the call:") else "nothing ahead"
+
         def build(url, brief, turn_id, news="", subagent=""):
             return runs.TurnCommand(argv=[sys.executable, "-c", "pass"], env={}, cwd=b.workspace, harness="stub",
-                                    parse=lambda out: {"text": LOOKED_UP})  # fmt: skip
+                                    parse=lambda out: {"text": text})  # fmt: skip
 
         return build
 
@@ -302,7 +306,7 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     # A refused resume opened a fresh session, and Valor answered after it.
     assert seen["refused"] and len(fresh) == 1 and gaps["after_fresh"] < 30
     # Everyone's goodbye is the model's leave, past the fresh session, and Gemini's summary file.
-    assert reason == "Valor was asked to leave"
+    assert reason == call.LEAVES["wrapped up"]
     assert "Gemini's summary of the call is" in report
 
 

@@ -74,9 +74,30 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   Live's own end of a turn is kept: it waits out a pause of a second
   inside a thought, and answers one of 1.5 s; no setting tried waited that
   out and still answered within 2 s (2026-11-17,
-  `tests/test_live_call_voice.py`). With
+  `tests/test_live_call_voice.py`). Each person's sound reaches Live only
+  while they speak (`call.mixed`: from a frame over `SPEAKING` until
+  `HOLD_S` after their last): faint talk under it from the others, summed
+  in, kept Live's end of turn from coming, and it answered no one, asked
+  by name twice in a group call (0 of 8 live runs with it, 3 of 3 once
+  it stopped; the notes sent mid-stream changed nothing, 12 of 12
+  answered, 2026-11-18). With
   one other person in the call, a silence after their words asks Live for
-  the answer, unless a reply already answered them. `ask`, `post`, `settle`
+  the answer, unless a reply already answered them; in a group, a stretch
+  naming Valor with no turn of his `NAMED_S` (3 s) after it asks Live
+  once whether it was to him. When to speak is
+  the persona's "In a call"; in a group, the who-is-here note also says a
+  question without Valor's name is to the person it was said to (the
+  persona's line alone took side talk as his, 3 of 3, 2026-11-18). The
+  recording keeps everyone's sound. The call's log has each note told to Live
+  and each Live turn, begun and complete. A worker's answer to an `ask`
+  made aloud is posted and, once it is in the chat, said in a sentence at
+  the next pause; one asked in the chat is posted and noted; one the chat
+  fails is said as unposted, once. A steer of the call is posted in
+  its chat and noted to Live; one opening `look up:` goes to the call's
+  worker instead, unposted, its answer posted and said as an `ask` made
+  aloud (the chat session's hand-off). The nudge, the spoken answer and
+  the hand-off rest on the chat session's stated default after five minutes
+  with no objection from Tom (2026-11-18), his to reverse. `ask`, `post`, `settle`
   and `leave` don't block: a result that only acknowledges, in a turn that
   has already spoken, goes back silent, so it starts no second reply; any
   other result is said (`post`'s is "posting in the chat; you will be
@@ -92,11 +113,15 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   before the next opens. A resume that fails to open (Live refusing its
   handle as still connected, or not found or expired) opens a fresh
   session, told that Valor is already in the call,
-  who is here, and the newest of the transcript (`CALL_SO_FAR` characters).
+  who is here, the newest of the worker's answers, the steers and the
+  newest prep (a quarter of `CALL_SO_FAR`), and the newest of the
+  transcript in the rest; one kept while no session was open is noted to
+  the next to open.
   Two failed fresh opens post one line and leave. Nothing ends a call at a
   set time: Valor stays while anyone else is in it. "Valor, leave" from Tom
   is matched in Live's transcript; anyone else asking, or everyone saying
-  goodbye, is the model's `leave`. A call that fails, or any of its lanes
+  goodbye, is the model's `leave`, whose reason says which ("Valor was
+  asked to leave" or "everyone wrapped up and said goodbye"). A call that fails, or any of its lanes
   (the mixer, Live, the posts), ends and writes its traceback to
   `meet.log`. A restart of the database is not a failure (the Cowboy,
   2026-11-13): the call's connections wait up to `DB_WAIT_S` (180 s) for

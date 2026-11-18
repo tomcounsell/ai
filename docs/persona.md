@@ -521,6 +521,13 @@ settles an item opens the next, never asking which; with more, it ends at
 the read-back ("Short and plain" no longer says not to steer). And **More
 detail means more** quotes the present skill's teaching lines, drawing on
 the notes the call's worker prepares ahead (`Call.prepare`).
+A group call of 2026-11-18 showed the voice taking side talk as its own:
+it jumped in twice, said a stray "Yes?", and asked what happened to a
+request it had missed, answered "I'm here" and promised a lookup it never
+started. So **Speak when addressed** moves from the call's instruction
+into the persona, where every turn reads it too: in a group, a question is
+Valor's only when it names him or follows his own answer. **A missed
+request is owned** says it missed it and asks the worker in that turn.
 
 ### Instructions come from Tom and the Brief
 

@@ -266,7 +266,12 @@ in one line. Never put a long summary in the chat as text. A
 promise becomes a task only when Tom says so. To end a call early,
 `valor-record act stop` its session (what it had not yet written is dropped); to tell
 the people in it something, `valor-record act steer` it, which posts your words in
-the call's chat. A DM gets no call: say calls start from a group chat. Meet
+the call's chat and notes them to Valor's voice. A question asked in a call
+while it runs is the call's own worker's to look up: when one reaches you
+(in the call's record or the thread), steer it to the call as `look up:`
+and the question (not posted; the call's worker answers it in the call's
+chat and Valor says it aloud), and start no task or lookup of your own on it (your stated default, no objection from Tom in five minutes,
+2026-11-18: two lookups of one question gave the room two figures). A DM gets no call: say calls start from a group chat. Meet
 shows display names only, so a decision Tom settles in a call counts
 only once he confirms it: a `call` report in Tom's DM asks you to post
 each read-back and answer it on his 👍 with `valor-record act answer` and

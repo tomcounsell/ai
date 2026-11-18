@@ -69,8 +69,8 @@ def voice():
     folder = os.path.expanduser(settings.tts_model_dir)
     kokoro = Kokoro(f"{folder}/kokoro-v1.0.onnx", f"{folder}/voices-v1.0.bin")
 
-    def clip(text: str) -> np.ndarray:
-        pcm, rate = kokoro.create(text, voice="af_heart", lang="en-us")
+    def clip(text: str, who: str = "af_heart") -> np.ndarray:
+        pcm, rate = kokoro.create(text, voice=who, lang="en-us")
         pcm = pcm[np.linspace(0, len(pcm) - 1, len(pcm) * call.RATE // rate).astype(int)]
         loud = np.flatnonzero(np.abs(pcm) > 0.01)
         return pcm[loud[0] : loud[-1] + 1].astype(np.float32)
@@ -85,10 +85,14 @@ async def session(
     notes: list[str] = (),
     here: str = ALONE,
     listen_s: int = 8,
+    during: list[tuple[float, str]] = (),
+    send=None,
 ) -> dict:
     """Live's first voiced audio, in seconds on `audio`'s clock, what it
     said and the tools it called, with `before` sent as the conversation so
-    far and `notes` as the call's notes (who is here, the worker's prep). A
+    far and `notes` as the call's notes (who is here, the worker's prep), and
+    `during` as notes sent that many seconds into `audio`, as the call sends
+    them while people talk (`send`, the call's own `note` by default). A
     non-blocking tool's reply is scheduled as `Call._tools` schedules it."""
     from google.genai import types
 
@@ -136,7 +140,10 @@ async def session(
                             out["first"] = time.monotonic() - t0 - 0.5
 
         task = asyncio.create_task(receive())
+        due = sorted(during)
         for i in range(0, len(audio), CHUNK):
+            while due and due[0][0] + 0.5 <= i / call.RATE:
+                await (send or (lambda s, text: s.send_client_content(**call.note(text))))(s, due.pop(0)[1])
             await s.send_realtime_input(
                 audio=types.Blob(
                     data=call.pcm16(audio[i : i + CHUNK]), mime_type=f"audio/pcm;rate={call.RATE}"
@@ -231,3 +238,118 @@ def test_asked_for_more_twice_each_answer_adds_what_the_last_lacked(voice):
     one, two = words(first["said"]), words(second["said"])
     assert len(one - opening) >= 3 and len(two - opening - one) >= 3, (one, two)
     assert len(two & one) / len(two) < 0.6, (one, two)
+
+
+def a_named_ask_in_a_group(voice, murmur: float = 0.0) -> tuple[np.ndarray, list[tuple[float, str]]]:
+    """The 2026-11-18 group call's silence, made up: two people talk, then
+    one asks Valor by name for a lookup, while a third murmurs off-mic at
+    `murmur` RMS, under `call.SPEAKING`, all along. Each person's sound is
+    mixed as the call mixes it (`call.mixed`, 40 ms frames). The call notes
+    each change of speaker `CHANGE_S` after the new voice starts, and the
+    worker's prep lands while the second person talks."""
+    gap = np.zeros(call.RATE * 6 // 10, np.float32)
+    parts = [
+        ("ana", voice("So the launch numbers look decent so far; the landing page converts better than in October.")),
+        ("ben", voice("Right, but I'd like to know how many of those signups actually finished onboarding.", "am_adam")),
+        ("ana", voice("Valor, can you look up how many signups we had last week, and put the number in the chat?")),
+    ]  # fmt: skip
+    names = {"ana": "Ana Ruiz", "ben": "Ben Ito"}
+    total = sum(len(p) + len(gap) for _, p in parts) + call.RATE * 10
+    tracks = {who: np.zeros(total, np.float32) for who in names}
+    during, at = [], 0
+    for i, (who, part) in enumerate(parts):
+        if i:
+            during.append((at / call.RATE + call.CHANGE_S, f"{names[who]} is speaking."))
+        if i == 1:
+            during.append((at / call.RATE + 1.5, PREPARED))
+        tracks[who][at : at + len(part)] = part
+        at += len(part) + len(gap)
+    if murmur:
+        lines = ["We could move the review to Thursday if the others agree.", "Then check the forms again."]
+        talk = np.concatenate(
+            [voice(line, w) for line, w in zip(lines, ["bm_george", "af_bella"], strict=True)]
+        )
+        tracks["off"] = np.resize(talk, total) * (murmur / np.sqrt(np.mean(talk**2)))
+    spoke_at: dict[str, float] = {}
+    frames = [
+        call.mixed({w: t[i : i + CHUNK] for w, t in tracks.items()}, CHUNK, spoke_at, i / call.RATE)[0]
+        for i in range(0, total, CHUNK)
+    ]
+    return np.concatenate(frames)[:total], during
+
+
+def test_in_a_group_a_named_ask_is_answered_with_notes_and_faint_talk_behind_it(voice):
+    """The 2026-11-18 group call: asked by name twice, Valor said nothing for
+    a minute and a half. Not the notes: sent mid-stream as the call sends
+    them, sent none, or one right after the ask, Live answered 12 of 12.
+    Faint talk behind the ask, summed into what Live hears: answered 0 of
+    8 at 0.005 RMS (under `SPEAKING`), and 3 of 3 once it stopped 2 s after
+    the ask, so Live's own end of turn never came. The call now gives Live
+    each person's sound only while they speak (`call.mixed`). Real talk
+    behind it, at 0.02, is what the group nudge is for (`NAMED_S`)."""
+    audio, during = a_named_ask_in_a_group(voice, murmur=0.005)
+    for _ in range(3):
+        seen = asyncio.run(session(audio, prep=AGENDA, here=GROUP, during=during, listen_s=0))
+        assert seen["first"] is not None or "ask" in seen["tools"], seen
+
+
+def test_in_a_group_talk_behind_a_named_ask_is_answered_once_the_call_asks(voice):
+    """Real talk behind the ask (0.02 RMS, over `SPEAKING`) also keeps
+    Live's turn open (0 of 3, 2026-11-18): the call's group note, sent
+    `NAMED_S` after the stretch closes, gets the answer."""
+    audio, during = a_named_ask_in_a_group(voice, murmur=0.02)
+    asked = "Valor, can you look up how many signups we had last week, and put the number in the chat?"
+    end = len(audio) / call.RATE - 10
+    nudge = f"[note] {call.NAMED_NOTE.format(name='Ana Ruiz', text=asked)}"  # the call's own note
+
+    async def send(s, text):
+        complete = text == nudge
+        await s.send_client_content(turns={"role": "user", "parts": [{"text": text}]}, turn_complete=complete)
+
+    during = [(t, f"[note] {text}") for t, text in during] + [(end + call.QUIET_S + call.NAMED_S, nudge)]
+    for _ in range(3):
+        seen = asyncio.run(session(audio, prep=AGENDA, here=GROUP, during=during, send=send, listen_s=0))
+        assert "ask" in seen["tools"] or (seen["first"] or 0) > end, seen
+
+
+def test_in_a_group_talk_between_the_others_gets_no_lookup_and_no_word(voice):
+    """2026-11-18: twice Valor jumped in on talk not to it, calling the
+    worker and starting to speak, and once said a stray "Yes?". Two others
+    discussing a figure Valor could look up get neither: with the persona's
+    line and the group note, no lookup and no word on it in 9 of 9 (two
+    voiced their silence, "(No speech detected)"); before them it spoke in
+    3 of 6 ("I'll stay silent since...", 2026-11-18)."""
+    gap = np.zeros(call.RATE * 6 // 10, np.float32)
+    audio = np.concatenate([
+        voice("How many of the trial accounts converted last month, do you remember?"), gap,
+        voice("I think it was around forty, but I'd have to check the report.", "am_adam"), gap,
+        voice("Okay Ben, can you check it after the call and tell me?"), gap,
+    ])  # fmt: skip
+    ben = len(voice("How many of the trial accounts converted last month, do you remember?")) + len(gap)
+    ana = (
+        ben
+        + len(voice("I think it was around forty, but I'd have to check the report.", "am_adam"))
+        + len(gap)
+    )
+    during = [(ben / call.RATE + call.CHANGE_S, "Ben Ito is speaking."),
+              (ana / call.RATE + call.CHANGE_S, "Ana Ruiz is speaking.")]  # fmt: skip
+    for _ in range(3):
+        seen = asyncio.run(session(audio, prep=AGENDA, here=GROUP, listen_s=8, during=during))
+        # No lookup and nothing on the talk; Live sometimes voices its silence ("(No speech detected)").
+        assert not seen["tools"] and not re.search(
+            r"forty|check|convert|report|look", seen["said"], re.IGNORECASE
+        ), seen
+
+
+def test_asked_what_happened_to_a_missed_request_the_voice_owns_it_and_asks_the_worker(voice):
+    """2026-11-18: asked what happened to a request it missed, Valor said
+    "I'm here", then promised a lookup it never started."""
+    before = [
+        {"role": "user", "parts": [{"text": "Ana Ruiz: Valor, can you find last week's signup numbers by "
+                                    "country?"}]},
+        {"role": "user", "parts": [{"text": "Ben Ito: Good idea, and split out the paid ones."}]},
+    ]  # fmt: skip
+    asked = voice("Valor, we had a question for you a minute ago. What happened?")
+    for _ in range(3):
+        seen = asyncio.run(session(asked, before, AGENDA, here=GROUP))
+        assert {"ask", "person", "backlog"} & set(seen["tools"]), seen  # a lookup started in that turn
