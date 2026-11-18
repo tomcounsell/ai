@@ -640,7 +640,8 @@ TOOLS = [
 # reply (five in two calls, 2026-11-16). One that only acknowledges, in a
 # turn that has spoken, is silent; any other result is said.
 ASKED = "asked: the answer will be posted in the chat and noted to you"
-ACKNOWLEDGED = {"posted", "recorded", "leaving", ASKED}
+POSTING = "posting in the chat; you will be told if it fails"
+ACKNOWLEDGED = {POSTING, "recorded", "leaving", ASKED}
 # A call asked for in a chat joins first and reads up after (P-033, Tom, 2026-11-16).
 READING_LINE = (
     "- Your worker is still reading up for this call. Asked what that reading would hold, say you are still "
@@ -962,6 +963,7 @@ LEAVE = re.compile(
 )
 JOIN_LINE = "Valor here, recording for notes."
 LOST_LINE = "I've lost my voice connection; leaving, the summary will follow in the thread."
+UNPOSTED = "[not posted] The call's chat failed, so the room has not seen this; say it aloud now: {text}"
 JOIN_S = 90  # to get through Meet's join screen
 LOBBY_S = 600  # waiting to be let in
 ALONE_S = 600  # with no one else ever there
@@ -996,6 +998,7 @@ class Post:
     text: str
     copy: bool
     settles: list[dict[str, str]] = field(default_factory=list)
+    note: str = ""  # told to the session once the whole post is in the chat
 
 
 @dataclass
@@ -1132,6 +1135,7 @@ class Call:
         self.metered: str | None = None  # the open `gateway.opened` call of the current turn
         self.playing_until = 0.0
         self.posts: asyncio.Queue = asyncio.Queue()
+        self.unposted: list[str] = []  # posts the chat failed, for Live to say aloud
         self.questions: asyncio.Queue = asyncio.Queue()
         self.asking: list[str] = []
         self.asked: dict[
@@ -1243,6 +1247,7 @@ class Call:
                     await self._note(f"{self.names.get(top, 'someone')} is speaking.")
         if not voiced:
             await self._answer_alone(UNANSWERED_S)
+        await self._say_unposted()
         if self.close_at is not None and now >= self.close_at[0]:
             await self._close_stretch(self.close_at[1])
         elif self.heard and now - self.last_voice >= QUIET_S:
@@ -1472,6 +1477,19 @@ class Call:
             turn_complete=True,
         )
 
+    async def _say_unposted(self) -> None:
+        """What the chat failed to post (every post of a call on the
+        Captain, 2026-11-18, the recording notice among them), as one turn
+        for Live to say aloud: once a session is open, so a failure before
+        Live opened waits for it, and once Valor is not mid-reply, so it
+        cuts no answer off. The reply is spoken, not posted."""
+        if not self.unposted or self.session is None or self.reply is not None or self.out is not None:
+            return
+        text, self.unposted, self.typed = " ".join(self.unposted), [], False
+        await self.session.send_client_content(
+            turns={"role": "user", "parts": [{"text": UNPOSTED.format(text=text)}]}, turn_complete=True
+        )
+
     async def _audio(self, reply: Reply, data: bytes) -> None:
         """A chunk of Live's speech: once the turn shows speech, in Live's
         transcript of it or in its sound, it requests its `meet.say`. Live
@@ -1588,7 +1606,7 @@ class Call:
                     # Live asked again in the turn after its tool response
                     # (the live test, 2026-11-05): one worker turn, one post.
                     answer = self.asked[key]
-                    result = f"already asked; {f'the answer, posted in the chat: {answer}' if answer else 'the answer is coming'}"
+                    result = f"already asked; {f'the answer: {answer}' if answer else 'the answer is coming'}"
                 else:
                     self.asked[key] = None
                     self.questions.put_nowait(question)
@@ -1600,7 +1618,7 @@ class Call:
             elif fc.name == "post" and str(args.get("text") or "").strip():
                 self.typed_posted = True
                 self.posts.put_nowait(Post(reply.id, str(args["text"]).strip(), True))
-                result = "posted"
+                result = POSTING
             elif fc.name == "backlog" and self.sheet:
                 result = await self._backlog(str(args.get("about") or "").strip())
             elif fc.name == "person" and str(args.get("about") or "").strip():
@@ -1718,12 +1736,15 @@ class Call:
         from core import bridge
 
         turn = post.turn or ledger.new_id()
-        done = []
+        done, failed = [], []
         for i, part in enumerate(bridge.split_text("meet", post.text)):
             payload = {"text": part, **({"settles": post.settles} if post.settles and i == 0 else {})}
             out = await self._effect("meet.send_message", payload, f"meet/{turn}/{i}/post")
-            if out.kind == "done":
-                done.append(part)
+            (done if out.kind == "done" else failed).append(part)
+        if failed:
+            self.unposted.append(" ".join(failed))
+        elif post.note:
+            await self._note(post.note)
         if post.copy and done:
             kind, payload, chat = self._copy(" ".join(done))
             await self._effect(kind, payload, f"meet/{turn}/copy", chat)
@@ -1802,8 +1823,8 @@ class Call:
                 self.late.append({"question": question, "answer": answer})
             else:
                 self.asked[" ".join(re.findall(r"\w+", question.lower()))] = answer
-                self.posts.put_nowait(Post(None, f'On "{question}": {answer}', True))
-                await self._note(f'Your worker answered "{question}" (posted in the chat): {answer}')
+                self.posts.put_nowait(Post(None, f'On "{question}": {answer}', True,
+                                           note=f'Your worker answered "{question}" (posted in the chat): {answer}'))  # fmt: skip
 
     async def _read_up(self) -> None:
         """The worker's reading for a call asked in a chat, done while Valor

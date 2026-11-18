@@ -121,23 +121,38 @@ const handleVideoTrackForRealTimePerParticipantVideo = async ({ track, streams }
     }
 };
 
-function sendChatMessage(text) {
-    
-    // First try to find the chat input textarea
-    let chatInput = document.querySelector('textarea[aria-label="Send a message"]');
-    
+// Valor's edit (2026-11-18): Meet adds the chat box to the page only once
+// its panel has opened, and the join-time openChatPanel can lose that race
+// (every post of a call on the Captain, 2026-11-18, failed). With no box,
+// the post opens the panel: it clicks "Chat with everyone" while that shows
+// the panel shut (aria-expanded "false"), at most once a second since a
+// Meet pop-up can eat a click, never while it shows it open or opening,
+// and waits up to 10 s for the box. A hidden box takes the post as it is.
+async function sendChatMessage(text) {
+    const box = () => document.querySelector('textarea[aria-label="Send a message"]');
+    let chatInput = box();
+    const chatButton = document.querySelector('button[aria-label="Chat with everyone"]');
+    for (let waited = 0, clicked = -1000; !chatInput && chatButton && waited < 10000; waited += 100) {
+        if (chatButton.getAttribute('aria-expanded') === 'false' && waited - clicked >= 1000) {
+            chatButton.click();
+            clicked = waited;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+        chatInput = box();
+    }
+
     if (!chatInput) {
         console.error('Chat input not found');
         return false;
     }
-    
+
     // Type the message
     chatInput.focus();
     chatInput.value = text;
-    
+
     // Trigger input event to ensure the UI updates
     chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-    
+
     // Send Enter keypress to submit the message
     const enterEvent = new KeyboardEvent('keydown', {
         key: 'Enter',
@@ -147,7 +162,7 @@ function sendChatMessage(text) {
         bubbles: true
     });
     chatInput.dispatchEvent(enterEvent);
-    
+
     return true;
 }
 

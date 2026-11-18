@@ -79,7 +79,13 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   the answer, unless a reply already answered them. `ask`, `post`, `settle`
   and `leave` don't block: a result that only acknowledges, in a turn that
   has already spoken, goes back silent, so it starts no second reply; any
-  other result is said. Each turn's usage is charged by modality. A Live session
+  other result is said (`post`'s is "posting in the chat; you will be
+  told if it fails"). A post the chat fails (its `meet.send_message`
+  `failed`, no thread copy) goes back to Live as one turn to say aloud,
+  once a session is open and Valor is not mid-reply, and that reply is
+  spoken; a worker's answer is noted to Live as posted only once it is
+  (every post of a call on the Captain failed, 2026-11-18, and Live, told
+  each went, said nothing). Each turn's usage is charged by modality. A Live session
   that goes away, or sends nothing back through 6 s of speech and the 6 s
   of quiet after it, is resumed (a long turn, however little Live sends
   during it, is not; nor is a short utterance), the old session closed
@@ -117,7 +123,13 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   left muted joins muted: the Captain, 2026-11-18), so the payload's
   `ensureMicOn()` clicks "Turn on microphone" once in the call
   (`Page.ready()`) and again at the first chunk of each turn Valor speaks;
-  with the microphone on, nothing is clicked.
+  with the microphone on, nothing is clicked. Meet adds the chat box to the page
+  only once its panel has opened, and the payload's open of it at join can
+  lose that race (the Captain, 2026-11-18), so a post with no box clicks
+  "Chat with everyone" while it shows the panel shut (`aria-expanded`
+  "false"), again if a pop-up ate the click, never while it shows it open,
+  and waits up to 10 s for the box (a local edit to the vendored payload);
+  a hidden box takes the post as it is.
 - **After the call**, the recording (two channels, Valor and the others)
   goes to Gemini (`settings.summary_model`, through the Files API) with
   the transcript; the call is moved whole into Yudame Tools' meetings

@@ -668,7 +668,7 @@ def test_a_typed_line_asks_for_a_reply_answered_in_the_chat_never_aloud(dsn, tea
     assert post["kind"] == "done" and copy["target"] == team.chat
     assert copy["payload"] == {"text": "It is in the ledger.", "reply_to": at(1)}
     (response,) = [kw for k, kw in c.session.sent if k == "tool"]
-    assert response["function_responses"][0].response == {"result": "posted"}
+    assert response["function_responses"][0].response == {"result": call.POSTING}
 
 
 def test_a_typed_line_is_answered_in_the_chat_past_a_tool_call_until_someone_speaks(dsn, team, quick):
@@ -706,18 +706,119 @@ def _answers(text):
     return worker
 
 
-def test_a_failed_post_gets_no_copy(dsn, team, quick):
+def unposted(session) -> list[str]:
+    """The turns telling Live the chat failed, each completed."""
+    return [t for t, complete in session.contents() if t.startswith("[not posted]") and complete]
+
+
+def test_a_failed_post_gets_no_copy_and_live_is_told_to_say_it_aloud(dsn, team, quick):
+    """Every post of a call failed and Live was told each went, so it said
+    nothing (the Captain, 2026-11-18)."""
+
     async def go():
         c = await in_call(dsn, team)
         c.page.post_ok = False
         await push(c.session, tool("post", text="First."), done())
         await settle(c.the)
+        assert await until(lambda: unposted(c.session))
         await finish(c)
-        return await effects(dsn, c.the.id)
+        return c, await effects(dsn, c.the.id)
 
-    done_ = run(go())
+    c, done_ = run(go())
     assert [e["kind"] for e in done_ if e["payload"].get("text") == "First."] == ["failed"]
     assert not [e for e in done_ if e["type"] == "slack.send_message"]
+    assert unposted(c.session) == [call.UNPOSTED.format(text="First.")]
+
+
+def test_a_worker_answer_the_chat_failed_is_said_aloud_never_noted_as_posted(dsn, team, quick):
+    async def go():
+        page = Page()
+        c = await in_call(dsn, team, page, worker=_answers("Tuesday."))
+        page.post_ok = False
+        await push(c.session, tool("ask", question="When did the import ship?"), done())
+        assert await until(lambda: unposted(c.session))
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert unposted(c.session) == [call.UNPOSTED.format(text='On "When did the import ship?": Tuesday.')]
+    assert not [t for t, _ in c.session.contents() if "(posted in the chat)" in t]
+
+
+def test_the_join_line_failing_before_live_opens_reaches_the_session_once_it_opens(dsn, team, quick):
+    """The join line is how the room hears it is recorded; it is queued
+    before the Live session opens."""
+
+    class Gated(Gemini):
+        def __init__(self):
+            super().__init__()
+            self.gate = asyncio.Event()
+
+        @contextlib.asynccontextmanager
+        async def connect(self, config):
+            await self.gate.wait()
+            async with super().connect(config) as session:
+                yield session
+
+    async def go():
+        page, gemini = Page(), Gated()
+        page.post_ok = False
+        _, the = await a_call_of(dsn, team, page, gemini)
+        running = asyncio.create_task(the.run())
+        assert await until(lambda: the.unposted)  # failed, with no session yet
+        gemini.gate.set()
+        assert await until(lambda: gemini.sessions and unposted(gemini.sessions[0]))
+        c = SimpleNamespace(the=the, running=running)
+        await finish(c)
+        return gemini.sessions[0], await effects(dsn, the.id)
+
+    session, done_ = run(go())
+    assert unposted(session) == [call.UNPOSTED.format(text=call.JOIN_LINE)]
+    assert [e["kind"] for e in done_ if e["payload"].get("text") == call.JOIN_LINE] == ["failed"]
+
+
+def test_a_post_failing_while_valor_speaks_is_told_once_the_reply_is_over_in_one_turn(dsn, team, quick):
+    """Told mid-reply, Live would cut its own answer off; a post the chat
+    split in two, both parts failed, is one turn."""
+
+    async def go():
+        page = Page()
+        c = await in_call(dsn, team, page)
+        page.ahead, page.post_ok = 1.5, False
+        await push(c.session, audio(), said("Monday, after QA."), done())
+        assert await until(lambda: c.the.out is not None)
+        c.the.posts.put_nowait(call.Post(None, "a" * 400 + "\n" + "b" * 400, True))
+        assert await until(lambda: c.the.unposted)
+        during = (c.the.out is not None, unposted(c.session))
+        assert await until(lambda: unposted(c.session))
+        after = c.the.out
+        await finish(c)
+        return c, during, after
+
+    c, during, after = run(go())
+    assert during == (True, []) and after is None
+    (turn,) = unposted(c.session)
+    assert "a" * 400 in turn and "b" * 400 in turn
+
+
+def test_after_a_typed_answer_the_chat_failed_the_next_reply_is_spoken(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        c.page.post_ok = False
+        c.the.chat(LOGAN, "Valor, where is the invoice?")
+        typed = ("[typed by Logan] Valor, where is the invoice?", True)
+        assert await until(lambda: typed in c.session.contents())
+        await push(c.session, audio(), said("It is in the ledger."), done())  # a typed line's reply: posted
+        assert await until(lambda: unposted(c.session))
+        await push(c.session, audio(), said("It is in the ledger."), done())  # the turn saying it aloud
+        assert await until(lambda: c.page.streams)
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert unposted(c.session) == [call.UNPOSTED.format(text="It is in the ledger.")]
+    assert c.page.streams
 
 
 def test_an_ask_returns_at_once_and_its_answer_after_a_resumption_is_posted_and_noted(dsn, team, quick):
@@ -1921,10 +2022,7 @@ def test_a_question_live_asks_twice_is_one_worker_turn_and_one_post(dsn, team, q
     asked, posts, responses = run(go())
     assert asked == ["When is the launch?"]
     assert posts.count('On "When is the launch?": Monday.') == 1
-    assert (
-        responses[1].startswith("already asked")
-        and responses[2] == "already asked; the answer, posted in the chat: Monday."
-    )
+    assert responses[1].startswith("already asked") and responses[2] == "already asked; the answer: Monday."
 
 
 def test_side_talk_said_with_others_there_is_not_answered_once_they_leave(dsn, team, quick, monkeypatch):

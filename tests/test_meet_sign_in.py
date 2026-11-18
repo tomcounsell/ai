@@ -475,6 +475,89 @@ def test_valors_microphone_is_turned_on_once_in_the_call_and_at_each_new_turn(la
     assert all(q > 0 for q in queued)
 
 
+# -- the call's chat box, which Meet adds once its panel opens (the Captain, 2026-11-18) ---
+
+# Meet's chat button as observed: it toggles `aria-expanded`, and the box
+# comes a second after the panel first opens and stays, hidden, once it
+# shuts. `eat` clicks are ignored (a pop-up over the button); `start` is
+# how the page begins: "shut", "opening" (clicked once already, the box
+# still coming), "hidden" (the box in the page, the panel shut), "none"
+# (no chat button).
+CHAT = """<!doctype html><html><body><script>
+window.clicks = 0; window.sent = []; let eat = {eat};
+function addBox() {{
+  if (document.querySelector('textarea')) return;
+  const t = document.createElement('textarea');
+  t.setAttribute('aria-label', 'Send a message');
+  t.addEventListener('keydown', e => {{ if (e.key === 'Enter') window.sent.push(t.value); }});
+  document.body.appendChild(t);
+}}
+function open_() {{ b.setAttribute('aria-expanded', 'true'); setTimeout(addBox, 1000); }}
+const b = document.createElement('button');
+b.setAttribute('aria-label', 'Chat with everyone');
+b.setAttribute('aria-expanded', 'false');
+b.onclick = () => {{
+  window.clicks++;
+  if (eat) {{ eat--; return; }}
+  if (b.getAttribute('aria-expanded') === 'true') b.setAttribute('aria-expanded', 'false'); else open_();
+}};
+const start = "{start}";
+if (start !== 'none') document.body.appendChild(b);
+if (start === 'opening') open_();
+if (start === 'hidden') addBox();
+</script></body></html>"""
+
+
+@pytest.mark.parametrize(
+    "start, eat, posted, clicks",
+    [("shut", 0, True, 1), ("opening", 0, True, 0), ("shut", 1, True, 2), ("hidden", 0, True, 0),
+     ("none", 0, False, 0)],
+)  # fmt: skip
+def test_a_post_opens_the_chat_panel_only_while_it_is_shut_and_finds_the_box(start, eat, posted, clicks):
+    """Every chat post of a call failed: the box was not in the page. In a
+    real Chrome with the call's payloads, `Page.post` clicks Meet's chat
+    button while it shows the panel shut, again if a click was eaten, never
+    while it shows it open or opening, and types into the box once it comes;
+    a hidden box takes the post with no click; no chat button, no post."""
+    from aiohttp import web
+    from playwright.async_api import async_playwright
+
+    async def go():
+        sock = meet.Socket(lambda *a: None, lambda *a: None, lambda *a: None)
+        port = await sock.start()
+
+        async def chat(_):
+            return web.Response(text=CHAT.format(start=start, eat=eat), content_type="text/html")
+
+        app = web.Application()
+        app.router.add_get("/", chat)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    channel="chrome", headless=True, args=list(meet.CHROME_ARGS)
+                )
+                page = meet.Page("unused")
+                page.page = await browser.new_page()
+                await page.page.add_init_script(meet.script(port))
+                await page.page.goto(f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/")
+                ok = await page.post("Valor here, recording for notes.")
+                seen = await page.page.evaluate("[window.clicks, window.sent]")
+                await browser.close()
+            return ok, seen
+        finally:
+            await runner.cleanup()
+            await sock.close()
+
+    ok, (clicked, sent) = asyncio.run(go())
+    assert ok is posted
+    assert clicked == clicks
+    assert sent == (["Valor here, recording for notes."] if posted else [])
+
+
 # -- a navigation under the call's page (a rejoin, 2026-11-05) ----------------------
 
 
