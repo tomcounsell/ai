@@ -67,8 +67,8 @@ person up (`person`: their dossier on the call's project, by name or loose
 description, or the project's roster for "everyone", docs/memory.md, People; the instruction says to call it before
 saying anything about someone). Each Live turn is one `meet.say`, its audio
   held until released and settled with Live's transcript of what played;
-  a typed line is answered in the chat, never aloud, until someone
-  speaks. A Live turn of silence ("<no speech>", "...", or near-silent
+  a typed line is answered in the chat, not aloud (unless the chat
+  fails that post), until someone speaks. A Live turn of silence ("<no speech>", "...", or near-silent
   audio) is never said. Live itself never cuts Valor off; the call does,
   when the person he answers speaks over him, and side talk does not.
   Live's own end of a turn is kept: it waits out a pause of a second
