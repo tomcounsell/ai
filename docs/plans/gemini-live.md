@@ -25,24 +25,25 @@ amends: docs/plans/meet.md (items 4, 5, 7)
 1. **Key.** `python -m core google-key` stores it into the kernel key directory (amended 2026-11-05: that key ran out of credit, and Tom put a paid one, "Gemini API Key Yudame Tools", in `Yudame Secrets`; `google-key` reads it with `op read` from `settings.google_key_ref`), read with `read_key`. This is the `openai-key` path, recorded in `docs/machine.md`.
 2. **Session** (google-genai, `settings.call_model` = `gemini-3.8-live`).
    - The voice is Charon (amended 2026-11-16: Tom picked Alnilam). Transcription in and out, resumption and compression are on.
-   - The tracks are mixed to 16 kHz mono and sent with `send_realtime_input`. Valor's own audio is not sent.
+   - The tracks are mixed to 16 kHz mono and sent with `send_realtime_input`. Valor's own audio is not sent. (Amended 2026-11-18: each person's sound only while they speak, `call.mixed`; the recording keeps everyone's.)
    - Activity detection: start sensitivity LOW, prefix padding 300 ms, interruptions kept (amended 2026-11-05: Live's own start and end of a turn are kept, and the call, not Live, cuts Valor off; 2026-11-17, P-038: a longer end of turn was tried again and is not set, `core/call.py` `live_config`).
-   - Instructions: the call's mechanics (answer only when addressed, or when asked what only Valor holds; a line tagged "typed" is answered with `post()`; the tools), then the persona's own "In a call" section (`persona/conduct.md`, read by `persona.section` as the call starts; docs/plans/call-persona.md), then `prep`. Proactive audio is on.
+   - Instructions: the call's mechanics (answer only when addressed, or when asked what only Valor holds, amended 2026-11-18: that rule is now the persona's **Speak when addressed**; a line tagged "typed" is answered with `post()`; the tools), then the persona's own "In a call" section (`persona/conduct.md`, read by `persona.section` as the call starts; docs/plans/call-persona.md), then `prep`. Proactive audio is on.
    - Heard speech is transcribed with `language_codes=["en-US"]`. That shapes the transcript only; the reply's language is the model's, kept English by the persona section.
 3. **Notes.** These are context only, sent as `send_client_content(turn_complete=False)`:
    - who is speaking;
    - the head count, and with one other person, "all Tom says is to you";
-   - a worker's answer.
+   - a worker's answer to a question asked in the chat;
+   - a steer of the call (amended 2026-11-18).
 
-   A typed chat line is sent with `turn_complete=True`. "Valor, leave" is still matched by `LEAVE` on the operator's transcription.
+   A typed chat line is sent with `turn_complete=True`, as are the nudge when Valor is named in a group and a worker's answer to a question asked aloud, said at the next pause (amended 2026-11-18). "Valor, leave" is still matched by `LEAVE` on the operator's transcription.
 4. **Playback** (`page.js`). `valorStream` appends PCM chunks to one Web Audio timeline. `valorStop` clears it and returns the seconds played, called on Live's `interrupted`. `valorPlay` goes.
 5. **Say gate.**
    - `meet.say` `{"turn"}` is requested at a turn's first chunk. Audio is buffered until it is released and dropped if it is refused.
    - It settles `done` with `spoken_text`: the output transcription cut at the seconds played.
    - In `core/bridge.py`, `meet.say` gets a turn-shape check; `meet.send_message` keeps `_refuse_meet`.
 6. **Tools.**
-   - `ask(q)` starts the worker (`runs.run_turn`, `fresh="call"`) and returns at once. Its answer is posted ("On "q": …") and noted, so it survives a reconnect. After leaving, it goes in the report.
-   - `post` (with the thread copy), `open_decisions` (`board.snapshot`), `settle`, `leave`.
+   - `ask(q)` starts the worker (`runs.run_turn`, `fresh="call"`) and returns at once. Its answer is posted ("On "q": …") and noted, so it survives a reconnect. (Amended 2026-11-18: one asked aloud is said in a sentence at the next pause instead of noted, once it is in the chat; either is kept for a fresh session. A steer opening `look up:` is asked of the worker the same way.) After leaving, it goes in the report.
+   - `post` (with the thread copy), `open_decisions` (`board.snapshot`), `settle`, `leave` (amended 2026-11-18: with `why`, `asked` or `wrapped up`, which names the reason the call ended).
 7. **Record.** Each input transcription span is a `call.heard` row, credited to the loudest track. `valor-record call` is unchanged.
 8. **Metering.**
    - `settings.GEMINI_PRICES` holds `GeminiPrice(text_in, audio_in, text_out, audio_out, checked)`.

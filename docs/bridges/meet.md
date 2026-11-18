@@ -48,7 +48,7 @@ against a new Meet with a second device of Valor's account
   Gemini Live session (`settings.call_model`, voice `settings.call_voice`,
   the key in `google-key`), with notes that ask for no reply: who is
   speaking, who is here (with one other person, all they say is to Valor),
-  the worker's answers and, for a call asked for in a chat, the worker's
+  the worker's answers, the call's steers and, for a call asked for in a chat, the worker's
   reading once it is in (until then the instruction says it is still
   reading up, while asking the worker and taking tasks go on as usual;
   the note bringing the reading says it no longer is), and the worker's

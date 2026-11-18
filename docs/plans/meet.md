@@ -47,7 +47,9 @@ virtual mic; they sit at `refs/spike/meet-stash^3`. The call profile
    result; a retry finds the session by `effect_key` and writes no report.
 2. **The call session runs no turn** (`router.has_step` false for `meet`;
    `notices.owe` owes it nothing). A steer is posted in the Meet chat while
-   the call is open and fails after. "Valor, leave" from Tom is a leave:
+   the call is open and fails after (amended 2026-11-18: it is noted to
+   the voice as well; one opening `look up:` goes to the call's worker,
+   unposted). "Valor, leave" from Tom is a leave:
    the bridge exits and the normal `ended` path follows. `task.stop` is the
    hard kill (`LISTEN`): the broker refuses what the session has not
    released, and the report names the dropped copies and questions. Its
