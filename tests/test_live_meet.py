@@ -175,13 +175,20 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                 await ledger.append(
                     conn, session, "workspace.provisioned", {"fields": {"workspace": str(work)}}
                 )
-            started = time.time()
-            calling = asyncio.create_task(kernel._call(session))
             a, b = Device(tmp_path / "a", seen), Device(tmp_path / "b", seen)
+            calling = None
             try:
-                await asyncio.sleep(15)  # Valor joins first
+                # The asking device is in first, so it sees Valor's join line
+                # (the recording notice) arrive in the chat.
                 await a.join(url)
-                await asyncio.sleep(15)
+                started = time.time()
+                calling = asyncio.create_task(kernel._call(session))
+                for _ in range(90):
+                    if call.JOIN_LINE in seen["chat"]:
+                        break
+                    await asyncio.sleep(1)
+                seen["notice"] = call.JOIN_LINE in seen["chat"]
+                await asyncio.sleep(5)
                 seen["gaps"]["hello"] = await a.ask(kokoro, "Hello.")
                 await asyncio.sleep(6)
                 await valor[0].evaluate(mute)
@@ -198,6 +205,12 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                         break
                     await asyncio.sleep(1)
                 seen["looked_up"] = any(LOOKED_UP in t for t in seen["chat"])
+                # Valor's chat fails (as every post did on the Captain, 2026-11-18):
+                # the answer to a typed line is said aloud instead.
+                await valor[0].evaluate("() => { window.sent_ = window.sendChatMessage; "
+                                        "window.sendChatMessage = async () => false; }")  # fmt: skip
+                seen["unposted"] = await a.typed("Valor, can you post the launch time here too?")
+                await valor[0].evaluate("() => { window.sendChatMessage = window.sent_; }")
                 await asyncio.sleep(4)
                 seen["barge_at"] = await a.cut_in(kokoro, "Valor, tell me a story of five or six sentences about a "
                                                   "launch party.", "Valor, stop. Wait a moment.")  # fmt: skip
@@ -231,7 +244,10 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                 # A wrap-up to everyone, which the operator's "Valor, leave" match misses: the model leaves.
                 await a.ask(kokoro, "Thanks everyone, that's all for today, we're done. Goodbye!", wait=False)
                 reason = await asyncio.wait_for(calling, 300)
+                calling = None
             finally:
+                if calling is not None:
+                    calling.cancel()
                 await a.close()
                 await b.close()
             return session, asking.id, reason, url
@@ -268,6 +284,7 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     fresh = [line for line in seen["log"] if "opening a fresh one" in line]
     reopened = [line for line in seen["log"] if "is open (resumed)" in line]
     print(json.dumps({"gaps": gaps, "typed": seen["typed"], "looked_up": seen["looked_up"],
+                      "notice": seen["notice"], "unposted": seen["unposted"],
                       "side_talk_frames": seen["side_talk_frames"], "barge": seen["barge_at"], "over": seen["over_at"],
                       "says": says, "charged_turns": len(resumed), "reason": reason, "report": report,
                       "unheard_s": round(seen["unheard_s"], 1), "stalls": stalls, "fresh": fresh,
@@ -278,6 +295,10 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     assert all(g < 30 for g in gaps.values())
     # Reported, not a bar: Tom dropped the 2 s median target (2026-11-05, docs/plans/gemini-live.md).
     print(f"live: reply gap median {statistics.median(gaps.values()):.2f} s over {len(gaps)} questions")
+    # The recording notice seen in the chat by the device already there.
+    assert seen["notice"]
+    # A post the chat failed was said aloud, and nothing reached the chat.
+    assert seen["unposted"]["frames"] and not seen["unposted"]["chat"]
     # The typed question answered in the chat, not aloud; the lookup posted.
     assert seen["typed"]["chat"] and not seen["typed"]["frames"]
     assert seen["looked_up"]
