@@ -121,6 +121,19 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     monkeypatch.setattr(call.Call, "_speakers", measured)
     monkeypatch.setattr(call, "_log", lambda text: (seen["log"].append(text), log(text)))
 
+    # Valor joins muted, as Meet joins a large call (the Captain, 2026-11-18);
+    # it is muted again before the question below, as Meet may mute later.
+    valor, ready = [], Page.ready
+    mute = "document.querySelector('button[aria-label=\"Turn off microphone\"]')?.click()"
+
+    async def muted(self):
+        if self.profile == settings.meet_profile:
+            valor.append(self)
+            await self.evaluate(mute)
+        await ready(self)
+
+    monkeypatch.setattr(Page, "ready", muted)
+
     async def go():
         # `_call` connects by `settings.dsn()`: the test database here. The asking
         # device's display name is Valor's, so it stands in for Tom's.
@@ -171,6 +184,7 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                 await asyncio.sleep(15)
                 seen["gaps"]["hello"] = await a.ask(kokoro, "Hello.")
                 await asyncio.sleep(6)
+                await valor[0].evaluate(mute)
                 seen["gaps"]["question"] = await a.ask(
                     kokoro, "Valor, what shipped this week, and when is the launch?"
                 )

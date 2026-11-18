@@ -1819,7 +1819,9 @@ def test_a_calls_worker_takes_no_turn_slot(dsn, tmp_path, monkeypatch):
 STUB = """
 window.ws = { ws: { addEventListener() {} }, sendJson() {} };
 const ctx = new AudioContext();
-window.botOutputManager = { audioContext: ctx, gainNode: ctx.createGain(), _createSourceAudioTrack() {} };
+window.botOutputManager = {
+    audioContext: ctx, gainNode: ctx.createGain(), _createSourceAudioTrack() {}, ensureMicOn() {},
+};
 """
 
 

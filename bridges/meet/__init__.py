@@ -328,8 +328,12 @@ class Page:
         return True
 
     async def ready(self) -> None:
-        """Once in the call: the payloads start reading it and open the chat."""
-        await self.evaluate("window.ws.enableMediaSending()")
+        """Once in the call: the payloads start reading it and open the chat,
+        and the microphone is on (Meet joins a large call, or a profile last
+        left muted, with it off: the Captain, 2026-11-18)."""
+        await self.evaluate(
+            "window.ws.enableMediaSending().then(() => window.botOutputManager.ensureMicOn())"
+        )
 
     async def state(self) -> dict[str, Any]:
         return await self.evaluate("window.valorState()")

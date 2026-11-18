@@ -32,14 +32,18 @@
     // Gemini Live's speech, a chunk at a time: each Int16 PCM chunk
     // (base64, at `rate`) starts where the last one ends, so a turn plays
     // without gaps. `fresh` starts a new turn's count of seconds played.
-    // Resolves with the seconds still queued to play.
+    // Resolves with the seconds still queued to play. A new turn turns the
+    // microphone back on if Meet has turned it off since the join.
     let sources = [];
     let next = 0;
     window.valorStream = (b64, rate, fresh) => {
         const out = window.botOutputManager;
+        if (fresh) {
+            out.ensureMicOn();
+            sources = [];
+        }
         out._createSourceAudioTrack();
         const ctx = out.audioContext;
-        if (fresh) sources = [];
         const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
         const pcm = new Int16Array(bytes.buffer);
         const buffer = ctx.createBuffer(1, pcm.length, rate);

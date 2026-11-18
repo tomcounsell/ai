@@ -417,6 +417,64 @@ def test_the_pages_socket_opens_after_the_document_loads_in_every_frame_and_the_
     assert up
 
 
+# -- the microphone on in the call and when Valor speaks (the Captain, 2026-11-18) ---
+
+# Meet's microphone button, labelled as Meet labels it, counting its clicks.
+MUTED = """<!doctype html><html><body><button aria-label="{label}"
+onclick="window.clicks = (window.clicks || 0) + 1">mic</button></body></html>"""
+
+
+@pytest.mark.parametrize(
+    "label, clicks", [("Turn on microphone", [1, 2, 2]), ("Turn off microphone", [0, 0, 0])]
+)
+def test_valors_microphone_is_turned_on_once_in_the_call_and_at_each_new_turn(label, clicks):
+    """Meet joined Valor muted in a large call and nobody heard it. In a
+    real Chrome with the call's payloads: a "Turn on microphone" button is
+    clicked by `ready()` and again by the first chunk of a turn, not by the
+    chunks after it; with the microphone already on, nothing is clicked and
+    the speech still queues."""
+    from aiohttp import web
+    from playwright.async_api import async_playwright
+
+    async def go():
+        sock = meet.Socket(lambda *a: None, lambda *a: None, lambda *a: None)
+        port = await sock.start()
+
+        async def muted(_):
+            return web.Response(text=MUTED.format(label=label), content_type="text/html")
+
+        app = web.Application()
+        app.router.add_get("/", muted)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    channel="chrome", headless=True, args=list(meet.CHROME_ARGS)
+                )
+                page = meet.Page("unused")
+                page.page = await browser.new_page()
+                await page.page.add_init_script(meet.script(port))
+                await page.page.goto(f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}/")
+                seen, queued = [], []
+                await page.ready()
+                seen.append(await page.page.evaluate("window.clicks || 0"))
+                for fresh in (True, False):
+                    queued.append(await page.stream(b"\0\0" * 2400, 24000, fresh))
+                    seen.append(await page.page.evaluate("window.clicks || 0"))
+                await browser.close()
+            return seen, queued
+        finally:
+            await runner.cleanup()
+            await sock.close()
+
+    seen, queued = asyncio.run(go())
+    assert seen == clicks
+    assert all(q > 0 for q in queued)
+
+
 # -- a navigation under the call's page (a rejoin, 2026-11-05) ----------------------
 
 
