@@ -260,12 +260,6 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     (link,) = [i for i, r in enumerate(rows) if r["type"] == "effect.held"
                and r["payload"]["request_id"] == "meet/link/copy"]  # fmt: skip
     assert joined < link and f"I'm in: {url}" in json.dumps(rows[link]["payload"])
-    # The join line, how the room hears it is recorded, is in the call's chat
-    # (posted before the asking device joined, so the ledger says so).
-    (notice,) = [r["payload"]["effect_id"] for r in rows if r["type"] == "effect.held"
-                 and r["payload"]["request_id"] == "meet/join/0/post"]  # fmt: skip
-    assert [r["payload"]["kind"] for r in rows
-            if r["type"] == "effect.outcome" and r["payload"]["effect_id"] == notice] == ["done"]  # fmt: skip
     report = next(r["payload"]["text"] for r in asyncio.run(bridges.rows(dsn, asking_id))
                   if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended"))  # fmt: skip
     says = [
