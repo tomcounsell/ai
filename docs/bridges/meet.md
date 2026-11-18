@@ -112,7 +112,12 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   connected"): audio, the call's chat and who sends which stream come
   over them; who is in the call does not. Live's speech is streamed into
   the virtual microphone a chunk at a time (`valorStream`) and stopped at
-  once (`valorStop`, which says how much played).
+  once (`valorStop`, which says how much played). Meet may have Valor's
+  microphone off (it mutes a joiner of a large call, and a profile last
+  left muted joins muted: the Captain, 2026-11-18), so the payload's
+  `ensureMicOn()` clicks "Turn on microphone" once in the call
+  (`Page.ready()`) and again at the first chunk of each turn Valor speaks;
+  with the microphone on, nothing is clicked.
 - **After the call**, the recording (two channels, Valor and the others)
   goes to Gemini (`settings.summary_model`, through the Files API) with
   the transcript; the call is moved whole into Yudame Tools' meetings
