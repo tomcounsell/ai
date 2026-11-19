@@ -738,8 +738,10 @@ def live_config(
 ) -> Any:
     """The Live session's settings: Valor's voice, transcripts both ways,
     proactive audio (it may stay silent), no cutting Valor off (Live's own
-    barge-in stopped him for side talk, 2026-11-05: the call cuts him off
-    only for the person he answers), compression that bounds what each
+    barge-in stopped him for side talk, 2026-11-05, and on a 0.6 s "Mm-hm."
+    restarted its answer from the top, 2 of 2, 2026-11-19: the call cuts him
+    off only for the person he answers, and sends again what Live, still in
+    its turn, did not hear, `Call._cut_off`), compression that bounds what each
     turn bills, and resumption from `handle`. Live's own start and end of
     speech are kept: at its lowest start sensitivity it missed a short
     "Hello.", and 500 ms to end a turn gained nothing measurable (the live
@@ -1167,6 +1169,8 @@ class Call:
         self.buffers: dict[str, np.ndarray] = {}
         self.spoke_at: dict[str, float] = {}  # when each person last spoke, for what reaches Live (`HOLD_S`)
         self.mine = np.zeros(0, np.float32)  # Valor's own speech, for the recording
+        self.lately = np.zeros(0, np.float32)  # the last of what Live was sent, for `kept`
+        self.kept: np.ndarray | None = None  # sent while Live's cut turn runs, which it does not hear
         self.names: dict[str, str] = {}
         self.first_names: list[str] = []  # who was in the call, for its title
         self.present: set[str] = set()  # who else is in the call now
@@ -1260,13 +1264,21 @@ class Call:
         mine, self.mine = self.mine[:due], self.mine[due:]
         if self.recording is not None:
             self.recording.write(np.pad(mine, (0, due - len(mine))), whole)
+        # Live hears nothing sent while its turn runs (`NO_INTERRUPTION`): what
+        # was said after Valor was cut off is sent again once the turn is over.
+        sending = frame
+        if self.kept is not None and self.reply is None:
+            sending, self.kept = np.concatenate([self.kept, frame]), None
+        elif self.kept is not None:
+            self.kept = np.concatenate([self.kept, frame])
+        self.lately = np.concatenate([self.lately, frame])[-int((BARGE_S + 2 * MIX_S) * RATE) :]
         if self.session is not None:
             from google.genai import types
 
             with contextlib.suppress(Exception):  # a dropped session is the receiver's to resume
-                await self.session.send_realtime_input(
-                    audio=types.Blob(data=pcm16(frame), mime_type=f"audio/pcm;rate={RATE}")
-                )
+                for i in range(0, len(sending), RATE // 25):  # in 40 ms chunks, as the mix sends
+                    await self.session.send_realtime_input(audio=types.Blob(
+                        data=pcm16(sending[i : i + RATE // 25]), mime_type=f"audio/pcm;rate={RATE}"))  # fmt: skip
         await self._speakers(loud, due / RATE)
 
     async def _speakers(self, loud: dict[str, float], seconds: float) -> None:
@@ -1445,7 +1457,7 @@ class Call:
                 if refused:
                     self.handle = None
             finally:
-                self.session = None
+                self.session, self.kept = None, None
                 if self.reply is not None:
                     await self._finish(self.reply, cut=True)
                     self.reply = None
@@ -1665,8 +1677,13 @@ class Call:
     async def _cut_off(self, reply: Reply) -> None:
         """The person Valor answers spoke over him: he stops, the rest of
         the turn Live is still sending is dropped, and the session is told
-        what was heard of it."""
+        what was heard of it. What they say until that turn is over, the
+        `BARGE_S` that cut him in it, is sent again once it is (`kept`):
+        Live heard none of it, and the call lost what settled an item
+        (2026-11-19, gaps of up to 13 s with no transcript)."""
         reply.dropped, reply.held, self.barge, self.cut_at = True, [], 0.0, self.now()
+        if self.reply is not None:  # Live is still sending a turn, deaf to what cut Valor off
+            self.kept = self.lately.copy()
         await self._finish(reply, cut=True)
         name = self.names.get(self.answering, "someone") if self.answering else "someone"
         said = reply.over.result().get("spoken_text") if reply.over and reply.over.done() else ""

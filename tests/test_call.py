@@ -418,6 +418,56 @@ def test_the_person_answered_speaking_over_valor_cuts_him_off_and_side_talk_does
     assert ("[note] Logan cut you off; they heard only: one two three", False) in c.session.contents()
 
 
+@pytest.mark.parametrize("case", ["cut in the turn", "cut in the tail", "a short sound", "session lost"])
+def test_what_cuts_valor_off_while_lives_turn_runs_is_sent_again_once_it_is_over(dsn, team, quick, case):
+    """Live hears nothing sent while its turn runs, and runs on up to 30 s
+    after the call cut it off (Tom's calls, 2026-11-19: what settled an item
+    had no transcript). What the person said from the cut, with the
+    `BARGE_S` that cut him, is sent once the turn is over, before the next
+    frame; a cut in the tail, a sound too short to cut, and a session lost
+    meanwhile send nothing again."""
+
+    async def go():
+        page = Page()
+        page.ahead, page.played = 30.0, 1.0
+        c = await in_call(dsn, team, page)
+        await talk(c.the, LOGAN, 0.5)
+        await push(c.session, heard("Valor, tell me about the launch."))
+        await push(c.session, audio(1.0), said("one two three four five six"), audio(1.0))
+        if case == "cut in the tail":
+            await push(c.session, done())
+        assert await until(lambda: c.the.out is not None)
+        await talk(c.the, LOGAN, 0.25 if case == "a short sound" else 0.6)
+        await talk(c.the, LOGAN, 0.4 if case != "a short sound" else 0.0)
+        kept = None if c.the.kept is None else len(c.the.kept)
+        before = c.session.audio_bytes()
+        await asyncio.sleep(0.2)
+        early = c.session.audio_bytes() - before
+        if case == "session lost":
+            c.gemini.fail = 0
+            await push(c.session, ConnectionError("1006 lost"))
+            assert await until(lambda: len(c.gemini.sessions) == 2 and c.the.session is c.gemini.sessions[1])
+        elif case != "cut in the tail":
+            await push(c.session, done())
+            c.the.playing_until = 0.0  # the uncut reply's audio played out
+        await asyncio.sleep(0.3)
+        after = c.gemini.sessions[-1].audio_bytes() - (before + early if len(c.gemini.sessions) == 1 else 0)
+        await settle(c.the)
+        await finish(c)
+        return c, kept, early, after
+
+    c, kept, early, after = run(go())
+    normal = int(0.5 * call.RATE * 2)  # 0.3 s of frames, and some
+    if case == "cut in the turn":
+        assert c.page.stops == 1 and kept >= int(0.8 * call.RATE)  # the barge and what followed it
+        assert early < normal and after >= kept * 2  # held while the turn ran, then all of it
+    elif case == "session lost":
+        assert kept and after < normal  # the next session is not sent what the lost one was owed
+    else:
+        assert kept is None and after < normal
+    assert c.the.kept is None and c.page.stops == (0 if case == "a short sound" else 1)
+
+
 @pytest.mark.parametrize("quiet_between", [True, False])
 def test_valor_answers_who_spoke_last_when_his_reply_begins_before_their_words_are_heard(
     dsn, team, quick, quiet_between

@@ -71,6 +71,12 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   fails that post), until someone speaks. A Live turn of silence ("<no speech>", "...", or near-silent
   audio) is never said. Live itself never cuts Valor off; the call does,
   when the person he answers speaks over him, and side talk does not.
+  Live hears nothing sent until its turn is over, which runs on up to
+  30 s after the call has cut it off, so what was said from the cut until
+  then is sent again once it is (gaps with no transcript in Tom's calls,
+  2026-11-19; heard and answered 2 of 2 in the live runs). Live's own
+  interrupt was tried and refused: a short "Mm-hm." stopped Valor and he
+  started his answer again from the top, 2 of 2.
   Live's own end of a turn is kept: it waits out a pause of a second
   inside a thought, and answers one of 1.5 s; no setting tried waited that
   out and still answered within 2 s (2026-11-17,
