@@ -1,59 +1,63 @@
-# Find a past call by its words (task f7bc1d7a)
+# What a call settled lives with the project's record (task f7bc1d7a)
 
-Tom, 2026-11-19 15:33 UTC, #valor-dev: no separate place to ask; "as long as
-you can look them up, I will just ask you."
+Tom, 2026-11-19, #valor-dev: 15:33 "as long as you can look them up, I will just
+ask you"; 15:36 "more important is actually having the answer and it living
+with all other PM data"; the source line is nice to have.
 
-**Checked first (observed, Cowboy, 2026-11-19).** The valor project's call of
-2026-11-16 14:39 UTC (`valor-record call pxz-exmv-icy`) holds its heard and
-spoken lines. A phrase said only in it finds nothing with
-`valor-record messages --search` (it reads `message.received` only), and
-`valor-record memory` finds it only where a later task happened to quote it:
-memory ingests no `call.heard` rows (`core/memory.py` TYPES), and a second
-phrase from Valor's own spoken line finds nothing at all. The call's title and
-Gemini summary are not in the ledger; they live only in the Mac's Meetings
-folder, which mixes every project's calls. So the read is missing, not only
-guidance.
+**Today (observed in code and on the Cowboy, 2026-11-19).** Gemini's summary
+returns `decisions` and `actions` (`core/call.py` SUMMARY). Decisions go only
+into notes.md in the Mac's Meetings folder (mixed across clients) and the
+summary file posted in the thread; the call's report to the chat session lists
+the actions, not the decisions. Open questions Tom settles by voice (`settle`)
+go to his DM for a 👍 and are answered there; nothing else becomes a fact.
+Memory ingests no `call.heard` rows, and `messages --search` reads chat
+messages only: a phrase said only in the 2026-11-16 14:39 UTC call is not found.
 
-**Build (one mechanism: the existing `call` verb).**
-1. `core/record.py` `call()`: with `q` (and no `code`), search every Meet
-   session in the project's reach (`reach()`, the same scoping `call <code>`
-   uses) for rows whose text holds every word of `q`, case-insensitive: heard
-   and typed lines (`call.heard`), Valor's spoken and posted lines
-   (`effect.outcome` with `spoken_text` / `posted`), and the call's summary
-   (below). Newest first, `limit` as now. Each hit: the record, its time, who,
-   how, the text, and its call's code, start date and title.
-2. `core/call.py`: the summary step's result also carries the call's `title`
-   and its `notes` (Gemini's summary paragraph and decisions, as saved), and
-   `end()` writes both into the `call.ended` payload. From then on a call's
-   title and summary are in the ledger, under its project; older calls show no
-   title and are found by their lines. `docs/data.md` names the two fields.
-3. `tools/valor_record.py`: `call [CODE] [--search WORDS]`; a search prints
-   each hit as `<date> <title> (meet <code>) #<record> [HH:MM UTC] <who>
-   (<how>): <text>`, so the session can then read the whole call by its code.
-   Neither given: an error naming both. Docstring usage line updated.
-4. Guidance, one place: `skills/sdlc/converse.md`, "What Valor learned
-   before": asked what was said or agreed in a past call, search the calls
-   (`valor-record call --search "<words>"`) and answer with the call's date and
-   the line it comes from; `valor-record call <code>` for the whole call.
+**Build, one mechanism each, size small (about 100 production lines).**
+1. **Decisions become facts.** SUMMARY_SCHEMA's decisions become
+   `{decision, by}` (`by`: the deciders' names as the transcript shows them);
+   saved notes keep the text only. `end()`, given a summary with decisions,
+   writes each through `memory.fact_write` (existing; keyed, so a repeated end
+   adds nothing): kind `decision`, the claim (with the deciders' names in it),
+   `since` the call's start, `source` "Meet call <code> <date>, <title>",
+   `about` the deciders that resolve to a person entity of the project (a new
+   read-only `memory.known(spec, names)` over `facts.entity`; unknown names
+   stay in the claim only). `facts`, `person` and `memory` then answer from
+   them. Memory off or unreachable: nothing written, the report says so.
+2. **The report carries them.** `end()`'s report lists each decision with its
+   fact name, and one line: carry each that changes a backlog item or open
+   question to where it lives (its Sheet row, the task waiting on it); an open
+   question is answered only by Tom's 👍 as now. No action becomes a task
+   without Tom's say-so (existing rule, unchanged).
+3. **Words, the lesser part.** `call.ended` also gets `title` and `notes`
+   (summary paragraph and decision texts). `core/record.py` `call()` with `q`:
+   every call session in `reach()`, or only that code's when `code` is also
+   given; one escaped `ILIKE` per word (as `messages()` does) over heard and
+   typed text, spoken/posted results and `call.ended` notes; newest first,
+   `limit` as now. Each hit: record, time, who, how, text, the call's code,
+   start date and title (omitted when none). With `before` and `code`,
+   `call()` reads the session of that code holding records below it (codes
+   recur); a hit prints `valor-record call <code> --before <record+1>` as how
+   to read around it. CLI: `code` optional, `--search`; neither is an error.
+4. **Guidance, one place each** (`skills/sdlc/converse.md`): "What Valor
+   learned before": asked what was said or agreed in a past call, `facts
+   --kind decision` and memory first, then `call --search`, answering with the
+   call's date. "Calls": after a call's report, carry its decisions as step 2.
 
-**Out of scope.** No index, no new table, no memory ingest of call rows, no
-reading of the Meetings folder, no backfill of titles for past calls, no
-change to what a call itself can look up.
+**Not built.** No backfill of past calls (their lines are searchable; they
+have no title, summary or decision facts), no Meetings-folder reads, no new
+table, no memory ingest of call rows. Adds no check, gate or limit: scoping is
+the existing `reach()` and fact project scoping.
 
-**Governance.** Adds no check, gate or limit: the project scoping is the
-existing `reach()`, unchanged.
+**Tests.** test_call: end() with decisions writes kind-decision facts dated
+the call, citing it, about a known person and not an unknown one; the report
+lists them with the carry line; a second end adds none; memory off, the
+report says not recorded; call.ended holds title and notes. test_meet: a word
+said in one call finds it with code and date, not another call; all words,
+any order/case; a word in notes finds the call with its title; a past call
+without title prints none; two sessions of one code, `--before` reads the
+older; another project's session finds nothing. CLI line format; no code and
+no search errors. Full suite, merge; Tom rolls out.
 
-**Tests** (`tests/test_meet.py`, beside the transcript test):
-- a word said in one call (heard, spoken, typed) finds that line with its
-  call's code and date, and not a second call of the project without it;
-- several words match a line holding all of them in any order and case; a
-  line with only one does not match;
-- a word in a call's stored summary finds it, with its title;
-- another project's session searching the same word finds nothing;
-- `end()` with a summary writes `title` and `notes` into `call.ended`
-  (`tests/test_call.py`, where the end report is tested);
-- CLI: `--search` prints the hit line format; no code and no search errors.
-Full suite under 5 minutes, then merge. Tom rolls out.
-
-Stakes: a read-only search over the project's own record plus two fields on
-an existing row; reversible. Critique rounds 0, review rounds 0.
+Stakes: decisions written as project facts (additive, keyed) and a read-only
+search; reversible. Critique rounds 0, review rounds 0.
