@@ -159,6 +159,10 @@ The routines the kernel holds:
   A fix that worked is only recorded; a target still broken after its fix,
   or unreachable for 24 h, is reported once to the operator chat's session,
   or as a fatal Sentry event on a Mac with no such session.
+  Each run also reports, once a day each, every target it read and its own
+  Mac with under 15 GB free; with no session to hear it the report stays a
+  quiet row, since the Cowboy's watch reports every Mac (the Captain's own
+  notices went unheard six times before its disk filled, 2026-11-19).
 - **summary** (01:30 daily, ceiling `act`, installed on every Mac; issue
   #3679, [the plan](plans/78a8c31b-nightly-summary.md)): for each project
   placed on this Mac, the Bangkok days after its last summary's `through`
@@ -181,7 +185,7 @@ The routines the kernel holds:
   this Mac to its branch's tip (`intake.request_update`, `by: routine`), as
   `python -m core update` does, and starts no task. It also starts `uv cache prune`
   on the Mac's uv cache and leaves it running, since the prune waits while
-  any task's uv uses the cache, and tells Tom once a day when the Mac's disk is low and once a
+  any task's uv uses the cache, and tells Tom once a
   week while its call profile is not signed in. Where `VALOR_SNAPSHOT_DIR`
   is set (the Cowboy) it also commits the night's copy of the Valor folder
   into the work vault ([machine.md](machine.md), The Valor folder's

@@ -585,7 +585,7 @@ def test_the_watch_holds_a_broken_mac_fixes_it_a_watch_later_and_reports_only_wh
     peers = Peers(pirate=GOOD)
     assert watch_once(fresh, peers, holds, objective).summary == "pirate: healthy"
     assert states() == [] and not (holds / "hold-pirate").exists()
-    peers.states["pirate"] = {**BAD, "after_fix": GOOD}
+    peers.states["pirate"] = {**BAD, "after_fix": {**GOOD, "free_gb": 9.2}}
     watch_once(fresh, peers, holds, objective)  # broken once: held, not fixed
     assert states()[-1] == "watch.held" and (holds / "hold-pirate").exists()
     assert (
@@ -804,3 +804,54 @@ def test_health_fix_reopens_tailscale_at_once_and_shares_the_spacing_with_the_ke
     assert health.reopen_tailscale("not running") == "spaced" and len(acts(tailscale_app)) == 1
     tailscale_app.running, tailscale_app.state = True, "Running"
     assert run(health.report(fix=True, agents=tmp_path))["fixed"] == {}
+
+
+def disk_reports(dsn) -> list[dict]:
+    async def go():
+        async with await db.connect(dsn) as conn:
+            found = await (
+                await conn.execute(
+                    "SELECT payload FROM events WHERE type = 'child.reported' AND payload->>'from' = 'watch' "
+                    "AND payload->>'about_key' LIKE 'disk:%%' ORDER BY id"
+                )
+            ).fetchall()
+            return [r[0] for r in found]
+
+    return run(go())
+
+
+def test_the_watch_reports_each_mac_low_on_disk_once_a_day(fresh, tmp_path, monkeypatch):
+    """The Captain's update wrote its low-disk notice six times with no
+    session to hear it, and its disk filled (2026-11-19): the watch, whose
+    reports reach Tom from the Cowboy, reports each Mac it reads and itself
+    under `DISK_LOW_GB`, once a day each, and sends no Sentry event."""
+    import shutil
+
+    from routines.watch import runner as watch
+
+    events = []
+    monkeypatch.setattr(watch.sentry_sdk, "capture_message", lambda text, level: events.append(level))
+    monkeypatch.setattr(shutil, "disk_usage", lambda _: shutil._ntuple_diskusage(228e9, 220e9, 8e9))
+    objective = run(new_task(fresh))
+    holds = tmp_path / "holds"
+    peers = Peers(pirate={**GOOD, "free_gb": 4.6}, bald={**BAD, "free_gb": 9.2, "after_fix": {**GOOD, "free_gb": 9.2}}, old=GOOD | {"free_gb": None},
+                  roomy={**GOOD, "free_gb": 15.0}, asleep=None)  # fmt: skip
+
+    async def go(now):
+        async with await db.connect(fresh) as conn:
+            ctx = SimpleNamespace(conn=conn, objective=objective, now=now)
+            await watch.runner(
+                remote=peers, holds=holds, targets=("pirate", "bald", "old", "roomy", "asleep")
+            )(ctx)
+
+    today = datetime(2026, 11, 19, 12, tzinfo=UTC)
+    run(go(today))
+    run(go(today + timedelta(hours=1)))
+    told = disk_reports(fresh)
+    assert sorted(r["about_key"] for r in told) == [
+        f"disk:{settings.machine}:2026-11-19", "disk:bald:2026-11-19", "disk:pirate:2026-11-19"]  # fmt: skip
+    text = {r["about_key"].split(":")[1]: r["text"] for r in told}
+    assert text["pirate"].startswith("pirate has 5 GB of disk left") and "9 GB" in text["bald"]
+    assert "tonight" not in text["pirate"] and events == []
+    run(go(today + timedelta(days=1)))
+    assert len(disk_reports(fresh)) == 6

@@ -52,11 +52,16 @@ not a new check.
   3.6 GB), after confirming each branch is merged and no job is running there.
   Clear rebuildable caches (`brew cleanup -s`, npm, pnpm store). Workspaces of
   ended tasks stay: several hold deliverables kept only there, or were cut short.
-- Outage check: every message received 18:42–19:55 UTC on the Captain's bridges
-  got a reply. Tasks ended 18:20–19:55 UTC by ENOSPC or by the 5-hour usage
+- Outage check: each served chat's own history (Slack, Telegram, email) from
+  each service's actual down time to its restart, against the kernel's received
+  rows, so a message never fetched shows too; each received one got a reply. Tasks ended 18:20–19:55 UTC by ENOSPC or by the 5-hour usage
   limit (about 10, including chat sessions) are listed, and each one whose work
   was cut short and that nobody has reopened is reopened with `core feedback`
-  naming the cause. Check that 73b03a6d8923 is moving.
+  naming the cause; its delivery then reaches its own room, as normal. Check that
+  73b03a6d8923 is moving.
+- Headroom: merged removals and caches leave about 8–10 GB; the rest comes from
+  the kernel's own 24 h reclaim of about 17 GB of finished workspaces (by about
+  02:00 UTC 11-21) and Tom's call on the Docker VM. The delivery says so.
 - For Tom: the Docker VM (14.5 GB, recommend delete), local models 11.2 GB,
   `~/src` projects, apps (Xcode 4.8, ChatGPT and its Homebrew copy, AnythingLLM),
   and the Hugging Face cache, each with its size. Free space at the end.

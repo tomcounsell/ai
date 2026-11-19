@@ -696,7 +696,7 @@ def test_the_update_routine_writes_one_request_and_no_task(fresh, monkeypatch):
     assert objective["objective"] == "update"
 
 
-def test_the_update_routine_prunes_uv_and_reports_low_disk_once_a_day(fresh, tmp_path, monkeypatch):
+def test_the_update_routine_prunes_uv_and_leaves_low_disk_to_the_watch(fresh, tmp_path, monkeypatch):
     """The prune is started and left running: a task's uv holding the
     Mac's shared cache makes `uv cache prune` wait, and the routine must
     still end and report (a uv here that blocks until released)."""
@@ -730,9 +730,7 @@ def test_the_update_routine_prunes_uv_and_reports_low_disk_once_a_day(fresh, tmp
         assert (tmp_path / "argv").read_text() == "cache prune\n" * 2
     finally:
         release.touch()
-    ((_, notice),) = reports(fresh)
-    assert notice["kind"] == "rollout" and notice["about_key"].startswith("disk:20")
-    assert "8 GB of disk left" in notice["text"] and notice["child_id"] is None
+    assert reports(fresh) == []  # low disk is the watch's report (routines/watch), not the update's
 
 
 def signed(profile: Path, email: str | None = "valor@example.com") -> str:

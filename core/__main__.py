@@ -759,16 +759,12 @@ def _routine_runners() -> dict:
     }
 
 
-# Below this much free disk the overnight update tells Tom (Tom, 2026-10-22).
-DISK_LOW_GB = 15
-
-
 async def update_runner(ctx: routines.Context) -> routines.Ran:
     """The overnight update: one request, which the resident kernel rolls;
     no task. It also starts a prune of uv's shared cache (19.5 GiB on the
     Captain, 2026-10-22), left to run on its own, since `uv cache prune`
     waits for every uv process using the cache (tasks share it); tells Tom
-    once a day when this Mac's disk is low, and once a week while its call profile is not signed in (the Captain was first
+    once a week while its call profile is not signed in (the Captain was first
     asked mid-call, 2026-11-02). On the Mac with `snapshot_dir` it copies the
     Valor folder into the vault (`core/snapshot.py`) and tells Tom once a day
     when that commits nothing for a reason."""
@@ -776,15 +772,6 @@ async def update_runner(ctx: routines.Context) -> routines.Ran:
     await asyncio.to_thread(subprocess.Popen, [settings.uv, "cache", "prune"], stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)  # fmt: skip
     free = shutil.disk_usage(Path.home()).free / 1e9
-    if free < DISK_LOW_GB:
-        await notices.request(
-            ctx.conn,
-            intake.UPDATES,
-            kind="rollout",
-            about_key=f"disk:{ctx.now:%Y-%m-%d}",
-            text=f"{settings.machine} has {free:.0f} GB of disk left after tonight's cleanup. "
-            "Builds start failing when it fills; what should go?",
-        )
     from bridges.meet import google
     from core import call
 
