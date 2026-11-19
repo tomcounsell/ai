@@ -60,7 +60,7 @@ LOOKED_UP = "The import's error rate is 0.4 percent."
 # talks (Tom's calls, 2026-11-19: the answer's own turn spoke over him): the
 # words that ask each, its answer, and the seconds the stub worker takes.
 LATE = {
-    "signup": ("There were 212 signups last week.", 6),
+    "sign": ("There were 212 signups last week.", 6),
     "invoice": ("The printer's invoice is 340 dollars.", 3),
 }
 
@@ -76,7 +76,11 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
         # A reading or prep holding the answer let Live say it without asking (2026-11-18): only a
         # question gets it.
         text = LOOKED_UP if prompt.startswith("Asked in the call:") else "nothing ahead"
-        late = [v for k, v in LATE.items() if prompt.startswith("Asked in the call:") and k in prompt.lower()]
+        late = [
+            v
+            for k, v in LATE.items()
+            if prompt.startswith("Asked in the call:") and k in prompt.splitlines()[0].lower()
+        ]
         text, wait = late[0] if late else (text, 0)
 
         def build(url, brief, turn_id, news="", subagent=""):
@@ -304,7 +308,9 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     spans = sorted((x["at"] - x["played_s"], x["at"]) for x in says if x["played_s"])
     assert all(b0 >= a1 - 0.3 for (_, a1), (b0, _) in itertools.pairwise(spans)), spans
     assert not [line for line in seen["log"] if "(a reply asked)" in line and "asked aloud" in line]
-    assert all(any(answer in t for t in seen["chat"]) for answer, _ in LATE.values())
+    posted = [r["payload"]["result"]["posted"] for r in rows
+              if r["type"] == "effect.outcome" and "posted" in (r["payload"]["result"] or {})]  # fmt: skip
+    assert all(any(answer in t for t in posted) for answer, _ in LATE.values()), posted
     # No stall-resume in a healthy call, a half-minute monologue included.
     assert not stalls
     # Answered when addressed, and to "Hello" with one other person there.
