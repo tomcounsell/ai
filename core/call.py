@@ -335,8 +335,10 @@ async def end(
 ) -> bool:
     """Write the call's end once (module docstring). False when it had
     already ended. `summary` is Gemini's summary document (`path`) and its
-    `actions`, each listed as a task from the call, or why it failed
-    (`error`); None when none was made."""
+    `actions`, each listed as a task from the call, the call's `title` and
+    `notes` (kept on `call.ended`, which `valor-record call --search`
+    reads) and the lines on what it `decided`; or why it failed (`error`);
+    None when none was made."""
     async with conn.transaction():
         await ledger.lock(conn, f"task:{session_id}")
         rows = await ledger.read(conn, session_id)
@@ -344,8 +346,9 @@ async def end(
             return False
         stopped = await tasks.is_stopped(conn, session_id)
         late, unanswered = list(late or []), list(unanswered or [])
+        kept = {k: summary[k] for k in ("title", "notes") if (summary or {}).get(k)}
         await ledger.append(conn, session_id, "call.ended", {"reason": reason, "stopped": stopped, "late": late,
-                            "unanswered": unanswered})  # fmt: skip
+                            "unanswered": unanswered, **kept})  # fmt: skip
         if not stopped:
             await ledger.append(
                 conn, session_id, "task.ended", {"kind": "call", "by": "valor", "reason": reason}
@@ -378,6 +381,7 @@ async def end(
         if actions := (summary or {}).get("actions"):
             lines.append("Tasks from the call: take, hand on or decline each in the thread it was asked in:")
             lines += [f"- {a['task']}" + (f" ({a['owner']})" if a.get("owner") else "") for a in actions]
+        lines += (summary or {}).get("decided") or []
         lines += settled
         lines += [
             f'Answered by your worker after the call: on "{a["question"]}": {a["answer"]}' for a in late
@@ -816,7 +820,8 @@ SUMMARY = (
     "before it, and its transcript (heard, said and typed lines, each with its minute). Write the notes on it, "
     "using only what was said:\n"
     "- topic: what the call was about, in two to five words, as its title;\n"
-    "- summary: a short paragraph;\n- decisions: each decision made;\n"
+    "- summary: a short paragraph;\n- decisions: each decision made, and by: who made it, by their names as "
+    "the transcript gives them;\n"
     "- actions: each task from the call: each thing someone said they would do, each task someone gave or "
     "asked Valor for, and each thing Valor said it would do, with its owner (the one to do it) or null;\n"
     "- markdown: the full summary as a Markdown document: who joined, what was discussed, what was settled, "
@@ -828,7 +833,9 @@ SUMMARY_SCHEMA = {
     "properties": {
         "topic": {"type": "string"},
         "summary": {"type": "string"},
-        "decisions": {"type": "array", "items": {"type": "string"}},
+        "decisions": {"type": "array", "items": {"type": "object", "properties": {
+            "decision": {"type": "string"}, "by": {"type": "array", "items": {"type": "string"}}},
+            "required": ["decision"]}},
         "actions": {"type": "array", "items": {"type": "object", "properties": {
             "task": {"type": "string"}, "owner": {"type": "string", "nullable": True}}, "required": ["task"]}},
         "markdown": {"type": "string"},
@@ -2298,7 +2305,8 @@ class Call:
         segments = sorted(self.segments, key=lambda s: s["start"])
         # Linked in summary.json, which the app rewrites notes.md from; its
         # decisions and actions it escapes, so they stay as they are.
-        summary = {"summary": linked(notes["summary"], repo, links), "decisions": list(notes["decisions"]),
+        decided = [d for d in notes["decisions"] if d["decision"].strip()]
+        summary = {"summary": linked(notes["summary"], repo, links), "decisions": [d["decision"] for d in decided],
                    "actions": [{k: v for k, v in a.items() if k in ("task", "owner") and v} for a in notes["actions"]]}  # fmt: skip
         files = {
             "meta.json": meta_json(title, self.started_at, datetime.now(UTC), _zone(), segments),
@@ -2314,7 +2322,40 @@ class Call:
         for name, text in files.items():
             (staging / name).write_text(text)
         folder = keep(staging, self.store, folder_name(title, self.started_at))
-        return {"path": str(folder / f"{day} {title}.md"), "actions": summary["actions"]}
+        async with await self._connect() as conn:
+            facts = await self._decisions(conn, decided, f"Meet call {code} {day}, {title}")
+        return {"path": str(folder / f"{day} {title}.md"), "actions": summary["actions"], "title": title,
+                "notes": "\n".join([summary["summary"], *summary["decisions"]]), "decided": facts}  # fmt: skip
+
+    async def _decisions(self, conn, decided: list[dict[str, Any]], source: str) -> list[str]:
+        """Each decision the call made as a dated fact of its project (kind
+        `decision`, citing the call), about those who made it whom the
+        project knows as people; the report's lines on them."""
+        from core import memory
+
+        if not decided:
+            return []
+        spec, texts = self._spec("its decisions are not recorded as facts"), [d["decision"] for d in decided]
+        try:
+            if spec is None:
+                raise memory.Unavailable("the call has no project spec")
+            writes = []
+            for d in decided:
+                by = [n.strip() for n in d.get("by") or [] if n.strip()]
+                claim = d["decision"] + (f" (decided by {', '.join(by)})" if by else "")
+                writes.append({"op": "fact", "kind": "decision", "claim": claim, "source": source,
+                               "since": self.started_at.isoformat(), "about": await memory.known(conn, spec, by)})  # fmt: skip
+            names = await memory.fact_write(conn, spec, writes, via=f"Meet call, task {self.id}")
+        except (memory.Unavailable, memory.Refused) as exc:
+            _log(f"call {self.id}: its decisions are not recorded as facts: {exc}")
+            head = f"Decided in the call, not recorded as facts ({exc}); record each with `valor-record fact add --kind decision`:"
+            return [head, *(f"- {t}" for t in texts)]
+        head = (
+            "Decided in the call, now facts of the project (kind decision): carry each that changes a backlog "
+            "item or an open question to where it lives (its Sheet row, the task waiting on it); an open "
+            "question is still answered only on Tom's 👍:"
+        )
+        return [head, *(f"- {t} (fact {names[str(n)]})" for n, t in enumerate(texts, 1))]
 
     def _title(self, topic: str | None) -> str:
         """The call's topic, then the first names of those in it, Valor's last."""

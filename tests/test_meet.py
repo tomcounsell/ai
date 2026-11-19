@@ -182,7 +182,9 @@ def test_a_join_opens_one_call_session_reports_joining_with_no_link_and_starts_i
     assert b.max_effect_class == brief.max_effect_class == "act" and b.parent_id is None
     assert info["asked_by"] == {"channel": "slack", "chat_id": team.chat, "reply_to": at(1), "topic_id": None,
                                 "session": brief.id}  # fmt: skip
-    assert info["url"] == URL and info["prep"].startswith("The launch") and info["machine"] == settings.machine
+    assert (
+        info["url"] == URL and info["prep"].startswith("The launch") and info["machine"] == settings.machine
+    )
     (joining,) = [r for r in got if r["kind"] == "call"]
     assert joining["about_key"].endswith(":joining") and joining["child_id"] == session_id
     assert URL not in joining["text"] and CODE not in joining["text"]
@@ -633,6 +635,73 @@ def test_a_calls_post_is_refused_empty_or_over_500_characters(dsn, team):
     assert ok is None and settles is None and "empty" in empty and "501" in long
 
 
+def test_a_word_said_in_one_call_finds_its_line_and_call_and_no_other_projects_call_finds_it(
+    dsn, team, tmp_path
+):
+    """Tom, 2026-11-19: "as long as you can look them up, I will just ask
+    you". `call` with `q` finds the lines of the project's calls holding
+    every word of it, in any order and case (heard, typed, spoken, posted,
+    and a call's kept summary), newest first, each with its call's code,
+    start and title; a code given narrows it to that code's calls. A Meet
+    code recurs, so `before` reads the call holding the records below it.
+    Another project's session finds none of it."""
+
+    async def go():
+        brief, first = await a_call(dsn, team)
+        await append(dsn, first, ("call.started", {}),
+                     ("call.heard", {"turn_id": "a", "who": "d2", "name": "Logan", "via": "spoke",
+                                     "text": "The Pricing page goes live on Friday"}),
+                     ("call.heard", {"turn_id": "b", "who": "d2", "name": "Logan", "via": "typed",
+                                     "text": "pricing only"}),
+                     ("effect.outcome", {"effect_id": ledger.new_id(), "kind": "done",
+                                         "result": {"spoken_text": "Friday it is, the page goes live"}}))  # fmt: skip
+        async with await db.connect(dsn) as conn:
+            await call.end(conn, first, "done", summary={"path": "/x.md", "actions": [], "title": "Launch - Logan, Valor",
+                            "notes": "The launch.\nThe pricing page goes live Friday"})  # fmt: skip
+        again = await join(dsn, brief, [], request_id="t1/join2.json")
+        assert again.kind == "done", again
+        second = again.result["session_id"]
+        assert second != first
+        await append(dsn, second, ("call.started", {}),
+                     ("call.heard", {"turn_id": "c", "who": "d2", "name": "Logan", "via": "spoke",
+                                     "text": "Budget review next"}),
+                     ("effect.outcome", {"effect_id": ledger.new_id(), "kind": "done",
+                                         "result": {"posted": "Budget notes are in the thread"}}))  # fmt: skip
+        ask = lambda q: record.answer(dsn, brief.id, "call", q)
+        live = await ask({"q": "live PRICING"})
+        budget = await ask({"q": "budget", "code": CODE})
+        none = await ask({"q": "pricing tuesday"})
+        latest = await ask({"code": CODE})
+        older = await ask({"code": CODE, "before": str(live[-1]["record"] + 1)})
+        other = f"other{uuid.uuid4().hex[:6]}"
+        (tmp_path / "projects" / f"{other}.toml").write_text(
+            f'name = "{other}"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\nchats = ["slack:T0ABC/C0ELSE"]\n'
+        )
+        async with await db.connect(dsn) as conn:
+            outsider = await tasks.start(conn, tasks.Brief(instruction="x", project={"name": other}))
+        elsewhere = await record.answer(dsn, outsider, "call", {"q": "pricing"})
+        with pytest.raises(record.NotFound, match="meeting code"):
+            await ask({})
+        return live, budget, none, latest, older, elsewhere
+
+    live, budget, none, latest, older, elsewhere = run(go())
+    assert [(h["who"], h["how"], h["text"]) for h in live] == [
+        ("Gemini", "summary", "The launch.\nThe pricing page goes live Friday"),
+        ("Logan", "spoke", "The Pricing page goes live on Friday"),
+    ]
+    assert all(h["code"] == CODE and h["title"] == "Launch - Logan, Valor" and h["started"] for h in live)
+    assert [(h["who"], h["how"], h["title"]) for h in budget] == [
+        ("Valor", "typed", None), ("Logan", "spoke", None)]  # fmt: skip
+    assert none == [] and elsewhere == []
+    assert [line["text"] for line in reversed(latest)] == [
+        "",
+        "Budget review next",
+        "Budget notes are in the thread",
+    ]
+    assert "The Pricing page goes live on Friday" in [line["text"] for line in older]
+    assert "Budget review next" not in [line["text"] for line in older]
+
+
 def test_the_call_transcript_reads_in_order_from_the_asking_chats_project_only_a_page_at_a_time(
     dsn, team, tmp_path
 ):
@@ -742,3 +811,32 @@ def test_a_lock_on_another_profile_a_dead_pid_or_none_names_no_holder(tmp_path):
         assert holder(str(profile)) is None
     finally:
         other.kill()
+
+
+def test_valor_record_call_search_prints_each_hit_with_its_call_and_how_to_read_around_it(
+    monkeypatch, capsys
+):
+    import io
+
+    from tools import valor_record
+
+    hits = [{"record": 41, "at": "2026-11-16T14:41:00+00:00", "who": "Logan", "how": "spoke", "text": "Ship it",
+             "code": CODE, "started": "2026-11-16 14:39:02+00:00", "title": "Launch - Logan, Valor"},
+            {"record": 7, "at": "2026-11-10T09:05:00+00:00", "who": "Valor", "how": "typed", "text": "Shipped",
+             "code": CODE, "started": "2026-11-10 09:00:00+00:00", "title": None}]  # fmt: skip
+    asked = []
+
+    def urlopen(request, timeout):
+        asked.append(request.full_url)
+        return io.BytesIO(json.dumps(hits).encode())
+
+    monkeypatch.setenv("VALOR_RECORD_URL", "http://kernel.test/record")
+    monkeypatch.setattr(valor_record.urllib.request, "urlopen", urlopen)
+    assert valor_record.main(["call", "--search", "ship it"]) == 0
+    assert asked == ["http://kernel.test/record/call?q=ship+it&limit=200"]
+    assert capsys.readouterr().out.splitlines() == [
+        f"2026-11-16 Launch - Logan, Valor (meet {CODE}) #41 [2026-11-16 14:41 UTC] Logan (spoke): Ship it",
+        f"  the call around it: valor-record call {CODE} --before 42",
+        f"2026-11-10 (meet {CODE}) #7 [2026-11-10 09:05 UTC] Valor (typed): Shipped",
+        f"  the call around it: valor-record call {CODE} --before 8",
+    ]

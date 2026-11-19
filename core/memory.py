@@ -222,6 +222,25 @@ async def search(conn, spec, query: str, limit: int, offset: int) -> dict[str, A
     )
 
 
+async def known(conn, spec, names: list[str]) -> list[str]:
+    """The `names` that are a person of `spec`'s project. Reads only."""
+    if not on():
+        raise Unavailable("memory is off on this Mac")
+    mdsn = dsn_for(conn)
+    why = await asyncio.to_thread(unreachable, mdsn)
+    if why:
+        raise Unavailable(f"the memory store could not be reached ({why})")
+    from memory import facts as f
+
+    name, where = ledger_name(conn), (spec.repo, spec.client or "")
+
+    def go() -> list[str]:
+        f.use(mdsn)
+        return [n for n in names if (e := f.entity(name, *where, n)) and f.fold(e.kind) == "person"]
+
+    return await asyncio.to_thread(go)
+
+
 async def mark(conn, record: str, *, by: str = "valor", via: str = "the command line") -> int:
     """Record that `record` (`<ledger>/<key>`, as its Remembered label
     names it) is a standard of working: from the next ingest on, it is

@@ -5,6 +5,7 @@ valor-record tasks [--search TEXT] [--limit N] [--json]
 valor-record task ID [--json]
 valor-record memory WORDS [--limit N] [--offset N] [--json]
 valor-record call CODE [--before RECORD] [--limit N] [--json]
+valor-record call [CODE] --search WORDS [--limit N] [--json]
 valor-record hours [--since DATE] [--until DATE] [--json]
 valor-record waits [--json]
 valor-record facts [--as-of DATE] [--kind K] | --history FACT | --related FACT_OR_ENTITY [--depth N] [--json]
@@ -31,7 +32,10 @@ is `<channel>:<id>` as `chats` prints it. Messages print oldest first. `memory` 
 this project (the records recall reads, and standards of working), best
 match first, each record quoted as data. `call` reads a Meet call's
 transcript by its meeting code, oldest first a page at a time: who said
-or typed what, what Valor spoke and posted. `hours` prints the blocks of
+or typed what, what Valor spoke and posted; `call --search WORDS` finds
+the lines of every call of the project (or of CODE) holding all the
+words, and the calls' summaries, newest first, each with its call's
+date, title and code and how to read the call around it. `hours` prints the blocks of
 time Valor worked on this project (Bangkok days, default this month), as
 the `hours` routine writes them to the project's calendar. `waits`
 prints what is waiting now, oldest first: each task's open question and
@@ -192,8 +196,11 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--limit", "-n", type=int, default=50, help="how many (at most 200)")
     one = sub.add_parser("task", help="one task's ledger rows")
     one.add_argument("id")
-    call = sub.add_parser("call", help="a Meet call's transcript, by its meeting code")
-    call.add_argument("code")
+    call = sub.add_parser(
+        "call", help="a Meet call's transcript by its meeting code, or the calls' lines by --search"
+    )
+    call.add_argument("code", nargs="?", help="the meeting code; with --search, only that call")
+    call.add_argument("--search", "-s", help="words said, typed or summarised in the project's calls")
     call.add_argument("--before", help="only lines older than this record number (#N)")
     call.add_argument("--limit", "-n", type=int, default=200, help="how many (at most 200)")
     hrs = sub.add_parser("hours", help="the time Valor worked on this project, block by block")
@@ -379,6 +386,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"{b['start'][:10]} {b['start'][11:16]}-{b['end'][11:16]} {b['hours']:>4}h  {', '.join(b['tasks'])}"
             )
         print(f"total {round(sum(b['hours'] for b in out), 1)}h")
+    elif args.verb == "call" and args.search:
+        for r in out:
+            title = f"{r['title']} " if r["title"] else ""
+            print(f"{r['started'][:10]} {title}(meet {r['code']}) #{r['record']} [{_when(r['at'])}] "
+                  f"{r['who']} ({r['how']}): {r['text']}")  # fmt: skip
+            print(f"  the call around it: valor-record call {r['code']} --before {r['record'] + 1}")
     elif args.verb == "call":
         for r in reversed(out):
             print(f"#{r['record']} [{_when(r['at'])}] {r['who']} ({r['how']}): {r['text']}".rstrip())

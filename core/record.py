@@ -95,6 +95,11 @@ async def reach(conn, spec: workspace.Spec) -> dict[str, dict[str, Any]]:
     return {t: b for t, b in bodies.items() if inside(t)}
 
 
+def _like(words: str) -> str:
+    """An ILIKE pattern holding `words` as they are."""
+    return "%" + words.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 def _limit(query: dict[str, str], default: int = LIMIT, most: int = MOST) -> int:
     try:
         n = int(query.get("limit") or default)
@@ -130,7 +135,7 @@ async def messages(
         args.append(query["chat"])
     if query.get("q"):
         where.append("r.payload->>'text' ILIKE %s")
-        args.append("%" + query["q"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
+        args.append(_like(query["q"]))
     if query.get("before"):
         if not query["before"].isdigit():
             raise NotFound(f"before {query['before']!r} is not a record id")
@@ -284,51 +289,108 @@ async def facts_write(conn, spec: workspace.Spec, task_id: str, body: Any) -> di
         raise NotFound(str(exc)) from None
 
 
+# What a call's rows say: who, how, and the words.
+CALL_ROWS = (
+    "(e.type IN ('call.heard', 'call.participant', 'call.started', 'call.ended') OR (e.type = 'effect.outcome' "
+    "AND e.payload->>'kind' = 'done' AND (e.payload->'result' ? 'spoken_text' OR e.payload->'result' ? 'posted')))"
+)
+CALL_TEXT = (
+    "CASE e.type WHEN 'call.heard' THEN e.payload->>'text' WHEN 'call.ended' THEN e.payload->>'notes' "
+    "WHEN 'effect.outcome' THEN COALESCE(e.payload->'result'->>'spoken_text', e.payload->'result'->>'posted') END"
+)
+
+
+def _said(kind: str, p: dict[str, Any], search: bool = False) -> dict[str, Any]:
+    if kind == "call.heard":
+        return {"who": p.get("name"), "how": p.get("via"), "text": p.get("text")}
+    if kind == "call.participant":
+        return {"who": p.get("name"), "how": "joined", "text": ""}
+    if kind == "call.started":
+        return {"who": "Valor", "how": "joined", "text": ""}
+    if kind == "call.ended":
+        return {"who": "Gemini", "how": "summary", "text": p.get("notes")} if search else {
+            "who": "Valor", "how": "left", "text": p.get("reason") or ""}  # fmt: skip
+    if "spoken_text" in p["result"]:
+        cut = " (cut off)" if p["result"].get("cut") else ""
+        return {"who": "Valor", "how": "spoke" + cut, "text": p["result"]["spoken_text"]}
+    return {"who": "Valor", "how": "typed", "text": p["result"]["posted"]}
+
+
 async def call(conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query) -> list[dict[str, Any]]:
     """A Meet call's transcript, newest first, paged by `before` (a record
     id) and `limit` as `messages` is: each turn heard (who, how, the
     words), each sentence Valor spoke (as far as it got) and each post,
     who joined, and how it ended. `code` is the meeting code, the call's
-    chat id; its latest call in reach."""
+    chat id; a code recurs, so it is the latest call in reach with records
+    before `before`. With `q`, the lines of the project's calls (of `code`
+    only, when given) holding every word of it, and their summaries, each
+    with its call's code, start and title (`search`)."""
     code = (query.get("code") or "").removeprefix("meet:")
-    found = [t for t, b in tasks.items() if (b.get("chat") or {}) == {"channel": "meet", "chat_id": code}]
+    found = [
+        t for t, b in tasks.items()
+        if (b.get("chat") or {}).get("channel") == "meet" and (not code or b["chat"]["chat_id"] == code)
+    ]  # fmt: skip
+    if (query.get("q") or "").strip():
+        return await search(conn, tasks, found, query)
+    if not code:
+        raise NotFound("read a call by its meeting code, or search the calls for words")
     if not found:
         raise NotFound(f"no call {code!r} in project {spec.name}'s record")
-    session = max(found, key=lambda t: tasks[t]["created_at"])
-    where, args = ["e.task_id = %s"], [session]
+    where, args = ["e.task_id = %s"], []
     if query.get("before"):
         if not query["before"].isdigit():
             raise NotFound(f"before {query['before']!r} is not a record id")
+        row = await (
+            await conn.execute(
+                "SELECT task_id FROM events WHERE task_id = ANY(%s) AND id < %s ORDER BY id DESC LIMIT 1",
+                (found, int(query["before"])),
+            )
+        ).fetchone()
+        if row is None:
+            return []
+        args.append(row[0])
         where.append("e.id < %s")
         args.append(int(query["before"]))
+    else:
+        args.append(max(found, key=lambda t: tasks[t]["created_at"]))
     rows = await (
         await conn.execute(
             "SELECT e.id, e.type, e.payload, e.at FROM events e WHERE "
             + " AND ".join(where)
-            + " AND (e.type IN ('call.heard', 'call.participant', 'call.started', 'call.ended') OR "
-            "(e.type = 'effect.outcome' "
-            "AND e.payload->>'kind' = 'done' AND (e.payload->'result' ? 'spoken_text' OR "
-            "e.payload->'result' ? 'posted'))) ORDER BY e.id DESC LIMIT %s",
+            + f" AND {CALL_ROWS} ORDER BY e.id DESC LIMIT %s",
             (*args, _limit(query)),
         )
     ).fetchall()
-    lines = []
-    for row_id, kind, p, at in rows:
-        if kind == "call.heard":
-            said = {"who": p.get("name"), "how": p.get("via"), "text": p.get("text")}
-        elif kind == "call.participant":
-            said = {"who": p.get("name"), "how": "joined", "text": ""}
-        elif kind == "call.started":
-            said = {"who": "Valor", "how": "joined", "text": ""}
-        elif kind == "call.ended":
-            said = {"who": "Valor", "how": "left", "text": p.get("reason") or ""}
-        elif "spoken_text" in p["result"]:
-            cut = " (cut off)" if p["result"].get("cut") else ""
-            said = {"who": "Valor", "how": "spoke" + cut, "text": p["result"]["spoken_text"]}
-        else:
-            said = {"who": "Valor", "how": "typed", "text": p["result"]["posted"]}
-        lines.append({"record": row_id, "at": at, **said})
-    return lines
+    return [{"record": row_id, "at": at, **_said(kind, p)} for row_id, kind, p, at in rows]
+
+
+async def search(conn, tasks: dict[str, dict[str, Any]], sessions: list[str], query) -> list[dict[str, Any]]:
+    """The lines of `sessions` holding every word of `q`, in any case,
+    newest first: heard and typed, Valor's spoken and posted, and each
+    call's summary; each with its call's `code`, `started` and `title`
+    (None for a call that kept none)."""
+    words = query["q"].split()
+    rows = await (
+        await conn.execute(
+            f"SELECT e.id, e.type, e.payload, e.at, e.task_id FROM events e WHERE e.task_id = ANY(%s) AND {CALL_ROWS} "
+            + "".join(f" AND {CALL_TEXT} ILIKE %s" for _ in words)
+            + " ORDER BY e.id DESC LIMIT %s",
+            (sessions, *map(_like, words), _limit(query)),
+        )
+    ).fetchall()
+    titles = dict(
+        await (
+            await conn.execute(
+                "SELECT task_id, payload->>'title' FROM events WHERE type = 'call.ended' AND task_id = ANY(%s)",
+                (list({r[4] for r in rows}),),
+            )
+        ).fetchall()
+    )
+    return [
+        {"record": row_id, "at": at, **_said(kind, p, search=True), "code": tasks[t]["chat"]["chat_id"],
+         "started": tasks[t]["created_at"], "title": titles.get(t)}
+        for row_id, kind, p, at, t in rows
+    ]  # fmt: skip
 
 
 # Valor's hours (Tom, 2026-11-01): days are Bangkok's; turns whose gaps are

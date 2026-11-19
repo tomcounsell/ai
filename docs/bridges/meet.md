@@ -180,7 +180,7 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   lines beside it. The summary's actions (each task given or taken in the
   call, with the one to do it) are listed in the call's report as tasks
   for the asking session to take, hand on or decline; with no summary, the
-  report points at the transcript for them (P-034). `valor-record call <code>` reads the transcript.
+  report points at the transcript for them (P-034). `valor-record call <code>` reads the transcript; `valor-record call --search "<words>"` finds a line or summary across the project's calls. Each decision in the summary is written as a `decision` fact of the project, citing the call, and listed in the report.
 
 ## Setup per Mac
 

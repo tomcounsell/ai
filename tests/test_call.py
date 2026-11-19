@@ -142,7 +142,7 @@ class Gemini:
         self.configs: list = []
         self.fail = 0
         self.notes = notes or {"topic": "Launch plan", "summary": "Shipping is Monday, after PR 12.",
-                               "decisions": ["Ship Monday"], "actions": [{"task": "Book QA", "owner": "Logan"}],
+                               "decisions": [{"decision": "Ship Monday", "by": ["Logan Reyes"]}], "actions": [{"task": "Book QA", "owner": "Logan"}],
                                "markdown": "# The call\n\nShip PR #12 and ENG-633."}  # fmt: skip
         self.summarised: list[tuple[Path, str, bytes]] = []
         self.preps: list[str] = []
@@ -1791,6 +1791,91 @@ def test_a_failed_summary_is_named_in_the_report_and_no_other_is_written(dsn, te
     assert "Gemini could not summarise it (RuntimeError: quota; the call's files are kept in" in ended["text"]
     assert "write no summary of your own" in ended["text"]
     assert "Its transcript, where any task given in the call is: `valor-record call" in ended["text"]
+
+
+def test_what_a_call_decided_becomes_dated_facts_of_its_project_and_the_report_says_to_carry_them(
+    dsn, team, quick
+):
+    """Tom, 2026-11-19: what a call settled lives with the project's other
+    PM data. Each decision in Gemini's summary is a `decision` fact of the
+    call's project, dated the call and citing it, about the deciders the
+    project knows as people; the end report lists them and says to carry
+    them; `call.ended` keeps the title and the notes the search reads.
+    With memory off, the report lists them as not recorded."""
+    from core import memory, workspace
+
+    notes = {"topic": "Launch plan", "summary": "Shipping is Monday.", "markdown": "m", "actions": [],
+             "decisions": [{"decision": "Ship Monday", "by": ["Rowan Vale", "Mara Ode"]},
+                           {"decision": "Drop the beta", "by": []}, {"decision": " ", "by": []}]}  # fmt: skip
+
+    async def a_call():
+        c = await in_call(dsn, team, gemini=Gemini(notes=notes))
+        await push(c.session, heard("Valor, when do we ship?"), done())
+        await settle(c.the)
+        await finish(c)
+        rows = await bridges.rows(dsn, c.brief.id)
+        (ended,) = [r["payload"] for r in rows if r["type"] == "child.reported"
+                    and r["payload"]["about_key"].endswith(":ended")]  # fmt: skip
+        (kept,) = [r["payload"] for r in await bridges.rows(dsn, c.the.id) if r["type"] == "call.ended"]
+        return c, ended["text"], kept
+
+    async def go():
+        spec = workspace.Spec.load(team.project)
+        async with await db.connect(dsn) as conn:
+            await memory.fact_write(conn, spec, [{"op": "entity", "kind": "person", "name": "Rowan Vale"}])
+        c, text, kept = await a_call()
+        async with await db.connect(dsn) as conn:
+            facts = (await memory.facts_read(conn, spec, {"kind": "decision"}))["facts"]
+        return c, text, kept, facts
+
+    memory.reset()
+    try:
+        c, text, kept, facts = run(go())
+    finally:
+        memory.reset()
+    day = c.the.started_at.strftime("%Y-%m-%d")
+    by_claim = {f["claim"]: f for f in facts}
+    # Every test project's repo is "unused", so other calls' decisions share the store.
+    assert {"Ship Monday (decided by Rowan Vale, Mara Ode)", "Drop the beta"} <= set(by_claim)
+    assert not [c for c in by_claim if not c.strip()]
+    ship = by_claim["Ship Monday (decided by Rowan Vale, Mara Ode)"]
+    assert (
+        ship["since"].startswith(day)
+        and ship["about"] == ["Rowan Vale"]
+        and by_claim["Drop the beta"]["about"] == []
+    )
+    assert (
+        ship["source"] == f"Meet call {CODE} {c.the.started_at.astimezone().strftime('%Y-%m-%d')}, "
+        "Launch plan - Logan, Tom, Valor"
+    )
+    assert "now facts of the project (kind decision): carry each that changes a backlog item" in text
+    assert f"- Ship Monday (fact {ship['fact']})" in text and "- Drop the beta (fact " in text
+    assert kept["title"] == "Launch plan - Logan, Tom, Valor"
+    assert kept["notes"] == "Shipping is Monday.\nShip Monday\nDrop the beta"
+
+
+def test_with_memory_off_the_report_lists_what_the_call_decided_as_not_recorded(
+    dsn, team, quick, monkeypatch
+):
+    from core import memory
+
+    notes = {"topic": "Launch plan", "summary": "s", "markdown": "m", "actions": [],
+             "decisions": [{"decision": "Ship Monday", "by": []}, {"decision": "Drop the beta"}]}  # fmt: skip
+    monkeypatch.setattr(memory, "on", lambda: False)
+
+    async def go():
+        c = await in_call(dsn, team, gemini=Gemini(notes=notes))
+        await push(c.session, heard("Valor, when do we ship?"), done())
+        await settle(c.the)
+        await finish(c)
+        rows = await bridges.rows(dsn, c.brief.id)
+        (ended,) = [r["payload"] for r in rows if r["type"] == "child.reported"
+                    and r["payload"]["about_key"].endswith(":ended")]  # fmt: skip
+        return ended["text"]
+
+    off = run(go())
+    assert "Decided in the call, not recorded as facts (memory is off on this Mac); record each with" in off
+    assert "- Ship Monday\n- Drop the beta" in off
 
 
 def test_the_summary_uploads_the_recording_and_sends_it_with_the_transcript(tmp_path):
