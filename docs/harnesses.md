@@ -603,7 +603,8 @@ same project. Because privacy is scoped by access to comms."
 
 The workspace has `valor-record` (`tools/valor_record.py`): `chats`,
 `messages [CHAT] [--search] [--limit] [--before]`, `tasks [--search]`,
-`task ID`, `call CODE`, `hours [--since D] [--until D]` (the blocks of
+`task ID`, `call CODE` (a Meet call's transcript; `call [CODE] --search
+WORDS` finds the project's calls' lines and summaries by their words), `hours [--since D] [--until D]` (the blocks of
 time Valor worked on the project, as the `hours` routine writes them to
 its calendar, [routines.md](routines.md)), `waits` (what is waiting now,
 oldest first: each task's open question and each post a chat session
