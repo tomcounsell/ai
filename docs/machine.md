@@ -262,8 +262,9 @@ scheduler, supervisor, or watchdog on the machine.
   (`kernel.kicked`). The `watch` routine (every 30 minutes, the Macs in
   `VALOR_WATCH`) reads each peer's `python -m core health` over ssh,
   writes `~/.config/brew-nightly/hold-<host>` on both while it is broken,
-  runs `health --fix` at the second broken watch, and reports only what
-  stays broken.
+  runs `health --fix` at the second broken watch, and reports what stays
+  broken and, once a day each, a Mac it read or itself with under 15 GB
+  free.
 - **Tailscale, reopened** (`core/health.py`, `Tailnet`): it is Valor's
   only route to the other Macs, and on 2026-10-28 the Captain fell off the
   tailnet with nobody at it. At most every 30 s on its wake, the kernel reads
