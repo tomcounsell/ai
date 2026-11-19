@@ -452,46 +452,59 @@ def test_a_note_sent_during_a_long_reply_leaves_it_whole(voice):
 
 
 def test_a_prep_note_listing_a_settled_item_does_not_reopen_it(voice):
-    """Tom's calls, 2026-11-19: twice the newest prep note led with an item
-    the call had settled minutes before ("a read-back", "a catch"), and
-    asked what was next, Valor raised it again. With the import settled in
-    the conversation and a note that leads with a catch on it, asked what
-    is next, Valor opens the next unreached item."""
+    """Tom's calls, 2026-11-19: twice the newest prep note led with a catch
+    on an item the call had settled minutes before, and asked what was
+    next, Valor raised it again. With an item settled in the conversation
+    and a note that leads with a catch on it, asked what is next, Valor
+    opens the next unreached item. The scenario is made up."""
     u = lambda text: {"role": "user", "parts": [{"text": f"Tom Counsell: {text}"}]}
     m = lambda text: {"role": "model", "parts": [{"text": text}]}
     settled = [
-        u("Let's go through the list."),
+        u("Let's go through the delivery app list."),
         m(
-            "First, coaches' access to shared reports. I recommend the share flags go back to off when a member "
-            "is anonymized."
+            "First, late-order refunds. I recommend refunds go out automatically when a delivery is over an hour late."
         ),
-        u("Yes, exactly, the share flags go back to off. Next."),
-        m(
-            "Noted: share flags reset to off on anonymization. Next, the team name when it's named after the user."
-        ),
-        u("Rename it after the next member by join date."),
-        m("Noted. Next, the confirmation email to the erased address."),
-        u("Yes, send it, and say we may not recognise them if they come back."),
+        u("Yes, automatic refunds past an hour. Next."),
+        m("Noted: automatic refunds past an hour late. Next, the driver tip screen."),
+        u("Keep it as it is."),
+        m("Noted. Next, the weekend opening hours banner."),
+        u("Yes, show it from Friday noon."),
         m("Noted. What's the next item you'd like to review?"),
     ]
     stale = call.PREPARED.format(notes=(
-        "Notes for the next two unreached items: the stored report PDFs, then the backup policy. One catch "
-        "first, because it adds work.\n**Share flags back to off (Tom, 6:41)**\n- The PR doesn't do it today: "
-        "erasure deletes the share grants but leaves the flag. The step: set it to off on all the member's "
-        "submissions, one line plus one test. Recommend raising it now.\n**Stored report PDFs**\n- Deleted at "
-        "erasure and rebuilt on the next download with the member's name replaced. Recommend: yes.\n"
-        "**Backup policy**\n- Backups keep the original data for 7 days; restoring one re-applies erasures."
+        "Notes for the next two unreached items: the loyalty stamps, then the allergen labels. One catch "
+        "first, because it adds work.\n**Automatic late-order refunds**\n- The payment code doesn't do it "
+        "today: refunds are manual. The step: one scheduled job plus one test. Recommend raising it now.\n"
+        "**Loyalty stamps**\n- Ten stamps for a free loaf; 30 percent of regulars reach ten in a month. "
+        "Recommend: yes.\n**Allergen labels**\n- Shown on the menu page only; the checkout lacks them."
     ))  # fmt: skip
     for _ in range(3):
         said = asyncio.run(
             session(
                 voice("I said it's on you. You tell me what the next item is."),
                 settled,
-                "Tom and Valor go through the account erasure decisions.",
+                "Tom and Valor go through the delivery app decisions.",
                 [stale],
                 listen_s=12,
             )
         )["said"]
-        assert re.search(r"PDF|report", said, re.IGNORECASE) and not re.search(
-            r"share|flag", said, re.IGNORECASE
-        ), said
+        # Never the settled item; what comes next may be the stub `open_decisions`' list instead of the note's.
+        assert said.strip() and not re.search(r"refund", said, re.IGNORECASE), said
+
+
+def test_an_answer_noted_while_valor_talks_is_given_in_his_next_reply(voice):
+    """The answer to a lookup asked aloud is a note asking no turn
+    (2026-11-19: its own turn spoke over Tom); the next reply gives it, so
+    it is not said late or never (2026-11-18: 11 minutes late)."""
+    before = [
+        {"role": "user", "parts": [{"text": "Tom Counsell: How many signups did we have last week? Look it up."}]},
+        {"role": "model", "parts": [{"text": "I'll check that with my worker. Meanwhile, the launch is Monday."}]},
+    ]  # fmt: skip
+    noted = call.SAY_ANSWER.format(
+        question="How many signups last week?", answer="There were 212 signups last week."
+    )
+    for _ in range(3):
+        said = asyncio.run(session(voice("Okay. Anything else?"), before, AGENDA, [noted], listen_s=10))[
+            "said"
+        ]
+        assert "212" in said or "two hundred" in said.lower(), said

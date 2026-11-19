@@ -707,8 +707,9 @@ ANSWERED = 'Your worker answered "{question}" (posted in the chat): {answer}'
 # a pause it spoke over Tom answering Valor's own question (2026-11-19, Tom:
 # hold it for the next opportunity to talk).
 SAY_ANSWER = (
-    'Your worker\'s answer to "{question}", asked aloud, is in and posted in the chat: {answer}\nGive it in one '
-    "short sentence, saying the chat has the detail, when you next speak; never break in to give it."
+    'Your worker\'s answer to "{question}", asked aloud, is in and posted in the chat: {answer}\nOpen your next '
+    "reply with it, whatever that reply answers, in one short sentence saying the chat has the detail; never "
+    "break in to give it."
 )
 # A steer from the chat session reaches the voice as well as the chat (2026-11-18: a corrected
 # answer reached only the call's chat).

@@ -55,7 +55,10 @@ against a new Meet with a second device of Valor's account
   prep on the items still to come: one after the reading (or as an
   invited call starts) and one after each `settle`, `backlog` or
   `open_decisions`, never on a timer, a question asked meanwhile going
-  first (`Call.prepare`; Tom, 2026-11-17, P-038). With one other person,
+  first (`Call.prepare`; Tom, 2026-11-17, P-038). The prep leaves out what
+  the call has settled, read-backs and catches on it included, and Live is
+  told a settled item stays settled, whatever a note lists (twice a prep
+  note's catch on a settled item had Valor raise it again, 2026-11-19). With one other person,
   Valor leads: a settled item's read-back opens the next; with more, the
   who-is-here note says the next item waits until someone asks for it. Live decides when Valor is addressed and
   speaks; its tools ask the worker (a fresh `call` turn in the session's

@@ -32,12 +32,12 @@ outside the repo. Cases are given by time and kind only.
 - No `interrupted` line appears in either call's log (observed), as expected
   under `NO_INTERRUPTION`.
 - Settled items reopened from the worker's prep note (observed). A 10:15:42:
-  the newest prep note led with an item settled at 10:10:36 and listed
-  another item as "unreached". Asked for the next item at 10:16:27, Valor
+  the newest prep note led with a catch on an item settled at 10:10:36 and
+  listed another settled item as not yet reached. Asked for the next item at 10:16:27, Valor
   raised exactly those two, in that order, and Tom said both were covered. B
-  10:34:40: the note "read back" an item settled at 10:33:01-21 ("couldn't
-  tell from the call"). Valor raised it at 10:35:30 and Tom said "we just
-  covered this". In both, the settling lines were inside the 40 lines the prep
+  10:34:40: the note led with a read-back of an item settled at 10:33:01-21,
+  saying it could not tell whether it was settled. Valor raised it at
+  10:35:30 and Tom said it was already covered. In both, the settling lines were inside the 40 lines the prep
   read (`self.lines[-40:]`). For A the window began at 10:08:47 and for B it
   covered the whole call, and both settling rows are heard rows (observed). So
   the 40-line window is not the cause; the prompt is.
@@ -88,8 +88,11 @@ outside the repo. Cases are given by time and kind only.
   leads with an item settled in the conversation, then "what's next?", gets
   the other item, 3 of 3. The existing voice tests still pass.
 - test_live_meet.py: a lookup answer arriving while Valor speaks and while the
-  other device speaks gives one voice at a time and no spoken answer turn. A
-  settled item is not reopened.
+  other device speaks gives one voice at a time and no spoken answer turn.
+  The settled-item case is tested against Live directly
+  (test_live_call_voice.py), not in Meet: it needs a prep stub that relists
+  an item, which the Meet test's stub worker does not model. A noted answer
+  is given in Valor's next reply: a live voice test, 3 of 3.
 - Full suite under 5 minutes; then merge, roll out to the four Macs (never
   while `pgrep -f meet-chrome`), confirm each head, and run the live Meet test.
 

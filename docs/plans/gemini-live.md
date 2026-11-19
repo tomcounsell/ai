@@ -35,14 +35,14 @@ amends: docs/plans/meet.md (items 4, 5, 7)
    - a worker's answer to a question asked in the chat;
    - a steer of the call (amended 2026-11-18).
 
-   A typed chat line is sent with `turn_complete=True`, as are the nudge when Valor is named in a group and a worker's answer to a question asked aloud, said at the next pause (amended 2026-11-18). "Valor, leave" is still matched by `LEAVE` on the operator's transcription.
+   A typed chat line is sent with `turn_complete=True`, as is the nudge when Valor is named in a group (amended 2026-11-18; a worker's answer to a question asked aloud is a note since 2026-11-19, given when Valor next speaks: as a turn of its own it spoke over Tom). "Valor, leave" is still matched by `LEAVE` on the operator's transcription.
 4. **Playback** (`page.js`). `valorStream` appends PCM chunks to one Web Audio timeline. `valorStop` clears it and returns the seconds played, called on Live's `interrupted`. `valorPlay` goes.
 5. **Say gate.**
    - `meet.say` `{"turn"}` is requested at a turn's first chunk. Audio is buffered until it is released and dropped if it is refused.
    - It settles `done` with `spoken_text`: the output transcription cut at the seconds played.
    - In `core/bridge.py`, `meet.say` gets a turn-shape check; `meet.send_message` keeps `_refuse_meet`.
 6. **Tools.**
-   - `ask(q)` starts the worker (`runs.run_turn`, `fresh="call"`) and returns at once. Its answer is posted ("On "q": …") and noted, so it survives a reconnect. (Amended 2026-11-18: one asked aloud is said in a sentence at the next pause instead of noted, once it is in the chat; either is kept for a fresh session. A steer opening `look up:` is asked of the worker the same way.) After leaving, it goes in the report.
+   - `ask(q)` starts the worker (`runs.run_turn`, `fresh="call"`) and returns at once. Its answer is posted ("On "q": …") and noted, so it survives a reconnect. (Amended 2026-11-19: one asked aloud is noted, once it is in the chat, for Valor to give in a sentence when he next speaks, never as a turn of its own; either is kept for a fresh session. A steer opening `look up:` is asked of the worker the same way.) After leaving, it goes in the report.
    - `post` (with the thread copy), `open_decisions` (`board.snapshot`), `settle`, `leave` (amended 2026-11-18: with `why`, `asked` or `wrapped up`, which names the reason the call ended).
 7. **Record.** Each input transcription span is a `call.heard` row, credited to the loudest track. `valor-record call` is unchanged.
 8. **Metering.**

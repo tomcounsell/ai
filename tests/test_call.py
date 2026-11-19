@@ -1075,8 +1075,8 @@ def test_an_answer_asked_aloud_is_never_a_turn_of_its_own(dsn, team, quick, when
 
 
 def test_an_answer_asked_aloud_whose_post_fails_is_said_once_as_unposted(dsn, team, quick):
-    """An answer is said at the pause only once it is in the chat; when the
-    chat fails it, the unposted turn says it, and nothing says it twice."""
+    """An answer is noted only once it is in the chat; when the chat fails
+    it, the unposted turn says it, and nothing says it twice."""
 
     async def worker(question):
         return "The import, on Tuesday."
