@@ -353,3 +353,145 @@ def test_asked_what_happened_to_a_missed_request_the_voice_owns_it_and_asks_the_
     for _ in range(3):
         seen = asyncio.run(session(asked, before, AGENDA, here=GROUP))
         assert {"ask", "person", "backlog"} & set(seen["tools"]), seen  # a lookup started in that turn
+
+
+# Five stages, read out at length: a reply long enough to speak over.
+STAGES = (
+    "The deployment pipeline, five stages: 1. Build: every push builds a container image tagged with the commit "
+    "and runs the unit tests in parallel. 2. Staging: the image deploys to staging, migrations run against a "
+    "copy of production data, and the smoke tests check sign-in and checkout. 3. Review: a person reads the "
+    "staging diff and the test report, and approves or sends it back with a reason. 4. Canary: five percent of "
+    "production traffic goes to the new image for thirty minutes while error rates are watched. 5. Rollout: the "
+    "rest of production moves over in three steps, and a rollback is one command that restores the previous image."
+)
+
+
+async def over_a_long_reply(voice, *, barge: str = "", note: str = "") -> dict:
+    """Tom asks for the five stages; 1.5 s into Valor's reply, `note` is
+    noted and `barge` said over it. What Live was sent from then until its
+    turn completes is sent again after, as `Call._tick` sends what cut
+    Valor off. What it heard, said, and whether it was interrupted."""
+    from google.genai import types
+
+    key = credentials.read_key(settings.google_keyfile, call.GOOGLE_KEY, "google-key")
+    out = {"heard": "", "said": "", "first": None, "complete": 0, "interrupted": False}
+    ask = voice(
+        "Valor, read me the five stages of the deployment pipeline from your notes, each one in full."
+    )
+    async with call.Gemini(key).connect(call.live_config("Valor", STAGES, None)) as s:
+        await s.send_client_content(**call.note(ALONE))
+        t0 = time.monotonic()
+
+        async def receive():
+            while True:
+                async for m in s.receive():
+                    sc = m.server_content
+                    if not sc:
+                        continue
+                    out["heard"] += sc.input_transcription.text if sc.input_transcription else ""
+                    out["said"] += (sc.output_transcription.text or "") if sc.output_transcription else ""
+                    if sc.model_turn and out["first"] is None:
+                        out["first"] = time.monotonic() - t0
+                    out["interrupted"] |= bool(sc.interrupted)
+                    out["complete"] += bool(sc.turn_complete)
+
+        async def feed(x, kept=None):
+            for i in range(0, len(x), CHUNK):
+                if kept is not None and not out["complete"]:
+                    kept.append(x[i : i + CHUNK])
+                await s.send_realtime_input(audio=types.Blob(
+                    data=call.pcm16(x[i : i + CHUNK]), mime_type=f"audio/pcm;rate={call.RATE}"))  # fmt: skip
+                await asyncio.sleep(CHUNK / call.RATE)
+
+        task = asyncio.create_task(receive())
+        quiet = lambda seconds: np.zeros(int(call.RATE * seconds), np.float32)
+        await feed(np.concatenate([quiet(0.5), ask]))
+        for _ in range(100):
+            if out["first"] is not None:
+                break
+            await feed(quiet(0.1))
+        await feed(quiet(1.5))
+        if note:
+            await s.send_client_content(**call.note(note))
+        kept: list[np.ndarray] = []
+        await feed(voice(barge) if barge else quiet(3), kept if barge else None)
+        for _ in range(1000):  # Live's turn runs on; the call keeps what it sends
+            if out["complete"]:
+                break
+            await feed(quiet(0.04), kept if barge else None)
+        for chunk in kept:  # sent again once the turn is over
+            await s.send_realtime_input(
+                audio=types.Blob(data=call.pcm16(chunk), mime_type=f"audio/pcm;rate={call.RATE}")
+            )
+        await feed(quiet(12))
+        task.cancel()
+    print(f"\nsaid: {out['said']!r} heard: {out['heard']!r}")
+    return out
+
+
+def test_what_is_said_over_a_long_reply_is_heard_once_sent_again_after_it(voice):
+    """Tom's calls, 2026-11-19: what he said once he had cut Valor off had
+    no transcript, for up to 13 s, and twice Valor asked him to say it
+    again. Live hears nothing sent while its turn runs (0 of 3 in the runs
+    that day); sent again once the turn completes, as the call now does, it
+    is heard and answered."""
+    barge = "Hold on. The staging account already exists, I created it yesterday. The code word is pineapple."
+    for _ in range(3):
+        seen = asyncio.run(over_a_long_reply(voice, barge=barge))
+        assert "pineapple" in seen["heard"].lower() and not seen["interrupted"], seen
+        assert seen["complete"] >= 2, seen  # and a turn answering it
+
+
+def test_a_note_sent_during_a_long_reply_leaves_it_whole(voice):
+    """A note goes to Live as client content, which may interrupt a turn: a
+    speaker change noted mid-reply leaves the reply whole (2 of 2 in the
+    runs, 2026-11-19)."""
+    for _ in range(3):
+        seen = asyncio.run(over_a_long_reply(voice, note="Tom Counsell is speaking."))
+        assert not seen["interrupted"] and re.search(r"rollout|roll out", seen["said"], re.IGNORECASE), seen
+
+
+def test_a_prep_note_listing_a_settled_item_does_not_reopen_it(voice):
+    """Tom's calls, 2026-11-19: twice the newest prep note led with an item
+    the call had settled minutes before ("a read-back", "a catch"), and
+    asked what was next, Valor raised it again. With the import settled in
+    the conversation and a note that leads with a catch on it, asked what
+    is next, Valor opens the next unreached item."""
+    u = lambda text: {"role": "user", "parts": [{"text": f"Tom Counsell: {text}"}]}
+    m = lambda text: {"role": "model", "parts": [{"text": text}]}
+    settled = [
+        u("Let's go through the list."),
+        m(
+            "First, coaches' access to shared reports. I recommend the share flags go back to off when a member "
+            "is anonymized."
+        ),
+        u("Yes, exactly, the share flags go back to off. Next."),
+        m(
+            "Noted: share flags reset to off on anonymization. Next, the team name when it's named after the user."
+        ),
+        u("Rename it after the next member by join date."),
+        m("Noted. Next, the confirmation email to the erased address."),
+        u("Yes, send it, and say we may not recognise them if they come back."),
+        m("Noted. What's the next item you'd like to review?"),
+    ]
+    stale = call.PREPARED.format(notes=(
+        "Notes for the next two unreached items: the stored report PDFs, then the backup policy. One catch "
+        "first, because it adds work.\n**Share flags back to off (Tom, 6:41)**\n- The PR doesn't do it today: "
+        "erasure deletes the share grants but leaves the flag. The step: set it to off on all the member's "
+        "submissions, one line plus one test. Recommend raising it now.\n**Stored report PDFs**\n- Deleted at "
+        "erasure and rebuilt on the next download with the member's name replaced. Recommend: yes.\n"
+        "**Backup policy**\n- Backups keep the original data for 7 days; restoring one re-applies erasures."
+    ))  # fmt: skip
+    for _ in range(3):
+        said = asyncio.run(
+            session(
+                voice("I said it's on you. You tell me what the next item is."),
+                settled,
+                "Tom and Valor go through the account erasure decisions.",
+                [stale],
+                listen_s=12,
+            )
+        )["said"]
+        assert re.search(r"PDF|report", said, re.IGNORECASE) and not re.search(
+            r"share|flag", said, re.IGNORECASE
+        ), said

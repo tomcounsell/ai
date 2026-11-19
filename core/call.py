@@ -612,7 +612,8 @@ INSTRUCTIONS = (
     'say is to you: answer it, and lead the call as "In a call" says.\n'
     "- Lines that begin `[note]` tell you about the call (who is speaking, who is here, what your worker "
     'found). Never answer a note or read one out, except as a note asks you to. A note opening "Your worker prepared" is depth on items '
-    "still to come: use it when the call reaches them.\n"
+    "still to come: use it when the call reaches them. An item the call has settled or said is covered stays "
+    "settled: never raise it again, whatever a note says.\n"
     "- A line that begins `[typed by NAME]` was typed in the call's chat: answer it only by calling `post`, "
     "never aloud.\n"
     "- For anything you would have to look up (code, records, documents, figures), call `ask` and say you "
@@ -687,12 +688,17 @@ READ_UP = (
 PREPARE = (
     "Prepare ahead for this call; nothing you write is posted, it reaches Valor's voice as a note. From the "
     "call so far and the notes before it, take the next two items or open questions the call has not reached "
-    "yet. For each, in short notes: its case (what happened, when, where it is recorded; observed, reported "
+    "yet. Leave out everything the call has settled or said is covered, even where it adds work: no "
+    "read-back of it and no catch on it, since Valor raising it again reopens a settled item. "
+    "For each, in short notes: its case (what happened, when, where it is recorded; observed, reported "
     "or assumed), the numbers, and the two or three follow-ups likely asked, each answered a level below the "
     "last (an example, the mechanism, the step). Answer only `nothing ahead` when nothing is left.\n\n"
     "The call so far:\n{so_far}"
 )
-PREPARED = "Your worker prepared, for when the call reaches it (say nothing about this note):\n{notes}"
+PREPARED = (
+    "Your worker prepared, for when the call reaches it (say nothing about this note; an item the call has "
+    "settled stays settled, even where this lists it):\n{notes}"
+)
 # Kept for a fresh session (`Call.told`): the newest within a quarter of `CALL_SO_FAR`.
 ANSWERED = 'Your worker answered "{question}" (posted in the chat): {answer}'
 # Built on the chat session's stated default, no objection from Tom in five minutes, 2026-11-18; his to reverse.
