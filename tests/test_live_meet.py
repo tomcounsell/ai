@@ -16,6 +16,7 @@ the two compare. The worker is a stub turn.
 
 import asyncio
 import contextlib
+import itertools
 import json
 import os
 import shutil
@@ -55,6 +56,13 @@ MONOLOGUE = (
     "do you think is the riskiest part of launching on Monday?"
 )
 LOOKED_UP = "The import's error rate is 0.4 percent."
+# Lookups whose answers come in while Valor speaks and while another device
+# talks (Tom's calls, 2026-11-19: the answer's own turn spoke over him): the
+# words that ask each, its answer, and the seconds the stub worker takes.
+LATE = {
+    "signup": ("There were 212 signups last week.", 6),
+    "invoice": ("The printer's invoice is 340 dollars.", 3),
+}
 
 
 def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_outlasts_a_reconnect(
@@ -68,10 +76,12 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
         # A reading or prep holding the answer let Live say it without asking (2026-11-18): only a
         # question gets it.
         text = LOOKED_UP if prompt.startswith("Asked in the call:") else "nothing ahead"
+        late = [v for k, v in LATE.items() if prompt.startswith("Asked in the call:") and k in prompt.lower()]
+        text, wait = late[0] if late else (text, 0)
 
         def build(url, brief, turn_id, news="", subagent=""):
-            return runs.TurnCommand(argv=[sys.executable, "-c", "pass"], env={}, cwd=b.workspace, harness="stub",
-                                    parse=lambda out: {"text": text})  # fmt: skip
+            return runs.TurnCommand(argv=[sys.executable, "-c", f"import time; time.sleep({wait})"], env={},
+                                    cwd=b.workspace, harness="stub", parse=lambda out: {"text": text})  # fmt: skip
 
         return build
 
@@ -221,9 +231,11 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                 await asyncio.sleep(6)
                 await b.join(url)
                 await asyncio.sleep(8)
+                await a.ask(kokoro, "Valor, ask your worker to look up the printer's invoice total.")
                 seen["side_talk_frames"] = await b.side(kokoro, "Hey Sam, did you get the invoice from the printer "
                                                         "yesterday? I need it for the books.", a)  # fmt: skip
                 await asyncio.sleep(3)
+                await a.ask(kokoro, "Valor, ask your worker to look up last week's signup count.")
                 seen["over_at"] = await a.cut_in(
                     kokoro,
                     "Valor, tell me a story of five or six sentences about a rocket launch.",
@@ -287,6 +299,12 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                       "says": says, "charged_turns": len(resumed), "reason": reason, "report": report,
                       "unheard_s": round(seen["unheard_s"], 1), "stalls": stalls, "fresh": fresh,
                       "resumed": reopened, "long_s": LONG_S}, indent=1))  # fmt: skip
+    # One voice at a time: no say began before the one before it ended, and no
+    # lookup answer was a turn of its own; both answers reached the chat.
+    spans = sorted((x["at"] - x["played_s"], x["at"]) for x in says if x["played_s"])
+    assert all(b0 >= a1 - 0.3 for (_, a1), (b0, _) in itertools.pairwise(spans)), spans
+    assert not [line for line in seen["log"] if "(a reply asked)" in line and "asked aloud" in line]
+    assert all(any(answer in t for t in seen["chat"]) for answer, _ in LATE.values())
     # No stall-resume in a healthy call, a half-minute monologue included.
     assert not stalls
     # Answered when addressed, and to "Hello" with one other person there.
