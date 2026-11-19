@@ -950,12 +950,10 @@ def test_after_a_typed_answer_the_chat_failed_the_next_reply_is_spoken(dsn, team
     assert c.page.streams
 
 
-def test_an_ask_returns_at_once_and_its_answer_after_a_resumption_is_posted_and_said_at_a_pause(
-    dsn, team, quick
-):
-    """Asked aloud, the worker's answer is posted and, at the next pause,
-    Live is asked to say it in a sentence (2026-11-18: an
-    answer asked for aloud was said 11 minutes later)."""
+def test_an_ask_returns_at_once_and_its_answer_after_a_resumption_is_posted_and_noted(dsn, team, quick):
+    """Asked aloud, the worker's answer is posted and noted, kept, for Valor
+    to give when he next speaks: never a turn of its own (2026-11-19: said
+    at a pause, it spoke over Tom answering Valor's own question)."""
 
     async def go():
         gate = asyncio.Event()
@@ -971,28 +969,59 @@ def test_an_ask_returns_at_once_and_its_answer_after_a_resumption_is_posted_and_
         (response,) = [kw for k, kw in c.session.sent if k == "tool"]
         await push(c.session, go_away())
         assert await until(lambda: len(c.gemini.sessions) == 2 and c.the.session is c.gemini.sessions[1])
-        for _ in range(10):  # Logan talks as the answer comes: it waits for the pause
-            c.the.hear(LOGAN, loud(0.05), 48_000)
-            await asyncio.sleep(0.04)
         gate.set()
-        for _ in range(10):
-            c.the.hear(LOGAN, loud(0.05), 48_000)
-            await asyncio.sleep(0.04)
-        said_early = [t for t, _ in c.the.session.contents() if "asked aloud" in t]
         assert await until(lambda: any("asked aloud" in t for t, _ in c.the.session.contents()))
+        await asyncio.sleep(call.QUIET_S + 0.3)  # a quiet pause asks nothing more
         await settle(c.the)
         await finish(c)
-        return c, response, await effects(dsn, c.the.id), said_early
+        return c, response, await effects(dsn, c.the.id)
 
-    c, response, done_, said_early = run(go())
+    c, response, done_ = run(go())
     assert response["function_responses"][0].response["result"].startswith("asked")
     assert c.gemini.configs[1].session_resumption.handle == "h1"
     assert 'On "What did we ship?": The import, on Tuesday.' in c.page.posts
     noted = c.gemini.sessions[1].contents()
     say = call.SAY_ANSWER.format(question="What did we ship?", answer="The import, on Tuesday.")
-    assert not said_early and noted.count((f"[note] {say}", True)) == 1
-    assert not any(t.startswith("[note] Your worker answered") for t, _ in noted)  # said, not noted twice
+    assert [x for x in noted if "Tuesday" in x[0]] == [(f"[note] {say}", False)]
+    assert c.the.told == [say]  # kept for a fresh session
     assert [e["type"] for e in done_ if e["type"] != "meet.send_message"] == ["slack.send_message"]
+
+
+@pytest.mark.parametrize("when", ["valor speaking", "the other speaking", "a pause"])
+def test_an_answer_asked_aloud_is_never_a_turn_of_its_own(dsn, team, quick, when):
+    """Tom's two calls, 2026-11-19: the answer's turn began 0.45 s after
+    Valor's own question and Tom, answering it, cut it off. Arriving while
+    Valor's reply plays, while the other person talks, or in a quiet pause,
+    it is one note asking no reply, and no turn is asked for it."""
+
+    async def go():
+        gate = asyncio.Event()
+
+        async def worker(question):
+            await gate.wait()
+            return "The import, on Tuesday."
+
+        page = Page()
+        c = await in_call(dsn, team, page, worker=worker)
+        await push(c.session, tool("ask", question="What did we ship?"), done())
+        assert await until(lambda: [k for k, _ in c.session.sent if k == "tool"])
+        if when == "valor speaking":
+            page.ahead = 2.0
+            await push(c.session, audio(), said("While that runs, the next item."), done())
+            assert await until(lambda: c.the.out is not None)
+        gate.set()
+        for _ in range(15 if when == "the other speaking" else 0):
+            c.the.hear(LOGAN, loud(0.05), 48_000)
+            await asyncio.sleep(0.04)
+        assert await until(lambda: any("asked aloud" in t for t, _ in c.session.contents()))
+        await asyncio.sleep(call.QUIET_S + 0.5)
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    c = run(go())
+    say = call.SAY_ANSWER.format(question="What did we ship?", answer="The import, on Tuesday.")
+    assert [x for x in c.session.contents() if "Tuesday" in x[0]] == [(f"[note] {say}", False)]
 
 
 def test_an_answer_asked_aloud_whose_post_fails_is_said_once_as_unposted(dsn, team, quick):
@@ -1449,6 +1478,7 @@ def test_a_fresh_session_is_told_the_workers_answers_the_steers_and_the_newest_p
         starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
         c = await in_call(dsn, team, worker=worker, preparer=preparer, starts=starts)
         c.the.chat(LOGAN, "When did the import ship?")  # typed: its answer is noted, not said
+        assert await until(lambda: any(t.startswith("[typed by") for t, _ in c.session.contents()))
         await push(c.session, tool("ask", question="When did the import ship?"), done())
         await push(c.session, tool("settle", ids=["t1/q1"], readback="Ship Monday."), done())
         async with await db.connect(dsn) as conn:
@@ -2099,11 +2129,11 @@ def test_a_steer_while_live_reconnects_is_noted_to_the_next_session_resumed_or_f
     assert [t for t, _ in c.gemini.sessions[1].contents() if "chat session sent" in t] == [steer]
 
 
-def test_a_question_the_chat_session_passes_on_goes_to_the_worker_unposted_and_is_said(dsn, team, quick):
+def test_a_question_the_chat_session_passes_on_goes_to_the_worker_unposted_and_is_noted(dsn, team, quick):
     """2026-11-18: the chat session hands a question asked in
     the call to the call's worker. A `look up:` steer is a worker turn, asked
     once even when Live asks it too; it is not posted, and its answer is
-    posted and said at the next pause."""
+    posted and noted as one asked aloud."""
     asked = []
 
     async def worker(question):
@@ -2128,7 +2158,7 @@ def test_a_question_the_chat_session_passes_on_goes_to_the_worker_unposted_and_i
     assert not any("Look up" in p or "look up" in p for p in c.page.posts)
     assert 'On "How many signups last week?": 212 signups.' in c.page.posts
     say = call.SAY_ANSWER.format(question="How many signups last week?", answer="212 signups.")
-    assert (f"[note] {say}", True) in c.session.contents()
+    assert (f"[note] {say}", False) in c.session.contents()
 
 
 def test_a_stop_before_valor_is_let_in_leaves_within_seconds(dsn, team, quick):
@@ -3109,7 +3139,7 @@ def test_prep_runs_on_the_queue_moving_not_on_talk_and_questions_go_first(dsn, t
     assert not [p for p in c.page.posts if "0.4 percent" in p or "nothing ahead" in p]
     assert any("Tuesday." in p for p in c.page.posts)
     say = call.SAY_ANSWER.format(question="When did the import ship?", answer="Tuesday.")
-    assert (f"[note] {say}", True) in c.session.contents()  # asked aloud: said at the pause
+    assert (f"[note] {say}", False) in c.session.contents()  # asked aloud: noted, asking no turn
 
 
 def test_a_prep_done_while_no_session_is_open_is_noted_once_to_the_next(dsn, team, quick):

@@ -696,11 +696,13 @@ PREPARED = "Your worker prepared, for when the call reaches it (say nothing abou
 # Kept for a fresh session (`Call.told`): the newest within a quarter of `CALL_SO_FAR`.
 ANSWERED = 'Your worker answered "{question}" (posted in the chat): {answer}'
 # Built on the chat session's stated default, no objection from Tom in five minutes, 2026-11-18; his to reverse.
-# Said aloud at the next pause when it was asked aloud (2026-11-18: an answer
-# asked for aloud was posted only, and said 11 minutes later).
+# An answer asked for aloud is given when Valor next speaks (2026-11-18: it
+# was posted only, and said 11 minutes later). Never as a turn of its own: at
+# a pause it spoke over Tom answering Valor's own question (2026-11-19, Tom:
+# hold it for the next opportunity to talk).
 SAY_ANSWER = (
-    'Your worker\'s answer to "{question}", asked aloud, is in and posted in the chat: {answer}\nSay it aloud '
-    "now in one short sentence, and say the chat has the detail."
+    'Your worker\'s answer to "{question}", asked aloud, is in and posted in the chat: {answer}\nGive it in one '
+    "short sentence, saying the chat has the detail, when you next speak; never break in to give it."
 )
 # A steer from the chat session reaches the voice as well as the chat (2026-11-18: a corrected
 # answer reached only the call's chat).
@@ -1052,7 +1054,6 @@ class Post:
     copy: bool
     settles: list[dict[str, str]] = field(default_factory=list)
     note: str = ""  # told to the session once the whole post is in the chat, and kept (`Call.told`)
-    say: tuple[str, str] | None = None  # instead said at the next pause (`Call._say_answer`), kept as noted
 
 
 @dataclass
@@ -1143,7 +1144,6 @@ class Call:
         self.preparer, self.prep_queued = preparer, False
         self.told: list[str] = []  # the notes kept for a fresh session (`so_far`): answers, steers, the prep
         self.pending: list[str] = []  # those noted while no session was open, for the next to open
-        self.answers: list[tuple[str, str]] = []  # answers to asks made aloud, said at the next pause
         self.aloud: set[str] = set()  # the questions asked aloud, by their words
         self.sessions = 0  # Live sessions opened
         first = persona.identity(settings.persona_dir)["name"].split()[0].lower()
@@ -1305,8 +1305,6 @@ class Call:
                     await self._note(f"{self.names.get(top, 'someone')} is speaking.")
         await self._answer_alone(None if voiced else UNANSWERED_S)
         await self._say_unposted()
-        if not voiced and now - self.last_voice >= QUIET_S:
-            await self._say_answer()
         if self.close_at is not None and now >= self.close_at[0]:
             await self._close_stretch(self.close_at[1])
         elif self.heard and now - self.last_voice >= QUIET_S:
@@ -1594,14 +1592,6 @@ class Call:
         await self._tell({"turns": {"role": "user", "parts": [{"text": UNPOSTED.format(text=text)}]},
                           "turn_complete": True})  # fmt: skip
 
-    async def _say_answer(self) -> None:
-        """At a pause, the worker's answer to something asked aloud is said
-        in a sentence, the detail in the chat."""
-        if self.answers and self.session is not None and self.reply is None and self.out is None:
-            question, answer = self.answers.pop(0)
-            text = f"[note] {SAY_ANSWER.format(question=question, answer=answer)}"
-            await self._tell({"turns": {"role": "user", "parts": [{"text": text}]}, "turn_complete": True})
-
     async def _audio(self, reply: Reply, data: bytes) -> None:
         """A chunk of Live's speech: once the turn shows speech, in Live's
         transcript of it or in its sound, it requests its `meet.say`. Live
@@ -1860,9 +1850,6 @@ class Call:
             (done if out.kind == "done" else failed).append(part)
         if failed:
             self.unposted.append(" ".join(failed))
-        elif post.say:
-            self.told.append(post.note)
-            self.answers.append(post.say)
         elif post.note:
             await self._note(post.note, keep=True)
         if post.copy and done:
@@ -1944,10 +1931,10 @@ class Call:
             else:
                 key = self._key(question)
                 self.asked[key] = answer
-                # Once posted: asked aloud, said at the next pause; else noted. Kept for a fresh session.
+                # Noted once posted, kept for a fresh session; asked aloud, to be given when Valor next speaks.
+                told = SAY_ANSWER if key in self.aloud else ANSWERED
                 self.posts.put_nowait(Post(None, f'On "{question}": {answer}', True,
-                                           note=ANSWERED.format(question=question, answer=answer),
-                                           say=(question, answer) if key in self.aloud else None))  # fmt: skip
+                                           note=told.format(question=question, answer=answer)))  # fmt: skip
 
     async def _read_up(self) -> None:
         """The worker's reading for a call asked in a chat, done while Valor

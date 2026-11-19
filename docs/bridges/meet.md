@@ -90,12 +90,14 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   persona's line alone took side talk as his, 3 of 3, 2026-11-18). The
   recording keeps everyone's sound. The call's log has each note told to Live
   and each Live turn, begun and complete. A worker's answer to an `ask`
-  made aloud is posted and, once it is in the chat, said in a sentence at
-  the next pause; one asked in the chat is posted and noted; one the chat
+  made aloud is posted and, once it is in the chat, noted to Live to give
+  in a sentence when Valor next speaks, never as a turn of its own (said
+  at a pause, it spoke over Tom answering Valor's own question,
+  2026-11-19); one asked in the chat is posted and noted; one the chat
   fails is said as unposted, once. A steer of the call is posted in
   its chat and noted to Live; one opening `look up:` goes to the call's
-  worker instead, unposted, its answer posted and said as an `ask` made
-  aloud (the chat session's hand-off). The nudge, the spoken answer and
+  worker instead, unposted, its answer posted and noted as an `ask` made
+  aloud (the chat session's hand-off). The nudge and
   the hand-off rest on the chat session's stated default after five minutes
   with no objection from Tom (2026-11-18), his to reverse. `ask`, `post`, `settle`
   and `leave` don't block: a result that only acknowledges, in a turn that
