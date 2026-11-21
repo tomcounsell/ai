@@ -10,16 +10,16 @@ credits or ENOSPC (kernel DB port 5433; 5432 on the Cowboy):
 
 - **Captain, 37 endings.** Five of 709b0d649ddb's six restarts were
   delivered; plan 399d9fc62dc6 ended again. The weekly limit (11-19 ~23:30
-  to 11-21 07:00 UTC) ended psyoptimal and mastery chat sessions,
+  to 11-21 07:00 UTC) ended two client projects' chat sessions,
   email-thread sessions and two email-started tasks.
 - **Pirate:** 3 yudame chat sessions ended on "out of usage credits", the
   last at 06:28 UTC on 11-21. **Bald:** 4 cuttlefish chat sessions ended
   on the weekly limit. **Cowboy:** valor only.
 - **Accounts.** Every Mac's kernel holds the same `claude-token`
   (fingerprint 9bcabd03a4, login valor@yuda.me). The Captain also holds
-  `claude-token.mastery` (2cb1ab9850). So there are two accounts: the
-  shared one (all four Macs, including the Cowboy's own work) and mastery
-  (the Captain's mastery and mastery-be work).
+  a client's own token (2cb1ab9850). So there are two accounts: the
+  shared one (all four Macs, including the Cowboy's own work) and the client's
+  (that client's two projects on the Captain).
 - **709b0d649ddb's fix never merged.** All four Macs run fcb4edd48. Its
   ops scripts are gone with its workspace.
 
@@ -49,7 +49,7 @@ credits or ENOSPC (kernel DB port 5433; 5432 on the Cowboy):
 
 ## Order
 
-1. **Limits.** Make one minimal call per account (shared, mastery).
+1. **Limits.** Make one minimal call per account (shared, client).
    Nothing is restarted on an account that refuses it, and a Pirate
    credits refusal is reported to Tom as a blocker.
 2. **Inventory.** List every ending as handled, task to restart, person
@@ -61,7 +61,7 @@ credits or ENOSPC (kernel DB port 5433; 5432 on the Cowboy):
 3. **Restarts, per account.**
    - People waiting go first.
    - The shared account runs at most two turns at once across all four
-     Macs; the mastery account runs at most two.
+     Macs; the client account runs at most two.
    - The next restart starts only when one of them ends a turn.
    - Restarts on an account stop at its first refusal.
 4. **Reports of restarted tasks.**
