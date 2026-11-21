@@ -22,7 +22,7 @@ clone, a throwaway Postgres 18 cluster set up as the kernel sets one up
 |---|---|---|---|
 | staff API | `uv run pytest -q` | 812 passed | 125 s |
 | backend | `uv run pytest -q` | 59 passed | 8 s |
-| admin app | `pnpm lint`, `pnpm typecheck`, `pnpm test` (vitest) | 238 passed, 3 skipped | 20 s |
+| admin app | `pnpm test` (vitest; lint and typecheck also passed, 9 s) | 238 passed, 3 skipped | 10 s |
 | admin app e2e | `pnpm e2e` (Playwright, Chromium, whole local stack) | 29 passed | 82 s |
 | prompt-sheet tool | `uv run pytest` | 12 failed, 56 passed | 7 s |
 
@@ -42,19 +42,27 @@ In the spec:
    `pnpm exec playwright install chromium` in the admin app.
 3. `suite` runs the staff API pytest, the backend pytest, the admin vitest
    and the admin e2e. Every part runs even when an earlier one fails. Each
-   part writes its own JUnit file under `tmp/` (pytest `--junitxml`, vitest
-   `--reporter=junit`, Playwright `--reporter=list,junit` with
-   `PLAYWRIGHT_JUNIT_OUTPUT_NAME`). An inline `python3 -I` step merges them
-   into `{junit}`, prefixing each classname with its part so that
-   `tests.test_x` in two parts stays two ids. The suite exits non-zero when
-   any part did.
-4. `lint` runs CI's other checks: `black --check .` in the staff API and the
-   backend, then `pnpm lint` and `pnpm typecheck` in the admin app.
-5. The comment "No code of its own yet" is replaced by one naming the parts
+   part writes its own JUnit file under the checkout's `tmp/` (pytest
+   `--junitxml`, vitest `--reporter=junit`, Playwright `--reporter=list,junit`
+   with `PLAYWRIGHT_JUNIT_OUTPUT_NAME`), separate from `{junit}`, which sits
+   outside the checkout. An inline `python3 -I` step merges them into
+   `{junit}`, and writes it even when a part wrote no report, so a crashed
+   part shows as missing ids, not as a run with no per-test results. Each
+   classname is prefixed with its part's directory in the form the kernel
+   maps back to a file (`core/checks.py` `located()`): dotted for pytest
+   (`apps.staff-api.` + `tests.test_x` resolves to
+   `apps/staff-api/tests/test_x.py`), a path for the admin app's `.ts` files
+   (`apps/admin/`). Ids stay distinct across parts, and a deleted test or a
+   dropped parametrize case is still told apart from a vanished one. The
+   suite exits non-zero when any part did.
+4. The comment "No code of its own yet" is replaced by one naming the parts
    run and what is left out.
 
 ## Out of scope
 
+- **CI's lint** (`black --check`, `pnpm lint`, `pnpm typecheck`). The ask
+  sets the suite; a spec `lint` runs at head and fails the stage on its own
+  findings, an added check with no grant. Named in the report.
 - **prompt-sheet's tests.** CI doesn't run them. Natively they fail 12 of
   68: ten build a database URL without the port and reach `127.0.0.1:5432`,
   where the kernel's cluster isn't; two fail on a message-format assertion.
@@ -79,11 +87,15 @@ The change is config, so its proof is runs:
   sandbox profile (`sandbox-exec -f` the task's `turn.sb`), on the Captain
   against a kernel-style cluster at the repo's main. Expect 812 + 59 + 238 +
   29 passing tests in the merged JUnit, and exit 0. Record the wall time.
-- Run the `lint` string the same way; it must exit 0 at main. Otherwise
-  report what fails, and drop that command from lint only with the evidence.
 - Break one test in a scratch copy (e.g. an assertion in a backend test) and
   confirm the suite exits non-zero, the merged JUnit shows that one id
-  failed, and the later parts still ran.
+  failed, and the later parts still ran. Then call `removed_definitions`
+  (its `located()` mapping) on the merged ids against a scratch mirror
+  where the diff deletes one staff-API test function: that id must map to
+  `apps/staff-api/tests/<file>.py` and count as removed, and an untouched
+  id must not.
+- Make one part crash before writing a report (a bad path): `{junit}` is
+  still written, holding the other parts' ids.
 - Load the edited spec with `core.workspace`'s spec loader to confirm it
   parses (TOML and the required keys).
 
