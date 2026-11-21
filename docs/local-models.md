@@ -9,7 +9,8 @@ on what models are required to run Valor as well as yudame tools").
 
 To see what a Mac holds: `ollama list`, `du -sh ~/.ollama/models
 ~/.cache/huggingface/hub/models--* ~/.cache/kokoro-onnx ~/.cache/whisper
-~/Library/Application\ Support/YudameTools/Models/*`. A Hugging Face
+~/.u2net ~/Library/Application\ Support/YudameTools/Models/*
+~/Library/Application\ Support/superwhisper`. A Hugging Face
 model's files sit in the cache's shared `blobs/` folder, so `du` on its
 `models--` folder alone shows only links. Ollama's `:cloud` entries take no
 disk.
@@ -21,7 +22,7 @@ disk.
 | Parakeet TDT 0.6B v3, ONNX int8 (`istupakov/parakeet-tdt-0.6b-v3-onnx`) | 670 MB | `~/.cache/huggingface/hub` | Valor's voice service transcribes every voice note and audio attachment: `tools/voice.py:75`, model named at `core/settings.py:554` | all four | `$PY -m tools.voice fetch` |
 | Silero VAD (`istupakov/silero-vad-onnx`) | 2 MB | `~/.cache/huggingface/hub` | the same service, which cuts long audio into segments: `tools/voice.py:76` | all four | `$PY -m tools.voice fetch` |
 | Kokoro v1.0 (`kokoro-v1.0.onnx`, `voices-v1.0.bin`) | 337 MB | `~/.cache/kokoro-onnx` | Valor's speech out, the present skill's `tts.py`: `tools/voice.py:46-49`, `core/settings.py:555`, passed to turns at `core/__main__.py:305` | all four | `$PY -m tools.voice fetch` |
-| granite4.1:3b (Ollama) | 2.1 GB | `~/.ollama/models` | Yudame Tools' editor model: tidies dictation and writes meeting notes. Default at `Sources/YudameToolsKit/LocalModels/Ollama.swift:12`; no Mac overrides `editorModel` | all four | Yudame Tools downloads it when next needed (`approveDownloads` is on), or `ollama pull granite4.1:3b` |
+| granite4.1:3b (Ollama) | 2.1 GB | `~/.ollama/models` | Yudame Tools' editor model: tidies dictation and writes meeting notes. Default at `Sources/YudameToolsKit/LocalModels/Ollama.swift:12`; no Mac overrides `editorModel` | all four | Yudame Tools' Setup page (it downloads without asking on the Cowboy, Captain and Bald, where `approveDownloads` is on; the Pirate waits for Download), or `ollama pull granite4.1:3b` |
 | Parakeet 0.6B unified, GGUF Q8 (`parakeet-unified-en-0.6b-Q8_0.gguf`) | 731 MB | `~/Library/Application Support/YudameTools/Models/transcribe` | Yudame Tools' speech model for Dictation and Meetings, the "Accurate" choice every Mac has: `Sources/YudameToolsKit/Dictation/SpeechChoice.swift:27,38`, folder at `Sources/YudameTools/Tools/Dictation/DictationTool.swift:175` | all four | Yudame Tools downloads it on its Setup page |
 | SpeakerKit (pyannote segmenter, embedder, clusterer) | 11 MB | `~/Library/Application Support/YudameTools/Models/speakers` | Yudame Tools Meetings, telling speakers apart: `Sources/YudameTools/Tools/Meetings/SpeakerSeparator.swift:16` | all four | Yudame Tools downloads it on its Setup page |
 
@@ -48,6 +49,16 @@ on first use if removed.
   cannot be pulled again. Nothing in any repository names it, and Valor's
   Jev calls go to the hosted API (`core/settings.py:305`). Ask Tom before
   removing it.
+- **superwhisper's models** on the Cowboy (978 MB: Canary 1B v2 and Parakeet
+  v2 Core ML, pyannote speaker models, `emb-v1.onnx`, `seg-v1.onnx`) and the
+  Bald (727 MB: `ggml-small.bin` 488 MB, superdiarize nemotron3 199 MB, the
+  same small files), in `~/Library/Application Support/superwhisper`.
+  superwhisper is a third-party dictation app, installed in `/Applications`
+  on these two Macs. It is not running, and its database was last written on
+  2026-10-09 (Cowboy) and 2026-11-02 (Bald). Yudame Tools' Dictation replaced
+  it, but the app is still installed, so its models go with a decision to
+  uninstall it, which is Tom's. Uninstalling the app and its folder together
+  frees them.
 
 ## Unused: safe to delete (2026-11-21)
 
@@ -60,6 +71,8 @@ on first use if removed.
 | mlx-community/whisper-small.en-mlx | 481 MB | Bald | As above; downloaded by a turn on 2026-11-21. |
 | Systran/faster-whisper-small.en | 486 MB | Cowboy | As above. |
 | pipecat-ai/smart-turn-v3 | 9 MB | Cowboy | Valor's Meet calls used it until 2026-11-05, when they moved to Gemini Live. |
+| superwhisper's models, `~/Library/Application Support/superwhisper` | 978 MB Captain, 536 MB Pirate | Captain, Pirate | The superwhisper app is not installed on these two Macs; its folder is what an uninstall left. Database last written 2026-10-13 (Captain), 2026-10-08 (Pirate). |
+| u2net (`~/.u2net/u2net.onnx`) | 176 MB | Captain | rembg's background-removal model, downloaded 2025-12-21. No repository on the Captain uses rembg, and rembg downloads it again on first use. |
 | Yudame Tools `canary-180m-flash-Q8_0.gguf` | 218 MB | Pirate | The Pirate's Dictation is set to Accurate (Parakeet). Choosing Fast downloads Canary again. |
 
 Deleting: `ollama rm NAME` for Ollama; `hf cache rm model/ORG/NAME` (the
