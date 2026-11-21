@@ -26,8 +26,9 @@ listing before the 2026-11-21 cleanup (task 0b976535bda8) already lacked
 
 1. **Install** on the Captain and the Bald, over ssh, with the same command
    the doc will carry (so the install also tests the doc):
-   `/opt/homebrew/bin/uv tool run --from playwright==1.58.0 playwright install chromium-headless-shell`
-   (Playwright 1.58.0 pins headless shell 1208). Nothing is removed.
+   `PLAYWRIGHT_SKIP_BROWSER_GC=1 /opt/homebrew/bin/uv tool run --from playwright==1.58.0 playwright install chromium-headless-shell`
+   (Playwright 1.58.0 pins headless shell 1208; the variable stops the
+   install deleting builds it does not name). Nothing is removed.
 2. **Confirm on all four Macs**: the resolved path exists and is
    executable, `chrome-headless-shell --headless --no-sandbox --dump-dom
    'data:text/html,<p>ok</p>'` prints the page, and `~/src/ai/tools/look`
