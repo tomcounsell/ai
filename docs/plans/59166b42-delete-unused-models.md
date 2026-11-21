@@ -35,9 +35,13 @@ the uncommitted edits as a commit rather than discard them.
    - Name who made each edit: search the ledger and memory for the 2026-11-20
      backup change, and say so in the commit message (or "unknown" with what
      was searched).
-   - Commit both edits on this branch, byte-identical to the live files
-     (`git diff` of the live file against the commit is empty), message
-     without client names. Push the branch (`push_branch` effect).
+   - Save `git -C ~/src/ai diff -- CLAUDE.md docs/machine.md` and
+     `git apply` it on this branch, so `docs/machine.md` keeps 7ee13a3fa's
+     local-models pointer (lines 19-20) and gains the live backup paragraph.
+     Check: the committed `docs/machine.md` equals b11a17585's plus the live
+     diff, and `CLAUDE.md` (unchanged since e601dd093) is byte-identical to
+     the live file. Message without client names. Push the branch
+     (`push_branch` effect).
    - With the edits safe in a pushed commit, restore the two files in
      `~/src/ai` (`git checkout -- CLAUDE.md docs/machine.md`) so the pending
      fast-forward runs. Before that, save the live diff to
@@ -45,6 +49,12 @@ the uncommitted edits as a commit rather than discard them.
    - Confirm the rollout: `~/src/ai` HEAD at or past b11a17585, and the
      ledger shows the rollout done for 7b906188's merge, not failed again.
      The edits come back to the live checkout when this task merges.
+   - `git merge --ff-only` refuses any dirty path the merge touches, even
+     with equal content, and Yudame Tools writes its Slack block into a
+     folder's `CLAUDE.md`. Right before done, check `git -C ~/src/ai status
+     --short` is clean; if the block reappeared, the report names Yudame
+     Tools as its writer and that this task's own rollout will refuse
+     `CLAUDE.md` until it is restored.
 2. **Free space before**, per Mac: `df -h /` (and `df -k /` for exact).
 3. **Delete, per Mac**, only the page's Unused rows, with its commands
    (`ollama rm`, `hf cache rm` from Valor's `.venv`, `rm -rf` for the
@@ -65,7 +75,10 @@ the uncommitted edits as a commit rather than discard them.
    superwhisper folder, u2net. Bald gemma4:e2b, mlx whisper-small.en. Pirate
    superwhisper folder, Canary.
 4. **Free space after**, per Mac, and each deletion's measured size (`du`
-   before removal; for HF, the `blobs/` shrink).
+   before removal; for HF, its blobs; Ollama blobs counted once). The
+   reported total is the sum of those sizes; `df` before and after is shown
+   beside it, not used as the total, since APFS local snapshots can hold
+   freed space.
 5. **Verify each Mac**: `ollama list` shows granite4.1:3b and (where it was)
    nomic-embed-text; tev1:0.8b still on the Cowboy; superwhisper folders still
    on the Cowboy and Bald; Valor's voice service on 8714 returns a transcript
@@ -93,4 +106,4 @@ voice transcribe and speak round trips. Edge cases: a model loaded since the
 inventory (kept); the Pirate set to Fast (Canary kept); a Mac unreachable
 over ssh (its deletions open in the report); the `.env` synced over iCloud
 (check one other Mac sees the removal); a shared Ollama blob (size counted
-once, from `df`).
+once, from the manifest's blob list).
