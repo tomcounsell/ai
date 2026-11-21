@@ -22,7 +22,7 @@ devices. No new file.
    late January 2027 (Tom, 2026-11-20: "a couple months"). Set it up about
    two weeks before that work starts, both Macs in one sitting, and try it
    on a real app flow. Not set up earlier: as of 2026-11-21 the tool is
-   three months old, has no releases, and changes weekly.
+   three months old, at release 0.3.3, and changes weekly.
 2. **What it is.** A Python tool (installed with `uv`, Python 3.12) that
    lets an agent open apps, tap, type, scroll and read a real phone's
    screen, used from Claude Code as a CLI and skill.

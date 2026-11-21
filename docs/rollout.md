@@ -299,8 +299,8 @@ expected around late January 2027 (Tom, 2026-11-20: "We expect to do more
 mobile dev in a couple months"; 2026-11-21: put it in the docs "so we don't
 forget when the time comes"). Set it up about two weeks before that work
 starts, both Macs in one sitting, and try it on a real app flow. It is not
-set up before then: on 2026-11-21 it was three months old, had no
-releases, and changed weekly.
+set up before then: on 2026-11-21 it was three months old, at release 0.3.3,
+and changed weekly.
 
 It is a Python CLI and Claude Code skill that lets a turn open apps, tap,
 type, scroll and read a real phone's screen. The iPhone on the Pirate is
