@@ -344,4 +344,5 @@ The bridge imports only `core.bridge`, `core.intake`, `core.broker`,
   effect until the connection drops or a stop (Tom's task stop or SIGTERM) ends it; the outbox,
   the watch, and every other send go on.
 - **Email carries no one's rights.** No email record is verified, so
-  mail from Tom steers its thread's session as its sender, never as Tom.
+  mail from Tom steers the session it is bound to (the one that sent the
+  thread's root, else the thread's own) as its sender, never as Tom.

@@ -50,7 +50,9 @@ it (they come from settings), and loading a spec names the folder.
   `slack:<team id>/<channel or user id>`, `slack:<team id>/*` for every DM
   in that workspace that no spec lists by id), and `machine` the
   machine whose bridges receive them; none means the default machine, so
-  each chat has one owner. Tom's own DMs are owned this way too
+  each chat has one owner. An email in a thread whose root Valor sent
+  (an id carrying the sending Mac's tag) is received by that Mac instead,
+  whoever sent the email ([email.md](../docs/bridges/email.md), Receiving). Tom's own DMs are owned this way too
   (`valor.toml`), so only the Cowboy's bridges take them. In a group chat or someone else's DM listed
   here, anyone's message is heard, not only Tom's (a team chat,
   [telegram.md](../docs/bridges/telegram.md)).
