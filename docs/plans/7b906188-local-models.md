@@ -1,20 +1,16 @@
-# Local models: document what each Mac needs, restore the missing, delete the unused
+# Local models: document what each Mac needs, restore the missing, list the unused
 
 Tom, Slack DM 2026-11-21 14:51 UTC: the local models serve dictation and
 meeting recording, and Valor should document which models Valor and Yudame
 Tools need. His correction at 14:54 UTC: "you should know which ones are used
-and can delete the ones that aren't". So the job is to document what is
-required first, then delete every model that nothing uses, on all four Macs.
-A model we cannot rule out stays, and the report names it.
-
-The deletion is in scope because of that correction. It reached this task as
-an amendment to the request, written after the Brief: "This replaces 'Delete
-nothing' and step 3's 'recommendation only': once the inventory shows, with
-evidence from the code and each Mac's settings, which models are used [...]
-delete the ones nothing uses, on every Mac. Keep any model you cannot rule
-out, and name it with why. Before deleting, write the documentation of what
-is required, so the deletion follows the list." The Brief's "Not allowed:
-deleting any model" predates it and gives way to it.
+and can delete the ones that aren't". This task documents what is required, restores
+what a cleanup removed, and lists the unused models with their sizes as a
+recommendation. It deletes nothing: the kernel's request and the Brief say
+"Delete nothing" and forbid deleting any model or cache. Tom's 14:54 UTC
+correction ("you should know which ones are used and can delete the ones that
+aren't") reached this session but not the kernel's record of the request, so
+the deletions go to a follow-up task that carries it, working from the list
+this task writes. The report says so.
 
 ## What is known (observed at plan time, 2026-11-21)
 
@@ -53,45 +49,44 @@ deleting any model" predates it and gives way to it.
    code (from the upstream repo's `old-system` tag, or `~/src/ai`), and the
    launchd jobs on each Mac. A model with a user anywhere stays.
 2. **Write `docs/local-models.md`**: one table (model, size, path, user with
-   file:line, Macs that need it, reinstall command), a section for models
-   that look like leftovers and are safe to delete, and how to tell them
-   apart during a cleanup (`ollama list`, `du` paths). Link it from
-   `docs/rollout.md` step 9 (replacing its loose "about 1 GB" note) and
-   `docs/machine.md`. Commit it before any deletion.
+   file:line, Macs that need it, reinstall command), a section listing the
+   models nothing uses, per Mac with sizes, as a recommendation to delete,
+   and how to tell required from unused during a cleanup (`ollama list`,
+   `du` paths). Link it from `docs/rollout.md` step 9 (replacing its loose
+   "about 1 GB" note) and `docs/machine.md`.
 3. **Restore on the Captain**: `$PY -m tools.voice fetch`. Check that the
-   Parakeet and Silero VAD folders are back in `~/.cache/huggingface/hub`
-   and that `com.valor.voice` on port 8714 returns a transcript for a short
+   Parakeet and Silero VAD folders are back in `~/.cache/huggingface/hub`,
+   run `launchctl kickstart -k gui/$(id -u)/com.valor.voice` (the service
+   holds the loaded model in memory, so only a restart proves the files
+   load), then check that `com.valor.voice` on port 8714 returns a transcript for a short
    clip. Check where the Captain's Yudame Tools dictation keeps its chosen
    speech model; if it was in the emptied Hugging Face cache, download it
    again and confirm the app finds it. Re-pull any other required model a
    Mac lacks, for example the Ollama editor model.
-4. **Delete the unused, per Mac**, only models the doc lists as unused:
-   `ollama rm` for Ollama, and removing the `models--…` folder for HF.
-   Record `df` free space and each size before and after. Never touch the
-   `:cloud` entries (0 bytes), models we cannot rule out, or non-model caches.
-5. **Yudame Tools PR**: add the same list, limited to its own models, to that
+4. **Yudame Tools PR**: add the same list, limited to its own models, to that
    repo (its README or `docs/`), on a branch, PR opened and not merged.
-6. **Report** in `.valor/done.md`: the required table, where the doc lives,
-   what was deleted per Mac with sizes and free space before and after, what
-   was kept unproven and why, and the Captain restore.
+5. **Report** in `.valor/done.md`: the required table, where the doc lives,
+   the unused list per Mac with sizes as a recommendation, what could not
+   be ruled out and why, the Captain restore, and that deleting waits for a
+   follow-up task carrying Tom's 14:54 correction.
 
 ## Out of scope
 
-Code changes to Valor or Yudame Tools, deleting non-model caches, merging
+Code changes to Valor or Yudame Tools, deleting any model or cache on any Mac, merging
 the Yudame Tools PR, and changing which models either app uses.
 
 ## Tests
 
 The work is docs plus machine operations, with no production code, so there
 are no unit tests. Run `tests/test_bloat.py`. The evidence the build records:
-- Each Mac's `ollama list` and HF listing before and after, matched against
-  the doc.
+- Each Mac's `ollama list` and HF listing, matched against the doc's
+  required and unused lists.
 - On the Captain, the Parakeet and Silero VAD folders present and a
   `/transcribe` round trip on port 8714 returning text, plus Yudame Tools'
   chosen speech model found where the app looks for it.
 - On each Mac, the Yudame Tools editor model still listed, and dictation's
   chosen speech model folder still present.
 - Edge cases: a model one Mac uses and another does not (keep it per Mac,
-  following that Mac's settings); `:cloud` stubs; a blob two Ollama tags
-  share (checked by `ollama rm` itself); a model only the old system or
+  following that Mac's settings); `:cloud` stubs, which take no disk; a
+  blob two Ollama tags share (count its size once); a model only the old system or
   Tom's own tools use (keep, and name it).
