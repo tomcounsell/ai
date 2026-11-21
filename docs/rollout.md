@@ -63,6 +63,13 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `npm install -g @earendil-works/pi-coding-agent@1.0.0` (the pin in
    `harnesses/pi.py`); `sentry-cli`, `officecli`, `gws`; byob for the
    browser (an MCP server in `~/.claude.json`, not a command); `ffmpeg` (the voice process decodes and encodes audio with it).
+   The headless browser `look` runs (`VALOR_BROWSER`, [browser.md](browser.md)):
+   `PLAYWRIGHT_SKIP_BROWSER_GC=1 uv tool run --from playwright==1.58.0 playwright install chromium-headless-shell`.
+   That Playwright pins build 1208, the one `settings.browser` names; the
+   kernel's own Playwright installs a newer build. Without the variable an
+   install deletes every build no linked Playwright names, including ones
+   other projects use. It is done when
+   `~/Library/Caches/ms-playwright/chromium_headless_shell-1208/INSTALLATION_COMPLETE` exists.
 3. **The checkout.** The kernel runs from `~/src/ai`. On a Mac with the old
    system there: `git -C ~/src/ai branch retired/old-main`, then
    `cd ~/src/ai && git fetch origin && git checkout -B main origin/main && uv sync --frozen`.
