@@ -28,8 +28,11 @@ fix for unanswered hand-ons ended the same way, and its commit is lost.
    next year when that date is more than a day before `at`. Anything else
    returns None and is an ordinary failure. `_failed` writes `until` (ISO
    UTC) on `step.failed` when there is a match.
-2. **Wait, don't burn tries.** `failures()` skips `step.failed` rows that
-   carry `until`, so a limit never reaches `STEP_TRIES` or `task.ended`.
+2. **Wait, don't burn tries.** In `failures()` a `step.failed` row that
+   carries `until` is never counted, and it ends the run of ordinary
+   failures before it, as a `PROGRESS` row does. A limit never reaches
+   `STEP_TRIES` or `task.ended`, and ordinary failures on either side of a
+   limit window never add up (3 before plus 1 after counts 1).
    Such a row is due at `max(until, at + backoff)`. The backoff is the
    existing doubling from `STEP_BACKOFF_S`, capped at `STEP_BACKOFF_MAX_S`,
    over the run of consecutive limit rows. A limit that keeps arriving after
@@ -41,13 +44,16 @@ fix for unanswered hand-ons ended the same way, and its commit is lost.
    and sends no second notice.
 3. **One notice per chat per window.** In `router.step`, after a limit
    `step.failed` on a chat session, a notice goes out only when a person's
-   message is waiting: the fold's pending `message.steered` (`f.steering`).
-   A session holding only task reports sends none. The notice is one send
+   message is waiting: the fold's pending `message.steered` (`f.steering`),
+   or a pending inherited `ended` report from an earlier session of the
+   same chat (the incident's second session held only that). The person's
+   message is the one `notices.unanswered` resolves through the chain (item
+   4). A session holding only other task reports sends none. The notice is one send
    on that session through `broker.request` with its own performers, as
    `core/call.py` `_effect` does. Its request id is `limit/<until>`, and it
    is skipped when the session's rows already hold an effect with that
    request id.
-   - Type: `{channel}.send_message`, a reply to the latest pending steer
+   - Type: `{channel}.send_message`, a reply to that message
      (with its `topic_id`), or `email.send` replying in its thread
      (`session._reply_all`'s headers).
    - Text: internal readers get "I'm offline until {T}: I've hit my model
@@ -65,8 +71,12 @@ fix for unanswered hand-ons ended the same way, and its commit is lost.
    - **Every row the notice writes is quiet.** `broker.request` writes
      `effect.held` and `release.requested`; the bridge's `release` later
      writes `effect.intent`, `effect.outcome` and `effect.refused`. Each
-     carries `quiet: true`, which `ledger.quiet` already reads (the broker
-     copies the flag from the held action to each later row). None of them
+     carries `quiet: true`, which `ledger.quiet` already reads. The broker
+     does not carry such a flag today: `broker.request` gains a `quiet`
+     argument written on `effect.held` and `release.requested`, and
+     `_intent`, `_outcome`, `_refused_release` and `release`'s refusal copy
+     it from the held row onto `effect.intent`, `effect.outcome` and
+     `effect.refused`. None of them
      raises `latest` in `serve`, `retry_due` or `tasks.failed_step`, so
      the session stays asleep until its reset.
    - **The resumed turn knows.** `session.next_prompt` adds one line when a
@@ -97,10 +107,13 @@ no `until` and are left as they are.
   `until` and true after. Three limit failures after `until` are spaced 60,
   120 and 240 s. The same holds for a non-chat task.
 - Ordinary failure: unchanged backoff, ending at 4 with the `ended`
-  hand-on.
+  hand-on. 3 ordinary failures, a limit window, then 1 ordinary failure
+  after the reset: the task does not end (the count is 1).
 - Notice: once for 3 limit failures plus a new message in the same window.
   A later window sends again. No notice for a session holding only a
-  non-quiet task report, or for a background task. The quiet test runs a
+  non-quiet task report (not an inherited `ended`), or for a background
+  task. A session holding only an inherited `ended` report (the incident's
+  2a14f74c4cd6 shape) sends one notice, replying to the original message. The quiet test runs a
   bridge `release` through to `effect.outcome`, and to a refusal, and the
   session is still not due before the reset.
 - Wording and channels: operator, internal teammate, external, memory
