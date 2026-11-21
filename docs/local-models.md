@@ -60,22 +60,25 @@ on first use if removed.
   uninstall it, which is Tom's. Uninstalling the app and its folder together
   frees them.
 
-## Unused: safe to delete (2026-11-21)
+## Deleted 2026-11-21
 
-| Model | Size | Macs | Why nothing needs it |
+Every model this inventory found unused, deleted on Tom's word ("you should
+know which ones are used and can delete the ones that aren't", 2026-11-21).
+Each was checked first on its Mac: not loaded, not read since the inventory,
+and its app not installed or not set to use it. 28.6 GB freed in all.
+
+| Model | Size | Macs | Why nothing needed it |
 |---|---|---|---|
-| gemma4:e2b (Ollama) | 7.2 GB | Cowboy, Captain, Bald | The only Valor mention is `OLLAMA_LOCAL_MODEL` and `OLLAMA_VISION_MODEL` in the vault's `.env`, which no code reads. The old system retired it (`config/models.py:184,201` at `old-system`). The Ollama server logs on the Captain, the Bald and the Pirate show only granite4.1:3b loading. |
+| gemma4:e2b (Ollama) | 7.2 GB each | Cowboy, Captain, Bald | No code read the vault `.env` settings that named it (removed with it). The old system retired it (`config/models.py:184,201` at `old-system`). Ollama's logs show only granite4.1:3b loading. |
 | granite3.2-vision (Ollama) | 2.4 GB | Captain | Named nowhere. An earlier cleanup (task 7f96f2f1) removed it from the Cowboy as unused. |
-| mlx-community/whisper-large-v3-turbo | 1.6 GB | Cowboy | No code names it. A turn transcribing a clip ad hoc downloaded it; Valor's own path is the voice service. |
-| mlx-community/whisper-base.en-mlx | 144 MB | Cowboy | As above. |
+| mlx-community/whisper-large-v3-turbo, whisper-base.en-mlx; Systran/faster-whisper-small.en; pipecat-ai/smart-turn-v3 | 2.25 GB together | Cowboy | No code names them. One-off transcriptions downloaded the Whisper models; Valor's own path is the voice service. Valor's Meet calls used Smart Turn until 2026-11-05, when they moved to Gemini Live. |
 | mlx-community/whisper-small.en-mlx | 481 MB | Bald | As above; downloaded by a turn on 2026-11-21. |
-| Systran/faster-whisper-small.en | 486 MB | Cowboy | As above. |
-| pipecat-ai/smart-turn-v3 | 9 MB | Cowboy | Valor's Meet calls used it until 2026-11-05, when they moved to Gemini Live. |
-| superwhisper's models, `~/Library/Application Support/superwhisper` | 978 MB Captain, 536 MB Pirate | Captain, Pirate | The superwhisper app is not installed on these two Macs; its folder is what an uninstall left. Database last written 2026-10-13 (Captain), 2026-10-08 (Pirate). |
-| u2net (`~/.u2net/u2net.onnx`) | 176 MB | Captain | rembg's background-removal model, downloaded 2025-12-21. No repository on the Captain uses rembg, and rembg downloads it again on first use. |
-| Yudame Tools `canary-180m-flash-Q8_0.gguf` | 218 MB | Pirate | The Pirate's Dictation is set to Accurate (Parakeet). Choosing Fast downloads Canary again. |
+| superwhisper's models, `~/Library/Application Support/superwhisper` | 1.0 GB Captain, 562 MB Pirate | Captain, Pirate | The superwhisper app was not installed on these two Macs; the folder was what an uninstall left. |
+| u2net (`~/.u2net/u2net.onnx`) | 176 MB | Captain | rembg's background-removal model; no repository on the Captain uses rembg, and rembg downloads it again on first use. |
+| Yudame Tools `canary-180m-flash-Q8_0.gguf` | 218 MB | Pirate | The Pirate's Dictation is on Accurate (Parakeet), by default. Choosing Fast downloads Canary again. |
 
-Deleting: `ollama rm NAME` for Ollama; `hf cache rm model/ORG/NAME` (the
-`hf` in Valor's `.venv`) for a Hugging Face model, then check with `du`
-that the hub's shared `blobs/` folder shrank; Yudame Tools' Disk Cleanup
-page's Remove for its own models.
+A model found unused later is listed here before it is deleted. Deleting:
+`ollama rm NAME` for Ollama; `hf cache rm -y model/ORG/NAME` (the `hf` in
+Valor's `.venv`) for a Hugging Face model, whose files sit in the hub's
+shared `blobs/` folder, so measure that folder or `df` before and after;
+Yudame Tools' Disk Cleanup page's Remove for its own models.
