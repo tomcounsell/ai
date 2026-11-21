@@ -52,9 +52,13 @@ In the spec:
    maps back to a file (`core/checks.py` `located()`): dotted for pytest
    (`apps.staff-api.` + `tests.test_x` resolves to
    `apps/staff-api/tests/test_x.py`), a path for the admin app's `.ts` files
-   (`apps/admin/`). Ids stay distinct across parts, and a deleted test or a
+   (`apps/admin/`, and `apps/admin/e2e/` for Playwright, whose names are
+   relative to `e2e/`). Ids stay distinct across parts, and a deleted test or a
    dropped parametrize case is still told apart from a vanished one. The
    suite exits non-zero when any part did.
+   The suite unsets `DATABASE_URL`, as CI has none: the kernel's
+   driverless URL reaches the staff API's settings, which then pick
+   psycopg, not installed there (one test failed on it in the first run).
 4. The comment "No code of its own yet" is replaced by one naming the parts
    run and what is left out.
 
