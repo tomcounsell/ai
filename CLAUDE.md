@@ -50,3 +50,13 @@ never import from it. The cori copy is `tomcounsell/cori` at commit
 0336d10642534f344e002d9a7b7abb22eb40a8a1. What the rebuild left to do is
 `docs/plans/strip.md`, then `docs/plans/valor-rebuild.md`'s open items.
 Setting up a machine, and retiring the old system on it, is `docs/rollout.md`.
+
+<!-- yudame-tools:slack start -->
+## Slack
+
+Slack is available through the `slack` tools: every channel you're in, in every connected workspace. For this work, use:
+- yudame/#valor-dev: engineering in ai repo - Valor AI
+- yudame/#valor-product: product design for ai repo - Valor AI
+
+When you read or post, use a channel's full name as listed above, e.g. yudame/#valor-dev.
+<!-- yudame-tools:slack end -->
