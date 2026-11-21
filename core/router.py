@@ -33,6 +33,10 @@ with the reason (`session.next_prompt`); at `STEP_TRIES` failures in a row
 of the same state and check, `task.ended` is written with the last one and
 its session gets a report of what failed (`notices.owe`), except for docs, which
 decide `no_change` with the reason as a finding and never hold the merge.
+A usage-limit failure (`core/limit.py`) is no try: its `step.failed`
+carries `until`, the reset, it ends the run of ordinary failures before it,
+and `retry_due` waits for the reset; after a limit step a chat session sends
+its chat the one limit notice it owes (`limit.notify`).
 
 A task's services (its Postgres, its Redis) are held under the session lock
 `services:<task>` while up, on the services handle's own connection. `run`
@@ -51,7 +55,7 @@ from typing import Any
 
 import psycopg
 
-from core import broker, db, git, ledger, machine, session, spending, tasks, verdicts, workspace
+from core import broker, db, git, ledger, limit, machine, session, spending, tasks, verdicts, workspace
 from core.gateway import Gateway
 from core.machine import Check, State
 
@@ -163,6 +167,11 @@ async def step(
             got = await _failed(dsn, task_id, alive, ran, _reason(turn), turn.get("turn_id"))
             if got is not None:
                 return {"status": got} if got == "lock lost" else out
+            try:
+                async with await db.connect(dsn) as conn:
+                    await limit.notify(conn, built, task_id)
+            except Exception as exc:  # noqa: BLE001  the limit row is written; its retry stands either way
+                _log(f"task {task_id}: the usage limit notice was not sent: {exc!r}")
             async with await db.connect(dsn) as conn:
                 return {**out, "state": await tasks.status(conn, task_id)}
         finally:
@@ -197,6 +206,9 @@ async def _failed(
     if not await alive():
         return "lock lost"
     payload = {"state": ran.get("state"), "check": ran.get("check"), "reason": reason, "turn_id": turn_id}
+    reset = limit.until(reason, datetime.now(UTC))
+    if reset is not None:
+        payload |= {"until": reset.isoformat(), "zone": reset.tzinfo.key}
     async with await db.connect(dsn) as conn, conn.transaction():
         await ledger.lock(conn, f"task:{task_id}")
         if await tasks.is_stopped(conn, task_id):
@@ -238,6 +250,8 @@ def failures(rows: list[dict[str, Any]]) -> int:
     count = 0
     for r in reversed(rows):
         kind, p = r["type"], r["payload"]
+        if kind == "step.failed" and p.get("until"):
+            break  # a usage limit is no try, and the work waited across it
         if kind == "step.failed":
             key = (p.get("state"), p.get("check"))
             if last is not None and key != last:
@@ -276,15 +290,36 @@ def retry_due(rows: list[dict[str, Any]], now: datetime | None = None) -> bool:
     """Whether the kernel should step a task again whose latest step failed:
     its latest row (but for quiet rows, `ledger.quiet`) is `step.failed`, and
     the delay after it, doubling from `STEP_BACKOFF_S` with each failure in
-    a row, has passed. The task ends at `STEP_TRIES` failures (`_failed`)."""
+    a row, has passed. The task ends at `STEP_TRIES` failures (`_failed`).
+    A usage limit's row (`until`) is due at its reset, and after it with the
+    same doubling over the limit rows written past their own reset."""
     last = next((r for r in reversed(rows) if not ledger.quiet(r)), None)
     if last is None or last["type"] != "step.failed":
         return False
-    tries = failures(rows)
+    reset = last["payload"].get("until")
+    tries = _past_reset(rows) if reset else failures(rows)
     delay = min(STEP_BACKOFF_MAX_S, STEP_BACKOFF_S * 2 ** max(tries - 1, 0))
     at = last.get("at")
     now = now or datetime.now(UTC)
-    return at is None or now >= at + timedelta(seconds=delay)
+    if at is None:
+        return reset is None or now >= datetime.fromisoformat(reset)
+    due = at + timedelta(seconds=delay)
+    return now >= (max(due, datetime.fromisoformat(reset)) if reset else due)
+
+
+def _past_reset(rows: list[dict[str, Any]]) -> int:
+    """How many usage-limit failures in a row came at or after the reset
+    each names: the limit outlasting its parsed reset spaces out."""
+    count = 0
+    for r in reversed(rows):
+        kind, p = r["type"], r["payload"]
+        if kind == "step.failed":
+            if not p.get("until"):
+                break
+            count += r.get("at") is not None and r["at"] >= datetime.fromisoformat(p["until"])
+        elif kind in PROGRESS:
+            break
+    return count
 
 
 def has_step(rows: list[dict[str, Any]], f: machine.Fold, chat: bool | dict[str, str] | None) -> bool:

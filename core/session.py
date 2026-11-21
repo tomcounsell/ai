@@ -81,6 +81,7 @@ from core import (
     db,
     git,
     ledger,
+    limit,
     machine,
     mail,
     outcomes,
@@ -1494,7 +1495,7 @@ async def next_prompt(conn, task_id: str, now: datetime | None = None) -> tuple[
         places = await _send_places(conn, rows, b.chat, f.last_collected)
         report = _effects_report(f.last_collected, (await tasks.status(conn, task_id))["effects"], places)
         woken = _wake_report(owed(rows, now or datetime.now(UTC)))
-        parts = (first, chat_prompt(rows), woken, _failure_report(rows), _advice_report(rows),
+        parts = (first, chat_prompt(rows), woken, _failure_report(rows), limit.sent(rows), _advice_report(rows),
                  _errors_report(f.last_collected), report, context_report(rows, tasks.turn_model(b)))  # fmt: skip
         return "\n\n".join(x for x in parts if x) or "Continue.", f.session, read_upto
     if f.session is None and any(r["type"] == "workspace.removed" for r in rows):

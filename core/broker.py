@@ -188,19 +188,34 @@ async def _unlock(conn, key: str) -> None:
 
 
 async def request(
-    conn, performers: Performers, task_id: str, action: Action, *, request_id: str | None = None
+    conn,
+    performers: Performers,
+    task_id: str,
+    action: Action,
+    *,
+    request_id: str | None = None,
+    quiet: bool = False,
 ) -> Outcome:
     """Refuse, hold, or perform one action. `request_id` names where the
     request came from (the session passes `<turn>/<signal file>`): a prior
     effect on the task with the same `request_id` and digest is the
-    answer, so a re-collected file is never a second effect."""
+    answer, so a re-collected file is never a second effect. A `quiet`
+    effect (the kernel's usage-limit notice, `core/limit.py`) carries
+    `quiet` on every row it writes, held to outcome, so none of them steps
+    its task (`ledger.quiet`)."""
     effect_id = ledger.new_id()
     async with _performing(conn, effect_id):
-        return await _request(conn, performers, task_id, action, effect_id, request_id)
+        return await _request(conn, performers, task_id, action, effect_id, request_id, quiet)
 
 
 async def _request(
-    conn, performers: Performers, task_id: str, action: Action, effect_id: str, request_id: str | None
+    conn,
+    performers: Performers,
+    task_id: str,
+    action: Action,
+    effect_id: str,
+    request_id: str | None,
+    quiet: bool = False,
 ) -> Outcome:
     performer = performers.get(action.action_type)
     async with conn.transaction():
@@ -216,6 +231,8 @@ async def _request(
         described = action.describe(effect_class, effect_id)
         if request_id is not None:
             described["request_id"] = request_id
+        if quiet:
+            described["quiet"] = True
         reason = None
         refuse = getattr(performer, "refuse", None)
         if performer is None:
@@ -253,8 +270,9 @@ async def _request(
             return Outcome(effect_id, "refused", error=reason)
         if declared(performer):
             await ledger.append(
-                conn, task_id, "release.requested", {"effect_id": effect_id, "owner": performer.owner}
-            )
+                conn, task_id, "release.requested",
+                {"effect_id": effect_id, "owner": performer.owner, **_quiet(described)},
+            )  # fmt: skip
             return Outcome(effect_id, "released")
     return await _perform(conn, performers, task_id, effect_id, action, described)
 
@@ -262,7 +280,11 @@ async def _request(
 NO_PERFORMER = "no performer for this action type"
 UNSTORABLE = "the ledger's JSON (Postgres jsonb) cannot store the request"
 # The fields of an effect row the kernel made, none of them the turn's.
-BARE_FIELDS = ("effect_class", "payload_sha256", "request_id")
+BARE_FIELDS = ("effect_class", "payload_sha256", "request_id", "quiet")
+
+
+def _quiet(described: dict[str, Any]) -> dict[str, Any]:
+    return {"quiet": True} if described.get("quiet") else {}
 
 
 def _bare(effect_id: str, described: dict[str, Any], reason: str, **more: Any) -> dict[str, Any]:
@@ -444,6 +466,7 @@ def _intent_row(effect_id: str, described: dict[str, Any]) -> dict[str, Any]:
         "idempotency_key": described["idempotency_key"],
         **{f: described[f] for f in INTENT_FIELDS},
         **({"request_id": described["request_id"]} if described.get("request_id") else {}),
+        **_quiet(described),
     }
 
 
@@ -537,6 +560,7 @@ async def _outcome(conn, task_id: str, outcome: dict[str, Any], described: dict[
     refuse: then the row holds neither, its error saying why."""
     from core import notices
 
+    outcome = {**outcome, **_quiet(described)}
     _, why = await ledger.try_append(conn, task_id, "effect.outcome", outcome)
     written = outcome
     if why is not None:

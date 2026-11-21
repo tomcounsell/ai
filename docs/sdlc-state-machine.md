@@ -321,7 +321,7 @@ starts, corrections included. Effects beyond the workspace are requests to the b
 - `failed`: the harness reported an error or the turn did not finish. The step writes `step.failed`
   (the state, the check, the reason, the turn) and the run returns. The resident kernel steps the
   task again after a delay that doubles from a minute (`router.retry_due`), the next turn opening
-  with the reason; at four failures in a row of one state and check it writes `task.ended`.
+  with the reason; at four failures in a row of one state and check it writes `task.ended`. A usage-limit failure ("You've hit your … limit · resets 2pm (Asia/Bangkok)", `core/limit.py`) is no try: its `step.failed` carries `until`, the reset, and the task waits for it and runs again, the same doubling after it; a chat session with a person's message unanswered sends that chat one notice per limit window, "I'm offline until 2pm Bangkok time…", through its own send (Tom, 2026-11-21).
 
 **Ledgered.** `turn.started`, every gateway opening and charge, `turn.ended` (with the harness
 session id), `turn.collected`, effect rows. Mission items 1 and 2.

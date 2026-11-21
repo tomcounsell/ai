@@ -1050,11 +1050,13 @@ def test_a_sessions_child_and_grandchild_report_to_it_and_nothing_goes_to_a_brid
     assert [k for _, k in reported] == ["credential", "credential"] and n == 0
 
 
-def test_a_chat_session_that_kept_failing_on_a_message_hands_it_to_the_next_session_once(dsn, dm):
+def test_a_chat_session_that_kept_failing_on_a_message_hands_it_on_until_it_is_answered(dsn, dm):
     """The adatum chat, 2026-10-23: a broken install failed four turns on
     Tom's message. The chat's next session hears which message went
     unanswered and answers it; a session that ends holding only that report
-    passes nothing on, so the chain ends; one that answered says nothing."""
+    hands the same message on again (task 709b0d649ddb, 2026-11-19: the
+    second hand-on was dropped and a client's DMs were held by no one); one
+    that answered says nothing."""
     ended = {"by": "kernel", "kind": "step", "check": None, "state": "clarify", "tries": 4, "reason": "boom"}
 
     async def fail(conn, task, *verdicts):
@@ -1085,15 +1087,15 @@ def test_a_chat_session_that_kept_failing_on_a_message_hands_it_to_the_next_sess
         )
 
     first, second, third, answered, fourth, (second_rows, answered_rows) = run(go())
-    assert (
-        second not in (None, first) and third is None and answered not in (first, second) and fourth is None
-    )
-    handed, held = bridges.typed(second_rows, "child.reported")
+    assert second not in (None, first) and third not in (None, first, second) and answered == third
+    assert fourth is None
+    (handed,) = bridges.typed(second_rows, "child.reported")
     assert handed["from"] == first and not handed.get("quiet")
-    assert (held["from"], held["quiet"]) == (second, True)
+    again = [p for p in bridges.typed(answered_rows, "child.reported") if p["from"] == second]
+    assert again and '("Can this be used?")' in again[0]["text"]
     assert handed["text"].startswith("The session before you in this chat failed 4 times in a row on message")
     assert '("Can this be used?")' in handed["text"] and handed["text"].endswith("answer it.")
-    assert [p.get("quiet") for p in bridges.typed(answered_rows, "child.reported")] == [True]
+    assert [p.get("quiet") for p in bridges.typed(answered_rows, "child.reported") if p["from"] == answered] == [True]
 
 
 def test_a_session_ended_after_its_pick_gives_way_to_a_new_one(dsn, dm):

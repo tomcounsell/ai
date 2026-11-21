@@ -14,8 +14,9 @@ hears it (`hears`): the reporter's nearest ancestor that is a chat session;
 else the operator chat's session (`intake.operator_session`). A chat
 session hears its own reports (a send in doubt, a message it could not
 bind), but its end goes to the next session of its chat only when it
-ended with a message unanswered (`unanswered`); a session that ends holding
-only reports says nothing further. A `session` the caller names (a
+ended with a message unanswered (`unanswered`: its own, or one an earlier
+session of the chat handed on, so a message survives any number of ended
+sessions); a session that ends holding only reports says nothing further. A `session` the caller names (a
 `/update` reply, to its room's) is taken as given. With no session to hear
 it, the row is written on the reporter itself, quiet, so the record holds it.
 
@@ -191,14 +192,15 @@ async def owe(conn, task_id: str) -> list[str]:
                         text="\n\n".join([lead(head, STALE.format(days=board.STALE_DAYS)), question]),
                     )
                 )
-    if f.state is State.ENDED and f.entry is not None:
+    ended = f"ended:{(f.entry or {}).get('id')}"
+    if f.state is State.ENDED and f.entry is not None and not await _made(conn, task_id, ended):
         said = await unanswered(conn, task_id, rows)
         made.append(
             await request(
                 conn,
                 task_id,
                 kind="ended",
-                about_key=f"ended:{f.entry.get('id')}",
+                about_key=ended,
                 text=ended_text(f, await headline(conn, task_id), said),
             )
         )
@@ -206,18 +208,29 @@ async def owe(conn, task_id: str) -> list[str]:
 
 
 async def unanswered(conn, task_id: str, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The message a chat session ended without answering: its latest
-    `message.steered`, when no turn collected after it went through. None
-    for a task that is no chat session."""
+    """The message a chat session has not answered: its latest
+    `message.steered`, or the message an earlier session of the same chat
+    ended without answering and handed on (its `ended` report), when no
+    turn collected after it went through. So a message survives any number
+    of sessions that end on it. None for a task that is no chat session."""
     from core import tasks
 
-    if not (await tasks.brief(conn, task_id)).chat:
+    chat = (await tasks.brief(conn, task_id)).chat
+    if not chat:
         return None
     for r in reversed(rows):
-        if r["type"] == "turn.collected" and r["payload"].get("verdict") != "failed":
+        p = r["payload"]
+        if r["type"] == "turn.collected" and p.get("verdict") != "failed":
             return None
         if r["type"] == "message.steered":
-            return r["payload"]
+            return p
+        if r["type"] == "child.reported" and p.get("kind") == "ended" and p.get("child_id"):
+            try:
+                earlier = await tasks.brief(conn, p["child_id"])
+            except KeyError:
+                continue
+            if earlier.chat == chat:
+                return await unanswered(conn, earlier.id, await ledger.read(conn, earlier.id))
     return None
 
 

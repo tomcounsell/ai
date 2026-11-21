@@ -452,7 +452,7 @@ so one event is one step. A step that fails or raises writes `step.failed` (the 
 the reason, the turn), which the task's status shows. The kernel steps it again itself once a delay
 has passed, a minute doubling with each failure in a row (`router.retry_due`), and the next working
 turn opens with the reason; at four failures in a row of the same state and check it writes
-`task.ended`, and its session gets a report of what failed. A provisioning that fails is tried again the
+`task.ended`, and its session gets a report of what failed. A usage-limit failure ("You've hit your … limit · resets 2pm (Asia/Bangkok)", `core/limit.py`) is no try: its `step.failed` carries `until`, the reset, and the task waits for it and runs again, the same doubling after it; a chat session with a person's message unanswered sends that chat one notice per limit window, "I'm offline until 2pm Bangkok time…", through its own send (Tom, 2026-11-21). A provisioning that fails is tried again the
 same way, and the third failure ends the task with a report. At most `settings.max_turns` harness turns or checks run at once on a machine (default 2; a turn
 slot is a Postgres lock that `python -m core run` also takes; the test, review, and docs checks hold
 one throughout); the judge and the merge run beside them. The rendered
