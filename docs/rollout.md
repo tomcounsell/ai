@@ -292,6 +292,45 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
 A Mac with no Telegram session or mailbox can run with only the local
 chat bridge ([bridges/local.md](bridges/local.md)).
 
+## Phones, for mobile work (planned)
+
+Mobile dev will use [phone-harness](https://github.com/phone-harness/phone-harness),
+expected around late January 2027 (Tom, 2026-11-20: "We expect to do more
+mobile dev in a couple months"; 2026-11-21: put it in the docs "so we don't
+forget when the time comes"). Set it up about two weeks before that work
+starts, both Macs in one sitting, and try it on a real app flow. It is not
+set up before then: on 2026-11-21 it was three months old, had no
+releases, and changed weekly.
+
+It is a Python CLI and Claude Code skill that lets a turn open apps, tap,
+type, scroll and read a real phone's screen. The iPhone on the Pirate is
+reached through the Mac's iPhone Mirroring window: macOS 15+, an iOS 18+
+iPhone paired for Mirroring, and Screen Recording and Accessibility
+permission for the app that runs Python, which someone at the Mac must
+click. The Android on the Cowboy is reached through adb, over USB (or
+Wi-Fi) with USB debugging on.
+
+As found 2026-11-21: on the Cowboy no Android was reachable (nothing
+phone-like on USB, only a USB-C hub; adb not installed; no wireless
+debugging advertised). The Pirate was not checked.
+
+Setup, on each Mac:
+
+1. `uv tool install --python 3.12 --upgrade --force phone-harness`
+2. Register the skill: `phone-harness skill` prints its body.
+3. Cowboy: `brew install android-platform-tools`, phone plugged in, USB
+   debugging on. Pirate: pair iPhone Mirroring and grant the two
+   permissions. Connecting the phone is the person's job at the Mac.
+4. `phone-harness config set platform android` (Cowboy) or `ios` (Pirate),
+   then `phone-harness doctor`, which names the missing step.
+
+Known limits: it reads text by OCR, not icons; no multi-touch, camera or
+Face ID flows; unlocking the iPhone pauses Mirroring, and a PIN-locked
+Android needs a person; DRM video renders black.
+
+Sources: the tool's README and install.md, read 2026-11-21; the Cowboy
+check of 2026-11-21.
+
 ## Moving a project to another Mac
 
 A project's chats belong to the Mac its spec's `machine` names, read live
