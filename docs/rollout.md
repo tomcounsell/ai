@@ -58,7 +58,10 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    root-owned `/Library/Developer/CommandLineTools/usr/bin/git`); Homebrew
    `postgresql@18` as a service (on 5432, or on another port named by
    `VALOR_PGPORT` in every job and the shell profile when 5432 is taken);
-   `uv`, `node`, `gh`, `redis` (tasks start their own servers), `dovecot`
+   `uv`, `node`, `gh` (Homebrew's, linked: a hand-placed copy at
+   `/opt/homebrew/bin/gh` stops every nightly `brew` linking it, and
+   `gh auth setup-git` writes the path it ran from into the git credential
+   helper; the Captain, 2026-11-21), `redis` (tasks start their own servers), `dovecot`
    and `openssl` (the email tests only); `claude`, `codex`, and
    `npm install -g @earendil-works/pi-coding-agent@1.0.0` (the pin in
    `harnesses/pi.py`); `sentry-cli`, `officecli`, `gws`; byob for the
