@@ -7,6 +7,15 @@ and can delete the ones that aren't". So the job is to document what is
 required first, then delete every model that nothing uses, on all four Macs.
 A model we cannot rule out stays, and the report names it.
 
+The deletion is in scope because of that correction. It reached this task as
+an amendment to the request, written after the Brief: "This replaces 'Delete
+nothing' and step 3's 'recommendation only': once the inventory shows, with
+evidence from the code and each Mac's settings, which models are used [...]
+delete the ones nothing uses, on every Mac. Keep any model you cannot rule
+out, and name it with why. Before deleting, write the documentation of what
+is required, so the deletion follows the list." The Brief's "Not allowed:
+deleting any model" predates it and gives way to it.
+
 ## What is known (observed at plan time, 2026-11-21)
 
 - Valor's code: `tools/voice.py` (Parakeet TDT 0.6B v3 and Silero VAD through
@@ -36,16 +45,26 @@ A model we cannot rule out stays, and the report names it.
    `defaults read` of its domain and its Application Support settings
    showing which speech model and editor model are chosen). Also check who
    ran each model last (Ollama server logs, file access times) as
-   supporting evidence, never as the only reason.
+   supporting evidence, never as the only reason. Smart Turn v3,
+   all-MiniLM-L6-v2, faster-whisper and the MLX whisper models have no user
+   in the rebuilt code, and the request names /hear and Smart Turn as
+   Valor's. Before any of them is called unused, search the installed plugin
+   skills and scripts (/hear, meeting recording), the old system's jobs and
+   code (from the upstream repo's `old-system` tag, or `~/src/ai`), and the
+   launchd jobs on each Mac. A model with a user anywhere stays.
 2. **Write `docs/local-models.md`**: one table (model, size, path, user with
    file:line, Macs that need it, reinstall command), a section for models
    that look like leftovers and are safe to delete, and how to tell them
    apart during a cleanup (`ollama list`, `du` paths). Link it from
    `docs/rollout.md` step 9 (replacing its loose "about 1 GB" note) and
    `docs/machine.md`. Commit it before any deletion.
-3. **Restore on the Captain**: `$PY -m tools.voice fetch`, then confirm
-   `com.valor.voice` transcribes a short clip. Re-pull any other required
-   model a Mac lacks (for example the Ollama editor model).
+3. **Restore on the Captain**: `$PY -m tools.voice fetch`. Check that the
+   Parakeet and Silero VAD folders are back in `~/.cache/huggingface/hub`
+   and that `com.valor.voice` on port 8714 returns a transcript for a short
+   clip. Check where the Captain's Yudame Tools dictation keeps its chosen
+   speech model; if it was in the emptied Hugging Face cache, download it
+   again and confirm the app finds it. Re-pull any other required model a
+   Mac lacks, for example the Ollama editor model.
 4. **Delete the unused, per Mac**, only models the doc lists as unused:
    `ollama rm` for Ollama, and removing the `models--…` folder for HF.
    Record `df` free space and each size before and after. Never touch the
@@ -67,7 +86,9 @@ The work is docs plus machine operations, with no production code, so there
 are no unit tests. Run `tests/test_bloat.py`. The evidence the build records:
 - Each Mac's `ollama list` and HF listing before and after, matched against
   the doc.
-- On the Captain, a `/transcribe` round trip after the fetch.
+- On the Captain, the Parakeet and Silero VAD folders present and a
+  `/transcribe` round trip on port 8714 returning text, plus Yudame Tools'
+  chosen speech model found where the app looks for it.
 - On each Mac, the Yudame Tools editor model still listed, and dictation's
   chosen speech model folder still present.
 - Edge cases: a model one Mac uses and another does not (keep it per Mac,
