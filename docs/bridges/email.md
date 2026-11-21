@@ -64,10 +64,10 @@ searches again instead of waiting. After each wait, and once on
 connecting, the bridge:
 
 1. selects `INBOX` and reads its `UIDVALIDITY`;
-2. searches `UNSEEN SINCE <email_since>` with an `OR` tree of `FROM` terms
-   over `intake.owned("email")`, and keeps a match only when
-   `intake.owns("email", sender)`, since `FROM` matches substrings;
-3. fetches the headers of every match and asks `intake.recorded` which are
+2. searches `UNSEEN SINCE <email_since>`, fetches each match's `From`,
+   `Message-ID` and `References` headers, and keeps those this Mac takes
+   (`intake.takes_email`, below);
+3. asks `intake.recorded` which are
    already received; those are marked `\Seen` without a body fetch;
 4. for each other message, oldest first, fetches it with `BODY.PEEK[]` so
    the fetch changes nothing, parses it, saves its attachments, calls
@@ -99,7 +99,14 @@ received until it is marked unread.
 | `attachments` | Each attachment part saved under `inbound_dir/email/`, named by the sha256 of its bytes, as `{name, mime, bytes, path}` with the filename sanitized; a part that does not decode is `{name, mime, bytes, skipped}`; an `audio/*` attachment also has `transcript` from the voice process, or `transcript_failed` with the reason ([telegram.md](telegram.md), Voice notes) |
 | `headers` | `subject`, `date`, `to`, `cc`, the raw `from` and `authentication_results` values as received (topmost first), and `uid` and `uidvalidity` |
 
-The bridge receives mail from owned senders only: Tom's addresses
+An email in a thread whose root is one of Valor's own Message-IDs belongs
+to the Mac that sent the root, whoever sends it: the id carries that Mac's
+tag (Idempotency, below), so that Mac's bridge receives it and every other
+Mac's leaves it unseen, even from an address it owns. A thread a project's
+session on one Mac started is answered there when Tom replies to all from
+an address only another Mac owns (the incident of 2026-11-21). Any other
+mail, and a thread rooted in an id sent before the tag, is received from
+owned senders only: Tom's addresses
 (`operator_email`) and the `email:<address>` chats a project spec on this
 machine lists, and every sender at an `email:@<domain>` it lists (exactly
 that domain; a listed address wins over it). The sender's `From` is not
@@ -196,7 +203,9 @@ the send's report. The bridge sends to
 the addresses in the payload and to no others.
 
 **Idempotency.** The `Message-ID` is `<valor.<first 32 hex of the key's
-sha256>@<Valor's domain>>`, so a retry of one effect repeats its id and two
+sha256>.<first 8 hex of the sha256 of this Mac's name>@<Valor's domain>>`
+(`mail.message_id`; the Mac's part is `mail.machine_tag`, read back by
+`mail.machine_of`), so a retry of one effect repeats its id and two
 effects never share one. `lookup(action, key, since)` opens the folder
 whose `LIST` flags include `\Sent` and searches for that exact id among
 messages from the day before `since` (the intent's time): with Gmail's

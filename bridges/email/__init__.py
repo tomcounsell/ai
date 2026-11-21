@@ -1,6 +1,6 @@
 """The email bridge: Valor's Gmail mailbox over IMAP and SMTP.
 
-`run` watches INBOX for owned senders' mail and performs each `email.send`
+`run` watches INBOX for the mail this Mac takes and performs each `email.send`
 the outbox releases. Governed by `docs/bridges/email.md`.
 """
 

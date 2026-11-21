@@ -1,5 +1,6 @@
-"""The watch: owned senders' unseen mail in INBOX, received once each,
-on one IMAP connection that waits in IDLE (RFC 2177) for new mail.
+"""The watch: unseen mail in INBOX this Mac takes (a thread it started,
+else an owned sender's), received once each, on one IMAP connection that
+waits in IDLE (RFC 2177) for new mail.
 
 Adapted from `_poll_imap` and `_build_imap_sender_query`
 (`bridge/email_bridge.py`) on `main`. Blocking IMAP calls run in
@@ -40,19 +41,6 @@ INTERFACE_CHANGES = ("RTM_IFINFO", "RTM_NEWADDR", "RTM_DELADDR")
 ROUTE_MONITOR = ("route", "-n", "monitor")
 
 _UID = re.compile(rb"UID (\d+)")
-_SAFE = re.compile(r"[^A-Za-z0-9@._+-]")
-
-
-def sender_query(addresses: list[str]) -> str:
-    """An `OR` tree of `FROM` terms, one per address. Characters outside
-    an address's alphabet are dropped, so no term breaks the query."""
-    terms = [f'FROM "{_SAFE.sub("", a)}"' for a in addresses if _SAFE.sub("", a)]
-    if not terms:
-        raise ValueError("no owned addresses to search for")
-    query = terms[-1]
-    for term in reversed(terms[:-1]):
-        query = f"OR {term} {query}"
-    return query
 
 
 def connect(cfg: Config, ends: Ends | None = None) -> imaplib.IMAP4_SSL:
@@ -70,8 +58,11 @@ def select_inbox(conn: imaplib.IMAP4) -> str:
     return (data[0] or b"").decode() if data and data[0] else ""
 
 
-def search(conn: imaplib.IMAP4, since, addresses: list[str]) -> list[bytes]:
-    typ, data = conn.uid("SEARCH", "UNSEEN", "SINCE", smtp.imap_date(since), sender_query(addresses))
+def search(conn: imaplib.IMAP4, since) -> list[bytes]:
+    """Every unseen message since `since`: which are this Mac's is read
+    from their headers (`intake.takes_email`), since a thread's root is in
+    `References`, which IMAP search cannot match on."""
+    typ, data = conn.uid("SEARCH", "UNSEEN", "SINCE", smtp.imap_date(since))
     if typ != "OK":
         raise imaplib.IMAP4.error(f"SEARCH failed: {data}")
     return sorted((data[0] or b"").split(), key=int)
@@ -337,17 +328,15 @@ async def _thread(ends: Ends | None, fn, *args):
 
 
 async def poll(cfg: Config, conn: imaplib.IMAP4, db, ends: Ends | None = None) -> int:
-    """Receives INBOX's unseen mail from owned senders over `conn`, into
+    """Receives INBOX's unseen mail this Mac takes (`intake.takes_email`:
+    a thread it started, else an owned sender's) over `conn`, into
     the bridge's database connection `db`, and leaves INBOX selected.
     Returns how many messages were received. A failed connection raises;
     a message that fails is logged with its UID and left unseen."""
     uidvalidity = await _thread(ends, select_inbox, conn)
-    owned = list(intake.owned("email"))
-    if not owned:
-        return 0
-    uids = await _thread(ends, search, conn, cfg.since, owned)
+    uids = await _thread(ends, search, conn, cfg.since)
     heads = await _thread(ends, headers, conn, uids)
-    mine = [u for u in uids if u in heads and intake.owns("email", heads[u]["sender"])]
+    mine = [u for u in uids if u in heads and intake.takes_email(heads[u]["sender"], heads[u]["chat_id"])]
 
     seen: set[bytes] = set()
     by_root: dict[str, list[bytes]] = {}

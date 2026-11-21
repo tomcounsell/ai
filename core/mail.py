@@ -8,6 +8,7 @@ request-time size refusal measures the message that is sent. The bridge reaches 
 
 import hashlib
 import mimetypes
+import re
 from datetime import UTC, datetime
 from email.message import EmailMessage
 from email.utils import format_datetime
@@ -21,11 +22,29 @@ from core.settings import settings
 _PLACEHOLDER_DATE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
+def machine_tag(machine: str | None = None) -> str:
+    """The Mac's mark in the Message-IDs it sends: 8 hex of its name's
+    sha256 (`settings.machine`), so no name shows in a reader's headers."""
+    return hashlib.sha256((machine or settings.machine).encode()).hexdigest()[:8]
+
+
 def message_id(key: str, address: str) -> str:
     """The Message-ID of the send whose broker key is `key`: a retry of one
-    effect repeats it, and two effects never share it."""
+    effect repeats it, and two effects never share it. It ends in this
+    Mac's `machine_tag`, so a reply's thread root (`References[0]`) names
+    the Mac that started the thread to every Mac (`machine_of`)."""
     domain = address.rsplit("@", 1)[-1] or "localhost"
-    return f"<valor.{hashlib.sha256(key.encode()).hexdigest()[:32]}@{domain}>"
+    return f"<valor.{hashlib.sha256(key.encode()).hexdigest()[:32]}.{machine_tag()}@{domain}>"
+
+
+_OURS = re.compile(r"<valor\.[0-9a-f]{32}\.([0-9a-f]{8})@[^>]*>")
+
+
+def machine_of(message_id: str) -> str | None:
+    """The `machine_tag` a Message-ID of ours carries; None for anyone
+    else's, and for ours sent before the tag (2026-11-21)."""
+    m = _OURS.fullmatch(message_id or "")
+    return m.group(1) if m else None
 
 
 def email_message(

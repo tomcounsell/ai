@@ -576,14 +576,13 @@ def test_an_email_audio_attachment_is_transcribed(tmp_path, monkeypatch, heard):
         return set()
 
     for name, fn in {
-        "select_inbox": lambda conn: "1", "search": lambda conn, since, owned: [b"7"],
+        "select_inbox": lambda conn: "1", "search": lambda conn, since: [b"7"],
         "headers": lambda conn, uids: {b"7": {"sender": "tom@yuda.me", "message_id": "<voice-1@yuda.me>",
                                               "chat_id": "<voice-1@yuda.me>"}},
         "fetch": lambda conn, u: (mail.as_bytes(), None), "mark_seen": lambda conn, u: None,
     }.items():  # fmt: skip
         monkeypatch.setattr(imap, name, fn)
-    monkeypatch.setattr(imap.intake, "owned", lambda channel: ["tom@yuda.me"])
-    monkeypatch.setattr(imap.intake, "owns", lambda channel, who: True)
+    monkeypatch.setattr(imap.intake, "takes_email", lambda who, root: True)
     monkeypatch.setattr(imap.intake, "recorded", recorded)
     monkeypatch.setattr(imap.intake, "receive", receive)
     with bridges.configure(inbound_dir=str(tmp_path / "inbound")):

@@ -42,9 +42,15 @@ other is then asked whether it is meant for him (`address`, the
 
 An *email thread* is a chat too (Tom, 2026-10-17: "email threads are chat
 threads too"). Its id is the thread's root (`chat_id`, the first id in
-`References`), and it has one chat session, under the project listing
-the sender (`email:<address>`), else its domain (`email:@<domain>`),
-else `valor`. Every email the bridge
+`References`). A thread whose root a task on this Mac sent (`_thread_owner`;
+only that Mac's bridge receives its replies, `takes_email`) is the sending
+task's project's, and every email in it, whoever sent it, steers the open
+chat session that sent the root, else the nearest one above the sender, else
+the one it reported to (a Slack room's session hears Tom's reply to its
+email: the incident of 2026-11-21). With none open, and in any other
+thread, it has one chat session of its own, under the sending task's
+project, else the project listing the sender (`email:<address>`), else its
+domain (`email:@<domain>`), else `valor`. Every email the bridge
 records in it, Tom's or a project sender's, is a `message.steered` row
 on that session naming its sender, as in a team chat. No email is
 verified, so none carries Tom's rights: `stop` there is a steer.
@@ -82,7 +88,7 @@ The binding table, first match wins:
 | In a team chat, waking the chat session | `steer`, to the chat session |
 | In a team chat, otherwise | `heard`, to the chat session |
 | An email, with no text or files | `none` |
-| An email | `steer`, to the thread's session |
+| An email | `steer`, to the session that sent the thread's root, else the thread's session |
 | Not verified, or not from the operator | `none` |
 | In Tom's own chat, with no text or files | `none` |
 | In Tom's own chat, exactly `stop` | `stop`: the replied-to task, else each open task reporting to the session, stopped, and a steer to the session |
@@ -123,7 +129,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-from core import channels, judgement, ledger, machine, notices, reactions, tasks, workspace
+from core import channels, judgement, ledger, machine, mail, notices, reactions, tasks, workspace
 from core.settings import EFFORT, resolve_seat, settings
 
 
@@ -435,6 +441,17 @@ def owns(channel: str, id: str) -> bool:
     )
 
 
+def takes_email(sender: str, root: str | None) -> bool:
+    """Whether this Mac's email bridge receives an email: one in a thread
+    whose root a Mac sent (`mail.machine_of`) is that Mac's whoever sent
+    it; any other is its sender's owner's (`owns`). Valor's own mail is
+    never received."""
+    if sender == settings.email_address:
+        return False
+    tag = mail.machine_of(root or "")
+    return tag == mail.machine_tag() if tag is not None else owns("email", sender)
+
+
 def _domain(address: str) -> str:
     """An email chats entry naming every sender at the address's domain:
     `@northwind.example` for `someone@client.example`."""
@@ -663,10 +680,50 @@ def _toms_own(p: dict[str, Any]) -> bool:
     return channel == "local" and chat == LOCAL_CHAT
 
 
+async def _thread_owner(conn, p: dict[str, Any]) -> tuple[workspace.Spec | None, str | None]:
+    """For an email in a thread whose root this Mac's ledger records as
+    sent: the sending task's project, and the open chat session that sent
+    it, else the nearest above it (`tasks.ancestors`), else the newest it
+    reported to (`child.reported`); None for the session when none is open.
+    `(None, None)` when no task here sent the root."""
+    row = await (
+        await conn.execute(
+            f"SELECT task_id {_SENT}AND e->>'channel' = 'email' AND e->>'message_id' = %s ORDER BY id LIMIT 1",
+            (p["chat_id"],),
+        )
+    ).fetchone()
+    if row is None:
+        return None, None
+    sender = row[0]
+    reported = await (
+        await conn.execute(
+            "SELECT task_id FROM events WHERE type = 'child.reported' AND payload->>'child_id' = %s ORDER BY id DESC",
+            (sender,),
+        )
+    ).fetchall()
+    spec = session = None
+    for t in [sender, *await tasks.ancestors(conn, sender), *(r[0] for r in reported)]:
+        try:
+            b = await tasks.brief(conn, t)
+        except KeyError:
+            continue  # a stream's send: no task
+        if spec is None and b.project:
+            try:
+                spec = workspace.Spec.load(b.project["name"])
+            except workspace.Refused, FileNotFoundError:
+                pass
+        if b.chat and machine.fold(await ledger.read(conn, t)).state not in tasks.TERMINAL:
+            session = t
+            break
+    return spec, session
+
+
 async def _bind(conn, p: dict[str, Any]) -> str | None:
     team = team_spec(p)
+    session = None
     if team is None and p["channel"] == "email":
-        team = _project_for(p)
+        team, session = await _thread_owner(conn, p)
+        team = team or _project_for(p)
     if team is not None:
         text = (p.get("text") or "").strip()
         if f"{p['channel']}:{p['chat_id']}" == (team.update_chat or UPDATE_CHAT) and UPDATE_COMMAND.fullmatch(
@@ -677,7 +734,7 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
             reply = {"channel": p["channel"], "chat_id": p["chat_id"], "message_id": p["message_id"]}
             await request_update(conn, by=by, via=p["channel"], reply=reply)
             return as_
-        return await _chat(conn, p, team)
+        return await _chat(conn, p, team, session=session)
     if not _from_operator(p):
         return await _bound(conn, p, None, "none")
     spec = _project_for(p) if _toms_own(p) else None
@@ -727,13 +784,18 @@ async def _start(conn, p: dict[str, Any]) -> str | None:
     return as_
 
 
-async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False) -> str:
+async def _chat(
+    conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False, session: str | None = None
+) -> str:
     """Bind a message to its chat's session, started here when the chat
     has none open: a team chat's, or with `own` Tom's own chat's, where
     every message wakes it and an exact `stop` also stops at once the task
     whose post it replies to, else every open task that reports to the
     session. A session picked here and found ended once its locks are held
-    gives way to a new one. A reply under one of Valor's posts carries the
+    gives way to a new one. An email whose thread an open chat session
+    started (`session`, `_thread_owner`) steers that session, the thread
+    named on it; once that has ended, the thread's own session takes it.
+    A reply under one of Valor's posts carries the
     post (`replying_to`: its text, and the task when that is no chat
     session, which then reports to this one, `tasks.reporting`)."""
     text = (p.get("text") or "").strip()
@@ -742,8 +804,17 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
     replied, post = await _replied(conn, p)
     wakes = own or not _mentions_only(spec, p) or bool(MENTION.search(text)) or replied is not None
     channel, chat = p["channel"], p["chat_id"]
-    task_id, brief = await open_session(conn, channel, chat, spec, own=own, before=p["received_id"])
-    if brief is None:
+    if session is not None:
+        await tasks.lock_tree(conn, session)
+        await ledger.lock(conn, f"task:{session}")
+        if machine.fold(await ledger.read(conn, session)).state in tasks.TERMINAL:
+            session = None
+    task_id, brief = (
+        (session, None)
+        if session is not None
+        else await open_session(conn, channel, chat, spec, own=own, before=p["received_id"])
+    )
+    if brief is None and session is None:
         # Tree, then task, the order every tree writer takes; a stop that
         # landed after the pick shows in the fold read under them.
         await tasks.lock_tree(conn, task_id)
@@ -777,7 +848,7 @@ async def _chat(conn, p: dict[str, Any], spec: workspace.Spec, own: bool = False
         "message.steered" if wakes else "message.heard",
         {
             **{k: p.get(k) for k in keep},
-            "thread_tag": thread_tag(p),
+            "thread_tag": f"an email in the thread {chat}" if session else thread_tag(p),
             **({"posted": posted} if posted else {}),
             **({"replying_to": under} if under else {}),
             # A heard message is asked whether it is meant for Valor (`address`).
