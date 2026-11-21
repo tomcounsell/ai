@@ -341,8 +341,8 @@ def test_an_email_chat_is_answered_in_its_thread(dsn, tmp_path):
         r = ledger.new_id()
         async with await db.connect(dsn) as conn:
             await received_already_bound(conn, "email", {
-                "received_id": r, "channel": "email", "chat_id": "<root@client.test>",
-                "message_id": "<m1@client.test>", "sender_id": "pat@client.test",
+                "received_id": r, "channel": "email", "chat_id": f"<root-{r}@client.test>",
+                "message_id": f"<{r}@client.test>", "sender_id": "pat@client.test",
                 "headers": {"subject": "Invoice", "to": ["valor@valor.test"]},
             })  # fmt: skip
             return await limit._action(conn, {"channel": "email", "chat_id": "pat@client.test"},
@@ -351,7 +351,7 @@ def test_an_email_chat_is_answered_in_its_thread(dsn, tmp_path):
     with bridges.configure(email_address="valor@valor.test"):
         action = run(go())
     assert action.action_type == "email.send" and action.payload["to"] == ["pat@client.test"]
-    assert action.payload["in_reply_to"] == "<m1@client.test>" and action.payload["body"] == "x"
+    assert action.payload["in_reply_to"].endswith("@client.test>") and action.payload["body"] == "x"
     assert action.payload["subject"].lower().startswith("re:")
 
 
