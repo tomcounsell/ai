@@ -20,48 +20,66 @@ fix for unanswered hand-ons ended the same way, and its commit is lost.
 
 1. **Recognise and parse** (`core/router.py`). `limit_until(reason, at)`
    matches "hit your … limit · resets [<Mon> <D> at ]<h>[:<mm>]am|pm
-   (<IANA zone>)" and returns the reset time in UTC. With no date, it takes the
-   occurrence of that local time nearest to `at` (within ±12 h; a 5-hour window
-   is always nearer), so a retry a few minutes after the reset reads the same
-   time and does not jump a day. With a date, it uses that date in `at`'s year.
-   Anything else returns None and is an ordinary failure.
-   `_failed` writes `until` (ISO UTC) on `step.failed` when there is a match.
-2. **Wait, don't burn tries.** `failures()` skips `step.failed` rows that carry
-   `until`, so a limit never reaches `STEP_TRIES` or `task.ended`.
-   `retry_due` is due at `max(until, at + STEP_BACKOFF_S)` for such a row. This
-   holds for every task, so a chat session keeps its unanswered messages and
-   held reports (the watch's low-disk report among them), and a build or plan
-   resumes in place. A new message during the window still steps at once (the
-   limit may have been lifted), fails free, and sends no second notice.
+   (<IANA zone>)" and returns the reset time in UTC. With no date, it takes
+   the first occurrence of that local time after `at - 1 h`, so a retry just
+   after the reset keeps the same time. The incident reads correctly: a
+   failure at 21:24 Bangkok with "resets 2pm" means 14:00 Bangkok the next
+   day (07:00 UTC). With a date, it uses that date: in `at`'s year, or the
+   next year when that date is more than a day before `at`. Anything else
+   returns None and is an ordinary failure. `_failed` writes `until` (ISO
+   UTC) on `step.failed` when there is a match.
+2. **Wait, don't burn tries.** `failures()` skips `step.failed` rows that
+   carry `until`, so a limit never reaches `STEP_TRIES` or `task.ended`.
+   Such a row is due at `max(until, at + backoff)`. The backoff is the
+   existing doubling from `STEP_BACKOFF_S`, capped at `STEP_BACKOFF_MAX_S`,
+   over the run of consecutive limit rows. A limit that keeps arriving after
+   its parsed reset therefore spaces out (60, 120, 240 s … 15 min) instead
+   of firing every minute. This holds for every task: a chat session keeps
+   its unanswered messages and held reports (the watch's low-disk report
+   among them), and a build or plan resumes in place. A new message during
+   the window still steps at once (the limit may have lifted), fails free,
+   and sends no second notice.
 3. **One notice per chat per window.** In `router.step`, after a limit
-   `step.failed` on a chat session with `session.chat_waiting` true, request one
-   send on that session through `broker.request` with its own performers, as
-   `core/call.py` `_effect` does. The request id is `limit/<until>`, and it is
-   skipped when the session's rows already hold an effect with that request id.
-   - Type: `{channel}.send_message`, a reply to the latest waiting
-     `message.steered` (with its `topic_id`), or `email.send` replying in its
-     thread (`session._reply_all`'s headers).
-   - Text: internal readers get "I'm offline until {T}: I've hit my model usage
-     limit. I'll pick this up then." Everyone else gets "I'm offline until {T}
-     and will pick this up then." Internal means the operator
+   `step.failed` on a chat session, a notice goes out only when a person's
+   message is waiting: the fold's pending `message.steered` (`f.steering`).
+   A session holding only task reports sends none. The notice is one send
+   on that session through `broker.request` with its own performers, as
+   `core/call.py` `_effect` does. Its request id is `limit/<until>`, and it
+   is skipped when the session's rows already hold an effect with that
+   request id.
+   - Type: `{channel}.send_message`, a reply to the latest pending steer
+     (with its `topic_id`), or `email.send` replying in its thread
+     (`session._reply_all`'s headers).
+   - Text: internal readers get "I'm offline until {T}: I've hit my model
+     usage limit. I'll pick this up then." Everyone else gets "I'm offline
+     until {T} and will pick this up then." Internal means the operator
      (`intake._from_operator` or `_toms_own`), or a sender whose
-     `sender_name` is an exact name or alias in `core.memory.people` with team
-     `internal`. With memory unavailable, the sender is treated as external.
-   - `{T}` ("2pm Bangkok time", with "on Nov 21" when the reset is on another
-     day) is in the operator's zone (`session._zone`) for the operator. For
-     everyone else it is in the zone the limit message names, since the record
-     holds no other reader's zone.
-   - The notice's effect rows must not count as the session's latest row:
-     they leave `retry_due`, `tasks.failed_step` and `serve` scheduling as if
-     only the `step.failed` were there (`ledger.quiet` reads a `quiet` flag the
-     broker writes on that effect's rows).
+     `sender_name` is an exact name or alias in `core.memory.people` with
+     team `internal`. With memory unavailable, the sender is treated as
+     external.
+   - `{T}` is "2pm Bangkok time", with "tomorrow" or "on Nov 21" added when
+     the reset falls on a later local date than the reader's now. It is in
+     the operator's zone (`session._zone`) for the operator. For everyone
+     else it is in the zone the limit message names, since the record holds
+     no other reader's zone.
+   - **Every row the notice writes is quiet.** `broker.request` writes
+     `effect.held` and `release.requested`; the bridge's `release` later
+     writes `effect.intent`, `effect.outcome` and `effect.refused`. Each
+     carries `quiet: true`, which `ledger.quiet` already reads (the broker
+     copies the flag from the held action to each later row). None of them
+     raises `latest` in `serve`, `retry_due` or `tasks.failed_step`, so
+     the session stays asleep until its reset.
+   - **The resumed turn knows.** `session.next_prompt` adds one line when a
+     limit notice was sent since the last collected turn: "While your model
+     usage limit held, the chat was told: <text> (to message N)". The turn
+     answers the waiting message without repeating that notice.
 4. **Unanswered survives any number of ended sessions** (the lost 709b fix,
-   simplest form). `notices.unanswered` returns the session's latest owed row:
-   its own `message.steered`, or an inherited `ended` report from an earlier
-   session of the same chat (`child_id`, same Brief `chat`). For the inherited
-   case it recurses to the original message. `owe` checks `_made` before
-   computing the text. No 15-minute hold: with item 2, a limit no longer
-   ends sessions, so there is no chain to slow.
+   simplest form). `notices.unanswered` returns the session's latest owed
+   row: its own `message.steered`, or an inherited `ended` report from an
+   earlier session of the same chat (`child_id`, same Brief `chat`). For
+   the inherited case it recurses to the original message. `owe` checks
+   `_made` before computing the text. No 15-minute hold: with item 2, a
+   limit no longer ends sessions, so there is no chain to slow.
 
 **Not in scope.** The board summary that is not re-sent when its session ends:
 `board.owe` dedupes by digest across sessions, which is a separate code path,
@@ -71,18 +89,25 @@ no `until` and are left as they are.
 
 ## Tests
 
-- Parse: both observed forms, "2:30pm", and a zone other than Bangkok. A
-  failure just after the reset gives today's reset, not tomorrow's. A date
-  near New Year. A non-limit error gives None.
+- Parse: both observed forms. The incident case: a failure at 2026-11-20
+  14:24 UTC with "resets 2pm (Asia/Bangkok)" gives 2026-11-21 07:00 UTC. A
+  retry 10 minutes after a reset keeps that reset. "2:30pm", a zone other
+  than Bangkok, a date across New Year, and a non-limit error (None).
 - 6 limit failures in a row: no `task.ended`; `retry_due` is false before
-  `until` and true after; the next prompt still carries the waiting message.
-  The same holds for a non-chat task.
-- Ordinary failure: unchanged backoff, ending at 4 with the `ended` hand-on.
-- Notice: once for 3 limit failures plus a new message in the same window. A
-  second, later window sends again. The notice's effect rows do not make the
-  session due before reset.
-- Notice wording and channel types: operator, internal teammate, external,
-  memory down; Telegram, Slack, local, email. No notice when nothing waits (a
-  session holding only quiet reports) or for a background task.
+  `until` and true after. Three limit failures after `until` are spaced 60,
+  120 and 240 s. The same holds for a non-chat task.
+- Ordinary failure: unchanged backoff, ending at 4 with the `ended`
+  hand-on.
+- Notice: once for 3 limit failures plus a new message in the same window.
+  A later window sends again. No notice for a session holding only a
+  non-quiet task report, or for a background task. The quiet test runs a
+  bridge `release` through to `effect.outcome`, and to a refusal, and the
+  session is still not due before the reset.
+- Wording and channels: operator, internal teammate, external, memory
+  down; "tomorrow" when the reset is on the next local day; Telegram,
+  Slack, local, email.
+- Resume: after `until`, the session is due, its prompt holds the waiting
+  message and the line naming the sent notice, and a successful turn
+  clears it.
 - Hand-on: a message survives three ended sessions; the text names the
   original message.
