@@ -123,8 +123,13 @@ is a chat (Tom, 2026-10-17: "email threads are chat threads too"), so
 email binds as a team chat's messages do (`core/intake.py`).
 
 **One session per thread.** The thread's root (`chat_id`) names its chat.
-Its first recorded email starts the thread's chat session, under the
-project listing the sender (`email:<address>`), else `valor`, opening with
+When a task on this Mac sent the root, every email in the thread, whoever
+sent it, steers that task while it is an open chat session (a Slack room's
+session hears Tom's reply to the email it sent); otherwise the thread's
+first recorded email starts the thread's chat session, under the sending
+task's project, else the project listing the sender (`email:<address>`),
+else `valor` (an unowned sender's email in a thread no task here sent is
+bound to nothing), opening with
 the thread's earlier recorded emails; every later one is a steer on that
 session, naming its sender. The session reads, answers by replying to all
 (`email.send` with `reply_to`), and starts the tasks the work needs

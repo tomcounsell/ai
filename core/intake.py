@@ -44,13 +44,13 @@ An *email thread* is a chat too (Tom, 2026-10-17: "email threads are chat
 threads too"). Its id is the thread's root (`chat_id`, the first id in
 `References`). A thread whose root a task on this Mac sent (`_thread_owner`;
 only that Mac's bridge receives its replies, `takes_email`) is the sending
-task's project's, and every email in it, whoever sent it, steers the open
-chat session that sent the root, else the nearest one above the sender, else
-the one it reported to (a Slack room's session hears Tom's reply to its
-email: the incident of 2026-11-21). With none open, and in any other
-thread, it has one chat session of its own, under the sending task's
-project, else the project listing the sender (`email:<address>`), else its
-domain (`email:@<domain>`), else `valor`. Every email the bridge
+task's project's, and every email in it, whoever sent it, steers the chat
+session that sent the root while it is open (a Slack room's session hears
+Tom's reply to its email: the incident of 2026-11-21). Otherwise the thread
+has one chat session of its own, under the sending task's project, else,
+for an owned sender, the project listing the sender (`email:<address>`),
+else its domain (`email:@<domain>`), else `valor`; an unowned sender's
+email in a thread no task here sent is bound `none`. Every email the bridge
 records in it, Tom's or a project sender's, is a `message.steered` row
 on that session naming its sender, as in a team chat. No email is
 verified, so none carries Tom's rights: `stop` there is a steer.
@@ -88,7 +88,7 @@ The binding table, first match wins:
 | In a team chat, waking the chat session | `steer`, to the chat session |
 | In a team chat, otherwise | `heard`, to the chat session |
 | An email, with no text or files | `none` |
-| An email | `steer`, to the session that sent the thread's root, else the thread's session |
+| An email | `steer`, to the session that sent the thread's root, else the thread's session; `none` from an unowned sender in a thread no task here sent |
 | Not verified, or not from the operator | `none` |
 | In Tom's own chat, with no text or files | `none` |
 | In Tom's own chat, exactly `stop` | `stop`: the replied-to task, else each open task reporting to the session, stopped, and a steer to the session |
@@ -681,41 +681,24 @@ def _toms_own(p: dict[str, Any]) -> bool:
 
 
 async def _thread_owner(conn, p: dict[str, Any]) -> tuple[workspace.Spec | None, str | None]:
-    """For an email in a thread whose root this Mac's ledger records as
-    sent: the sending task's project, and the open chat session that sent
-    it, else the nearest above it (`tasks.ancestors`), else the newest it
-    reported to (`child.reported`); None for the session when none is open.
-    `(None, None)` when no task here sent the root."""
+    """For an email in a thread whose root a task on this Mac sent: that
+    task's project, and the task when it is an open chat session (else
+    None). `(None, None)` when no task here sent the root."""
     row = await (
         await conn.execute(
             f"SELECT task_id {_SENT}AND e->>'channel' = 'email' AND e->>'message_id' = %s ORDER BY id LIMIT 1",
             (p["chat_id"],),
         )
     ).fetchone()
-    if row is None:
+    try:
+        b = await tasks.brief(conn, row[0]) if row else None
+        spec = workspace.Spec.load(b.project["name"]) if b and b.project else None
+    except KeyError, workspace.Refused, FileNotFoundError:
+        return None, None  # a stream's send, or a project gone
+    if spec is None:
         return None, None
-    sender = row[0]
-    reported = await (
-        await conn.execute(
-            "SELECT task_id FROM events WHERE type = 'child.reported' AND payload->>'child_id' = %s ORDER BY id DESC",
-            (sender,),
-        )
-    ).fetchall()
-    spec = session = None
-    for t in [sender, *await tasks.ancestors(conn, sender), *(r[0] for r in reported)]:
-        try:
-            b = await tasks.brief(conn, t)
-        except KeyError:
-            continue  # a stream's send: no task
-        if spec is None and b.project:
-            try:
-                spec = workspace.Spec.load(b.project["name"])
-            except workspace.Refused, FileNotFoundError:
-                pass
-        if b.chat and machine.fold(await ledger.read(conn, t)).state not in tasks.TERMINAL:
-            session = t
-            break
-    return spec, session
+    open_ = b.chat and machine.fold(await ledger.read(conn, b.id)).state not in tasks.TERMINAL
+    return spec, b.id if open_ else None
 
 
 async def _bind(conn, p: dict[str, Any]) -> str | None:
@@ -723,7 +706,10 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     session = None
     if team is None and p["channel"] == "email":
         team, session = await _thread_owner(conn, p)
-        team = team or _project_for(p)
+        # No send here: the sender's rule, for an owned sender only, since
+        # a root tagged with this Mac is received from anyone.
+        if team is None and owns("email", p["sender_id"]):
+            team = _project_for(p)
     if team is not None:
         text = (p.get("text") or "").strip()
         if f"{p['channel']}:{p['chat_id']}" == (team.update_chat or UPDATE_CHAT) and UPDATE_COMMAND.fullmatch(

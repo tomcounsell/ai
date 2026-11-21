@@ -20,6 +20,7 @@ from tests import bridges
 run = asyncio.run
 COWBOY, PIRATE = "Valor the Cowboy", "Valor the Pirate"
 CLIENT_ROOM = "slack:T0ABC/C0CLIENT"
+OUTSIDE = f"<CAK+{uuid.uuid4().hex}@mail.gmail.com>"  # a root no Mac of ours sent
 
 
 @pytest.fixture
@@ -170,25 +171,29 @@ def test_toms_reply_in_a_project_rooms_thread_steers_the_room_session_on_its_mac
     assert b.chat == {"channel": "email", "chat_id": root} and b.project == {"name": "client"}
 
 
-def test_a_reply_reaches_the_session_above_a_task_that_sent_the_root(dsn, macs):
-    """A build under the room's session, or one that reports to it, sent
-    the email: the reply goes to that session, not to an email session."""
+def test_a_build_tasks_thread_gets_its_projects_email_session_and_a_stray_root_nothing(dsn, macs):
+    """A task that is no chat session sent the root: the reply opens the
+    thread's own session under the task's project, with the task under it
+    (`replying_to`). A root tagged with this Mac that no task here sent,
+    from a sender no spec here lists, is bound to nothing."""
 
     async def go():
         with on(PIRATE):
             async with await db.connect(dsn) as conn:
-                room = await session_of(conn, "client", CLIENT_ROOM)
-                child = await tasks.start(conn, tasks.Brief(instruction="build", parent_id=room,
-                                                            project={"name": "client"}))  # fmt: skip
-                loose = await tasks.start(conn, tasks.Brief(instruction="build", project={"name": "client"}))
-                await ledger.append(conn, room, "child.reported", {"from": loose, "child_id": loose,
-                                    "kind": "delivered", "text": "done"})  # fmt: skip
-                roots = [await sends(conn, t) for t in (child, loose)]
-                got = [await replied(conn, r) for r in roots]
-                return room, got, await email_sessions(conn, *roots)
+                build = await tasks.start(conn, tasks.Brief(instruction="build", project={"name": "client"}))
+                got = await replied(conn, await sends(conn, build), sender="x@nowhere.test")
+                b = await tasks.brief(conn, got["task_id"])
+                steered = [r["payload"] for r in await ledger.read(conn, got["task_id"])
+                           if r["type"] == "message.steered"]  # fmt: skip
+                stray = await replied(conn, mail.message_id(ledger.new_id(), settings.email_address),
+                                      sender="x@nowhere.test")  # fmt: skip
+        return build, got, b, steered, stray
 
-    room, got, made = run(go())
-    assert [(g["as"], g["task_id"]) for g in got] == [("steer", room)] * 2 and made == []
+    build, got, b, steered, stray = run(go())
+    assert got["as"] == "steer" and got["task_id"] != build
+    assert b.chat["channel"] == "email" and b.project == {"name": "client"}
+    assert steered[0]["replying_to"]["task_id"] == build
+    assert stray["as"] == "none" and stray.get("task_id") is None
 
 
 def test_a_thread_valor_started_and_one_nobody_here_started(dsn, macs):
@@ -199,19 +204,19 @@ def test_a_thread_valor_started_and_one_nobody_here_started(dsn, macs):
     async def go():
         with on(COWBOY):
             async with await db.connect(dsn) as conn:
-                own = await session_of(conn, "valor", f"telegram:{bridges.OPERATOR_CHAT}")
+                own = await session_of(conn, "valor", "telegram:-1009000000777")
                 ours = await replied(conn, await sends(conn, own))
-                theirs = await replied(conn, "<CAK+someone@mail.gmail.com>")
+                theirs = await replied(conn, OUTSIDE)
                 b = await tasks.brief(conn, theirs["task_id"])
                 state = machine.fold(await ledger.read(conn, own)).state
+                for t in (own, theirs["task_id"]):
+                    await tasks.stop(conn, t, reason="test")  # no open session left for other tests
         return own, ours, theirs, b, state
 
     own, ours, theirs, b, state = run(go())
     assert (ours["as"], ours["task_id"]) == ("steer", own) and state not in tasks.TERMINAL
     assert theirs["as"] == "steer" and theirs["task_id"] != own
-    assert b.chat == {"channel": "email", "chat_id": "<CAK+someone@mail.gmail.com>"} and b.project == {
-        "name": "valor"
-    }
+    assert b.chat == {"channel": "email", "chat_id": OUTSIDE} and b.project == {"name": "valor"}
 
 
 class Box:
