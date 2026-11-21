@@ -174,9 +174,12 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `~/Desktop/Valor/zshenv.sh`, and other Postgres versions, which are the
    machine's, not the old system's.
 9. **The jobs.** First the voice models, once per Mac (about 1 GB:
-   Parakeet into `~/.cache/huggingface`, Kokoro, which the present
-   skill's `tts.py` speaks with, into `~/.cache/kokoro-onnx`; Handy's own
-   models folder is not used): `$PY -m tools.voice fetch`.
+   Parakeet and Silero VAD into `~/.cache/huggingface`, Kokoro, which the
+   present skill's `tts.py` speaks with, into `~/.cache/kokoro-onnx`;
+   Handy's own models folder is not used): `$PY -m tools.voice fetch`.
+   Yudame Tools downloads its own models (granite4.1:3b in Ollama, its
+   speech and speaker models) on its Setup page. Every model a Mac needs,
+   and which ones a cleanup may delete, is [local-models.md](local-models.md).
    Then, at the Mac itself, `$PY -m core permissions`: it builds
    `~/Applications/Valor.app`, which every job below runs its command
    through, and asks in one sitting for the privacy grants the jobs and

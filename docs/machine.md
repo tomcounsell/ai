@@ -16,6 +16,8 @@ how much memory each part may take, how many turns run at once, where
 secrets live, and how launchd starts things. It enforces the plan
 constraint "16 GB of RAM": Postgres, up to `max_turns` (default 2) `claude -p`
 turns at a time, and the bridges coexist, and no model runs resident.
+The model files a Mac keeps on disk, and which are required, are
+[local-models.md](local-models.md).
 
 Which data lives in Postgres is [data.md](data.md). How a turn is built is
 [harnesses.md](harnesses.md). What a routine is allowed to do is
