@@ -23,19 +23,34 @@ Other Macs are reached over ssh from the Cowboy
 1. Record `df -h /` and `du -sh` of every path above.
 2. Quit both apps (`osascript -e 'quit app "…"'`, then `pkill -x` if still
    running).
-3. `brew uninstall --cask --zap superwhisper handy` where the cask is
-   registered; `--force` where the cask is registered but the app is gone
-   (Captain's superwhisper).
-4. Remove what the zap left, by name only: any path matching
-   `*superwhisper*`, `com.superduper.superwhisper*`, `com.pais.handy*` or
-   `Handy.app` under `/Applications`, `~/Applications`, `~/Documents`, and
-   `~/Library/{Application Support,Caches,Containers,Group Containers,
-   Preferences,LaunchAgents,HTTPStorages,WebKit,Saved Application State,
-   Logs,Application Scripts}`; `defaults delete` for their domains so
-   cfprefsd drops the cached prefs; their login items (System Events login
-   items, `sfltool dumpbtm` to read background items; a GUI-only item that
-   ssh cannot remove is reported, not forced).
-5. Re-run the survey: nothing matches. Record `df -h /` again.
+3. `launchctl bootout gui/$(id -u)/<label>` for `~/Library/LaunchAgents/Handy.plist`
+   if loaded, then plain `brew uninstall --cask superwhisper handy` where the
+   cask is registered (`--force` where the app is gone: Captain's
+   superwhisper). Not `--zap`: both casks' zap stanzas are `trash:`, which
+   moves the models to `~/.Trash` and frees nothing.
+4. `rm -rf` each exact path, taken from the casks' zap lists plus what the
+   survey found:
+   - superwhisper: `~/Documents/superwhisper`, `~/Library/Application
+     Support/superwhisper`, `~/Library/Application Support/com.superduper.superwhisper`,
+     `~/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments/com.superduper.superwhisper.sfl*`,
+     and `com.superduper.superwhisper` under `~/Library/{Caches,HTTPStorages,
+     WebKit}`, `Preferences/com.superduper.superwhisper.plist`,
+     `Saved Application State/com.superduper.superwhisper.savedState`.
+   - Handy: `com.pais.handy` under `~/Library/{Application Support,Caches,
+     Logs,WebKit}`, `~/Library/LaunchAgents/Handy.plist`, and either app
+     bundle left in `/Applications` or `~/Applications`.
+   - Containers and Group Containers: only an entry named for either bundle
+     id; a deletion refused there over ssh (no Full Disk Access) is reported
+     as could-not-remove, not retried.
+   - `~/Documents` is checked at the top level only (`-maxdepth 1`), never
+     inside the user's project folders.
+   - `~/.Trash`: only items whose names contain superwhisper, Handy or the
+     two bundle ids; nothing else in the Trash is touched.
+   - `defaults delete` both domains so cfprefsd drops cached prefs; login
+     items named for either app removed (`sfltool dumpbtm` to read them; a
+     GUI-only item ssh cannot remove is reported, not forced).
+5. Re-run the survey, now also matching `Handy.plist` and `~/.Trash`:
+   nothing matches, and `df` shows the space freed. Record `df -h /` again.
 6. Confirm Yudame Tools still has its models
    (`~/Library/Application Support/YudameTools/Models/transcribe` and
    `speakers` present with their files and sizes unchanged).
