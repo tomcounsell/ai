@@ -9,8 +9,7 @@ on what models are required to run Valor as well as yudame tools").
 
 To see what a Mac holds: `ollama list`, `du -sh ~/.ollama/models
 ~/.cache/huggingface/hub/models--* ~/.cache/kokoro-onnx ~/.cache/whisper
-~/.u2net ~/Library/Application\ Support/YudameTools/Models/*
-~/Library/Application\ Support/superwhisper`. A Hugging Face
+~/.u2net ~/Library/Application\ Support/YudameTools/Models/*`. A Hugging Face
 model's files sit in the cache's shared `blobs/` folder, so `du` on its
 `models--` folder alone shows only links. Ollama's `:cloud` entries take no
 disk.
@@ -49,16 +48,6 @@ on first use if removed.
   cannot be pulled again. Nothing in any repository names it, and Valor's
   Jev calls go to the hosted API (`core/settings.py:305`). Ask Tom before
   removing it.
-- **superwhisper's models** on the Cowboy (978 MB: Canary 1B v2 and Parakeet
-  v2 Core ML, pyannote speaker models, `emb-v1.onnx`, `seg-v1.onnx`) and the
-  Bald (727 MB: `ggml-small.bin` 488 MB, superdiarize nemotron3 199 MB, the
-  same small files), in `~/Library/Application Support/superwhisper`.
-  superwhisper is a third-party dictation app, installed in `/Applications`
-  on these two Macs. It is not running, and its database was last written on
-  2026-10-09 (Cowboy) and 2026-11-02 (Bald). Yudame Tools' Dictation replaced
-  it, but the app is still installed, so its models go with a decision to
-  uninstall it, which is Tom's. Uninstalling the app and its folder together
-  frees them.
 
 ## Deleted 2026-11-21
 
@@ -82,3 +71,22 @@ A model found unused later is listed here before it is deleted. Deleting:
 Valor's `.venv`) for a Hugging Face model, whose files sit in the hub's
 shared `blobs/` folder, so measure that folder or `df` before and after;
 Yudame Tools' Disk Cleanup page's Remove for its own models.
+
+## Removed 2026-11-22: superwhisper and Handy
+
+Tom: "Uninstall Superwhisper and handy from all macs" (2026-11-22). Both
+are third-party dictation apps that Yudame Tools' Dictation replaced. Each
+was uninstalled with `brew uninstall --cask` (not `--zap`, whose `trash:`
+stanzas only move files to the Trash), then its folders were deleted by
+exact path: Application Support, Caches, HTTPStorages, WebKit, Preferences,
+recent-documents entry, and `~/Documents/superwhisper`, which iCloud syncs,
+so removing it on one Mac removed it on all four. Neither app had a launch
+agent or a running process. Handy (`com.pais.handy`) held no downloaded
+model on any Mac: its data was under 1 MB.
+
+| Mac | superwhisper removed | Handy removed |
+|---|---|---|
+| Cowboy | app 115 MB, models 978 MB, data 9 MB | app 32 MB, data 0.9 MB |
+| Captain | data 9 MB (app already gone; cask entry) | app 32 MB, data 0.5 MB |
+| Bald | app 115 MB, models 727 MB, data 7 MB | app 32 MB |
+| Pirate | data 4 MB (app already gone) | app 32 MB, data 0.9 MB |
