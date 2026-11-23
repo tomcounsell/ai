@@ -40,13 +40,29 @@ the Captain by two runs at once, 2026-11-18 21:00 UTC).
 ## What will be built
 
 1. **The vault script** (`~/Desktop/Valor/brew/brew-nightly-update.sh`,
-   reaches every Mac at its next 04:00): move the leftover-job removal out
-   of `yt_install`'s first-install branch into `yudame_tools()`, so every
-   run boots out and removes `me.yuda.brew-status` until #8, whatever
-   Yudame Tools' install step returned. Kept as is: a running Yudame job
-   is left alone and noted. The comment says the vault job is the one
-   Homebrew runner until #8, and #8 deletes this block. `SETUP.md`'s top
-   paragraph says the same.
+   reaches every Mac at its next 04:00). The leftover-job removal leaves
+   `yt_install`'s first-install branch and becomes its own step in
+   `yudame_tools()`, run every time, placed before the `launchctl print
+   $DOMAIN/me.yuda.brew-status` line that writes the status file's
+   `homebrew jobs:`. It no longer skips a running job, since at 04:00 the
+   Yudame job is always running when the vault job gets there (both fire
+   in the same second):
+   - the plist is removed at once (launchd keeps a loaded job's config, so
+     the running update is undisturbed, and the app will not set the job
+     up again at launch without it);
+   - not running: `launchctl bootout` now, noted `removed
+     me.yuda.brew-status`;
+   - running: the bootout waits for it to end, through a one-shot job of
+     the same shape as the script's own deferred reload (line ~616:
+     `while launchctl print … | grep -q 'state = running'; do sleep 2;
+     done; launchctl bootout …; launchctl bootout <itself>`), labelled
+     `com.valor.brew-nightly.yudame-off`, noted `me.yuda.brew-status
+     removed once its run ends`. The vault run itself never waits on it,
+     so a stuck Yudame run cannot hold the vault job past the next 04:00.
+   So a job set up again from the app runs at most one more night beside
+   the vault job, and is gone before the next. The comment says the vault
+   job is the one Homebrew runner until yudame-tools#8, and #8 deletes this
+   step. `SETUP.md`'s top paragraph says the same.
 2. **Each Mac now**, so tonight is single: copy the new script to
    `~/.local/bin` (remote Macs cannot read the vault over ssh,
    docs/rollout.md step 9) and run `brew-nightly-update.sh --yudame-tools`,
@@ -57,7 +73,9 @@ the Captain by two runs at once, 2026-11-18 21:00 UTC).
 
 Governance: none added. This widens an existing reconciliation (the script
 already removes this job and keeps its own plist current) from first
-install to every run; it adds no check, gate or denial.
+install to every run; it adds no check, gate or denial. `launchctl disable`
+was weighed and not used: it would also make the app's later set-up fail
+at #8 until someone ran `launchctl enable`.
 
 ## Out of scope (named in the delivery)
 
@@ -75,11 +93,19 @@ run, which the build checks with `bash -n` and a live `--yudame-tools` run.
 ## Tests (live; the vault script has no suite)
 
 - `bash -n` on the edited script.
-- Per Mac after step 2: `launchctl print gui/501/me.yuda.brew-status` →
-  not found, plist gone; `com.valor.brew-nightly` still loaded with
-  `valor-run` first; `yudame-tools-install.log` has the removal line;
+- **Not running** (each Mac after step 2): `launchctl print
+  gui/501/me.yuda.brew-status` → not found, plist gone;
+  `com.valor.brew-nightly` still loaded with `valor-run` first;
+  `yudame-tools-install.log` has `removed me.yuda.brew-status`;
   `~/Desktop/Valor/yudame-tools/status/<mac>.txt` says `homebrew jobs:
-  vault`.
+  vault` (written after the removal).
+- **Running** (the Cowboy, before step 2 there): `launchctl kickstart
+  gui/501/me.yuda.brew-status`, then while it runs
+  `brew-nightly-update.sh --yudame-tools`. By the vault run's end: plist
+  gone, the note says removed once its run ends, the
+  `.yudame-off` helper is loaded. Once Yudame's run ends: no
+  `me.yuda.brew-status`, no helper, and the Yudame run's log ends `done`
+  (it was not killed).
 - Yudame Tools' install result unchanged (`current`) and its settings
   unchanged on each Mac (the Pirate's unset `disabledTools` stays unset).
 - Tonight (2026-11-23 21:00 UTC): each log has exactly one `start` and one
