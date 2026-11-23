@@ -236,8 +236,9 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `~/Library/LaunchAgents` and bootstrapping it; a plist put in place
    from a turn, whose sandbox cannot bootstrap, is loaded by the next
    update (`permissions.ensure`). Until yudame-tools#8 each run also
-   removes Yudame Tools' own Homebrew job (`me.yuda.brew-status`), so the
-   two never run at once. Brew Status
+   removes Yudame Tools' own Homebrew job (`me.yuda.brew-status`), waiting
+   for a run in progress to end, so one set up again from the app runs at
+   most one more night beside it. Brew Status
    (`yudame/brew-status`) ran it from 2026-10-28 morning and was removed
    from all four Macs that day (Tom, Telegram 11762); Studio Tools'
    Homebrew Updates replaces this job once it is deployed
