@@ -32,7 +32,7 @@ Consequence, accepted: each ended run owes its quiet `ended` report
 (`notices.owe`, a routine result: wakes nothing). The first firing after
 rollout writes one per backlogged run.
 
-**Tests** (`tests/test_routines.py`, real ledger): a `finished` run is
+**Tests** (with the routine tests that drive `routines.run`, real ledger): a `finished` run is
 ENDED with `Done: <summary>` and out of `open_ids`; a `failed` run is ENDED
 with the bare summary; `started`/`running` runs stay open and `open_node`
 still returns them; `nothing_due` writes nothing; an earlier `finished` run
