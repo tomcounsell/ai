@@ -182,7 +182,7 @@ def test_every_chat_of_a_project_listing_projects_names_its_repositories(dsn, dm
 
 
 def test_every_room_but_valors_own_is_given_the_route_to_valors_code(tmp_path):
-    """A PsyOPTIMAL task, told to land a skill fix "on the current main of
+    """A client project's task, told to land a skill fix "on the current main of
     ~/src/ai", committed onto the Captain's live checkout and stopped its
     updates for three days (2026-11-21): every other project's room lists
     Valor's repository and says a change there is a `--project valor` task."""

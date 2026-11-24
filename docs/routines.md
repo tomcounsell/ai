@@ -160,14 +160,21 @@ The routines the kernel holds:
   or unreachable for 24 h, is reported once to the operator chat's session,
   or as a fatal Sentry event on a Mac with no such session.
   Each run also reports, once a day each, every target it read and its own
-  Mac with under 15 GB free, and each whose update is failing (`health`'s
-  `update`: a `rollout.failed` with no `rollout.ended`, since when, at
-  which step and why; not part of healthy, so it holds nothing); with no
-  session to hear it the report stays a quiet row, since the Cowboy's watch
-  reports every Mac (the Captain's own disk notices went unheard six times
-  before its disk filled, 2026-11-19, and its update failed 2,775 times
-  from 2026-11-21 to 11-24 with only its log saying so). The update's own
-  notice to the failing Mac's session, after three tries, stays as it is.
+  Mac with under 15 GB free; with no session to hear it the report stays a
+  quiet row, since the Cowboy's watch reports every Mac (the Captain's own
+  disk notices went unheard six times before its disk filled, 2026-11-19).
+  A read target whose update is failing (`health`'s `update`: a
+  `rollout.failed` with no `rollout.ended`) is not reported but repaired
+  (Tom, 2026-11-24: "don't report to me. self-heal"), never the watch's own
+  Mac, which its peer's watch reads, so a failure is seen once: a task under the `valor` project
+  while it still fails, one task at a time, at most one a day per Mac (a repair that ended with the failure still open is tried again the next day), the routine's own work, which finds why, runs `python -m
+  core realign` there on a diverged checkout (its local commits kept on a
+  branch `<machine>-local-<sha>` pushed to origin, the checkout put back on
+  the tip, an update requested), and confirms the next update. Each branch
+  realign kept (`health`'s `kept`) gets one task to land or drop it. A
+  repair's end is a quiet result; only its question, for what only Tom
+  holds, wakes the operator chat's session. The update's own notice to the
+  failing Mac's session, after three tries, stays as it is.
 - **summary** (01:30 daily, ceiling `act`, installed on every Mac; issue
   #3679, [the plan](plans/78a8c31b-nightly-summary.md)): for each project
   placed on this Mac, the Bangkok days after its last summary's `through`

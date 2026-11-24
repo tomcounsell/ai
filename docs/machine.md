@@ -274,7 +274,11 @@ scheduler, supervisor, or watchdog on the machine.
   writes `~/.config/brew-nightly/hold-<host>` on both while it is broken,
   runs `health --fix` at the second broken watch, and reports what stays
   broken and, once a day each, a Mac it read or itself with under 15 GB
-  free or whose update is failing (`health`'s `update`).
+  free; a read target whose update is failing (`health`'s `update`) is
+  not reported but repaired by a `valor` task, one at a time and at most one a day while it fails (never the
+  watch's own Mac: its peer's watch reads it), which runs
+  `python -m core realign` on a diverged checkout, and each branch realign
+  kept (`health`'s `kept`) gets a task to land or drop it.
 - **Tailscale, reopened** (`core/health.py`, `Tailnet`): it is Valor's
   only route to the other Macs, and on 2026-10-28 the Captain fell off the
   tailnet with nobody at it. At most every 30 s on its wake, the kernel reads

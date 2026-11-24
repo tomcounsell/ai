@@ -364,7 +364,7 @@ def repos(name: str | None) -> str | None:
     but Valor's own, `VALOR` (when its spec loads), with how `valor-record
     act start --project` chooses one. Valor's code is listed everywhere
     since a room on another project had no route to it: told to land a
-    skill fix "on the current main of ~/src/ai", a PsyOPTIMAL task
+    skill fix "on the current main of ~/src/ai", a client project's task
     committed onto the Captain's live checkout, and every update there
     failed for three days (2026-11-21). None for no project, a spec that
     does not load, or a project with nothing beside its own."""

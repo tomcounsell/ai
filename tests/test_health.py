@@ -560,7 +560,9 @@ def watch_once(dsn, peers, holds, objective, now=None):
 
     async def go():
         async with await db.connect(dsn) as conn:
-            ctx = SimpleNamespace(conn=conn, objective=objective, now=now or datetime.now(UTC))
+            ctx = SimpleNamespace(
+                conn=conn, objective=objective, now=now or datetime.now(UTC), start_project=None
+            )
             return await watch.runner(remote=peers, holds=holds, targets=("pirate",))(ctx)
 
     return run(go())
@@ -804,6 +806,7 @@ def test_health_fix_reopens_tailscale_at_once_and_shares_the_spacing_with_the_ke
     monkeypatch.setattr(health, "probe", probe)
     monkeypatch.setattr(health, "services", lambda agents: {})
     monkeypatch.setattr(health, "failing_update", lambda conn: probe())
+    monkeypatch.setattr(health, "kept", lambda conn: _nothing())
     monkeypatch.setattr(health.db, "connect", lambda dsn: _no_conn())
     tailscale_app.running = False
     out = run(health.report(agents=tmp_path))
@@ -814,6 +817,10 @@ def test_health_fix_reopens_tailscale_at_once_and_shares_the_spacing_with_the_ke
     assert health.reopen_tailscale("not running") == "spaced" and len(acts(tailscale_app)) == 1
     tailscale_app.running, tailscale_app.state = True, "Running"
     assert run(health.report(fix=True, agents=tmp_path))["fixed"] == {}
+
+
+async def _nothing():
+    return []
 
 
 async def _no_conn():
@@ -862,7 +869,7 @@ def test_the_watch_reports_each_mac_low_on_disk_once_a_day(fresh, tmp_path, monk
 
     async def go(now):
         async with await db.connect(fresh) as conn:
-            ctx = SimpleNamespace(conn=conn, objective=objective, now=now)
+            ctx = SimpleNamespace(conn=conn, objective=objective, now=now, start_project=None)
             await watch.runner(
                 remote=peers, holds=holds, targets=("pirate", "bald", "old", "roomy", "asleep")
             )(ctx)
@@ -924,6 +931,8 @@ def test_health_reports_an_update_failing_now_and_nothing_once_each_failure_ende
     first = datetime.fromisoformat(got["since"])
     assert (got["step"], got["reason"]) == ("fetch", "could not resolve host")
     assert run(health.report(fresh, agents=tmp_path))["update"] == got
+    _rollout(fresh, "", "rollout.realigned", branch="m-local-abc", sha="a" * 40, commits=1, onto="b" * 40)
+    assert run(health.report(fresh, agents=tmp_path))["kept"] == [{"branch": "m-local-abc", "sha": "a" * 40}]
     _rollout(fresh, fetch, "rollout.ended", outcome="done")
     assert _failing(fresh) == {"since": first.isoformat(), "step": "fast-forward",
                                "reason": "the checkout has diverged"}  # fmt: skip
@@ -938,54 +947,177 @@ def test_health_reports_an_update_failing_now_and_nothing_once_each_failure_ende
     assert _failing(fresh) is None
 
 
-def update_reports(dsn) -> list[dict]:
+class Starts:
+    """Stand-in `start_project`: each start's fields, and a task id."""
+
+    def __init__(self):
+        self.started: list[dict] = []
+
+    async def __call__(self, conn, **fields) -> str:
+        task_id = ledger.new_id()
+        self.started.append(fields)
+        await ledger.append(
+            conn, task_id, "task.started", {**fields["marker"], "instruction": fields["instruction"]}
+        )
+        return task_id
+
+
+def watch_ctx(conn, objective, now, starts):
+    routine = SimpleNamespace(name="watch", ceiling="act", model="frontier")
+    return SimpleNamespace(conn=conn, objective=objective, now=now, start_project=starts, routine=routine)
+
+
+def _ended(dsn, task_id: str) -> None:
+    async def go():
+        async with await db.connect(dsn) as conn:
+            await ledger.append(
+                conn, task_id, "task.ended", {"by": "valor", "kind": "decided", "text": "stopped"}
+            )
+
+    run(go())
+
+
+def test_a_failing_update_starts_a_repair_and_no_report(fresh, tmp_path):
+    """Tom, 2026-11-24, on the daily report of a failing update: "don't
+    report to me. self-heal". Each read target whose health has `update`
+    gets a `valor` task, the watch's own work; none more while it is open,
+    however many runs or days; nothing is reported and nothing is held.
+    This Mac's own failure starts nothing here: its peer's watch reads it,
+    so one failure has one repair at a time."""
+    from routines.watch import runner as watch
+
+    objective = run(new_task(fresh))
+    holds, starts = tmp_path / "holds", Starts()
+    failing = {"since": "2026-11-21T16:37:18+00:00", "step": "fast-forward",
+               "reason": "the checkout at 7fb4 has diverged from 37d5"}  # fmt: skip
+    peers = Peers(captain={**GOOD, "update": failing}, bald=GOOD)
+    _rollout(
+        fresh, ledger.new_id(), "rollout.failed", sha="3" * 40, step="dependencies", reason="uv sync exited 2"
+    )
+    _rollout(fresh, "", "rollout.realigned", branch="m-local-abc", sha="a" * 40, commits=1, onto="b" * 40)
+
+    async def go(now):
+        async with await db.connect(fresh) as conn:
+            await watch.runner(remote=peers, holds=holds, targets=("captain", "bald"))(
+                watch_ctx(conn, objective, now, starts)
+            )
+
+    today = datetime(2026, 11, 22, 1, tzinfo=UTC)
+    run(go(today))
+    run(go(today + timedelta(hours=3)))
+    run(go(today + timedelta(days=1)))
+    (captain,) = starts.started
+    assert (captain["project"], captain["routine"], captain["parent"]) == ("valor", "watch", objective)
+    assert captain["marker"] == {"sdlc": 1, "repair": "captain:2026-11-21T16:37:18+00:00:2026-11-22"}
+    text = captain["instruction"]
+    assert text.startswith("captain's update has failed since 2026-11-21T16:37:18+00:00 UTC, at fast-forward")
+    assert "`ssh captain`" in text and "python -m core realign" in text and "update --wait" in text
+    assert "question.md only for what only Tom holds" in text
+    assert not reports(fresh, "update:") and not list(holds.glob("hold-*"))
+
+
+def test_a_repair_that_ended_with_the_update_still_failing_is_tried_again_at_most_once_a_day(fresh, tmp_path):
+    """A repair that stopped or gave up without clearing the failure and
+    without asking Tom would leave the Mac stuck and nobody told: while the
+    failure is open and no repair of that Mac is, the watch starts another,
+    at most one a day per Mac; still no report."""
+    from routines.watch import runner as watch
+
+    objective = run(new_task(fresh))
+    starts = Starts()
+    failing = {"since": "2026-11-21T16:37:18+00:00", "step": "fast-forward", "reason": "diverged"}
+    peers = Peers(captain={**GOOD, "update": failing})
+
+    async def go(now):
+        async with await db.connect(fresh) as conn:
+            await watch.runner(remote=peers, holds=tmp_path, targets=("captain",))(
+                watch_ctx(conn, objective, now, starts)
+            )
+
+    day = datetime(2026, 11, 22, 1, tzinfo=UTC)
+    run(go(day))
+    first = run(_open_repair(fresh, "captain"))
+    _ended(fresh, first)
+    run(go(day + timedelta(hours=1)))  # ended, still failing, but the day's repair was made
+    assert len(starts.started) == 1
+    run(go(day + timedelta(days=1)))
+    assert [s["marker"]["repair"] for s in starts.started] == [
+        "captain:2026-11-21T16:37:18+00:00:2026-11-22", "captain:2026-11-21T16:37:18+00:00:2026-11-23"]  # fmt: skip
+    run(go(day + timedelta(days=2)))  # the second is still open: none on the third day
+    assert len(starts.started) == 2
+    _ended(fresh, run(_open_repair(fresh, "captain")))
+    peers.states["captain"] = GOOD
+    run(go(day + timedelta(days=3)))  # cleared: none
+    assert len(starts.started) == 2 and not reports(fresh, "update:")
+
+
+async def _open_repair(dsn, host: str) -> str:
+    async with await db.connect(dsn) as conn:
+        found = await (
+            await conn.execute(
+                "SELECT s.task_id FROM events s WHERE s.type = 'task.started' AND s.payload->>'repair' LIKE %s "
+                "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.task_id = s.task_id AND e.type = 'task.ended') "
+                "ORDER BY s.id DESC LIMIT 1",
+                (f"{host}:%",),
+            )
+        ).fetchone()
+    return found[0]
+
+
+def test_each_branch_a_realign_kept_gets_one_task_to_land_or_drop_it(fresh, tmp_path):
+    from routines.watch import runner as watch
+
+    objective = run(new_task(fresh))
+    starts = Starts()
+    kept = [{"branch": "valor-the-captain-local-7fb45956e", "sha": "7fb45956e" + "0" * 31}]
+    peers = Peers(captain={**GOOD, "kept": kept})
+
+    async def go():
+        async with await db.connect(fresh) as conn:
+            ctx = watch_ctx(conn, objective, datetime(2026, 11, 22, tzinfo=UTC), starts)
+            await watch.runner(remote=peers, holds=tmp_path, targets=("captain",))(ctx)
+
+    run(go())
+    run(go())
+    (land,) = starts.started
+    assert land["marker"] == {"sdlc": 1, "kept": f"captain:{kept[0]['sha']}"} and land["project"] == "valor"
+    assert "branch valor-the-captain-local-7fb45956e" in land["instruction"]
+    assert "land it on main here with a test" in land["instruction"] and "dropped" in land["instruction"]
+
+
+def test_realign_keeps_a_diverged_checkouts_commit_on_a_pushed_branch_and_ends_on_the_tip(tmp_path):
+    """The Captain's incident: a commit made on the live `main` while main
+    moved on. `realign` keeps it on `<machine>-local-<sha>`, here and on
+    the origin, and leaves the checkout on the origin's tip, untracked files
+    untouched; a checkout behind or on the tip is left alone."""
+    from tests.scripted import commit
+    from tests.scripted import git as sgit
+    from tests.test_rollout import Repo
+
+    repo = Repo(tmp_path)
+    assert rollout.realign(repo.co, None, "Valor the Captain") is None
+    tip = repo.land("core/b.py")
+    assert rollout.realign(repo.co, None, "Valor the Captain") is None  # behind: the update fast-forwards
+    local = commit(repo.co, "skills/sheet.py", "fixed\n", "a fix made on the live checkout")
+    (repo.co / "stray").write_text("")
+    kept = rollout.realign(repo.co, None, "Valor the Captain")
+    name = f"valor-the-captain-local-{local[:9]}"
+    assert kept == {"branch": name, "sha": local, "commits": 1, "onto": tip}
+    assert repo.head() == tip and (repo.co / "stray").exists()
+    assert sgit(repo.co, "rev-parse", name) == local
+    assert sgit(repo.origin, "rev-parse", f"refs/heads/{name}") == local
+    assert rollout.realign(repo.co, None, "Valor the Captain") is None
+
+
+def reports(dsn, prefix: str) -> list[dict]:
     async def go():
         async with await db.connect(dsn) as conn:
             found = await (
                 await conn.execute(
-                    "SELECT payload FROM events WHERE type = 'child.reported' AND payload->>'from' = 'watch' "
-                    "AND payload->>'about_key' LIKE 'update:%%' ORDER BY id"
+                    "SELECT payload FROM events WHERE type = 'child.reported' AND payload->>'about_key' LIKE %s",
+                    (prefix + "%",),
                 )
             ).fetchall()
             return [r[0] for r in found]
 
     return run(go())
-
-
-def test_the_watch_reports_each_mac_whose_update_fails_once_a_day(fresh, tmp_path):
-    """Reported the way low disk is (`disk:`): each read target whose
-    health has `update`, and this Mac from its own ledger, once a day each,
-    again the next day while it fails, and not once it has cleared; a
-    failing update is not broken, so it holds nothing."""
-    from routines.watch import runner as watch
-
-    objective = run(new_task(fresh))
-    holds = tmp_path / "holds"
-    failing = {"since": "2026-11-21T16:37:18+00:00", "step": "fast-forward",
-               "reason": "the checkout at 7fb4 has diverged from 37d5"}  # fmt: skip
-    peers = Peers(captain={**GOOD, "update": failing}, bald=GOOD)
-    mine = ledger.new_id()
-    _rollout(fresh, mine, "rollout.failed", sha="3" * 40, step="dependencies", reason="uv sync exited 2")
-
-    async def go(now):
-        async with await db.connect(fresh) as conn:
-            ctx = SimpleNamespace(conn=conn, objective=objective, now=now)
-            await watch.runner(remote=peers, holds=holds, targets=("captain", "bald"))(ctx)
-
-    today = datetime(2026, 11, 22, 1, tzinfo=UTC)
-    run(go(today))
-    run(go(today + timedelta(hours=3)))
-    told = {r["about_key"]: r["text"] for r in update_reports(fresh)}
-    assert sorted(told) == sorted(["update:captain:2026-11-22", f"update:{settings.machine}:2026-11-22"])
-    assert told["update:captain:2026-11-22"] == (
-        "captain's update has failed since 2026-11-21T16:37:18+00:00 UTC, at fast-forward: "
-        "the checkout at 7fb4 has diverged from 37d5. It takes no merged change until that is cleared."
-    )
-    assert "at dependencies: uv sync exited 2" in told[f"update:{settings.machine}:2026-11-22"]
-    assert not list(holds.glob("hold-*"))
-    run(go(today + timedelta(days=1)))
-    assert len(update_reports(fresh)) == 4
-    _rollout(fresh, mine, "rollout.ended", outcome="done")
-    peers.states["captain"] = GOOD
-    run(go(today + timedelta(days=2)))
-    assert len(update_reports(fresh)) == 4

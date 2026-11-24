@@ -341,3 +341,56 @@ def test_a_task_drafts_an_email_with_its_pdf_and_the_session_sends_it(dsn, dm, t
     pdf_path = pathlib.Path(effect["payload"]["files"][0]["path"])
     assert pdf.get_filename() == "report.pdf" and pdf.get_content() == pdf_path.read_bytes()
     assert pdf_path.is_relative_to(workspace)
+
+
+def test_a_watch_repair_ends_quietly_and_only_its_question_for_tom_reaches_the_operator_chat(
+    dsn, dm, tmp_path
+):
+    """Tom, 2026-11-24: "don't report to me. self-heal". The watch's repair
+    of a failing update is the routine's own work: its end, however it ends,
+    is a quiet result on the operator session; a repair that cannot finish
+    without Tom asks, and only that question wakes the session."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from routines.watch import runner as watch
+    from tests.test_board import ask
+
+    failing = {"since": "2026-11-21T16:37:18+00:00", "step": "fast-forward", "reason": "diverged"}
+
+    async def health(host, command):
+        state = {"healthy": True, "probe": None, "services": {}, "free_gb": 80, "update": failing}
+        return 0, json.dumps(
+            {**state, "update": {**failing, "since": host}}
+        ) if "core health" in command else ""
+
+    async def start_project(conn, *, parent, instruction, routine, ceiling, model, project, branch, marker):
+        brief = tasks.Brief(instruction=instruction, parent_id=parent, routine=routine,
+                            project={"name": project}, max_effect_class=ceiling)  # fmt: skip
+        return await tasks.start(conn, brief, marker=marker, by="routine")
+
+    async def go():
+        objective = await new_task(dsn, routine="watch", instruction="routine watch")
+        async with await db.connect(dsn) as conn:
+            ctx = SimpleNamespace(conn=conn, objective=objective, now=datetime(2026, 11, 22, tzinfo=UTC),
+                                  start_project=start_project,
+                                  routine=SimpleNamespace(name="watch", ceiling="act", model="frontier"))  # fmt: skip
+            await watch.runner(remote=health, holds=tmp_path, targets=("captain", "bald"))(ctx)
+            found = await (
+                await conn.execute(
+                    "SELECT task_id, payload->>'repair' FROM events WHERE type = 'task.started' "
+                    "AND payload ? 'repair' ORDER BY id"
+                )
+            ).fetchall()
+        mended = {key.split(":", 1)[0]: task for task, key in found}
+        await end(dsn, mended["captain"], "Done: the Captain takes updates again.")
+        await ask(dsn, mended["bald"], "The Bald's GitHub key is revoked; can you issue a new one?")
+        async with await db.connect(dsn) as conn:
+            await notices.owe(conn, mended["bald"])
+        return mended, await bridges.rows(dsn, await operator(dsn))
+
+    mended, heard = run(go())
+    by = {p["from"]: p for p in bridges.typed(heard, "child.reported")}
+    assert (by[mended["captain"]]["kind"], by[mended["captain"]].get("quiet")) == ("ended", True)
+    assert by[mended["bald"]]["kind"] == "question" and not by[mended["bald"]].get("quiet")
+    assert not [p for p in by.values() if p["about_key"].startswith("update:")]

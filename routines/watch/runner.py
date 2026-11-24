@@ -19,8 +19,18 @@ Each run reads each target's `python -m core health` over ssh
   once when it has been unreachable `UNREACHABLE_REPORT`.
 
 Each run also reports, once a day, each read target and this Mac whose
-free disk is under `DISK_LOW_GB`, and each whose update is failing
-(`health.failing_update`; `_daily`).
+free disk is under `DISK_LOW_GB` (`_disk`), and repairs each read target
+whose update is failing (`_repair`): a failing update is not reported
+(Tom, 2026-11-24: "don't report to me. self-heal"). Only a peer repairs:
+every Mac is another's target (the Cowboy reads the other three, the
+Captain the Cowboy), so each failure is seen once, and a repair turn on the
+failing Mac would itself hold the update it waits for. It starts a task under the `valor`
+project while it still fails, one task at a time, at most one a day per Mac (a repair that ended with the failure still open is tried again the next day), the routine's own work, so its
+end is a quiet result and only its question, for what only Tom holds,
+wakes the operator chat's session; the task finds why, runs `python -m
+core realign` on a diverged checkout, and confirms the next update. Each
+branch `realign` kept local commits on (`health`'s `kept`) gets one task
+to land or drop it.
 
 A row is written only when a target's state changes. A report goes to the
 operator chat's session (`notices.request`), Valor's own voice in Tom's DM;
@@ -38,7 +48,7 @@ from typing import Any
 
 import sentry_sdk
 
-from core import health, intake, ledger, notices
+from core import intake, ledger, machine, notices, tasks
 from core.remote import KERNEL, ssh
 from core.routines import Context, Ran
 from core.settings import settings
@@ -111,22 +121,89 @@ async def _tell(conn, key: str, text: str) -> None:
         sentry_sdk.capture_message(text, level="fatal")
 
 
-async def _daily(ctx, host: str, free: float | None, update: dict[str, Any] | None) -> None:
-    """Once a day per Mac, a report when its free disk is under `DISK_LOW_GB`,
-    and one while its update is failing. No Sentry event where no session
-    hears it: each Mac's watch reports its own, and the Cowboy's reaches Tom
-    (the Captain's own disk notices went unheard six times before its disk
-    filled, 2026-11-19; its update failed 2,775 times, 2026-11-21 to 11-24,
-    and only its own log said so)."""
+async def _disk(ctx, host: str, free: float | None) -> None:
+    """Once a day per Mac, a report when its free disk is under `DISK_LOW_GB`.
+    No Sentry event where no session hears it: each Mac's watch reports its
+    own disk, and the Cowboy's reaches Tom (the Captain's own notices went
+    unheard six times before its disk filled, 2026-11-19)."""
     if free is not None and free < DISK_LOW_GB:
         await notices.request(ctx.conn, STREAM, kind="rollout", about_key=f"disk:{host}:{ctx.now:%Y-%m-%d}",
                               text=f"{host} has {free:.0f} GB of disk left. Builds start failing when it fills; "
                               "what should go?")  # fmt: skip
-    if update:
-        await notices.request(ctx.conn, STREAM, kind="rollout", about_key=f"update:{host}:{ctx.now:%Y-%m-%d}",
-                              text=f"{host}'s update has failed since {update.get('since')} UTC, at "
-                              f"{update.get('step')}: {str(update.get('reason'))[:300]}. It takes no merged "
-                              "change until that is cleared.")  # fmt: skip
+
+
+REPAIR = (
+    "{host}'s update has failed since {since} UTC, at {step}: {reason}. It takes no merged change until "
+    'that is cleared. Repair it yourself; Tom is not told (2026-11-24: "don\'t report to me. self-heal"). '
+    "Reach it with `ssh {host}`; a step that reads ~/Desktop/Valor runs as a one-off gui launchd job through "
+    "~/Applications/Valor.app's valor-run. Find why from its ~/Library/Logs/valor/kernel.log and its "
+    "ledger's rollout.failed rows. Where its live checkout ~/src/ai has diverged from origin (a commit made "
+    "there), run `cd ~/src/ai && .venv/bin/python -m core realign` on it: it keeps the local commits on a "
+    "branch pushed to origin, puts the checkout back on its branch's tip and requests an update; the watch "
+    "gives the kept branch its own task. Any other cause, fix it as a developer at that Mac would, deleting "
+    "nothing. Then confirm the next update ends done and its services restarted (`.venv/bin/python -m core "
+    "update --wait` there). A fix to Valor's code is a commit with a test here; with nothing to merge, end "
+    "with stop.md. Ask in question.md only for what only Tom holds, such as a credential; nothing else "
+    "reaches him."
+)
+LAND = (
+    "{name} had local commits on its live checkout of Valor's repository, kept on branch {branch} at {sha} "
+    "(pushed to origin) when `python -m core realign` put it back on main. Review that work: land it on main "
+    "here with a test if it is sound, or end with stop.md saying why it should be dropped. Delete nothing."
+)
+
+
+async def _started(ctx, key: str, value: str) -> bool:
+    """Whether a task already carries `{key: value}` in its `task.started`."""
+    found = await (
+        await ctx.conn.execute(
+            "SELECT 1 FROM events WHERE type = 'task.started' AND payload->>%s = %s LIMIT 1", (key, value)
+        )
+    ).fetchone()
+    return found is not None
+
+
+async def _start(ctx, key: str, value: str, instruction: str) -> None:
+    """One task under the `valor` project for `{key: value}`, the watch's own
+    work (`routine`), a child of its objective, unless one was started or
+    this run cannot start one."""
+    if ctx.start_project is None or await _started(ctx, key, value):
+        return
+    await ctx.start_project(
+        ctx.conn, parent=ctx.objective, instruction=instruction, routine=ctx.routine.name,
+        ceiling=ctx.routine.ceiling, model=ctx.routine.model, project=tasks.VALOR, branch=None,
+        marker={"sdlc": 1, key: value},
+    )  # fmt: skip
+
+
+async def _repairing(ctx, host: str) -> bool:
+    """Whether a repair task for `host` is still open: running, or waiting on
+    its question."""
+    rows = await (
+        await ctx.conn.execute(
+            "SELECT task_id FROM events WHERE type = 'task.started' AND payload->>'repair' LIKE %s",
+            (f"{host}:%",),
+        )
+    ).fetchall()
+    for (task_id,) in rows:
+        if machine.fold(await ledger.read(ctx.conn, task_id)).state not in tasks.TERMINAL:
+            return True
+    return False
+
+
+async def _repair(ctx, host: str, h: dict[str, Any]) -> None:
+    """A repair of a failing update while it is still failing, at most once a
+    day per Mac (the `disk:` report's day stamp) and only when no repair of
+    that Mac is open (Tom, 2026-11-24: "self-heal": a repair that ended with
+    the failure still open is tried again the next day), and a task for each
+    branch its realign kept."""
+    update = h.get("update")
+    if update and not await _repairing(ctx, host):
+        await _start(ctx, "repair", f"{host}:{update.get('since')}:{ctx.now:%Y-%m-%d}", REPAIR.format(
+            host=host, since=update.get("since"), step=update.get("step"),
+            reason=str(update.get("reason"))[:500]))  # fmt: skip
+    for k in h.get("kept") or ():
+        await _start(ctx, "kept", f"{host}:{k['sha']}", LAND.format(name=host, **k))
 
 
 def runner(*, remote: Remote = ssh, holds: Path | None = None, targets: tuple[str, ...] | None = None):
@@ -139,41 +216,42 @@ def runner(*, remote: Remote = ssh, holds: Path | None = None, targets: tuple[st
         here = holds or Path(HOLDS).expanduser()
         last = await _last(ctx.conn, ctx.objective)
         said = []
-        await _daily(ctx, settings.machine, shutil.disk_usage(Path.home()).free / 1e9,
-                     await health.failing_update(ctx.conn))  # fmt: skip
+        await _disk(ctx, settings.machine, shutil.disk_usage(Path.home()).free / 1e9)
         for host in watched:
             was = last.get(host) or {}
-            state, detail = await _watch(ctx, remote, host, was, here)
+            state, detail, h = await _watch(ctx, remote, host, was, here)
             said.append(f"{host}: {state}")
             if state != was.get("type", "watch.healthy").removeprefix("watch."):
                 await ledger.append(ctx.conn, ctx.objective, f"watch.{state}", {"host": host, **detail})
+            if h is not None:
+                await _repair(ctx, host, h)
         return Ran(None, "finished", "; ".join(said))
 
-    async def _watch(ctx, remote, host, was, here) -> tuple[str, dict[str, Any]]:
+    async def _watch(ctx, remote, host, was, here) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
         h = await _health(remote, host)
         if h is None:
             if was.get("type") == "watch.unreachable" and ctx.now - was["at"] >= UNREACHABLE_REPORT:
                 await _tell(ctx.conn, f"watch:{host}:unreachable:{was['id']}",
                             f"I have not been able to reach {host} since {was['at']:%Y-%m-%d %H:%M} UTC "
                             "(asleep, off, or off the network). Nothing on it is held back for this.")  # fmt: skip
-            return "unreachable", {}
-        await _daily(ctx, host, h.get("free_gb"), h.get("update"))
+            return "unreachable", {}, None
+        await _disk(ctx, host, h.get("free_gb"))
         if h.get("healthy"):
             await _holds(remote, host, False, here)
-            return "healthy", {}
+            return "healthy", {}, h
         await _holds(remote, host, True, here)
         if was.get("type") not in ("watch.held", "watch.failed"):
-            return "held", {"detail": _broken(h)}
+            return "held", {"detail": _broken(h)}, h
         fixed = await _health(remote, host, fix=True)
         after = await _health(remote, host)
         if after is not None and after.get("healthy"):
             await _holds(remote, host, False, here)
-            return "fixed", {"detail": _broken(h), "fixed": (fixed or {}).get("fixed")}
+            return "fixed", {"detail": _broken(h), "fixed": (fixed or {}).get("fixed")}, after
         detail = _broken(after or h)
         if was.get("type") != "watch.failed":
             await _tell(ctx.conn, f"watch:{host}:failed:{was.get('id')}",
                         f"{host} is broken and neither it nor I could fix it: {detail}. "
                         "Its nightly updates are held until it is healthy.")  # fmt: skip
-        return "failed", {"detail": detail, "fixed": (fixed or {}).get("fixed")}
+        return "failed", {"detail": detail, "fixed": (fixed or {}).get("fixed")}, after or h
 
     return run

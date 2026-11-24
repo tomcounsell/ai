@@ -24,6 +24,10 @@ called by `core.serve.Kernel`); the rows are written on the loop.
   `core/schema.sql` stops at `uncommitted`: the restart would run that
   edit, which nothing merged. A checkout the fast-forward would refuse
   stops at `fast-forward`, before anything holds.
+- `realign`: a checkout diverged from its branch's tip (a commit made on
+  the live checkout) put back on the tip, its own commits kept on a branch
+  `<machine>-local-<sha>` pushed to the push URL (`python -m core
+  realign`, run by the watch's repair).
 - `fast_forward`, `step_back`: `git merge --ff-only <sha>`, and the
   `reset --keep` back to where it started when the head is still `sha`.
 - `sync_argv`, `sync`: `uv sync --frozen` in the checkout, with a PATH of
@@ -372,6 +376,36 @@ def prepare(checkout: Path, started: str, due: list[Merge], credential: str | Pa
     except (git.GitError, credentials.CredentialError) as exc:
         plan.failed = (plan.steps[-1], str(exc))
     return plan
+
+
+def realign(checkout: Path, credential: str | Path | None, machine: str) -> dict[str, Any] | None:
+    """A checkout diverged from its branch's tip (a commit made on the live
+    checkout stops every update, the Captain's 2026-11-21 to 11-24) put back
+    on that tip, its own commits kept: the branch `<machine>-local-<sha>` at
+    the head, pushed to the checkout's push URL, then `reset --keep` onto
+    the fetched tip, leaving untracked files alone. None when the head is
+    the tip, behind it or past it: nothing has diverged. Raises `GitError`
+    or `CredentialError`, the checkout unmoved, when the push fails."""
+    url, _, sha = tip(checkout, credential)
+    head = git.head(checkout)
+    if (
+        head is None
+        or head == sha
+        or git.is_ancestor(checkout, head, sha)
+        or git.is_ancestor(checkout, sha, head)
+    ):
+        return None
+    name = f"{re.sub(r'[^a-z0-9]+', '-', machine.lower()).strip('-')}-local-{head[:9]}"
+    if git.run(checkout, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}").returncode != 0:
+        git.out(checkout, "branch", name, head)
+    if credential is None or targets.local(url):
+        git.push(checkout, url, head, name)
+    else:
+        with credentials.header_file(credential, url) as header:
+            git.push(checkout, url, head, name, credential=header)
+    commits = int(git.out(checkout, "rev-list", "--count", f"{sha}..{head}"))
+    git.out(checkout, "reset", "--keep", sha)
+    return {"branch": name, "sha": head, "commits": commits, "onto": sha}
 
 
 def runs_at(checkout: Path, sha: str) -> str:

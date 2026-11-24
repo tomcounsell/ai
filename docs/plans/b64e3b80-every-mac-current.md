@@ -1,7 +1,8 @@
-# Every Mac current, its dropped messages handed on, and a failing update reported
+# Every Mac current, its dropped messages handed on, and a failing update self-healed
 
 Task b64e3b80c04f, the follow-up to 20b3b69a569c. Operations on the four
-Macs plus three small changes in this repo. The repository is public: no
+Macs plus three changes in this repo: the kept sheet fix, the Repos
+route, and a failing update self-healed by the watch. The repository is public: no
 client, person or chat id goes in a commit; ops scripts stay in the task's
 `ops/`, outside the repo.
 
@@ -53,30 +54,35 @@ client, person or chat id goes in a commit; ops scripts stay in the task's
    listing none gets a line naming its own project and `valor`; a project
    listing others gets them and `valor`; the valor project's own sessions
    get no added line; a spec that does not load still gives None.
-3. **A failing update, reported by the watch the way low disk is**
-   (Brief item 4; the incident: 2,775 failed rollouts on the Captain
-   2026-11-21 to 11-24, heard by no session). `health.report` gains
-   `update`: None, or `{since, step, reason}`. It comes from the
-   ledger's open `rollout.failed` rows, those whose `effect_id` has no
-   `rollout.ended`: `since` is the oldest one's `at`, step and reason the
-   newest. The `owed` ended rows close a failure once the running commit
-   contains it, so a Mac that later updates reports nothing.
-   `routines/watch/runner.py`: `_disk` becomes one daily report per Mac
-   covering disk and update. The update report goes through
-   `notices.request(..., about_key=f"update:{host}:{day}")`, for each read
-   target and for this Mac (read on `ctx.conn`). It is not part of
-   `healthy` and holds nothing. Tests (`tests/test_health.py`, beside the
-   disk test):
-   - a target whose health has `update` is reported once that day, again
-     the next day, and not after it clears;
-   - this Mac's own open failure is reported;
-   - `report()` gives None with no rows and with a failure later ended
-     (done, up_to_date or superseded); it gives the oldest open `since`
-     across two failing effects, and an update request's fetch failure
-     (no sha) counts.
-   Docs: `docs/routines.md` watch paragraph, the watch docstring.
-   A Mac still on code before this change cannot report it. That is why
-   step 4 brings every Mac current first.
+3. **A failing update, repaired by the watch** (Brief item 4, revised by
+   Tom, 2026-11-24 09:20 UTC: "don't report to me. self-heal"; the
+   incident: 2,775 failed rollouts on the Captain, 2026-11-21 to 11-24,
+   that no session heard). `health.report` gains `update` (the open
+   `rollout.failed` rows, those with no `rollout.ended`: the oldest one's
+   `since`, the newest one's step and reason) and `kept` (the
+   `rollout.realigned` rows). `rollout.realign` / `python -m core
+   realign` handles a diverged checkout: it keeps the head on
+   `<machine>-local-<sha>`, pushes that branch to origin, runs `reset
+   --keep` onto the fetched tip, and requests an update. The watch reports
+   no failing update. For each read target (only a peer repairs: every Mac is another's
+   target, so a failure is seen once), it starts
+   a `valor` task while it still fails, one task at a time, at most one a day per Mac (a repair that ended with the failure still open is tried again the next day), as the routine's
+   own work. That task finds the cause, runs realign where the checkout
+   has diverged, and confirms the next update. Its end is a quiet result,
+   and only a question for what only Tom holds reaches the operator chat.
+   Each kept branch gets one task to land it or drop it. The low-disk
+   report is unchanged. Tests:
+   - one repair, not a report, for a target, none for this Mac's own, none
+     more while it is open;
+   - a repair that ended with the failure still open is followed by another
+     the next day, at most one a day, and none once it clears;
+   - one land-or-drop task per kept branch;
+   - realign leaves a diverged checkout on the tip, with its commit on a
+     branch both locally and on origin and untracked files kept; it does
+     nothing to a checkout that is behind or current;
+   - a repair's end is quiet, and only its question reaches the operator
+     session;
+   - `update` and `kept` are empty while the database probe fails.
 
 ## Operations (through Valor.app's `valor-run`, a one-off gui job, as 20b3b69a569c did)
 
@@ -104,12 +110,13 @@ client, person or chat id goes in a commit; ops scripts stay in the task's
 
 ## Out of scope
 
-No auto-repair of a diverged checkout, no sandbox rule on `~/src/ai`, no
-new alert channel. The slow Yudame gap-fill budget (20b3b69a569c's
+No sandbox rule on `~/src/ai`, no new alert channel, no report of a
+failing update. The slow Yudame gap-fill budget (20b3b69a569c's
 product note) is named, not fixed.
 
 ## Stakes
 
-Kernel-adjacent and reversible: one Brief line, one health field, one
-watch report, and a skill fix whose error would scramble a product
+Kernel-adjacent and reversible: one Brief line, two health fields, a
+repair task the watch starts, `python -m core realign` (it moves a live
+checkout, its commits kept on a pushed branch), and a skill fix whose error would scramble a product
 Sheet's Queue. The Sheet can be restored from its version history.

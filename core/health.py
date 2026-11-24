@@ -45,8 +45,9 @@ passes inside it) is acted on, checked at most every `TAILNET_EVERY_S`.
 `services` lists this Mac's launchd services (a loaded `com.valor.*` job
 whose plist keeps it alive) with each one's pid, None when it is not
 running; `report` is `python -m core health`'s JSON: the probe, the
-services, free disk, and an update failing now (`failing_update`), which
-the peer's `watch` reports once a day.
+services, free disk, an update failing now (`failing_update`) and the
+branches `python -m core realign` kept local commits on (`kept`), from
+which the peer's `watch` starts a repair and a task to land or drop each.
 """
 
 import asyncio
@@ -334,12 +335,23 @@ async def failing_update(conn) -> dict[str, Any] | None:
     return {"since": since.astimezone(UTC).isoformat(timespec="seconds"), "step": step, "reason": reason}
 
 
+async def kept(conn) -> list[dict[str, Any]]:
+    """The branches `python -m core realign` kept this Mac's own commits on
+    (`rollout.realigned`), oldest first, each `{branch, sha}`."""
+    rows = await (
+        await conn.execute(
+            "SELECT payload->>'branch', payload->>'sha' FROM events WHERE type = 'rollout.realigned' ORDER BY id"
+        )
+    ).fetchall()
+    return [{"branch": b, "sha": sha} for b, sha in rows]
+
+
 async def report(dsn: str | None = None, *, fix: bool = False, agents: Path = AGENTS) -> dict[str, Any]:
     """`python -m core health [--fix]`: the probe, the services, Tailscale,
     free disk. `--fix` restarts a curably failing server, starts each
     service with no pid, and reopens a down Tailscale; it touches no
     running process. Tailscale is not part of `healthy`, nor is `update`
-    (`failing_update`, None while the database fails its probe)."""
+    (`failing_update`; it and `kept` are empty while the database fails its probe)."""
     failed = await probe(dsn)
     running = await asyncio.to_thread(services, agents)
     tailnet = await asyncio.to_thread(tailscale)
@@ -351,10 +363,11 @@ async def report(dsn: str | None = None, *, fix: bool = False, agents: Path = AG
         "tailscale": tailnet,
         "free_gb": round(shutil.disk_usage(Path.home()).free / 1e9, 1),
         "update": None,
+        "kept": [],
     }
     if failed is None:
         async with await db.connect(dsn) as conn:
-            out["update"] = await failing_update(conn)
+            out["update"], out["kept"] = await failing_update(conn), await kept(conn)
     if fix:
         fixed: dict[str, Any] = {}
         if out["curable"]:

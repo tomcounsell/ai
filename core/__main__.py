@@ -39,6 +39,9 @@ health [--fix]                 this Mac's database probe, services and free disk
                                as JSON, in the kernel job's environment; --fix
                                restarts a curably failing database and starts
                                each service that is not running (core/health.py)
+realign                        put this Mac's diverged checkout back on its branch's
+                               tip, its own commits kept on a branch pushed to
+                               origin, then request an update (rollout.realign)
 meet-sign-in                   sign this Mac's call profile in to Google, at the
                                Mac: its Chrome closes itself once signed in
 start INSTRUCTION [--ceiling C] [--workspace DIR] [--parent ID]
@@ -1197,6 +1200,26 @@ def _kernel_env() -> None:
         os.execve(sys.executable, [sys.executable, "-m", "core", *sys.argv[1:]], {**os.environ, **env})
 
 
+def _realign() -> None:
+    """`python -m core realign`, run by the watch's repair task on a Mac
+    whose update fails on a diverged checkout: `rollout.realign` on the
+    kernel's checkout; what it kept is a `rollout.realigned` row, which the
+    watch reads in this Mac's health and gives a task to land or drop; then
+    an update is requested. Prints what it did as JSON."""
+    from core import rollout, serve
+
+    _kernel_env()
+    kept = rollout.realign(serve.ROOT, settings.github_keyfile, settings.machine)
+
+    async def go() -> str:
+        async with await db.connect() as conn:
+            if kept is not None:
+                await ledger.append(conn, intake.UPDATES, "rollout.realigned", kept)
+            return await intake.request_update(conn, by="valor", via="python -m core realign")
+
+    print(json.dumps({"kept": kept, "update": asyncio.run(go())}))
+
+
 def _health(fix: bool) -> None:
     """`python -m core health [--fix]` (`core/health.py`), in the kernel job's environment."""
     from core import health
@@ -1275,6 +1298,8 @@ def _sync(args) -> bool:
         _health(args.fix)
     elif args.command == "receive":
         _receive(args.lookup)
+    elif args.command == "realign":
+        _realign()
     elif args.command == "backup":
         if args.plist:
             print(backup.plist().decode(), end="")
@@ -1467,6 +1492,7 @@ def main() -> None:
     sub.add_parser("serve").add_argument("--plist", action="store_true")
     sub.add_parser("health").add_argument("--fix", action="store_true")
     sub.add_parser("receive").add_argument("--lookup", action="store_true")
+    sub.add_parser("realign")
     sub.add_parser("permissions").add_argument("--probe", action="store_true")
     update = sub.add_parser("update")
     update.add_argument("--wait", action="store_true", help="wait for it to end or fail")
