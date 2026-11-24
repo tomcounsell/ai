@@ -35,11 +35,16 @@ class EmailBridge:
     channel = "email"
     limits = bridge.LIMITS["email"]
 
-    def __init__(self, cfg: Config | None = None, dsn: str | None = None):
+    def __init__(self, cfg: Config | None = None, dsn: str | None = None, *, others=None):
         """`dsn` is the database the watch records into: the one `serve`
-        is given, the kernel's when both are None."""
+        is given, the kernel's when both are None. `others` gives the other
+        mailboxes, read at each use, so a spec naming `google` after the
+        bridge started is picked up (`_others` by default; none with a
+        `cfg` given, unless named)."""
         self.cfg = cfg or Config.from_settings()
-        self.cfgs = {self.cfg.address: self.cfg, **({} if cfg else _others())}
+        self._others = others or (_others if cfg is None else dict)
+        self._watched: set[str] = set()
+        self._watching: asyncio.TaskGroup | None = None
         self.dsn = dsn
         self._retries: list[asyncio.Event] = []  # each watch's
         self._wakes: set[asyncio.Future] = set()
@@ -79,18 +84,30 @@ class EmailBridge:
             key, lambda: in_thread(smtp.lookup, cfg, action, key, since), check=False
         )
 
+    def mailboxes(self) -> dict[str, Config]:
+        """Own and each other mailbox on this Mac now, by address."""
+        return {self.cfg.address: self.cfg, **self._others()}
+
     def _from(self, action: broker.Action) -> Config | None:
         """The mailbox the send leaves from: its `from`, else own."""
-        return self.cfgs.get(str(action.payload.get("from") or self.cfg.address).lower())
+        return self.mailboxes().get(str(action.payload.get("from") or self.cfg.address).lower())
 
     def performers(self):
         return {"email.send": (self.perform, self.lookup)}
 
     async def watches(self) -> None:
-        """One watch per mailbox (`watch`), side by side."""
+        """One watch per mailbox (`watch`), side by side; a mailbox that
+        appears later gets its own on the next tick (`_watch_new`)."""
         async with asyncio.TaskGroup() as tg:
-            for cfg in self.cfgs.values():
-                tg.create_task(self.watch(cfg))
+            self._watching = tg
+            self._watch_new()
+
+    def _watch_new(self) -> None:
+        """A watch for each mailbox not watched yet."""
+        for address, cfg in self.mailboxes().items():
+            if address not in self._watched:
+                self._watched.add(address)
+                self._watching.create_task(self.watch(cfg))
 
     async def watch(self, cfg: Config) -> None:
         """The IMAP watch (`imap.watch`) of one mailbox on its own database
@@ -269,7 +286,10 @@ class EmailBridge:
         )
 
     async def tick(self) -> None:
-        """Each outbox wake: a watch that failed reconnects."""
+        """Each outbox wake: a watch that failed reconnects, and a new
+        mailbox gets its watch."""
+        if self._watching is not None:
+            self._watch_new()
         for retry in self._retries:
             retry.set()
         for wake in self._wakes:
@@ -295,6 +315,9 @@ async def serve(email: EmailBridge, dsn: str | None = None) -> None:
     await bridge.serve(email, dsn)
 
 
+_UNKEYED: set[str] = set()
+
+
 def _others() -> dict[str, Config]:
     """The mailbox of each other Google account of Valor's on this Mac
     whose keys `mail-keys` holds; one without them is left out, logged."""
@@ -305,5 +328,7 @@ def _others() -> dict[str, Config]:
         try:
             found[who.email] = Config.for_account(who.email)
         except credentials.CredentialError as exc:
-            log.warning("no mailbox for %s: %s", who.email, exc)
+            if who.email not in _UNKEYED:  # once, not on every tick
+                _UNKEYED.add(who.email)
+                log.warning("no mailbox for %s: %s", who.email, exc)
     return found

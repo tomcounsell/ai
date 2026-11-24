@@ -151,8 +151,7 @@ def mailbox(address: str) -> Config:
 
 
 def test_a_send_leaves_from_the_mailbox_it_names_and_one_not_here_fails(projects):
-    bridge = EmailBridge(mailbox(OWN))
-    bridge.cfgs[CLIENT] = mailbox(CLIENT)
+    bridge = EmailBridge(mailbox(OWN), others=lambda: {CLIENT: mailbox(CLIENT)})
 
     def action(**payload):
         return broker.Action("email.send", "a@b.test", {"to": ["a@b.test"], **payload})
@@ -166,8 +165,7 @@ def test_a_send_leaves_from_the_mailbox_it_names_and_one_not_here_fails(projects
 
 
 def test_each_mailbox_has_its_own_watch_and_a_tick_wakes_each(projects, monkeypatch):
-    bridge = EmailBridge(mailbox(OWN), dsn="unused")
-    bridge.cfgs[CLIENT] = mailbox(CLIENT)
+    bridge = EmailBridge(mailbox(OWN), dsn="unused", others=lambda: {CLIENT: mailbox(CLIENT)})
     watched = {}
 
     async def watch(cfg, db_, retry, connect, changed):
@@ -196,7 +194,53 @@ def test_each_mailbox_has_its_own_watch_and_a_tick_wakes_each(projects, monkeypa
 def test_without_another_accounts_keys_only_own_is_watched(projects, tmp_path, monkeypatch):
     with bridges.configure(pg_passfile=str(tmp_path / "pgpass")):
         monkeypatch.setattr(Config, "from_settings", classmethod(lambda cls: mailbox(OWN)))
-        assert set(EmailBridge().cfgs) == {OWN}
+        assert set(EmailBridge().mailboxes()) == {OWN}
+
+
+def test_a_bridge_started_before_the_spec_names_the_account_sends_and_watches_once_it_does(
+    projects, tmp_path, monkeypatch
+):
+    """The bridge reads its mailboxes at each use: one started before the
+    spec named `google` sends from that mailbox, and its next tick watches it."""
+    for name in ("client", "client-be", "broken"):
+        spec = projects / f"{name}.toml"
+        spec.write_text("".join(l for l in spec.read_text().splitlines(True) if not l.startswith("google")))
+    (tmp_path / "mail-keys").write_text("".join(f"{n}.{CLIENT}={v}\n" for n, v in (
+        ("IMAP_USER", CLIENT), ("SMTP_USER", CLIENT), ("IMAP_PASSWORD", "p1"), ("SMTP_PASSWORD", "p2"),
+        ("EMAIL_SINCE", "2026-11-24"))))  # fmt: skip
+    watched = []
+
+    async def watch(cfg, db_, retry, connect, changed):
+        watched.append(cfg.address)
+        await asyncio.Event().wait()
+
+    async def network_changes(changed):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(imap, "watch", watch)
+    monkeypatch.setattr(imap, "network_changes", network_changes)
+    monkeypatch.setattr(Config, "from_settings", classmethod(lambda cls: mailbox(OWN)))
+    sending = broker.Action("email.send", "a@b.test", {"to": ["a@b.test"], "from": CLIENT})
+
+    async def go():
+        bridge = EmailBridge(dsn="unused")
+        task = asyncio.create_task(bridge.watches())
+        await asyncio.sleep(0.05)
+        assert watched == [OWN] and bridge._from(sending) is None
+        spec = projects / "client.toml"
+        spec.write_text(spec.read_text() + f'google = "{CLIENT}"\n')
+        assert bridge._from(sending).address == CLIENT
+        await bridge.tick()
+        await asyncio.sleep(0.05)
+        assert watched == [OWN, CLIENT]
+        await bridge.tick()  # once each
+        await asyncio.sleep(0.05)
+        assert watched == [OWN, CLIENT]
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    with bridges.configure(pg_passfile=str(tmp_path / "pgpass")):
+        run(go())
 
 
 def test_the_turn_env_names_the_projects_gws_folder_and_nothing_for_own(projects):

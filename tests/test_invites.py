@@ -379,3 +379,21 @@ def test_copies_in_different_time_zones_are_one_event_joined_as_the_projects_acc
     fire(fresh, own, START - timedelta(minutes=8))
     (w,) = wakes(fresh)
     assert f"Join as: {CLIENT}" in w["text"]
+
+
+def test_with_no_calendar_read_the_run_fails_as_before(setup, fresh):
+    """An own-only Mac whose list fails fails the run, as before two accounts;
+    so does a Mac where every account's list fails."""
+    own = setup
+    own.put("acme1", organizer="jo@acme.com")
+    own.fails()
+    with pytest.raises(invites.Failed, match="invalid_grant"):
+        fire(fresh, own, START - timedelta(minutes=8))
+    client = with_account(own)
+    client.fails()
+    with pytest.raises(invites.Failed):
+        fire(fresh, own, START - timedelta(minutes=8))
+    # Own alone failing, with the client's read: the run goes on.
+    client.fails(False)
+    fire(fresh, own, START - timedelta(minutes=8))
+    assert wakes(fresh) == []

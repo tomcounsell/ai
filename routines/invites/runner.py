@@ -163,6 +163,7 @@ def runner(
         own = accounts[0]
         # Every calendar first, so one event on two is handled once, as it should join.
         copies: dict[tuple[str, str], list[tuple[Account, dict[str, Any]]]] = {}
+        failed: list[Failed] = []
         for who in accounts:
             try:
                 listed = await _gws(gws_, who, "list", {
@@ -171,6 +172,7 @@ def runner(
                     "singleEvents": True, "orderBy": "startTime", "maxResults": 2500,
                 })  # fmt: skip
             except Failed as exc:
+                failed.append(exc)
                 await ledger.append(
                     ctx.conn, ctx.objective, "calendar.unlisted", {"account": who.email, "why": str(exc)}
                 )
@@ -180,6 +182,8 @@ def runner(
                     # Each calendar gives the start in its own zone: grouped by the instant.
                     at = datetime.fromisoformat(e["start"]["dateTime"]).astimezone(UTC).isoformat()
                     copies.setdefault((e["iCalUID"], at), []).append((who, e))
+        if len(failed) == len(accounts):  # no calendar read: the run fails, as with one account
+            raise failed[0]
         accepted = woke = 0
         for (uid, _), found in copies.items():
             name, why = match(found[0][1], specs)
