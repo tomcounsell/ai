@@ -717,6 +717,9 @@ def tailscale_app(tmp_path, monkeypatch):
         mac.calls.append([Path(argv[0]).name, *argv[1:]])
         if argv[0] == health.PGREP:
             return subprocess.CompletedProcess(argv, 0 if mac.running else 1)
+        if argv[0] != health.OPEN and not (kw.get("env") or {}).get("TERM"):
+            # The real app's binary is its CLI only with TERM set (launchd sets none).
+            return subprocess.CompletedProcess(argv, 1, "", "The Tailscale GUI failed to start")
         if argv[1:] == ["status", "--json"]:
             if mac.hangs:
                 raise subprocess.TimeoutExpired(argv, kw["timeout"])
@@ -747,6 +750,11 @@ def test_the_tailscale_state_is_none_when_not_installed_else_the_apps_own(
     assert health.tailscale() == "not running"
     monkeypatch.setattr(health, "TAILSCALE_APP", tmp_path / "nowhere.app")
     assert health.tailscale() is None and acts(tailscale_app) == []
+
+
+def test_the_tailscale_cli_is_read_without_a_term_as_under_launchd(tailscale_app, monkeypatch):
+    monkeypatch.delenv("TERM", raising=False)
+    assert health.tailscale() == "Running"
 
 
 def test_a_quit_tailscale_is_reopened_after_a_minute_then_brought_up_and_each_action_is_spaced(

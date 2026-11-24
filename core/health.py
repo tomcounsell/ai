@@ -30,7 +30,9 @@ over ssh.
 
 `tailscale` is this Mac's Tailscale.app: None when it is not installed,
 `not running`, or the app's own `BackendState` (`unreadable` when its CLI
-does not answer). Tailscale is Valor's only route to the other Macs; on
+does not answer). Its binary is its CLI only with `TERM` set; without one,
+as under launchd, it tries to start a second app and fails, so its calls get
+`TERM`. Tailscale is Valor's only route to the other Macs; on
 2026-10-28 the Captain fell off the tailnet and nobody was at it.
 `reopen_tailscale` opens the app, or runs its `up` when it is `Stopped`;
 it leaves `NeedsLogin` and `NeedsMachineAuth` to a person. Each action is
@@ -75,6 +77,11 @@ TAILNET_EVERY_S = 30.0
 NEEDS_PERSON = ("NeedsLogin", "NeedsMachineAuth")
 PGREP = "/usr/bin/pgrep"
 OPEN = "/usr/bin/open"
+
+
+def _cli_env() -> dict[str, str]:
+    """The environment with the `TERM` Tailscale's CLI needs (module docstring)."""
+    return {**os.environ, "TERM": os.environ.get("TERM") or "dumb"}
 
 
 async def probe(dsn: str | None = None) -> Exception | None:
@@ -224,7 +231,7 @@ def tailscale() -> str | None:
     try:
         status = subprocess.run(
             [str(TAILSCALE_APP / "Contents/MacOS/Tailscale"), "status", "--json"],
-            capture_output=True, text=True, timeout=TAILSCALE_STATUS_TIMEOUT_S, check=False,
+            capture_output=True, text=True, timeout=TAILSCALE_STATUS_TIMEOUT_S, check=False, env=_cli_env(),
         )  # fmt: skip
         return str(json.loads(status.stdout)["BackendState"])
     except OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError:
@@ -246,7 +253,9 @@ def reopen_tailscale(state: str, stamps: Path | None = None) -> str:
         if not due:
             return "spaced"
         try:
-            done = subprocess.run(argv, capture_output=True, text=True, timeout=START_TIMEOUT_S, check=False)
+            done = subprocess.run(
+                argv, capture_output=True, text=True, timeout=START_TIMEOUT_S, check=False, env=_cli_env()
+            )
         except subprocess.TimeoutExpired:
             return f"{action} timed out"
         if done.returncode != 0:
