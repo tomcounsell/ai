@@ -2240,7 +2240,7 @@ def test_toms_dm_as_operator_chat_has_a_session_only_on_the_mac_its_spec_is_plac
 def test_in_a_slack_dev_channel_every_message_wakes_the_session_and_tom_is_tom(dsn, tmp_path):
     """As in an Eng group: anyone's message steers the one session, naming
     its sender; Tom, by his Slack id, is `tom`."""
-    dev, tom = "T0ABC/C0DEV", "T0ABC/U0TOM"
+    dev, tom = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}", "T0ABC/U0TOM"
     with bridges.operator(tmp_path, operator_slack_ids=(tom,)):
         (pathlib.Path(settings.projects_dir) / "flowers.toml").write_text(
             'name = "flowers"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\n'

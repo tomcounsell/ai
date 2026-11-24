@@ -2690,10 +2690,24 @@ def test_every_call_is_joined_as_the_projects_manager():
 def restart(dsn, monkeypatch):
     """What a restart of the server does to a call: every session dropped
     (`terminate_all`), and connections refused while `down` is set. The
-    test's own connections go through `real`."""
+    test's own connections go through `real`. `heard` is set once the call's
+    orders lane reads its listener, past the row it starts after: a drop
+    before then is no restart under a call but one before it listens."""
     from tests.test_health import terminate_all
 
-    real, down = db.connect, asyncio.Event()
+    real, down, heard = db.connect, asyncio.Event(), asyncio.Event()
+    listen = db.listen
+
+    async def listening(*a, **kw):
+        conn = await listen(*a, **kw)
+        notifies = conn.notifies
+
+        def told(*a, **kw):
+            heard.set()
+            return notifies(*a, **kw)
+
+        conn.notifies = told
+        return conn
 
     async def refusing(*a, **kw):
         if down.is_set():
@@ -2701,18 +2715,21 @@ def restart(dsn, monkeypatch):
         return await real(*a, **kw)
 
     monkeypatch.setattr(db, "connect", refusing)
+    monkeypatch.setattr(db, "listen", listening)
     monkeypatch.setattr(db, "RELISTEN_S", 0.05)
 
     def drop():
         down.set()
         terminate_all(dsn)
 
-    return SimpleNamespace(real=real, down=down, drop=drop)
+    return SimpleNamespace(real=real, down=down, drop=drop, heard=heard)
 
 
-async def held_call(dsn, team):
-    """A call under way as `python -m core call` runs one: started, its locks held."""
+async def held_call(dsn, team, restart):
+    """A call under way as `python -m core call` runs one: started, its locks
+    held, its orders lane listening."""
     c = await in_call(dsn, team)
+    await asyncio.wait_for(restart.heard.wait(), 5)
     async with await db.connect(dsn) as conn:
         await ledger.append(conn, c.the.id, "call.started", {"machine": settings.machine})
     c.the.held = db.Held(dsn, [f"meet:call:{c.the.id}", f"run:{c.the.id}"])
@@ -2728,7 +2745,7 @@ def test_a_call_stays_through_its_database_restarting_holds_its_locks_again_and_
     finding its lock free, ended it as "Valor's call process stopped"."""
 
     async def go():
-        c = await held_call(dsn, team)
+        c = await held_call(dsn, team, restart)
         restart.drop()
         async with await restart.real(dsn) as conn:
             await ledger.append(conn, c.the.id, "message.steered", {"text": "Back in a minute."})
@@ -2742,10 +2759,11 @@ def test_a_call_stays_through_its_database_restarting_holds_its_locks_again_and_
             await tasks.stop(conn, c.the.id, reason="enough", by="tom", via="chat")
         reason = await asyncio.wait_for(c.running, 10)
         await c.the.held.close()
-        return posted, lock[0], swept, still, reason, await bridges.rows(dsn, c.the.id)
+        return c.the.id, posted, lock[0], swept, still, reason, await bridges.rows(dsn, c.the.id)
 
-    posted, free, swept, still, reason, rows = run(go())
-    assert posted and not free and swept == [] and still
+    c_id, posted, free, swept, still, reason, rows = run(go())
+    # Other tests' calls share the database: only this one is looked at.
+    assert posted and not free and c_id not in swept and still
     assert reason == "the call was stopped"
     (ended,) = [r["payload"] for r in rows if r["type"] == "call.ended"]
     assert ended["reason"] == "the call was stopped"
@@ -2755,20 +2773,22 @@ def test_a_call_the_sweep_ended_while_its_database_was_down_leaves_and_is_ended_
     dsn, team, quick, restart
 ):
     async def go():
-        c = await held_call(dsn, team)
+        c = await held_call(dsn, team, restart)
         restart.drop()
         async with await restart.real(dsn) as conn:
-            for _ in range(50):  # its lock is free once the session holding it has exited
-                if swept := await call.sweep(conn):
+            # Its lock is free once the session holding it has exited; other
+            # tests' calls share the database, so only this one is looked for.
+            for _ in range(50):
+                if swept := c.the.id in await call.sweep(conn):
                     break
                 await asyncio.sleep(0.05)
         restart.down.clear()
         reason = await asyncio.wait_for(c.running, 15)
         await c.the.held.close()
-        return c, swept, reason, await bridges.rows(dsn, c.the.id)
+        return swept, reason, await bridges.rows(dsn, c.the.id)
 
-    c, swept, reason, rows = run(go())
-    assert swept == [c.the.id] and reason == "the call was ended while the database was down"
+    swept, reason, rows = run(go())
+    assert swept and reason == "the call was ended while the database was down"
     assert [r["payload"]["reason"] for r in rows if r["type"] == "call.ended"] == [
         "Valor's call process stopped"
     ]

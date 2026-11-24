@@ -26,10 +26,13 @@ pytestmark = pytest.mark.spend(usd=0)
 COWBOY, PIRATE, CAPTAIN, BALD = "Valor the Cowboy", "Valor the Pirate", "Valor the Captain", "Valor the Bald"
 TOM_TG, TOM_SLACK, TOM_EMAIL = "4242", "T0ABC/UTOM", "tom@example.com"
 DM = f"telegram:{TOM_TG}"
-DEV = "slack:T0ABC/C0DEV"  # the app's dev room, on the Pirate, waiting to be mentioned
-CLIENT = "slack:T0ABC/C0CLIENT"  # a client's room, on the Captain
-OURS = "slack:T0ABC/C0OURS"  # another of valor's rooms, on the Cowboy
-FAR = "slack:T0ABC/C0FAR"  # on the Bald, which no Mac here reaches
+# The rooms are this run's own: a chat's one session outlives the test
+# that started it, so a room another module also names would bind there.
+TAG = uuid.uuid4().hex[:6].upper()
+DEV = f"slack:T0ABC/C0DEV{TAG}"  # the app's dev room, on the Pirate, waiting to be mentioned
+CLIENT = f"slack:T0ABC/C0CLIENT{TAG}"  # a client's room, on the Captain
+OURS = f"slack:T0ABC/C0OURS{TAG}"  # another of valor's rooms, on the Cowboy
+FAR = f"slack:T0ABC/C0FAR{TAG}"  # on the Bald, which no Mac here reaches
 BASE = 'repo = "unused"\nkind = "plain"\nsuite = "true"\n'
 # Case 3's words as Tom wrote them (2026-11-23), typo and all.
 TURN_OFF = (
@@ -158,13 +161,14 @@ def steered(rows, received_id) -> dict:
     return r["payload"]
 
 
-async def reacted_or_sent(dsn, received_id) -> list[str]:
+async def reacted_or_sent(dsn, received_id, sessions) -> list[str]:
+    """A reaction to the record, or any effect held or released in `sessions`."""
     async with await db.connect(dsn) as conn:
         rows = await (
             await conn.execute(
                 "SELECT type FROM events WHERE (type LIKE 'reaction.%%' AND payload->>'received_id' = %s) "
-                "OR type IN ('effect.held', 'release.requested')",
-                (received_id,),
+                "OR (type IN ('effect.held', 'release.requested') AND task_id = ANY(%s))",
+                (received_id, list(sessions)),
             )
         ).fetchall()
     return [r[0] for r in rows]
@@ -191,7 +195,7 @@ def test_case_3_toms_words_reach_the_dev_rooms_session_on_the_pirate_as_he_wrote
         COWBOY,
     )
     assert steered(rows, received["received_id"])["provenance"]["by"] == "tom"
-    assert asyncio.run(reacted_or_sent(dsn, received["received_id"])) == []
+    assert asyncio.run(reacted_or_sent(dsn, received["received_id"], (dm_session, b["task_id"]))) == []
     line = intake.chat_line(steered(rows, received["received_id"]))
     assert f"handed on from {DM}" in line and "not said in this chat" in line and TURN_OFF in line
     assert "Valor's note on handing it on: Tom asked me to pass this to you" in line
@@ -298,8 +302,8 @@ def test_what_names_the_other_room_is_left_out_and_its_files_stay_on_the_mac(dsn
 
     async def paging():
         async with await db.connect(dsn) as conn:
-            return await intake.highest(conn, "slack", "T0ABC/C0DEV"), await intake.lowest_ts(
-                conn, "slack", "T0ABC/C0DEV"
+            return await intake.highest(conn, "slack", DEV.partition(":")[2]), await intake.lowest_ts(
+                conn, "slack", DEV.partition(":")[2]
             )
 
     assert not [
@@ -344,7 +348,8 @@ def test_a_mac_with_no_route_fails_plainly_and_nothing_is_recorded(dsn, macs, pe
             return await (
                 await conn.execute(
                     "SELECT 1 FROM events WHERE type = 'message.received' AND payload ? 'handed_on' "
-                    "AND payload->>'chat_id' = 'T0ABC/C0FAR'"
+                    "AND payload->>'chat_id' = %s",
+                    (FAR.partition(":")[2],),
                 )
             ).fetchall()
 

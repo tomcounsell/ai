@@ -320,10 +320,12 @@ async def holding(dsn, name: str, channel: str | None = None, wait: bool = True)
     return conn
 
 
-def test_a_rollouts_end_restarts_the_stale_bridges_holding_their_locks(fresh, tmp_path):
+def test_a_rollouts_end_restarts_the_stale_bridges_holding_their_locks(fresh, tmp_path, monkeypatch):
     """A stale holder is kicked before `rollout.ended`, which names it; a
     current holder, a stale waiter, other connections, and another
     database's bridge are not. (`NO_HEAD`: `test_which_live_bridges_are_stale`.)"""
+    # The kick restarts nothing, so no bridge connects again: not waited for.
+    monkeypatch.setattr(serve, "BRIDGE_WAIT_S", 0.0)
     co, base = layout(tmp_path)
     commit(co, "core/channels.py", "C = 2\n", "channels")  # reaches telegram
     running = commit(co, "core/bridge.py", "X = 1\n", "bridge")  # reaches slack, local

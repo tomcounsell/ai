@@ -8,6 +8,7 @@ Made-up teams and people."""
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 from bridges.slack import inbound
 from bridges.slack.wire import RateLimited
@@ -90,22 +91,25 @@ def test_a_dm_session_reads_a_post_another_session_sent_and_not_its_own_reply_ag
     other = {"id": "1793700000.000120", "sent_at": "2026-11-03T09:31:00Z", "text": "the report, new layout",
              "files": ["report.pdf"]}  # fmt: skip
     own = {"id": "1793700000.000110", "sent_at": "2026-11-03T09:30:30Z", "text": "hello Kim", "files": []}
+    # Kim's DM of this test's own: a chat's session and its messages outlive
+    # the test that received them, and `test_workspace_dms` uses `kim`.
+    kim = f"{TA}/U{uuid.uuid4().hex[:8].upper()}"
     with on("Pirate", root, tmp_path):
 
         async def go():
-            first = await dm(dsn, KIM_A, "hi there", "1793700000.000100")
+            first = await dm(dsn, kim, "hi there", "1793700000.000100")
             task = first["task_id"]
             async with await db.connect(dsn) as conn:
-                sent = [{"channel": "slack", "chat_id": KIM_A, "thread_ts": None, "message_id": own["id"]}]
+                sent = [{"channel": "slack", "chat_id": kim, "thread_ts": None, "message_id": own["id"]}]
                 await ledger.append(conn, task, "effect.outcome",
                                     {"effect_id": "e1", "idempotency_key": "k", "kind": "done",
                                      "result": {"sent": sent}, "error": None})  # fmt: skip
-            second = await dm(dsn, KIM_A, "what is this?", "1793700000.000200", posted=[own, other])
+            second = await dm(dsn, kim, "what is this?", "1793700000.000200", posted=[own, other])
             async with await db.connect(dsn) as conn:
                 rows = await ledger.read(conn, task)
             # A session that opens after both posts reads them in its history.
             async with await db.connect(dsn) as conn:
-                start = await intake._chat_start(conn, "slack", KIM_A, intake.workspace.Spec.load("yu"),
+                start = await intake._chat_start(conn, "slack", kim, intake.workspace.Spec.load("yu"),
                                                  False, None)  # fmt: skip
             return second, task, session.chat_prompt(rows), start
 
