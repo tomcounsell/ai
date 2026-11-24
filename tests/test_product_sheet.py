@@ -504,3 +504,21 @@ def test_the_values_asked_about_and_stray_letters_say_nothing_about_which_item(m
 def test_a_description_nothing_fits_finds_nothing(monkeypatch, capsys):
     assert lookup(monkeypatch, capsys, "the restart that happened")[0] == []
     assert lookup(monkeypatch, capsys, "P-099")[0] == []
+
+
+def test_drive_calls_reach_shared_drives_and_sheets_calls_are_left_as_asked(monkeypatch):
+    """A client's Sheet may sit in a shared drive (docs/plans/9f4967d9-google-per-project.md)."""
+    ran = []
+
+    def fake(cmd, **kw):
+        ran.append(json.loads(cmd[cmd.index("--params") + 1]))
+        return subprocess.CompletedProcess(cmd, 0, "{}", "")
+
+    monkeypatch.setattr(sheet.subprocess, "run", fake)
+    sheet.gws("drive", "files", "get", params={"fileId": "S"})
+    sheet.gws("drive", "files", "list", params={"q": "x"})
+    sheet.gws("sheets", "spreadsheets", "get", params={"spreadsheetId": "S"})
+    get, listed, sheets_call = ran
+    assert get == {"supportsAllDrives": True, "fileId": "S"}
+    assert listed["supportsAllDrives"] is True and listed["includeItemsFromAllDrives"] is True
+    assert sheets_call == {"spreadsheetId": "S"}

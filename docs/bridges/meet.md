@@ -215,7 +215,8 @@ Chrome with ⌘Q once Meet shows (Ctrl-C gives up). It never ends Chrome
 itself: Google writes its cookies before its passkey step is done (the
 Captain, 2026-11-13). A sign-in window may be left open, however it was opened: a call
 quits a plain Chrome holding the profile before starting its own ([rollout.md](../rollout.md), step 9; the nightly update tells Tom
-once a week while it is not signed in and the item is not in 1Password).
+once a week while it is not signed in and the item is not in 1Password, per
+account: `meet-profile:<machine>[:<address>]:<week>`, own's key without the address).
 To `call.account` and that notice, signed in means
 the account in the profile's preferences and Google's session cookie in its
 cookies, which a pending "Verify it's you" leaves in place; `meet-sign-in`

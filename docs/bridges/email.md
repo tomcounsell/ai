@@ -45,7 +45,8 @@ watch starts, so mail already there is never received
 `keys` reports each of them `kept` or `missing`. Each mailbox has its own
 watch, so one failing leaves the others running. Mail to it is the
 project's, whoever sent it (`intake.mailbox_project`), but Google's notices
-of an invite or a share; a send under the project leaves from it
+of an invite or a share (`intake.GOOGLE_NOTICES`; the invites routine handles
+invites), and mail from any of Valor's own addresses is never received; a send under the project leaves from it
 (`payload.from`, set by the session from the spec whatever the turn gave),
 and a send whose mailbox is not on the Mac fails, never leaving from
 Valor's own instead.
