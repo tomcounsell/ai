@@ -170,11 +170,11 @@ async def messages(
 
 
 def _state(rows: list[dict[str, Any]], session: bool) -> str:
-    """`stopped`, `open` for a chat session (which never leaves `judge`),
-    else the task's state."""
-    if any(r["type"] == "task.stopped" for r in rows):
-        return "stopped"
-    return "open" if session else machine.fold(rows).state.value
+    """The task's state as the status page shows it (`machine.label`: a
+    routine's run is `node`, never an open `judge`), and `open` for a chat
+    session that is not stopped (it never leaves `judge`)."""
+    state = machine.label(rows)
+    return "open" if session and state != "stopped" else state
 
 
 async def task_list(

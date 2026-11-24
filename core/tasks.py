@@ -1224,17 +1224,7 @@ async def index(conn) -> list[dict[str, Any]]:
     found = []
     for task_id, instruction, parent_id, project, chat, routine, harness_name, model, created_at in ids:
         rows = await ledger.read(conn, task_id)
-        f = machine.fold(rows)
         turns, _, attention = _digest(rows)
-        state = (
-            "calibration"
-            if f.calibration
-            else "stopped"
-            if _stopped(rows)
-            else "node"
-            if f.legacy
-            else f.state.value
-        )
         found.append(
             {
                 "task_id": task_id,
@@ -1246,7 +1236,7 @@ async def index(conn) -> list[dict[str, Any]]:
                 "harness_name": harness_name,
                 "model": model,
                 "created_at": created_at,
-                "state": state,
+                "state": machine.label(rows),
                 "spent_usd_micros": spending(rows)["spent_usd_micros"],
                 "attention_counts": _counts(attention),
                 "open_questions": [
@@ -1259,10 +1249,6 @@ async def index(conn) -> list[dict[str, Any]]:
             }
         )
     return sorted(found, key=lambda t: t["last_at"] or datetime.min.replace(tzinfo=UTC), reverse=True)
-
-
-def _stopped(rows: list[dict[str, Any]]) -> bool:
-    return any(r["type"] == "task.stopped" for r in rows)
 
 
 async def attention_log(conn) -> list[dict[str, Any]]:

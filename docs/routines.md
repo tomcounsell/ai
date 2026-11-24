@@ -430,7 +430,9 @@ rule. Workspace reclaim, which removes things, is not; it is work.
 - **The ledger.** Every run is a task, so its start, its turns, its spend,
   its effects, and its end are ledger rows like any task's. A run's result
   is its delivery or its stop note, read with `python -m core status <task>`
-  or a session's `valor-record tasks --search`.
+  or a session's `valor-record tasks --search`. A run is not driven by the
+  SDLC state machine, so it is never open: the status page and
+  `valor-record tasks` show it as `node` (`machine.label`).
 - **The status page.** `python -m ui` serves `http://127.0.0.1:8790` (set by
   `VALOR_UI_PORT`): tasks and what needs Tom, what is alive (`/live`), one task
   with its ledger, the attention log, and each routine with its last run,

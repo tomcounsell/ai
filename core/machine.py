@@ -662,6 +662,19 @@ def _merge_effect(f: Fold, kind: str, p: dict[str, Any], entry: dict[str, Any]) 
     return None
 
 
+def label(rows: list[dict[str, Any]]) -> str:
+    """The task's state as the status page and the project's record show it:
+    `calibration`, `stopped` (a `task.stopped` on the task itself), `node`
+    for a task the state machine does not drive (a routine's run, an
+    objective, a task from before it), else its state."""
+    f = fold(rows)
+    if f.calibration:
+        return "calibration"
+    if any(isinstance(r, dict) and r.get("type") == "task.stopped" for r in rows):
+        return "stopped"
+    return "node" if f.legacy else f.state.value
+
+
 def _legacy(rows: list[dict[str, Any]]) -> Fold:
     """A task started before the state machine, folded with the old kernel's
     own precedence: stopped; a delivery not reopened by feedback; an

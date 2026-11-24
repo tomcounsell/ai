@@ -399,3 +399,36 @@ def test_toms_working_hours_skip_the_weekend_and_count_across_his_midnight():
     tue_4pm = datetime(2026, 11, 3, 9, tzinfo=UTC)
     assert session.working_hours(tue_4pm, datetime(2026, 11, 4, 4, tzinfo=UTC)) == 4.0
     assert session.working_hours(bkk(2026, 11, 7, 9), bkk(2026, 11, 8, 18)) == 0.0
+
+
+def test_the_task_list_shows_a_routines_run_as_a_node_never_open(fresh, tmp_path):
+    """A routine's run (no `sdlc` marker) is no task the state machine
+    drives; the list showed each one `judge` for good, so the hours
+    routine's daily runs read as open tasks (2026-11-24). It reads `node`,
+    as the status page shows it; a stopped chat session reads `stopped`;
+    an SDLC task its state."""
+    with World(fresh, tmp_path):
+
+        async def go():
+            async with await db.connect(fresh) as conn:
+                objective = await tasks.start(
+                    conn, tasks.Brief(instruction="routine hours", project={"name": "a"}), marker={"objective": "hours"}
+                )  # fmt: skip
+                run = await tasks.start_child(
+                    conn, objective, marker={"objective": "hours"}, instruction="routine hours: 2026-11-24",
+                    project={"name": "a"}, routine="hours",
+                )  # fmt: skip
+                sdlc = await tasks.start(conn, tasks.Brief(instruction="sdlc work", project={"name": "a"}))
+                stopped = await tasks.start(conn, session_brief("a", CHAT1, tmp_path / "s9"))
+                await ledger.append(conn, stopped, "task.stopped", {"by": "tom"})
+                spec = record.workspace.Spec.load("a")
+                listed = await record.task_list(conn, spec, await record.reach(conn, spec), {"limit": "50"})
+                return {t["task_id"]: t["state"] for t in listed}, (objective, run, sdlc, stopped)
+
+        listed, (objective, run, sdlc, stopped) = asyncio.run(go())
+        assert (listed[objective], listed[run], listed[sdlc], listed[stopped]) == (
+            "node",
+            "node",
+            "judge",
+            "stopped",
+        )
