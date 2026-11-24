@@ -139,7 +139,10 @@ The routines the kernel holds:
   property `valor_hours=1` and are matched one-to-one to the blocks, so a
   re-run writes nothing and an event made by hand is never touched; no
   attendees, `sendUpdates=none`. A new event's title is one call on the
-  `light` seat through a gateway the runner starts, metered on the run.
+  `light` seat through a gateway the runner starts, metered on the run;
+  the titling calls' home, `<work_dir>/<run>/titles`, is removed with the
+  run's directory when the run ends, failed or not (the run is never
+  provisioned, so workspace reclaim never sees it).
   Each write is `calendar.written` on the run, a failure
   `calendar.unwritten`. A run only moves an event's start and end, so an
   event someone marks Free (`transparency: transparent`) stays Free: that
