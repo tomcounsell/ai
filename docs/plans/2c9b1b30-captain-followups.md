@@ -16,29 +16,44 @@ every queue line and the reconciler's list of a project's open tasks.
 
 **Fix, in one place: `core/routines.py` `_fire`.** After it appends
 `routine.ran`, it ends every run that the objective's `routine.ran` rows
-(the new one and earlier ones) name `finished` or `failed` and that has no
-`task.ended`/`task.stopped`/merge yet: one SQL read for the not-yet-ended
-ids, then one `task.ended` per such run, `{"kind": "decided", "by":
-"routine", "text": …}`, under `task:<run>` as `verdicts.end` writes it
-(reuse `verdicts.end` if the import allows; else the same three lines).
-`text` is `Done: <summary>` for `finished`, the summary for `failed`, so
-`notices.ended_text` and `record._result` read it as they read any end.
+(the new one and earlier ones) name `finished` or `failed` and that is not
+yet merged, ended or stopped. The row is written by `routines` itself, not
+`verdicts.end` (whose payload is `reason`, `by: kernel`): under
+`task:<run>`, folded first as `verdicts.end` does, `task.ended`
+`{"kind": "decided", "by": "routine", "text": …}`. `text` is
+`Done: <summary>` for `finished`, the summary for `failed`, so
+`notices.ended_text` and `record._result` read it as any decided end.
 Earlier runs are ended at each routine's next firing on each Mac, so the
 backlog (23+ hours runs on the Captain, the verify runs here) clears with
 no hand-run script. `started`, `continued`, `running` and `nothing_due`
 end nothing, so `open_node`'s sweep continues as now.
 
+**A runner that raises.** Hours (and conditions, summary) start a new child
+every firing, so a run whose runner raises after `start_child` gets no
+`routine.ran` and would stay open forever. `_fire` notes the ledger's last
+event id before calling the runner; when the runner raises, it ends each
+child of the objective whose `task.started` (marker naming this routine)
+is past that id, with `text` `the run raised: <repr>`, and re-raises. The
+error still surfaces as it does today (the command exits non-zero, the
+launchd log has the traceback); no runner changes, and the existing
+`pytest.raises` test in `tests/test_hours.py` stands, with one more assert.
+A verify run continued by a later firing is not past the id, so a raise
+in a continued sweep leaves it to its next firing, as now.
+
 Consequence, accepted: each ended run owes its quiet `ended` report
 (`notices.owe`, a routine result: wakes nothing). The first firing after
 rollout writes one per backlogged run.
 
-**Tests** (with the routine tests that drive `routines.run`, real ledger): a `finished` run is
-ENDED with `Done: <summary>` and out of `open_ids`; a `failed` run is ENDED
-with the bare summary; `started`/`running` runs stay open and `open_node`
-still returns them; `nothing_due` writes nothing; an earlier `finished` run
-still open is ended at the next firing; a stopped or already-ended run gets
-no second row; another routine's open run is untouched; the hours test's
-run ends after a run that fails partway (title call raising).
+**Tests** (with the routine tests that drive `routines.run`, real ledger):
+a `finished` run is ENDED with `Done: <summary>`, `by: routine`, and out of
+`open_ids`; a `failed` run is ENDED with the bare summary;
+`started`/`running` runs stay open and `open_node` still returns them;
+`nothing_due` writes nothing; an earlier `finished` run still open is
+ended at the next firing; a stopped or already-ended run gets no second
+row; another routine's open run is untouched; in
+`test_a_run_that_fails_leaves_no_directory` (sync and drain raising) the
+run is ENDED with `the run raised: RuntimeError(...)` and the error still
+propagates; a runner raising before it starts a child ends nothing.
 
 ## 2. The screenshot browser on the Captain
 
@@ -50,8 +65,13 @@ thing naming build 1208, went dead when a cache clean removed it; the next
 Playwright install anywhere without `PLAYWRIGHT_SKIP_BROWSER_GC` (a
 client app's `pnpm` installs, `.links` entries from 11-24 04:44 Bangkok
 time on) deleted every build no live link names. `.links` today has no
-1.58 entry. The build checks the order of the uv cache clears and the
-first such install, and says observed or assumed.
+1.58 entry. Task 89a67ebc's disk cleanup is ruled out as the direct
+cause on its own record: its plan turn (11-24 ~12:35 UTC) already found
+1208 missing, before its `uv cache clean --force` (~13:05 UTC), and it
+removed no Playwright browser. The build confirms that from its ledger and
+transcript, and finds what did: the uv cache clears since 11-21 (any task
+or the 11-21 cleanup, task 59166b42) and the first Playwright install after
+each, and says observed or assumed.
 
 **Fix:** install from a Playwright that is not a cache:
 `uv venv ~/.local/share/valor-browser && uv pip install --python
