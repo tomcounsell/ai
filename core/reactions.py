@@ -170,9 +170,13 @@ async def on_bound(conn, p: dict[str, Any], task_id: str | None, as_: str) -> No
     """The reactions a binding owes, in the binding's transaction: 👀 for a
     message read; then, for one handed to a new task or bound `none`, its
     done owed at once; for a `stop`, 👌 as its done. Tom's reaction on a
-    post (a record of kind `reaction`) is no message and gets none."""
+    post (a record of kind `reaction`) is no message and gets none, nor
+    does one handed on from another chat (`intake.Inbound.handed_on`): it
+    was never posted in this one."""
     row = channels.get(p["channel"])
     if task_id is None or row is None or not row.reacts or as_ not in SEEN or p.get("kind") == "reaction":
+        return
+    if p.get("handed_on"):
         return
     await _request(conn, task_id, p, "seen", "seen", completes=True)
     if as_ == "stop":

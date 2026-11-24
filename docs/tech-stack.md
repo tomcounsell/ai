@@ -508,9 +508,10 @@ Status: **in use**. An operational telemetry stack (latency, error rates) is
 Everything runs Mac native, one install per machine, with a MacBook Air M4 and 16 GB of RAM as the
 target (Tom's decision). Valor has four Macs, one per client (Tom, 2026-10-11): every project of a
 client, or every internal Yudame project, runs on that client's Mac under the same accounts. Each Mac
-keeps its own kernel Postgres, ledger, and bridges. Exactly two things cross machines: the code that
-runs Valor, and the memory store on a shared Postgres (the Memory entry in section 3; where that
-Postgres runs is chosen with a second Mac's install, [machine.md](machine.md), The shared memory store). The
+keeps its own kernel Postgres, ledger, and bridges. Exactly three things cross machines: the code that
+runs Valor, the memory store on a shared Postgres (the Memory entry in section 3; where that
+Postgres runs is chosen with a second Mac's install, [machine.md](machine.md), The shared memory store),
+and a message one chat's session hands to a chat another Mac owns, over ssh (machine.md). The
 demonstration and the baseline ran on a 64 GB Mac, so no
 memory figure from them carries over; the RAM plan per component is [machine.md](machine.md). What
 the target machine fixes in the stack:

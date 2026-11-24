@@ -11,7 +11,10 @@ line lists its spec's `projects`, the repository the request is about), carrying
 child reads it (`project.chat`), or with `in` another chat of its project
 as that chat's session's child, reading that chat (a product room
 approving a build in its sibling dev chat, `skills/sdlc/roles/product.md`); answers a task's open question with what the chat said; steers a
-task with what the chat added; and stops a task. A steer of a task waiting
+task with what the chat added, or hands a message of its record to another
+chat's session, any project's on any Mac (`in` and `from`, `TaskSteer.hand_on`:
+who said it, where and when, verbatim, recorded on the Mac owning the chat,
+over ssh, `core/remote.py`, when that is another; nothing is posted); and stops a task. A steer of a task waiting
 on its question answers it, since a waiting task reads nothing else. A steer of a task that has
 delivered (`merged` or `ended`) is feedback (`session.feedback`): the task reopens in
 `patch`, in its own workspace, resuming its own harness session, and
@@ -39,9 +42,26 @@ by the question it answered, a steer by its key on the `message.steered`,
 `feedback.given` or `question.answered` row, a stop by the task's stop.
 """
 
-from core import board, call, channels, db, intake, ledger, machine, session, tasks, workspace
+import json
+from dataclasses import asdict
+
+from core import (
+    board,
+    broker,
+    call,
+    channels,
+    db,
+    intake,
+    ledger,
+    machine,
+    record,
+    remote,
+    session,
+    tasks,
+    workspace,
+)
 from core.machine import State
-from core.settings import EFFORT, resolve_seat
+from core.settings import EFFORT, resolve_seat, settings
 
 
 class _ChatTask:
@@ -67,6 +87,8 @@ class _ChatTask:
             return (
                 None if str(action.payload.get("instruction") or "").strip() else "the request has no words"
             )
+        if self.action_type == "task.steer" and action.payload.get("in"):
+            return None  # a hand-on into a chat (`TaskSteer.hand_on`), no task of this session's
         try:
             child = await self._child(conn, action.target)
         except ValueError as exc:
@@ -174,6 +196,8 @@ class TaskSteer(_ChatTask):
     action_type = "task.steer"
 
     async def perform(self, action, key: str) -> dict:
+        if action.payload.get("in"):
+            return await self.hand_on(action, key)
         async with await db.connect(self.dsn) as conn, conn.transaction():
             await self._child(conn, action.target)
             await tasks.lock_tree(conn, action.target)
@@ -193,7 +217,74 @@ class TaskSteer(_ChatTask):
             })  # fmt: skip
         return {"task_id": action.target}
 
+    async def hand_on(self, action, key: str) -> dict:
+        """The record `from`, a message in this project's reach, handed to
+        the session of chat `in` as said by whoever said it, where and when
+        (Tom, 2026-11-24): recorded in the ledger of the Mac owning the chat,
+        whose kernel binds it (`intake._handed_on`). Nothing is posted. The
+        record is read and closed before the other Mac is reached."""
+        into, inbound = await self._handed(action, key)
+        owner = intake._spec_machine(into)
+        if owner == settings.machine:
+            async with await db.connect(self.dsn) as conn:
+                got = await intake.receive(conn, intake.Inbound(**inbound))
+            return {"chat": action.payload["in"], "machine": owner, "received_id": got.received_id}
+        status, out = await remote.ssh(
+            remote.host(owner), f"{remote.KERNEL} receive", json.dumps(inbound).encode()
+        )
+        if status == remote.NO_ROUTE:
+            raise broker.Failed(f"no route from {settings.machine} to {owner}: {out.strip()}")
+        return {"chat": action.payload["in"], "machine": owner, "received_id": _received(owner, status, out)}
+
+    async def _handed(self, action, key: str) -> tuple[workspace.Spec, dict]:
+        """The spec owning chat `in`, and the `intake.Inbound` fields of the
+        record `from` handed into it: who said it, when, and its words as
+        received; the thread, reply and posts of its own chat left out, its
+        files named and kept where they are. A record handed on before keeps
+        its first chat and who said it there."""
+        into = str(action.payload["in"])
+        channel, _, ident = into.partition(":")
+        row = channels.get(channel)
+        chat_id = row.normal(ident) if row is not None else ident
+        taken = intake._taking(channel, chat_id, anywhere=True)
+        if taken is None:
+            raise broker.Failed(f"no project on any Mac takes {into}")
+        frm = str(action.payload.get("from") or "").lstrip("#")
+        if not frm:
+            raise broker.Failed("a hand-on names the message it hands on: --from RECORD")
+        async with await db.connect(self.dsn) as conn:
+            spec = await record.spec_of(conn, self.session)
+            found = await record.messages(conn, spec, await record.reach(conn, spec), {"record": frm})
+        if not found:
+            raise broker.Failed(f"no record #{frm} in project {spec.name}'s messages")
+        m = found[0]["message"]
+        first = m.get("handed_on") or {
+            "chat": found[0]["chat"], "channel": m["channel"], "message_id": m["message_id"],
+            "verified": bool(m.get("verified")),
+            "by": "tom" if intake._from_operator(m) else (m.get("sender_name") or m["sender_id"]),
+        }  # fmt: skip
+        keep = ("chat", "channel", "message_id", "verified", "by")
+        handed_on = {
+            **{k: first.get(k) for k in keep},
+            "project": spec.name, "session": self.session, "machine": settings.machine,
+            "asked_by": action.payload.get("by"), "note": str(action.payload.get("text") or "").strip() or None,
+        }  # fmt: skip
+        files = [
+            {**{k: a[k] for k in ("name", "mime", "bytes", "transcript", "transcript_failed") if k in a},
+             "kept_on": a.get("kept_on") or settings.machine}
+            for a in m.get("attachments") or []
+        ]  # fmt: skip
+        inbound = intake.Inbound(
+            channel=channel, chat_id=chat_id, chat_kind="group" if channels.group(channel, chat_id) else "dm",
+            message_id=f"handon:{key}", sender_id=m["sender_id"], sender_name=m.get("sender_name") or "",
+            sent_at=m["sent_at"], kind=m.get("kind") or "message", text=m.get("text") or "",
+            attachments=files, handed_on=handed_on,
+        )  # fmt: skip
+        return taken[1], asdict(inbound)
+
     async def lookup(self, action, key: str) -> dict | None:
+        if action.payload.get("in"):
+            return await self._handed_lookup(action, key)
         async with await db.connect(self.dsn) as conn:
             rows = await ledger.read(conn, action.target)
         for r in rows:
@@ -203,6 +294,32 @@ class TaskSteer(_ChatTask):
                 found = {k: r["payload"][k] for k in ("feedback_id", "question_id") if r["payload"].get(k)}
                 return {"task_id": action.target, **found}
         return None
+
+    async def _handed_lookup(self, action, key: str) -> dict | None:
+        into, inbound = await self._handed(action, key)
+        owner = intake._spec_machine(into)
+        named = {k: inbound[k] for k in ("channel", "chat_id", "message_id")}
+        if owner == settings.machine:
+            async with await db.connect(self.dsn) as conn:
+                got = await intake.handed(conn, **named)
+        else:
+            status, out = await remote.ssh(
+                remote.host(owner), f"{remote.KERNEL} receive --lookup", json.dumps(named).encode()
+            )
+            if status == remote.NO_ROUTE:
+                raise broker.Unknown(f"no route from {settings.machine} to {owner}: {out.strip()}")
+            got = _received(owner, status, out)
+        return {"chat": action.payload["in"], "machine": owner, "received_id": got} if got else None
+
+
+def _received(owner: str, status: int, out: str) -> str | None:
+    """The received id `core receive` printed on `owner`; its own error
+    when it failed (a Mac whose update has not reached this code names
+    the command)."""
+    lines = [line for line in out.splitlines() if line.startswith("{")]
+    if status != 0 or not lines:
+        raise RuntimeError(f"{owner} did not record it: {out.strip()[-300:]}")
+    return json.loads(lines[-1])["received_id"]
 
 
 class TaskStop(_ChatTask):

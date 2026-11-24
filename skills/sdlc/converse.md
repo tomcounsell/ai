@@ -65,6 +65,26 @@ come before the act it reports.
 - `valor-record act stop <task> --why "..." --by <who asked> [--via
   "<chat | slack reaction :-1:>"]` stops it. The board chat's session also
   stops any task of its project.
+- `valor-record act steer --in <chat> --from <record> --by <who asked to
+  hand it on> [--text "<your note>"]` hands a message to another chat's
+  session, any project's, on any Mac (Tom, 2026-11-24). The message is the
+  record `valor-record messages` prints as `#N`, with who said it, where,
+  when and its words exactly as received; your note travels beside it as
+  yours. Nothing is posted in either room. Use it when an ask or a message
+  is for another project's room: never retype it, and never post your own
+  version there. Name a Slack room as `slack:<team>/<channel id>`, its id
+  read with the Slack tools. Hand on only within the asker's project or to
+  a room whose people may hear it, never one client's words into another
+  client's room. Tell the asker where it went; the work then reports in
+  that room. It prints `done` and the Mac that recorded it, or the error:
+  "no route from <this Mac> to <that Mac>" means it did not arrive.
+
+A message handed on to you reads "handed on from <chat>": it is that
+person's, said there, and the people in your room have not seen it. You
+decide what your room hears; anything you post about it goes top-level
+and makes sense without it. Start any task for it yourself. When the asker
+should hear the result where they asked, hand a short note back the same
+way.
 
 Long text goes in with `"$(cat <<'EOF' ... EOF)"`. The same command again
 in this turn is the same request: it prints what the first did, a failure

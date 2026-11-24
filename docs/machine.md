@@ -4,10 +4,18 @@ One Valor install runs on one Mac, and the design is for one machine. Valor
 has four Macs, one per client (Tom, 2026-10-11). Every project of a client,
 or every internal Yudame project, runs on that client's Mac, and Valor is
 logged into the same accounts for all of them. Each Mac keeps its own
-kernel Postgres, ledger, and bridges. Exactly two things cross machines:
-the code that runs Valor, and the memory store on a shared Postgres (see
-The shared memory store). There is no cross-machine ledger, no hub, and no
-replication. The hard boundary between clients is the Mac and the accounts
+kernel Postgres, ledger, and bridges. Exactly three things cross machines:
+the code that runs Valor, the memory store on a shared Postgres (see
+The shared memory store), and a message one chat's session hands to a chat
+another Mac owns (`valor-record act steer --in`, Tom, 2026-11-24), recorded
+in that Mac's ledger over ssh by its `python -m core receive`
+(`core/remote.py`, the route the `watch` routine reads health by). There is
+no cross-machine ledger, no hub, and no replication. A hand-on uses the ssh
+routes the Macs already have and opens none (observed 2026-11-24 from each
+Mac's `gui/` launchd domain: the Cowboy reaches the other three, the
+Pirate the Cowboy and the Captain, the Captain the Cowboy; every other
+pair fails host key verification), and a pair with no route fails with
+"no route from <this Mac> to <that Mac>". The hard boundary between clients is the Mac and the accounts
 on it (docs/business.md, constraint "Generic across businesses").
 Production runs on Valor's Macs, never on Tom's (Tom, 2026-10-01). The
 design target for one install is a MacBook Air M4 with 16 GB of RAM, Mac

@@ -22,6 +22,7 @@ valor-record source CHANNEL [--failed] [--upto CURSOR]
 valor-record act start --instruction TEXT --by WHO --context TEXT [--project P] [--in CHAT] [--key K]
 valor-record act answer TASK --text TEXT --by WHO [--via HOW] [--question-id Q] [--key K]
 valor-record act steer TASK --text TEXT --by WHO [--key K]
+valor-record act steer --in CHAT --from RECORD --by WHO [--text NOTE] [--key K]
 valor-record act stop TASK --why TEXT --by WHO [--via HOW] [--key K]
 
 Reads the ledger of this turn's own project: its chats, the messages each
@@ -54,7 +55,10 @@ and delivered), each dated and sourced (docs/memory.md, People).
 (`core/gateway.py`, `tools/chat_tasks.py`): it starts, answers, steers or
 stops a task and prints `done` and what it did (a start prints the new
 task's id), or the error, exiting 1; so the turn writes its reply from
-what happened. The same command again in a turn is the same request
+what happened. `act steer --in CHAT --from RECORD` hands the message
+`messages` prints as #RECORD to CHAT's session, any project's on any Mac,
+as said by whoever said it; `--text` is the session's note beside it.
+The same command again in a turn is the same request
 (`--key` defaults to a hash of it): it answers what the first did, a
 failure included, and never starts a second task; to try a failed one
 again, change it or pass a new `--key`. When the outcome is not known yet
@@ -87,6 +91,9 @@ def message_line(r: dict) -> str:
     m = r["message"]
     who = m.get("sender_name") or m.get("sender_id") or "someone"
     ids = f"message {m.get('message_id')}" + (f", replying to {m['reply_to']}" if m.get("reply_to") else "")
+    if m.get("handed_on"):
+        h = m["handed_on"]
+        ids = f"handed on from {h.get('chat')} by the {h.get('project')} session on {h.get('machine')}; not said here"
     bound = r.get("bound") or {}
     to = f"{bound.get('as')} {bound.get('task_id') or ''}".strip() if bound else "not bound yet"
     said = (m.get("text") or "").strip() or "(no text)"
@@ -172,10 +179,11 @@ def act_request(args: argparse.Namespace) -> dict:
     """The `act` body for the gateway: `task.<verb>`'s target and payload,
     as the chat_tasks performers read them, and the request's key."""
     names = {"start": ("instruction", "by", "context", "project", "in"), "answer": ("text", "by", "via", "question_id"),
-             "steer": ("text", "by"), "stop": ("why", "by", "via")}[args.op]  # fmt: skip
-    payload = {n: getattr(args, n if n != "in" else "into") for n in names}
-    payload = {k: v for k, v in payload.items() if v is not None}
-    target = "work" if args.op == "start" else args.task
+             "steer": ("text", "by", "in", "from"), "stop": ("why", "by", "via")}[args.op]  # fmt: skip
+    attr = {"in": "into", "from": "record"}
+    payload = {n: getattr(args, attr.get(n, n), None) for n in names}
+    payload = {k: v.lstrip("#") if k == "from" else v for k, v in payload.items() if v is not None}
+    target = "work" if args.op == "start" else payload["in"] if payload.get("in") else args.task
     key = (
         args.key
         or hashlib.sha256(json.dumps([args.op, target, payload], sort_keys=True).encode()).hexdigest()[:16]
@@ -276,6 +284,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             o.add_argument("--project", help="one of the projects your Repos line names")
             o.add_argument("--in", dest="into", help="another chat of this project, slack:<team>/<channel>")
+        elif op == "steer":
+            o.add_argument("task", nargs="?", help="the task's id; none with --in")
+            o.add_argument("--text", help="the words; with --in, your own note beside the message")
+            o.add_argument("--in", dest="into", help="hand a message to this chat's session, any project's")
+            o.add_argument(
+                "--from", dest="record", help="with --in: the message's record number, as messages prints it"
+            )
         else:
             o.add_argument("task", help="the task's id")
             o.add_argument("--why" if op == "stop" else "--text", required=True)
@@ -289,6 +304,13 @@ def main(argv: list[str] | None = None) -> int:
     for p in [*leaves, c, e, a, link, src, *ops]:
         p.add_argument("--json", action="store_true", help="print the kernel's JSON")
     args = parser.parse_args(argv)
+    if (
+        args.verb == "act"
+        and args.op == "steer"
+        and not ((args.into and args.record and not args.task) or (args.task and args.text and not args.into))
+    ):
+        print("valor-record: act steer takes TASK --text, or --in CHAT --from RECORD", file=sys.stderr)
+        return 2
 
     base = os.environ.get("VALOR_RECORD_URL")
     if not base:

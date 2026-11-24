@@ -31,6 +31,10 @@ memory bench QUESTIONS DUMP... --out DIR --scratch DSN
                                against `pg_dump -Fc -n memory` files, in the
                                scratch database DSN, never the live store
 settings                     every setting, as shell assignments
+receive [--lookup]             record the message on stdin (JSON) in this Mac's
+                               ledger, in the kernel job's environment: a hand-on
+                               from another Mac's session; --lookup prints the
+                               received id of the one it names, or null
 health [--fix]                 this Mac's database probe, services and free disk,
                                as JSON, in the kernel job's environment; --fix
                                restarts a curably failing database and starts
@@ -1181,17 +1185,43 @@ def _secure_login() -> dict:
     )
 
 
-def _health(fix: bool) -> None:
-    """`python -m core health [--fix]` (`core/health.py`), in the kernel job's
-    environment: over ssh a peer's `watch` runs it with none of this Mac's
-    settings, so it runs itself again with the kernel plist's."""
+def _kernel_env() -> None:
+    """Run this command again in the kernel job's environment when it is not
+    in it: over ssh a peer runs `health` or `receive` with none of this
+    Mac's settings, so the kernel plist's are taken."""
     from core import health, serve
 
     plist = health.AGENTS / f"{serve.LABEL}.plist"
     env = plistlib.loads(plist.read_bytes()).get("EnvironmentVariables", {}) if plist.exists() else {}
     if any(os.environ.get(k) != v for k, v in env.items()):
         os.execve(sys.executable, [sys.executable, "-m", "core", *sys.argv[1:]], {**os.environ, **env})
+
+
+def _health(fix: bool) -> None:
+    """`python -m core health [--fix]` (`core/health.py`), in the kernel job's environment."""
+    from core import health
+
+    _kernel_env()
     print(json.dumps(asyncio.run(health.report(fix=fix))))
+
+
+def _receive(lookup: bool) -> None:
+    """`python -m core receive [--lookup]`, in the kernel job's environment:
+    the `intake.Inbound` on stdin as JSON, recorded in this Mac's ledger
+    (a message another Mac's session handed on, `tools/chat_tasks.py`),
+    printing `{"received_id": ...}`; with `--lookup`, the received id of
+    the record the JSON's channel, chat and message id name, or null, and
+    nothing written. The kernel binds it on its next wake."""
+    _kernel_env()
+    given = json.loads(sys.stdin.read())
+
+    async def go():
+        async with await db.connect() as conn:
+            if lookup:
+                return await intake.handed(conn, given["channel"], given["chat_id"], given["message_id"])
+            return (await intake.receive(conn, intake.Inbound(**given))).received_id
+
+    print(json.dumps({"received_id": asyncio.run(go())}))
 
 
 def _sync(args) -> bool:
@@ -1243,6 +1273,8 @@ def _sync(args) -> bool:
             print(f"{name}: {what}")
     elif args.command == "health":
         _health(args.fix)
+    elif args.command == "receive":
+        _receive(args.lookup)
     elif args.command == "backup":
         if args.plist:
             print(backup.plist().decode(), end="")
@@ -1434,6 +1466,7 @@ def main() -> None:
     sub.add_parser("backup").add_argument("--plist", action="store_true")
     sub.add_parser("serve").add_argument("--plist", action="store_true")
     sub.add_parser("health").add_argument("--fix", action="store_true")
+    sub.add_parser("receive").add_argument("--lookup", action="store_true")
     sub.add_parser("permissions").add_argument("--probe", action="store_true")
     update = sub.add_parser("update")
     update.add_argument("--wait", action="store_true", help="wait for it to end or fail")

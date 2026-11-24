@@ -4,7 +4,7 @@ the Bald; the Captain the Cowboy) and fixes what the watched Mac could not.
 Deterministic: no turn decides anything.
 
 Each run reads each target's `python -m core health` over ssh
-(`BatchMode`, a 10 s connect timeout):
+(`core/remote.py`: `BatchMode`, a 10 s connect timeout):
 
 - healthy: the hold files `~/.config/brew-nightly/hold-<host>` on the
   target and here are deleted, so the nightly upgrades both again;
@@ -28,7 +28,6 @@ on a Mac with no session to hear it (the Captain, watching the Cowboy whose
 session may be what is down), it is a fatal Sentry event instead.
 """
 
-import asyncio
 import json
 import shlex
 import shutil
@@ -40,31 +39,18 @@ from typing import Any
 import sentry_sdk
 
 from core import health, intake, ledger, notices
+from core.remote import KERNEL, ssh
 from core.routines import Context, Ran
 from core.settings import settings
 
 HOLDS = "~/.config/brew-nightly"
 UNREACHABLE_REPORT = timedelta(hours=24)
-SSH = ("/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10")
-HEALTH = "cd ~/src/ai && .venv/bin/python -m core health"
+HEALTH = f"{KERNEL} health"
 STREAM = "watch"
 # Below this much free disk a Mac is reported, once a day (Tom, 2026-10-22).
 DISK_LOW_GB = 15
 
 Remote = Callable[[str, str], Awaitable[tuple[int, str]]]
-
-
-async def ssh(host: str, command: str) -> tuple[int, str]:
-    """Run `command` on `host`: its exit status and output."""
-    proc = await asyncio.create_subprocess_exec(
-        *SSH, host, command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), 300)
-    except TimeoutError:
-        proc.kill()
-        return 255, "ssh did not return in 300 s"
-    return proc.returncode or 0, out.decode(errors="replace")
 
 
 async def _health(remote: Remote, host: str, fix: bool = False) -> dict[str, Any] | None:

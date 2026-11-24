@@ -125,7 +125,8 @@ async def messages(
     conn, spec: workspace.Spec, tasks: dict[str, dict[str, Any]], query
 ) -> list[dict[str, Any]]:
     """Newest first: each message with its record id, its chat, its
-    binding (`as`, `task_id`) and the reaction on it."""
+    binding (`as`, `task_id`) and the reaction on it; with `record`, that
+    one record alone, when it is in reach."""
     where = [
         "((r.payload->>'channel') || ':' || (r.payload->>'chat_id') = ANY(%s) OR b.payload->>'task_id' = ANY(%s))"
     ]
@@ -136,6 +137,11 @@ async def messages(
     if query.get("q"):
         where.append("r.payload->>'text' ILIKE %s")
         args.append(_like(query["q"]))
+    if query.get("record"):
+        if not str(query["record"]).isdigit():
+            raise NotFound(f"record {query['record']!r} is not a record number")
+        where.append("r.id = %s")
+        args.append(int(query["record"]))
     if query.get("before"):
         if not query["before"].isdigit():
             raise NotFound(f"before {query['before']!r} is not a record id")

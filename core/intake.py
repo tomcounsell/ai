@@ -84,6 +84,7 @@ The binding table, first match wins:
 | The record | Bound as |
 | --- | --- |
 | In Valor's engineering room (its spec's `update_chat`), exactly `/update` or `/update@<bot>` | `update`: an update request (`request_update`), its report to the room's session when it ends |
+| Handed on from another chat's session (`handed_on`) | `steer`, to this chat's session, by who said it there; never a stop or an update; no project here taking the chat is a binding failure, reported |
 | In a team chat, with no text or files | `none` |
 | In a team chat, waking the chat session | `steer`, to the chat session |
 | In a team chat, otherwise | `heard`, to the chat session |
@@ -95,6 +96,14 @@ The binding table, first match wins:
 | In Tom's own chat | `steer`, to the chat's session |
 | Anywhere else, with text or files (a chat with no project) | `start` |
 | Anywhere else, empty | `none` |
+
+A record handed on (`Inbound.handed_on`, `tools/chat_tasks.py` `TaskSteer`)
+is a message another chat's session passed to this chat, on this Mac or
+from another over ssh (`python -m core receive`): its words, sender and time
+as received there, its thread, reply and posts left behind, its files named
+and kept on the Mac they came to. It keeps the rights of the chat it was
+said in (`verified`) and the speaker the sending Mac decided (`by`), and
+gets no reaction: it was never posted here.
 
 "Exactly" is the whole text, trimmed and casefolded (`/update`: trimmed,
 any verified member of the room).
@@ -158,6 +167,11 @@ class Inbound:
     # Mac sent them; or why they could not be read
     posted: list[dict] = field(default_factory=list)
     posted_failed: str | None = None
+    # A message another chat's session handed on (`tools/chat_tasks.py`,
+    # `TaskSteer`), said in that chat, not this one: {chat, channel,
+    # message_id, sent_at, verified, by, project, session, machine,
+    # asked_by, note}, the first chat it was said in.
+    handed_on: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -191,7 +205,11 @@ async def receive(conn, inbound: Inbound) -> Received:
     """Record one inbound message, committed before this returns."""
     received_id = ledger.new_id()
     verify = VERIFY.get(inbound.channel)
-    payload = {"received_id": received_id, "verified": bool(verify and verify(inbound)), **asdict(inbound)}
+    # A handed-on message keeps the rights of the chat it was said in.
+    verified = inbound.handed_on["verified"] if inbound.handed_on else bool(verify and verify(inbound))
+    payload = {"received_id": received_id, "verified": bool(verified), **asdict(inbound)}
+    if not inbound.handed_on:
+        del payload["handed_on"]
     try:
         async with conn.transaction():
             await ledger.append(conn, inbound.channel, "message.received", payload)
@@ -205,6 +223,18 @@ async def receive(conn, inbound: Inbound) -> Received:
         ).fetchone()
         return Received(row[0], True)
     return Received(received_id, False)
+
+
+async def handed(conn, channel: str, chat_id: str, message_id: str) -> str | None:
+    """The received id of the chat's record with `message_id`, or None."""
+    row = await (
+        await conn.execute(
+            "SELECT payload->>'received_id' FROM events WHERE type = 'message.received' "
+            "AND task_id = %s AND payload->>'chat_id' = %s AND payload->>'message_id' = %s",
+            (channel, chat_id, message_id),
+        )
+    ).fetchone()
+    return row[0] if row else None
 
 
 # An all-digit message id as a bigint, or NULL when it does not fit one.
@@ -351,15 +381,16 @@ def _project_chats(channel: str) -> list[tuple[str, workspace.Spec]]:
     return found
 
 
-def _taking(channel: str, chat_id: str) -> tuple[str, workspace.Spec] | None:
-    """The spec of this machine that takes the chat, and the `chats` entry
+def _taking(channel: str, chat_id: str, anywhere: bool = False) -> tuple[str, workspace.Spec] | None:
+    """The spec of this machine (with `anywhere`, of any Mac: whose
+    `machine` owns the chat) that takes the chat, and the `chats` entry
     it takes it by: one listing it, else one whose `slack:<team>/*` covers
     a Slack DM that no spec on any Mac lists by id (`Spec.takes`). A spec
     that does not load lists nothing. None when no spec here takes it."""
     row = channels.get(channel)
     key = f"{channel}:{row.normal(chat_id) if row is not None else chat_id}"
     every = workspace.Spec.all()
-    here = [s for s in every if _spec_machine(s) == settings.machine]
+    here = every if anywhere else [s for s in every if _spec_machine(s) == settings.machine]
     for spec in here:
         if key in spec.chats:
             return key, spec
@@ -702,6 +733,8 @@ async def _thread_owner(conn, p: dict[str, Any]) -> tuple[workspace.Spec | None,
 
 
 async def _bind(conn, p: dict[str, Any]) -> str | None:
+    if p.get("handed_on"):
+        return await _handed_on(conn, p)
     team = team_spec(p)
     session = None
     if team is None and p["channel"] == "email":
@@ -727,6 +760,19 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     if spec is not None:
         return await _chat(conn, p, spec, own=True)
     return await _start(conn, p)
+
+
+async def _handed_on(conn, p: dict[str, Any]) -> str:
+    """A message another chat's session handed on: a steer of this chat's
+    session, by whoever said it where it was said (`handed_on.by`), waking
+    it in any room; never a stop or an update. No project here taking the
+    chat raises, so `_bind_failed` reports it."""
+    taken = _taking(p["channel"], p["chat_id"])
+    own = _toms_own(p)
+    spec = taken[1] if taken else _project_for(p) if own else None
+    if spec is None:
+        raise LookupError(f"no project on {settings.machine} takes {p['channel']}:{p['chat_id']}")
+    return await _chat(conn, p, spec, own=own)
 
 
 def _project_for(p: dict[str, Any]) -> workspace.Spec | None:
@@ -788,7 +834,14 @@ async def _chat(
     if not text and not p.get("attachments"):
         return await _bound(conn, p, None, "none")
     replied, post = await _replied(conn, p)
-    wakes = own or not _mentions_only(spec, p) or bool(MENTION.search(text)) or replied is not None
+    handed_on = p.get("handed_on")
+    wakes = (
+        own
+        or bool(handed_on)
+        or not _mentions_only(spec, p)
+        or bool(MENTION.search(text))
+        or replied is not None
+    )
     channel, chat = p["channel"], p["chat_id"]
     if session is not None:
         await tasks.lock_tree(conn, session)
@@ -808,9 +861,15 @@ async def _chat(
         if machine.fold(await ledger.read(conn, task_id)).state in tasks.TERMINAL:
             brief = await _session_brief(conn, channel, chat, spec, own=own, before=p["received_id"])
             task_id = brief.id
-    stop = own and text.casefold() == "stop"
+    stop = own and not handed_on and text.casefold() == "stop"
     as_ = await _bound(conn, p, task_id, "stop" if stop else "steer" if wakes else "heard")
-    by = "tom" if _from_operator(p) else (p.get("sender_name") or p["sender_id"])
+    by = (
+        handed_on["by"]
+        if handed_on
+        else "tom"
+        if _from_operator(p)
+        else (p.get("sender_name") or p["sender_id"])
+    )
     if brief is not None:
         await tasks.start(conn, brief, by=by, via=channel)
         await ledger.lock(conn, f"task:{task_id}")
@@ -825,6 +884,7 @@ async def _chat(
         "text",
         "attachments",
         "posted_failed",
+        "handed_on",
     )
     under = await _replying_to(conn, replied, post)
     posted = await _not_its_own(conn, task_id, p)
@@ -834,7 +894,11 @@ async def _chat(
         "message.steered" if wakes else "message.heard",
         {
             **{k: p.get(k) for k in keep},
-            "thread_tag": f"an email in the thread {chat}" if session else thread_tag(p),
+            "thread_tag": f"an email in the thread {chat}"
+            if session
+            else None
+            if handed_on
+            else thread_tag(p),
             **({"posted": posted} if posted else {}),
             **({"replying_to": under} if under else {}),
             # A heard message is asked whether it is meant for Valor (`address`).
@@ -1190,9 +1254,16 @@ def chat_line(m: dict[str, Any], reaction: str | None = None) -> str:
     who = m.get("sender_name") or m.get("sender_id") or "someone"
     if m.get("kind") == "reaction":
         return f"[{when}] {who} reacted {m.get('text')} to your post {m.get('reply_to')}"
-    ids = f"message {m.get('message_id')}" + (f", replying to {m['reply_to']}" if m.get("reply_to") else "")
-    where = m["thread_tag"] if "thread_tag" in m else thread_tag(m)
-    ids += f", {where}" if where else ""
+    handed_on = m.get("handed_on")
+    if handed_on:
+        # No id or thread: it was never posted in this chat, so nothing here replies to it.
+        ids = handed_text(handed_on)
+    else:
+        ids = f"message {m.get('message_id')}" + (
+            f", replying to {m['reply_to']}" if m.get("reply_to") else ""
+        )
+        where = m["thread_tag"] if "thread_tag" in m else thread_tag(m)
+        ids += f", {where}" if where else ""
     ids += "; not addressed to you" if m.get("addressed") == "aside" else ""
     ids += f"; {reaction}" if reaction else ""
     files = _files(m.get("attachments") or [])
@@ -1205,7 +1276,20 @@ def chat_line(m: dict[str, Any], reaction: str | None = None) -> str:
             "\n".join("  > " + line for line in str(under.get("text") or "").splitlines()) or "  > (no text)"
         )
         post = f"\n  under {whose}:\n{quoted}"
-    return f"[{when}] {who} ({ids}): {said}" + post + (f"\n{files}" if files else "") + _posted(m)
+    note = (
+        f"\n  Valor's note on handing it on: {handed_on['note']}"
+        if handed_on and handed_on.get("note")
+        else ""
+    )
+    return f"[{when}] {who} ({ids}): {said}" + note + post + (f"\n{files}" if files else "") + _posted(m)
+
+
+def handed_text(h: dict[str, Any]) -> str:
+    """Where a handed-on message was said and who handed it on."""
+    return (
+        f"handed on from {h.get('chat')}, by your {h.get('project')} session on {h.get('machine')}; "
+        "not said in this chat, and its people have not seen it"
+    )
 
 
 def _posted(m: dict[str, Any]) -> str:
@@ -1291,7 +1375,9 @@ def _files(attachments: list[dict[str, Any]]) -> str:
     none."""
     lines = []
     for a in attachments:
-        where = a.get("path") or f"not downloaded: {a.get('skipped')}"
+        where = a.get("path") or (
+            f"kept on {a['kept_on']}, not here" if a.get("kept_on") else f"not downloaded: {a.get('skipped')}"
+        )
         lines.append(
             f"- {a.get('name') or 'file'} ({a.get('mime') or 'unknown type'}, {a.get('bytes')} bytes): {where}"
         )
