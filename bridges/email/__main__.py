@@ -11,7 +11,7 @@ from pathlib import Path
 from core import credentials
 from core.settings import settings
 
-from .config import PASSWORD_COMMAND, PASSWORD_NAMES, USER_NAMES
+from .config import PASSWORD_COMMAND, PASSWORD_NAMES, SINCE_NAME, USER_NAMES
 
 LABEL = "com.valor.email"
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -85,6 +85,16 @@ def main(argv: list[str] | None = None) -> int:
                 status[name] = f"missing; copy the Cowboy's mail-keys: {PASSWORD_COMMAND}"
         for name in [*USER_NAMES, *PASSWORD_NAMES]:
             print(f"{name}: {status[name]}")
+        from bridges.meet.google import Account
+
+        for who in Account.here()[1:]:  # another account's mailbox: its keys are typed in, never copied
+            for name in [*USER_NAMES, *PASSWORD_NAMES, SINCE_NAME]:
+                key = f"{name}.{who.email}"
+                try:
+                    credentials.read_key(settings.mail_keyfile, key)
+                    print(f"{key}: kept")
+                except credentials.MissingKey:
+                    print(f"{key}: missing; that mailbox is not watched and sends from it fail")
         return 1 if any(v.startswith("missing") for v in status.values()) else 0
     if args.verb == "run":
         from core import sentry

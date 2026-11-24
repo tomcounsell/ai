@@ -34,6 +34,22 @@ it and otherwise `missing` with the copy from the Cowboy to run, never a value. 
 and only as a chat session's `email.send`: `gws`'s Google sign-in reads
 mail and cannot send it ([plans/one-voice-mail.md](../plans/one-voice-mail.md)).
 
+**A project's own mailbox.** A project whose spec names `google`, an
+account a client gave Valor in its own domain, has that account's mailbox
+too, on the Mac the project is placed on, once `mail-keys` holds its own
+`IMAP_USER.<address>`, `SMTP_USER.<address>`, `IMAP_PASSWORD.<address>`,
+`SMTP_PASSWORD.<address>` (an app password made on that account and typed
+in at that Mac, never copied) and `EMAIL_SINCE.<address>`, the day its
+watch starts, so mail already there is never received
+([plans/9f4967d9-google-per-project.md](../plans/9f4967d9-google-per-project.md)).
+`keys` reports each of them `kept` or `missing`. Each mailbox has its own
+watch, so one failing leaves the others running. Mail to it is the
+project's, whoever sent it (`intake.mailbox_project`), but Google's notices
+of an invite or a share; a send under the project leaves from it
+(`payload.from`, set by the session from the spec whatever the turn gave),
+and a send whose mailbox is not on the Mac fails, never leaving from
+Valor's own instead.
+
 **The watch.** The bridge holds one IMAP connection and waits on it with
 IDLE (RFC 2177), so new mail arrives as an event: the server's `EXISTS`
 response ends the wait. RFC 3501 section 5.4 lets a server log out a client
@@ -64,7 +80,7 @@ searches again instead of waiting. After each wait, and once on
 connecting, the bridge:
 
 1. selects `INBOX` and reads its `UIDVALIDITY`;
-2. searches `UNSEEN SINCE <email_since>`, fetches each match's `From`,
+2. searches `UNSEEN SINCE <email_since>` (a project's own mailbox: its `EMAIL_SINCE`), fetches each match's `From`,
    `Message-ID` and `References` headers, and keeps those this Mac takes
    (`intake.takes_email`, below);
 3. asks `intake.recorded` which are

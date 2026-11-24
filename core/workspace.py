@@ -149,6 +149,10 @@ class Spec:
     call goes to; without it, `board`, else the first group chat it lists
     (`routines/invites`, docs/plans/invite-calls.md).
 
+    `google` names the Google account the project's work is done as, one a
+    client gave Valor in its own domain (lowercased); without it, Valor's
+    own (`bridges/meet/google.py`, `Account`).
+
     `links` maps a reference prefix to its URL prefix (`{"ENG-" =
     "https://linear.app/<workspace>/issue/ENG-"}`): in a call's saved
     summary, the prefix and its digits link to the URL plus the digits
@@ -183,6 +187,7 @@ class Spec:
     invites: tuple[str, ...] = ()
     call_chat: str | None = None
     links: dict[str, str] = field(default_factory=dict)
+    google: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Spec:
@@ -301,6 +306,10 @@ class Spec:
         else:
             groups = [c for c in normal if channels.group(*c.split(":", 1))]
             call_chat = board or (groups[0] if groups else None)
+        google = raw.get("google")
+        if google is not None and (not isinstance(google, str) or google.strip().count("@") != 1
+                                   or google.strip().startswith("@") or google.strip().endswith("@")):  # fmt: skip
+            raise Refused('google is one email address: "name@example.com"')
         links = raw.get("links") or {}
         if not isinstance(links, dict) or not all(
             isinstance(k, str) and k and isinstance(v, str) and v.startswith("https://")
@@ -337,6 +346,7 @@ class Spec:
             invites=tuple(a.strip().lower() for a in invites),
             call_chat=call_chat,
             links=dict(links),
+            google=google.strip().lower() if google else None,
         )
 
     def takes(self, chat: str) -> str | None:

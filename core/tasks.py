@@ -524,6 +524,16 @@ async def dispatch(
             f'OP_SERVICE_ACCOUNT_TOKEN="${own_op[0]}", e.g. '
             f'`OP_SERVICE_ACCOUNT_TOKEN="${own_op[0]}" op run --env-file=.env.tpl -- ...`'
         )
+    from bridges.meet.google import Account
+
+    who = Account.of((b.project or {}).get("name"))
+    if not who.is_own:
+        head += (
+            f"\nGoogle: gws is {who.email} here, the project's own Google account (mail read, calendar, "
+            f"Sheets, Drive, Docs, Meet); Valor's own, valor's other work and Slides, is "
+            f"`GOOGLE_WORKSPACE_CLI_CONFIG_DIR={Account.own().config_dir} gws ...`. Email under this project is "
+            f"{who.email}'s: it is received there and every email.send leaves from it"
+        )
     head += f"\nEffect ceiling: {b.max_effect_class}"
     if b.workspace and not fresh:
         head += f"\nWorkspace: {b.workspace}"

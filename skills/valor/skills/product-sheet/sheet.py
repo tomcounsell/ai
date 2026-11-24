@@ -57,7 +57,12 @@ ISSUE_URL = re.compile(r"https://github\.com/[^\s,;]+/issues/\d+")
 
 def gws(*args: str, params: dict, body: dict | None = None, upload: str | None = None) -> dict:
     """`upload` is markdown text, sent as the file's content; gws uploads
-    only from its working directory, so it runs in a temporary one."""
+    only from its working directory, so it runs in a temporary one. Every
+    Drive call reaches shared drives too, where a client's Sheet may sit."""
+    if args[0] == "drive":
+        params = {"supportsAllDrives": True, **params}
+        if args[1:] == ("files", "list"):
+            params = {"includeItemsFromAllDrives": True, **params}
     cmd = ["gws", *args, "--params", json.dumps(params)]
     if body is not None:
         cmd += ["--json", json.dumps(body)]

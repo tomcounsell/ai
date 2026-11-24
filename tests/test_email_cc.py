@@ -160,3 +160,30 @@ def test_the_brief_says_how_to_reach_the_clients_own_vaults(dsn, projects, tmp_p
         own, plain = asyncio.run(go("own")), asyncio.run(go("plain"))
     assert 'run it with OP_SERVICE_ACCOUNT_TOKEN="$OP_SERVICE_ACCOUNT_TOKEN_ACME"' in own
     assert "acme-op" not in own and "1Password:" not in plain
+
+
+def test_a_send_under_a_project_with_its_own_google_account_leaves_from_it(dsn, projects):
+    """docs/plans/9f4967d9-google-per-project.md: the project's `google`
+    is the send's `from`, whatever the turn gave; every other project's
+    send carries none, so it leaves from Valor's own."""
+    (projects / "client.toml").write_text(
+        SPEC.format(name="client")
+        + 'google = "valor@client.test"\nemail_cc = ["valor@client.test", "lead@client.test"]\n'
+    )
+    asked = {"to": ["someone@client.test"], "subject": "s", "body": "b"}
+    (sent,), _ = send(dsn, "client", {**asked, "from": "valor@valor.test"})
+    assert sent["from"] == "valor@client.test" and sent["cc"] == ["lead@client.test"]
+    (sent,), _ = send(dsn, "plain", {**asked, "from": "valor@client.test"})
+    assert sent == asked
+
+
+def test_a_reply_to_mail_in_the_clients_mailbox_leaves_from_it_without_copying_it(dsn, projects):
+    (projects / "client.toml").write_text(SPEC.format(name="client") + 'google = "valor@client.test"\n')
+    received = {
+        "received_id": "r2", "channel": "email", "chat_id": "<root2@client.test>", "message_id": "<m2@client.test>",
+        "sender_id": "someone@client.test", "text": "hi", "sent_at": "2026-11-24T08:00:00+00:00",
+        "headers": {"to": ["valor@client.test"], "cc": ["third@client.test"], "subject": "Plan",
+                    "mailbox": "valor@client.test"},
+    }  # fmt: skip
+    (sent,), _ = send(dsn, "client", {"reply_to": "r2", "body": "yes"}, received=received)
+    assert sent["from"] == "valor@client.test" and sent["cc"] == ["third@client.test"]

@@ -146,6 +146,30 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    (Tom, 2026-11-01, [plans/one-voice-mail.md](plans/one-voice-mail.md)).
    `tests/test_live_mail.py` checks this list, and with `VALOR_LIVE=1
    VALOR_MAIL_LIVE=1` the live sign-in.
+   **A client's own account** (a spec's `google`,
+   [plans/9f4967d9-google-per-project.md](plans/9f4967d9-google-per-project.md)),
+   on the Mac its projects are placed on, before the spec names it:
+   1. its login in `m-valor` as `Google <address>` (password and one-time
+      password), then `$PY -m core meet-sign-in --account <address>`;
+   2. `gws auth status` first, then, with `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file`
+      and `GOOGLE_WORKSPACE_CLI_CONFIG_DIR=~/.config/gws-<address>`: as the
+      account in byob Chrome, a Google Cloud project in the client's
+      organisation with an Internal consent screen and a Desktop OAuth
+      client, the Calendar, Sheets, Drive, Docs, Gmail and Meet APIs on, its
+      JSON in that folder as `client_secret.json` and in `m-valor`; `gws
+      auth login --scopes` with only `calendar`, `spreadsheets`, `drive`,
+      `documents`, `gmail.readonly`, `meetings.space.created`,
+      `meetings.space.readonly`, `openid` and `userinfo.email`; exported
+      there as a plain `credentials.json` as above; then a calendar read as
+      own, which must still work. Blocked by the client's settings: stop and
+      write the admin's clicks;
+   3. its mailbox: an app password made on the account, typed into
+      `mail-keys` with the other `<NAME>.<address>` keys and
+      `EMAIL_SINCE.<address>` as today's date (`python -m bridges.email
+      keys` names them), then the email bridge restarted;
+   4. its calendar's unanswered Meet invites and its inbox's mail, by sender
+      and subject, reported before the spec names it, since the `invites`
+      routine then accepts them, emailing their organizers.
 7. **The handover**, when the old system is there:
    - The old memory, exported while its Redis is up:
      `$OLDPY -I scripts/cutover_export_memory.py $CUT/memory.jsonl` (`PYTHONDONTWRITEBYTECODE=1`).

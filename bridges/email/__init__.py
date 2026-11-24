@@ -2,6 +2,12 @@
 
 `run` watches INBOX for the mail this Mac takes and performs each `email.send`
 the outbox releases. Governed by `docs/bridges/email.md`.
+
+Each of Valor's mailboxes on this Mac (`Config`: own, and each other
+Google account a project placed here names, when `mail-keys` holds its
+logins) has its own watch, so one failing leaves the others running; a
+send leaves from the mailbox its payload's `from` names (own without
+one), and one whose mailbox is not here fails.
 """
 
 import asyncio
@@ -11,7 +17,7 @@ from typing import Any
 
 import psycopg
 
-from core import bridge, broker, db, notices, tasks
+from core import bridge, broker, credentials, db, notices, tasks
 
 from . import imap, smtp
 from .config import Config
@@ -33,8 +39,9 @@ class EmailBridge:
         """`dsn` is the database the watch records into: the one `serve`
         is given, the kernel's when both are None."""
         self.cfg = cfg or Config.from_settings()
+        self.cfgs = {self.cfg.address: self.cfg, **({} if cfg else _others())}
         self.dsn = dsn
-        self._retry = asyncio.Event()
+        self._retries: list[asyncio.Event] = []  # each watch's
         self._wakes: set[asyncio.Future] = set()
         self._running: set[str] = set()
         self.stopped: set[str] = set()  # effects whose last call a stop ended
@@ -46,10 +53,15 @@ class EmailBridge:
         sent: the thread's own `SendRefused` is raised, so the effect
         settles `failed`. A stop after that line leaves the effect in
         flight for Sent Mail to settle."""
+        cfg = self._from(action)
+        if cfg is None:
+            raise smtp.SendRefused(
+                f"no mailbox for {action.payload['from']} on this Mac; give it its keys: python -m bridges.email keys"
+            )
         ends = Ends()
         try:
             return await self.until_stopped(
-                key, lambda: ends.call(smtp.perform, self.cfg, action, key, ends), check=True
+                key, lambda: ends.call(smtp.perform, cfg, action, key, ends), check=True
             )
         except Stopped:
             if isinstance(ends.error, broker.Failed):
@@ -60,25 +72,39 @@ class EmailBridge:
 
     async def lookup(self, action: broker.Action, key: str, since: str) -> dict[str, Any] | None:
         """The Sent Mail read, ended by a stop that arrives while it runs."""
+        cfg = self._from(action)
+        if cfg is None:
+            raise broker.Unknown(f"no mailbox for {action.payload['from']} on this Mac to read Sent Mail in")
         return await self.until_stopped(
-            key, lambda: in_thread(smtp.lookup, self.cfg, action, key, since), check=False
+            key, lambda: in_thread(smtp.lookup, cfg, action, key, since), check=False
         )
+
+    def _from(self, action: broker.Action) -> Config | None:
+        """The mailbox the send leaves from: its `from`, else own."""
+        return self.cfgs.get(str(action.payload.get("from") or self.cfg.address).lower())
 
     def performers(self):
         return {"email.send": (self.perform, self.lookup)}
 
     async def watches(self) -> None:
-        """The IMAP watch (`imap.watch`) on its own database connection,
-        replaced on the next wake when it drops. A route monitor beside it
-        tells it when the network changes."""
+        """One watch per mailbox (`watch`), side by side."""
+        async with asyncio.TaskGroup() as tg:
+            for cfg in self.cfgs.values():
+                tg.create_task(self.watch(cfg))
+
+    async def watch(self, cfg: Config) -> None:
+        """The IMAP watch (`imap.watch`) of one mailbox on its own database
+        connection, replaced on the next wake when it drops. A route
+        monitor beside it tells it when the network changes."""
 
         def connect():
             return db.connect(self.dsn, application_name="valor-email-watch")
 
-        changed = asyncio.Event()
+        changed, retry = asyncio.Event(), asyncio.Event()
+        self._retries.append(retry)
         monitor = asyncio.create_task(imap.network_changes(changed))
         try:
-            await imap.watch(self.cfg, None, self._retry, connect, changed)
+            await imap.watch(cfg, None, retry, connect, changed)
         finally:
             monitor.cancel()
             await asyncio.gather(monitor, return_exceptions=True)
@@ -244,7 +270,8 @@ class EmailBridge:
 
     async def tick(self) -> None:
         """Each outbox wake: a watch that failed reconnects."""
-        self._retry.set()
+        for retry in self._retries:
+            retry.set()
         for wake in self._wakes:
             if not wake.done():
                 wake.set_result(None)
@@ -266,3 +293,17 @@ async def serve(email: EmailBridge, dsn: str | None = None) -> None:
     main = asyncio.current_task()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, main.cancel)
     await bridge.serve(email, dsn)
+
+
+def _others() -> dict[str, Config]:
+    """The mailbox of each other Google account of Valor's on this Mac
+    whose keys `mail-keys` holds; one without them is left out, logged."""
+    from bridges.meet.google import Account
+
+    found = {}
+    for who in Account.here()[1:]:
+        try:
+            found[who.email] = Config.for_account(who.email)
+        except credentials.CredentialError as exc:
+            log.warning("no mailbox for %s: %s", who.email, exc)
+    return found

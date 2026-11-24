@@ -733,7 +733,7 @@ def test_the_update_routine_prunes_uv_and_leaves_low_disk_to_the_watch(fresh, tm
     assert reports(fresh) == []  # low disk is the watch's report (routines/watch), not the update's
 
 
-def signed(profile: Path, email: str | None = "valor@example.com") -> str:
+def signed(profile: Path, email: str | None = "valor@yuda.me") -> str:
     """A call profile as Chrome leaves it, signed in to `email` (none: signed out)."""
     from tests.test_meet_sign_in import signed_in
 
@@ -757,9 +757,12 @@ def test_the_update_names_an_unsigned_call_profile_once_a_week_per_mac(fresh, tm
     out = signed(tmp_path / "out", email=None)
     inside = signed(tmp_path / "in")
 
+    from bridges.meet import google
+
     async def update(machine, profile, day):
-        monkeypatch.setattr(main, "settings", dataclasses.replace(settings, uv=str(uv), machine=machine,
-                                                                    meet_profile=profile))  # fmt: skip
+        changed = dataclasses.replace(settings, uv=str(uv), machine=machine, meet_profile=profile)
+        monkeypatch.setattr(main, "settings", changed)
+        monkeypatch.setattr(google, "settings", changed)
         async with await db.connect(fresh) as conn:
             ctx = routines.Context(conn, None, "update", datetime(2026, 11, day, 20, tzinfo=UTC), None)
             await main.update_runner(ctx)
@@ -779,6 +782,19 @@ def test_the_update_names_an_unsigned_call_profile_once_a_week_per_mac(fresh, tm
     assert all(n["kind"] == "rollout" and "meet-sign-in" in n["text"] for n in got)
     assert got[1]["text"].startswith("Valor the Bald cannot join a Google Meet call")
     assert got[1]["text"].endswith("The Chrome window may be left open; the next call quits it.")
+
+    # A second account on the Mac (docs/plans/9f4967d9-google-per-project.md): its
+    # own notice, its own week, naming its own command; own's, signed in, says nothing.
+    client = google.Account("valor@client.example")
+    monkeypatch.setattr(google.Account, "here", classmethod(lambda cls, specs=None: [cls.own(), client]))
+    run(update("Valor the Cowboy", inside, 4))
+    run(update("Valor the Cowboy", inside, 5))
+    (late,) = [n for _, n in reports(fresh)][3:]
+    assert late["about_key"] == "meet-profile:Valor the Cowboy:valor@client.example:2026-W45"
+    assert (
+        "as valor@client.example" in late["text"]
+        and "meet-sign-in --account valor@client.example" in late["text"]
+    )
 
 
 def test_python_m_ui_plist_is_the_dashboards_job():

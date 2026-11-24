@@ -260,7 +260,9 @@ def test_poll_receives_its_threads_on_a_mac_that_owns_no_address(dsn, macs, tmp_
         ):
             assert intake.owned("email") == []
             async with await db.connect(dsn) as conn:
-                n = await imap.poll(SimpleNamespace(since=date(2026, 11, 1)), None, conn)
+                n = await imap.poll(
+                    SimpleNamespace(since=date(2026, 11, 1), address="valor@yuda.me"), None, conn
+                )
                 rows = await (
                     await conn.execute(
                         "SELECT payload->>'chat_id' FROM events WHERE type = 'message.received' "

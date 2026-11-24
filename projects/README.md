@@ -123,6 +123,13 @@ it (they come from settings), and loading a spec names the folder.
   none or two projects goes to `valor`. `call_chat` names the group chat
   those calls go to; without it, `board`, else the first group chat in
   `chats`.
+- `google` names the Google account the project works as, one a client
+  gave Valor in its own domain (`google = "valor@example.com"`; Tom,
+  2026-11-24, docs/plans/9f4967d9-google-per-project.md): its turns' `gws`,
+  its calls, new Meets and Sheet reads, its calendar's invites, its mail
+  received and sent. Without it, Valor's own (valor@yuda.me). Set it only
+  once that account is signed in on the project's Mac (docs/rollout.md,
+  step 6).
 - `links` maps a reference prefix to its URL prefix (`links = { "ENG-" =
   "https://linear.app/<workspace>/issue/ENG-" }`; Tom, 2026-11-12): in a
   call's saved summary, the prefix and its digits become a link to the URL

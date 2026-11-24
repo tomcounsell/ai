@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -22,7 +23,7 @@ from bridges import meet
 from core import call
 
 pytestmark = pytest.mark.spend(usd=0)
-EMAIL = "valor@example.com"
+EMAIL = "valor@yuda.me"  # Valor's own, as `persona/identity.toml` names it
 
 
 def signed_in(profile, email=EMAIL, host=".google.com", sid=True):
@@ -90,13 +91,14 @@ def meet_at(monkeypatch):
 
     at = At([meet.MEET_HOME])
 
-    async def settled(profile, renew=False):
+    async def settled(profile, renew=False, account=None):
         assert meet.holder(profile) is None  # never while a Chrome holds it
         at.asked += 1
         url = NOT_SIGNED if call.account(profile) is None else at.pop(0) if len(at) > 1 else at[0]
         if renew and not meet.on_meet(url):
             at.renewing += 1
-            if at.renews:
+            if at.renews:  # Valor's own sign-in leaves the profile signed in as the account
+                signed_in(Path(profile), email=(account.email if account else EMAIL))
                 return meet.MEET_HOME
         return url
 
@@ -106,7 +108,7 @@ def meet_at(monkeypatch):
 
 def sign_in(profile, path):
     said = []
-    code = call.sign_in(str(profile), chrome=path, poll_s=0.05, say=said.append)
+    code = call.sign_in(profile=str(profile), chrome=path, poll_s=0.05, say=said.append)
     return code, said
 
 
@@ -132,7 +134,7 @@ def held(profile, on=None, *, call_=False, stubborn=False):
         proc.wait()
 
 
-# -- profile_ready ------------------------------------------------------------------
+# -- signed in as which account -----------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -145,7 +147,15 @@ def test_the_profile_is_ready_only_with_an_account_and_googles_session_cookie(
     tmp_path, email, host, sid, ready
 ):
     signed_in(tmp_path, email=email, host=host, sid=sid)
-    assert call.profile_ready(str(tmp_path)) is ready
+    assert call.signed_in_as(str(tmp_path), EMAIL) is ready
+
+
+def test_a_profile_signed_in_as_valors_other_address_is_not_ready_for_this_one(tmp_path):
+    """Two accounts side by side (docs/plans/9f4967d9-google-per-project.md):
+    a profile signed in as one would join as the wrong address."""
+    signed_in(tmp_path, email="valor@client.example")
+    assert call.signed_in_as(str(tmp_path), "valor@client.example")
+    assert not call.signed_in_as(str(tmp_path), EMAIL)
 
 
 def test_preferences_naming_the_account_without_cookies_are_not_signed_in(tmp_path):
@@ -222,7 +232,7 @@ def test_a_sign_in_still_unverified_when_chrome_quits_says_where_meet_stayed(tmp
     signed_in(tmp_path / "p")
     meet_at[:] = [VERIFY]
     code, said = sign_in(tmp_path / "p", chrome(tmp_path, "quits"))
-    assert code == 1 and f"Meet stayed on {VERIFY}" in said[-1] and call.SIGN_IN in said[-1]
+    assert code == 1 and f"Meet stayed on {VERIFY}" in said[-1] and meet.google.SIGN_IN in said[-1]
 
 
 def test_a_new_sign_in_meet_still_refuses_is_not_signed_in(tmp_path, meet_at):
@@ -803,7 +813,7 @@ def login(monkeypatch, quick):
     from bridges.meet import google
 
     monkeypatch.setattr(google.asyncio, "sleep", lambda _s, sleep=asyncio.sleep: sleep(0))
-    monkeypatch.setattr(google, "secret", {"password": "pw-1", "otp": "123456"}.get)
+    monkeypatch.setattr(google, "secret", lambda field, account=None: {"password": "pw-1", "otp": "123456"}[field])
     return google
 
 
@@ -828,7 +838,7 @@ def test_valor_passes_verify_its_you_with_its_password_then_its_code(login, caps
 def test_a_never_signed_in_profile_gives_the_email_first(login):
     page = Google([f"{ACC}/identifier?x", f"{ACC}/challenge/pwd?x", f"{ACC}/challenge/totp?x", URL])
     assert asyncio.run(login.renew(page, SERVICE_LOGIN + "x")) is True
-    assert ("fill", login.EMAIL_FIELD, login.EMAIL) in page.done
+    assert ("fill", login.EMAIL_FIELD, EMAIL) in page.done
 
 
 def test_a_code_google_refuses_ends_the_sign_in(login):
@@ -838,7 +848,7 @@ def test_a_code_google_refuses_ends_the_sign_in(login):
 
 
 def test_without_the_login_in_1password_nothing_touches_the_page(login, monkeypatch):
-    monkeypatch.setattr(login, "secret", lambda field: None)
+    monkeypatch.setattr(login, "secret", lambda field, account=None: None)
     page = Google(FLOW)
     assert asyncio.run(login.renew(page, SERVICE_LOGIN + "x")) is False and page.done == []
     meet_page = meet.Page("unused")
@@ -874,3 +884,30 @@ def test_a_media_connections_state_from_the_page_is_written_to_the_calls_log(cap
     socket = meet.Socket(lambda *a: None, lambda *a: None, lambda *a: None)
     socket.read({"type": "ValorMedia", "connection": 2, "state": "failed"})
     assert capsys.readouterr().err == "media connection 2: failed\n"
+
+
+# -- another of Valor's accounts (docs/plans/9f4967d9-google-per-project.md) ---------
+
+
+def test_a_page_for_another_account_signs_in_as_it_with_its_own_login(login, monkeypatch):
+    from bridges.meet.google import Account
+
+    asked = []
+    monkeypatch.setattr(login, "secret", lambda field, account=None: asked.append((field, account.email)) or "v")
+    meet_page = meet.Page("unused", account=Account("valor@client.example"))
+    meet_page.page = Google([f"{ACC}/identifier?x", f"{ACC}/challenge/pwd?x", f"{ACC}/challenge/totp?x", URL])
+    assert asyncio.run(meet_page.renew(URL)) is True
+    assert ("fill", login.EMAIL_FIELD, "valor@client.example") in meet_page.page.done
+    assert asked == [("password", "valor@client.example"), ("otp", "valor@client.example")]
+
+
+def test_sign_in_for_another_account_wants_that_account_not_any(tmp_path, meet_at):
+    from bridges.meet.google import Account
+
+    profile = tmp_path / "p"
+    signed_in(profile)  # as own
+    said = []
+    code = call.sign_in(Account("valor@client.example"), profile=str(profile), chrome=chrome(tmp_path, "quits"),
+                        poll_s=0.05, say=said.append)  # fmt: skip
+    assert code == 1 and "signed in as valor@yuda.me, not valor@client.example" in said[0]
+    assert "meet-sign-in --account valor@client.example" in said[-1]

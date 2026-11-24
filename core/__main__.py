@@ -42,8 +42,9 @@ health [--fix]                 this Mac's database probe, services and free disk
 realign                        put this Mac's diverged checkout back on its branch's
                                tip, its own commits kept on a branch pushed to
                                origin, then request an update (rollout.realign)
-meet-sign-in                   sign this Mac's call profile in to Google, at the
-                               Mac: its Chrome closes itself once signed in
+meet-sign-in [--account EMAIL] sign this Mac's call profile in to Google, at the
+                               Mac, as Valor's own account or EMAIL, one a
+                               project's spec names in `google`
 start INSTRUCTION [--ceiling C] [--workspace DIR] [--parent ID]
       [--model SEAT_OR_ID] [--harness-config FILE] [--target-branch B]
       [--by B] [--role-played] [--harness {claude_code,pi}]
@@ -325,9 +326,13 @@ def _reading_env(b: tasks.Brief) -> dict[str, str]:
 def _client_env(b: tasks.Brief) -> dict[str, str]:
     """The project's client's own 1Password token as
     `OP_SERVICE_ACCOUNT_TOKEN_<CLIENT>` (`tasks.client_op`), beside Valor's
-    own; read each turn, never recorded."""
+    own; read each turn, never recorded. And the Google account the
+    project's spec names (`google.Account.of`): gws as that account, its
+    folder in `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`; nothing for Valor's own."""
+    from bridges.meet.google import Account
+
     own = tasks.client_op(b.project["name"])
-    return dict([own]) if own else {}
+    return {**(dict([own]) if own else {}), **Account.of(b.project["name"]).env}
 
 
 def _fresh_for(prompt: str, checkout: str, model: str, harness: dict, harness_name: str = "claude_code"):
@@ -601,7 +606,7 @@ async def _call(session_id: str) -> str:
                 return bool((await tasks.brief(conn, session_id)).workspace)
 
         the = call.Call(
-            session_id, info, Page(settings.meet_profile), dsn=dsn, gemini=call.Gemini(key),
+            session_id, info, Page((who := call.call_account(info)).profile, account=who), dsn=dsn, gemini=call.Gemini(key),
             worker=worker, worker_ready=ready, reader=read_up, preparer=turn, project=(b.project or {}).get("name"), held=held,
         )  # fmt: skip
         socket = Socket(the.hear, the.chat, the.people)
@@ -780,17 +785,18 @@ async def update_runner(ctx: routines.Context) -> routines.Ran:
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)  # fmt: skip
     free = shutil.disk_usage(Path.home()).free / 1e9
     from bridges.meet import google
-    from core import call
 
-    if not call.profile_ready(settings.meet_profile) and not google.secret("password"):
+    for who in google.Account.here():
+        if who.ready() or google.secret("password", who):
+            continue
         await notices.request(
             ctx.conn,
             intake.UPDATES,
             kind="rollout",
-            about_key=f"meet-profile:{settings.machine}:{ctx.now:%G-W%V}",
-            text=f"{settings.machine} cannot join a Google Meet call until its call profile is signed in to "
-            f"Google as Valor, once, at that Mac: {call.SIGN_IN}. The Chrome window may be left open; "
-            "the next call quits it.",
+            about_key=f"meet-profile:{settings.machine}{'' if who.is_own else ':' + who.email}:{ctx.now:%G-W%V}",
+            text=f"{settings.machine} cannot join a Google Meet call as {who.email} until its call profile is "
+            f"signed in to Google as {who.email}, once, at that Mac: {who.sign_in}. The Chrome window may be left "
+            "open; the next call quits it.",
         )
     summary = f"update {request_id} requested; uv cache prune started; {free:.0f} GB free"
     if settings.snapshot_dir:
@@ -1259,9 +1265,10 @@ def _sync(args) -> bool:
     elif args.command == "memory" and args.memory_command == "bench":
         print(json.dumps(memory.bench(args.questions, args.dumps, args.out, args.scratch), indent=1))
     elif args.command == "meet-sign-in":
+        from bridges.meet.google import Account
         from core import call
 
-        raise SystemExit(call.sign_in())
+        raise SystemExit(call.sign_in(Account(args.account.lower()) if args.account else None))
     elif args.command == "judgement-keys":
         try:
             status = credentials.copy_keys(settings.vault_env, settings.judgement_keyfile, [JEV_KEY])
@@ -1444,7 +1451,10 @@ def main() -> None:
     withdraw.add_argument("--via", default="the command line")
     sub.add_parser("corrections")
     sub.add_parser("secure-login")
-    sub.add_parser("meet-sign-in")
+    sub.add_parser("meet-sign-in").add_argument(
+        "--account",
+        help="the Google account to sign in as, one a project's spec names; Valor's own by default",
+    )
     memory_cmd = sub.add_parser("memory").add_subparsers(dest="memory_command", required=True)
     memory_cmd.add_parser("ingest")
     mark = memory_cmd.add_parser("mark")

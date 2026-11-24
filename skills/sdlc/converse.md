@@ -324,7 +324,8 @@ that post sent and no call yet for its link (a reply to the post cancels
 the wake, so it may be the reply's turn) requests `meet.join`: target the
 link, `reply_to` the post's message id, `prep` from `call-prep.md`, and
 `starts` the start from the report, so the call waits for latecomers from
-the start. From then on it is a call as above: the `link` report needs no
+the start, and `account` the report's "Join as" address, so Valor joins as
+the address that was invited. From then on it is a call as above: the `link` report needs no
 second post. When the report says it matched no project, or two, join
 with this chat's own context and ask Tom in the same post which project it
 is for.

@@ -175,7 +175,7 @@ def no_google_login(monkeypatch):
     read by a test: none is held unless the test gives one."""
     from bridges.meet import google
 
-    monkeypatch.setattr(google, "secret", lambda field: None)
+    monkeypatch.setattr(google, "secret", lambda field, account=None: None)
 
 
 @pytest.fixture(autouse=True)

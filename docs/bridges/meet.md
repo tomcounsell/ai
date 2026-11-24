@@ -220,6 +220,14 @@ the account in the profile's preferences and Google's session cookie in its
 cookies, which a pending "Verify it's you" leaves in place; `meet-sign-in`
 also needs Meet to settle on Meet. `meet.join` refuses a Mac whose profile
 is not signed in only while the item is not in 1Password.
+A project whose spec names `google` (another account of Valor's, a
+client's) joins as it, on that account's own call profile beside own's,
+`<meet profile>-<address>`, renewed from its own item, `Google <address>`
+in `m-valor`; `meet-sign-in --account <address>` signs it in. An invited
+call joins as the address that was invited (the invites routine's "Join
+as", `meet.join`'s `account`). For either account, ready means signed in
+as that address, not just any
+([plans/9f4967d9-google-per-project.md](../plans/9f4967d9-google-per-project.md)).
 Never start Chrome on the profile over ssh: the keychain is locked there,
 and Chrome drops the profile's sign-in (the Captain, 2026-11-03). A call
 whose profile another call's Chrome holds (Playwright's

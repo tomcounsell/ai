@@ -31,6 +31,7 @@ import psycopg
 import pytest
 from google.genai import types
 
+from bridges.meet import google
 from core import bridge, broker, call, db, ledger, persona, spending, tasks
 from core.settings import settings
 from tests import bridges, test_meet
@@ -1377,6 +1378,40 @@ def test_backlog_reads_the_sheet_the_projects_spec_names(dsn, team, quick, tmp_p
                     ["lookup", "SHEET-1_x", "fail"]]  # fmt: skip
 
 
+def test_a_call_as_a_projects_own_account_reads_its_sheet_as_that_account(
+    dsn, team, quick, tmp_path, monkeypatch
+):
+    """docs/plans/9f4967d9-google-per-project.md: the call's Sheet read runs
+    with the account's gws folder; own's with none."""
+    fake = tmp_path / "sheet.py"
+    fake.write_text(
+        'import json, os\nprint(json.dumps([{"id": os.environ.get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR")}]))\n'
+    )
+    monkeypatch.setattr(call, "SHEET_PY", fake)
+
+    async def go(account):
+        _, the = await a_call_of(dsn, team, Page(), Gemini())
+        if account:
+            the.info["account"] = account
+        the.sheet = "SHEET-1"
+        return json.loads(await the._backlog(""))[0]["id"]
+
+    assert run(go("valor@client.test")) == str(Path.home() / ".config" / "gws-valor@client.test")
+    assert run(go(None)) is None
+
+
+def test_a_call_as_a_projects_own_account_names_that_accounts_sign_in(dsn, team, quick):
+    page = AtSignIn()
+
+    async def go():
+        _, the = await a_call_of(dsn, team, page, Gemini())
+        the.info["account"] = "valor@client.test"
+        return await asyncio.wait_for(the.run(), 10)
+
+    reason = run(go())
+    assert "as valor@client.test" in reason and "meet-sign-in --account valor@client.test" in reason
+
+
 def test_a_call_whose_project_has_no_sheet_has_no_backlog(dsn, team, quick):
     async def go():
         c = await in_call(dsn, team)
@@ -2147,12 +2182,13 @@ def test_a_call_meet_keeps_on_googles_sign_in_ends_naming_the_mac_and_the_comman
     page = AtSignIn()
     reason, rows, got = run(ended_alone(dsn, team, page))
     assert reason == (
-        f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run: {call.SIGN_IN}"
+        f"Google wants Valor's sign-in as valor@yuda.me on {settings.machine} verified again; at that Mac run: "
+        f"{google.SIGN_IN}"
     )
     assert page.posts == [] and "confirmidentifier" in capsys.readouterr().out
     assert page.done == ["join", ("renew", page.url)]
     ended = never_in(rows, got)
-    assert settings.machine in ended["text"] and call.SIGN_IN in ended["text"]
+    assert settings.machine in ended["text"] and google.SIGN_IN in ended["text"]
 
 
 def test_a_call_valor_signs_itself_in_to_joins_and_reports_its_link(dsn, team, quick, capsys):

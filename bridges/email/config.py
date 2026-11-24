@@ -1,6 +1,13 @@
 """The email bridge's configuration: the settings it runs with and the
 mailbox logins from the kernel key directory. The passwords live here only,
-never in a record, a log line, or the environment."""
+never in a record, a log line, or the environment.
+
+Valor's own mailbox is `settings.email_address` with `mail-keys`'s
+`IMAP_USER` and its siblings. Another of Valor's Google accounts, one a
+project placed on this Mac names in `google`, has a mailbox when
+`mail-keys` holds its own `<NAME>.<address>` for each of those and
+`EMAIL_SINCE.<address>`, the day its watch started: mail before it is
+never received (docs/plans/9f4967d9-google-per-project.md)."""
 
 import ssl
 from dataclasses import dataclass, field
@@ -11,6 +18,7 @@ from core.settings import settings
 
 USER_NAMES = ["IMAP_USER", "SMTP_USER"]
 PASSWORD_NAMES = ["IMAP_PASSWORD", "SMTP_PASSWORD"]
+SINCE_NAME = "EMAIL_SINCE"
 KEYS_COMMAND = "python -m bridges.email keys"
 # The app password is in no vault a turn reads (docs/plans/one-voice-mail.md):
 # a Mac gets it only by copying the Cowboy's `mail-keys` (docs/rollout.md, step 5).
@@ -51,6 +59,28 @@ class Config:
         return cls(
             address=settings.email_address.lower(),
             since=date.fromisoformat(settings.email_since),
+            imap_host=settings.imap_host,
+            imap_port=settings.imap_port,
+            smtp_host=settings.smtp_host,
+            smtp_port=settings.smtp_port,
+            imap_user=keys["IMAP_USER"],
+            smtp_user=keys["SMTP_USER"],
+            imap_password=keys["IMAP_PASSWORD"],
+            smtp_password=keys["SMTP_PASSWORD"],
+            cafile=settings.mail_cafile,
+        )
+
+    @classmethod
+    def for_account(cls, address: str) -> Config:
+        """Another account's mailbox, from its own keys in `mail-keys`; a
+        missing one raises `MissingKey`, naming it."""
+        keys = {
+            n: credentials.read_key(settings.mail_keyfile, f"{n}.{address}", KEYS_COMMAND)
+            for n in [*USER_NAMES, *PASSWORD_NAMES, SINCE_NAME]
+        }
+        return cls(
+            address=address,
+            since=date.fromisoformat(keys[SINCE_NAME]),
             imap_host=settings.imap_host,
             imap_port=settings.imap_port,
             smtp_host=settings.smtp_host,

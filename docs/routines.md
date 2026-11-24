@@ -113,15 +113,19 @@ The routines the kernel holds:
   task holds (Findings, below). The runner holds the session lock
   `run:<run>`.
 - **invites** (every 5 minutes, ceiling `act`, installed on every Mac;
-  [invite-calls.md](plans/invite-calls.md)): lists Valor's own calendar
-  for the next 14 days and, for each event with a Meet link that Valor
+  [invite-calls.md](plans/invite-calls.md)): lists the calendar of each of
+  Valor's Google accounts on this Mac (own, and each a project placed here
+  names in `google`), all first, for the next 14 days (a list that fails is
+  `calendar.unlisted`, and the others go on) and, for each event (its copies
+  on several calendars, by `iCalUID`, once) with a Meet link that Valor
   organizes or is invited to, whose project (by the specs' `invites`) is
   placed on this Mac, patches Valor's `needsAction` to `accepted` on the
-  series with `sendUpdates=all` (`calendar.accepted` on the objective,
+  series with `sendUpdates=all`, through the account whose calendar holds
+  it (`calendar.accepted` on the objective,
   never twice; a failure `calendar.unaccepted`) and, from 12 minutes
   before start to the end, writes one `call` report to the project's
-  `call_chat` session per event and start (`calendar.woke`), which preps
-  and joins it. It starts no task and calls no model.
+  `call_chat` session per event and start (`calendar.woke`), naming the
+  account to join as (the project's when invited), which preps and joins it. It starts no task and calls no model.
 - **hours** (02:00 daily, ceiling `act`, installed on every Mac): for each
   project placed on this Mac whose spec names a `calendar` (`{id, since}`,
   in the private spec only), writes Valor's working time from the record

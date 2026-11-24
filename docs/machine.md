@@ -466,6 +466,18 @@ only when it is revoked, the account's password changes, or its
 2-Step Verification changes. The Gmail app password in `mail-keys` ends
 the same way. Signing in again: rollout step 6.
 
+A client may give Valor an account in its own domain, which that client's
+project specs name in `google`
+([plans/9f4967d9-google-per-project.md](plans/9f4967d9-google-per-project.md)).
+Its gws sign-in is its own folder, `~/.config/gws-<address>`, through an
+OAuth client made in the client's own Google Cloud (Internal there, as
+Yudame's is here), its refresh token a plain `credentials.json` there; its
+client JSON is kept in `m-valor` as "Google OAuth client <address>". A turn
+of those projects has `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` set to that folder,
+so its `gws` is that account, and its Brief names the variable to reach
+Valor's own. Every other project's turn, and the `hours` routine, work as
+valor@yuda.me as before.
+
 A turn runs as the machine's one macOS user, so it can read that user's
 login keychain on purpose through the `security` tool, the machine's Claude
 login included (rebuild-demonstration.md, Setup: Isolation). Tom decided on

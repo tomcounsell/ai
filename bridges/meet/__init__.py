@@ -231,8 +231,9 @@ async def quit_holder(profile: str, wait_s: float = 15) -> None:
 class Page:
     """The call's Chrome window, one per call."""
 
-    def __init__(self, profile: str, *, headless: bool = True):
-        self.profile, self.headless = profile, headless
+    def __init__(self, profile: str, *, headless: bool = True, account=None):
+        """`account` (`google.Account`) is who the profile signs in as; own by default."""
+        self.profile, self.headless, self.account = profile, headless, account
         self._playwright = self._context = self.page = None
 
     async def open(self, url: str, port: int) -> None:
@@ -317,12 +318,12 @@ class Page:
         return self.page.url
 
     async def renew(self, back: str) -> bool:
-        """Google's sign-in for `back` passed with Valor's own login
+        """Google's sign-in for `back` passed with the account's login
         (`google.renew`), then `back` opened; False, the page untouched,
         when that login is not in 1Password, or when Google kept it out."""
         from bridges.meet import google
 
-        if not await google.renew(self.page, SIGN_IN_AT + quote(back, safe="")):
+        if not await google.renew(self.page, SIGN_IN_AT + quote(back, safe=""), account=self.account):
             return False
         await self.page.goto(back, wait_until="domcontentloaded")
         return True
@@ -365,13 +366,15 @@ class Page:
             await self._playwright.stop()
 
 
-async def settled(profile: str, url: str = MEET_HOME, timeout_s: float = 30, *, renew: bool = False) -> str:
+async def settled(
+    profile: str, url: str = MEET_HOME, timeout_s: float = 30, *, renew: bool = False, account=None
+) -> str:
     """Where Meet settles for `profile`, in a headless Chrome started as a
     call's is (`Page.where`). On `meet.google.com`, the profile can join
     calls; elsewhere it needs signing in, which with `renew` Valor does
     itself first, on that page, when its login is in 1Password
-    (`Page.renew`); else someone at the Mac (`python -m core meet-sign-in`)."""
-    page = Page(profile)
+    (`Page.renew`, as `account`); else someone at the Mac (`python -m core meet-sign-in`)."""
+    page = Page(profile, account=account)
     try:
         await page.launch()
         await page.page.goto(url, wait_until="domcontentloaded")

@@ -24,14 +24,18 @@ VALOR = {"email": "valor@yuda.me", "self": True, "responseStatus": "needsAction"
 SPEC = 'name = "{name}"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\nchats = [{chats}]\n{more}'
 
 GWS = r"""#!{python}
-import json, pathlib, sys
-store = pathlib.Path({store!r})
+import json, os, pathlib, sys
+# Each account's calendar is its own file, by the gws folder it runs with.
+who = os.environ.get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "gws").rsplit("/", 1)[-1]
+if pathlib.Path({tmp!r}, who + ".fails").exists():
+    sys.exit("gws: invalid_grant")
+store = pathlib.Path({tmp!r}, who + ".json")
 events = json.loads(store.read_text()) if store.exists() else {{}}
 method = sys.argv[3]
 params = json.loads(sys.argv[sys.argv.index("--params") + 1])
 body = json.loads(sys.argv[sys.argv.index("--json") + 1]) if "--json" in sys.argv else None
 with pathlib.Path({log!r}).open("a") as f:
-    f.write(json.dumps({{"method": method, "params": params, "body": body}}) + "\n")
+    f.write(json.dumps({{"method": method, "params": params, "body": body, "who": who}}) + "\n")
 if method == "list":
     found = [e for e in events.values() if "recurrence" not in e
              and e["end"]["dateTime"] > params["timeMin"] and e["start"]["dateTime"] < params["timeMax"]]
@@ -48,16 +52,30 @@ store.write_text(json.dumps(events))
 
 
 class Calendar:
-    def __init__(self, tmp: Path):
-        self.store, self.log, self.gws = tmp / "events.json", tmp / "gws.jsonl", tmp / "gws"
-        self.gws.write_text(GWS.format(python=sys.executable, store=str(self.store), log=str(self.log)))
+    """One account's calendar (`who`, its gws folder's name: `gws` for
+    Valor's own), all sharing one stub `gws` and one log."""
+
+    def __init__(self, tmp: Path, who: str = "gws"):
+        self.store, self.log, self.gws = tmp / f"{who}.json", tmp / "gws.jsonl", tmp / "gws-stub"
+        self.tmp, self.who = tmp, who
+        self.gws.write_text(GWS.format(python=sys.executable, tmp=str(tmp), log=str(self.log)))
         self.gws.chmod(0o755)
+
+    def other(self, email: str) -> Calendar:
+        """Another account's calendar beside this one."""
+        return Calendar(self.tmp, f"gws-{email}")
+
+    def fails(self, failing: bool = True) -> None:
+        """Its gws sign-in refused (an expired or missing token), or back."""
+        flag = self.tmp / f"{self.who}.fails"
+        flag.touch() if failing else flag.unlink(missing_ok=True)
 
     def put(self, event_id: str, *, organizer: str, attendees=(), start=START, minutes=30, me=VALOR, **more):
         events = json.loads(self.store.read_text()) if self.store.exists() else {}
         people = [{"email": a, "responseStatus": "accepted"} for a in attendees] + ([dict(me)] if me else [])
         events[event_id] = {
-            "id": event_id, "summary": f"Call {event_id}", "status": "confirmed", "hangoutLink": LINK,
+            "id": event_id, "iCalUID": f"{event_id}@google.com", "summary": f"Call {event_id}",
+            "status": "confirmed", "hangoutLink": LINK,
             "organizer": {"email": organizer}, "attendees": people,
             "start": {"dateTime": start.isoformat()},
             "end": {"dateTime": (start + timedelta(minutes=minutes)).isoformat()}, **more,
@@ -69,8 +87,9 @@ class Calendar:
         return next(a["responseStatus"] for a in event["attendees"] if a.get("self"))
 
     def patches(self) -> list[dict]:
+        """This account's patches."""
         found = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
-        return [c for c in found if c["method"] == "patch"]
+        return [c for c in found if c["method"] == "patch" and c["who"] == self.who]
 
 
 @pytest.fixture
@@ -264,3 +283,82 @@ def test_the_routine_is_registered_with_the_kernel():
     r = routines.load("invites")
     assert r.runner in _routine_runners() and r.interval == 300 and r.ceiling == "act"
     assert invites.WAKE == timedelta(minutes=12)
+
+
+# -- two of Valor's accounts (docs/plans/9f4967d9-google-per-project.md) ------------------
+
+CLIENT = "valor@acme.com"  # the account acme gave Valor
+
+
+def with_account(cal):
+    """acme's spec names its own account: its calendar is listed beside own's."""
+    spec = cal.tmp / "projects" / "acme.toml"
+    spec.write_text(spec.read_text() + f'google = "{CLIENT}"\n')
+    return cal.other(CLIENT)
+
+
+def rows(dsn, kind: str) -> list[dict]:
+    async def go():
+        async with await db.connect(dsn) as conn:
+            found = await (
+                await conn.execute("SELECT payload FROM events WHERE type = %s ORDER BY id", (kind,))
+            ).fetchall()
+            return [r[0] for r in found]
+
+    return asyncio.run(go())
+
+
+def test_one_accounts_calendar_failing_leaves_the_others_invites_handled(setup, fresh):
+    own = setup
+    client = with_account(own)
+    client.fails()
+    own.put("acme1", organizer="jo@acme.com")
+    fire(fresh, own, START - timedelta(minutes=8))
+    assert own.mine("acme1") == "accepted" and len(wakes(fresh)) == 1
+    (unlisted,) = rows(fresh, "calendar.unlisted")
+    assert unlisted["account"] == CLIENT and "invalid_grant" in unlisted["why"]
+
+
+def test_one_event_on_both_calendars_wakes_once_as_the_projects_account(setup, fresh):
+    own = setup
+    client = with_account(own)
+    uid = {"iCalUID": "kickoff@google.com"}
+    own.put("own-copy", organizer="jo@acme.com", **uid)  # own is listed first
+    client.put("client-copy", organizer="jo@acme.com", me={**VALOR, "email": CLIENT}, **uid)
+    fire(fresh, own, START - timedelta(minutes=8))
+    (w,) = wakes(fresh)
+    assert f"Join as: {CLIENT}" in w["text"]
+    # Each copy is accepted through the account whose calendar holds it.
+    assert own.mine("own-copy") == client.mine("client-copy") == "accepted"
+    assert [p["params"]["eventId"] for p in own.patches()] == ["own-copy"]
+    assert [p["params"]["eventId"] for p in client.patches()] == ["client-copy"]
+    fire(fresh, own, START - timedelta(minutes=3))
+    assert len(wakes(fresh)) == 1 and len(own.patches()) == len(client.patches()) == 1
+
+
+def test_an_event_seen_on_one_calendar_then_both_wakes_once(setup, fresh):
+    own = setup
+    client = with_account(own)
+    uid = {"iCalUID": "weekly@google.com"}
+    own.put("own-copy", organizer="jo@acme.com", **uid)
+    client.put("client-copy", organizer="jo@acme.com", me={**VALOR, "email": CLIENT}, **uid)
+    client.fails()
+    fire(fresh, own, START - timedelta(minutes=8))
+    (w,) = wakes(fresh)
+    assert "Join as: valor@yuda.me" in w["text"]  # the only copy seen was own's
+    client.fails(False)
+    fire(fresh, own, START - timedelta(minutes=3))
+    assert len(wakes(fresh)) == 1
+
+
+def test_valors_other_address_matches_no_project_but_its_domain_still_does(setup):
+    own = setup
+    with_account(own)
+    specs = workspace.Spec.all()
+
+    def project(organizer, *attendees):
+        return invites.match({"organizer": {"email": organizer}, "attendees": [{"email": a} for a in attendees]},
+                             specs)  # fmt: skip
+
+    assert project(CLIENT, "ops@yuda.me")[0] == "valor"
+    assert project(CLIENT, "jo@acme.com") == ("acme", None)

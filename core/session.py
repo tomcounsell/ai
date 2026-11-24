@@ -997,27 +997,37 @@ async def _reply_all(conn, action: broker.Action) -> tuple[broker.Action, str | 
     ).fetchone()
     if row is None:
         return action, f"reply_to {ref} names no received email"
+    mailbox = (row[0].get("headers") or {}).get("mailbox") or settings.email_address
     payload = {
-        **mail.reply_all(row[0], settings.email_address),
+        **mail.reply_all(row[0], mailbox),
         "body": action.payload.get("body") or "",
         "files": action.payload.get("files") or [],
+        **({} if mailbox == settings.email_address else {"from": mailbox}),
     }
     return broker.Action("email.send", ",".join(sorted(payload["to"])), payload), None
 
 
 async def _copy(conn, task_id: str, brief: tasks.Brief | None, action: broker.Action):
     """An `email.send` with its project's `email_cc` copied (`mail.copied`),
-    the spec read now by name: the action, the addresses added, and why
-    none could be when the spec does not load (the send goes unchanged)."""
+    the spec read now by name, and sent from the project's Google account
+    (`payload.from`, set here whatever the turn gave; none for Valor's own):
+    the action, the addresses added, and why none could be when the spec
+    does not load (the send goes unchanged, from own)."""
+    from bridges.meet.google import Account
+
     b = brief or await tasks.brief(conn, task_id)
     name = (b.project or {}).get("name")
+    payload = {k: v for k, v in action.payload.items() if k != "from"}
     if not name:
-        return action, [], None
+        return broker.Action(action.action_type, action.target, payload), [], None
     try:
         spec = workspace.Spec.load(name)
     except workspace.Refused as exc:
-        return action, [], str(exc)
-    payload, added = mail.copied(action.payload, spec.email_cc, settings.email_address)
+        return broker.Action(action.action_type, action.target, payload), [], str(exc)
+    sender = spec.google or settings.email_address
+    if spec.google and spec.google != Account.own().email:
+        payload["from"] = spec.google
+    payload, added = mail.copied(payload, spec.email_cc, sender)
     return broker.Action(action.action_type, action.target, payload), added, None
 
 

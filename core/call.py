@@ -66,6 +66,7 @@ from typing import Any
 import numpy as np
 import psycopg
 
+from bridges.meet.google import Account
 from core import broker, db, intake, ledger, persona, tasks, workspace
 from core.settings import CALL_CONTEXT, CALL_OUTPUT_MOST, resolve_seat, settings
 
@@ -75,7 +76,6 @@ CHANNEL = "meet"
 NEVER_STARTED_S = 90
 # A call's process waits this long for a database that refuses connections (`Call._connect`).
 DB_WAIT_S = 180.0
-SIGN_IN = "cd ~/src/ai && .venv/bin/python -m core meet-sign-in"
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 # The product Sheet's tool (skills/valor/skills/product-sheet/SKILL.md), and
 # the Sheet a spec's `rooms` name; each names one (2026-11-13).
@@ -130,13 +130,24 @@ def account(profile: str | None = None) -> str | None:
     return email if row else None
 
 
-def profile_ready(profile: str | None = None) -> bool:
-    """Whether this Mac's call profile is signed in to a Google account."""
-    return account(profile) is not None
+def signed_in_as(profile: str, email: str) -> bool:
+    """Whether the call profile is signed in as `email`, not another
+    account: a profile signed in as Valor's other address would join as
+    the wrong one."""
+    return (account(profile) or "").lower() == email.lower()
 
 
-def sign_in(profile: str | None = None, *, chrome: str = CHROME, poll_s: float = 2.0, say=print) -> int:
-    """`python -m core meet-sign-in`, at the Mac: where Meet settles for a
+def call_account(info: dict[str, Any]) -> Account:
+    """The account a call joins as: the one its marker names, else own."""
+    return Account(info["account"]) if info.get("account") else Account.own()
+
+
+def sign_in(
+    who=None, *, profile: str | None = None, chrome: str = CHROME, poll_s: float = 2.0, say=print
+) -> int:
+    """`python -m core meet-sign-in [--account EMAIL]`, at the Mac, for
+    `who` (`google.Account`, own by default) on its call profile
+    (`profile` overrides it, for a test): where Meet settles for a
     call's Chrome (`bridges.meet.settled`), signed in first by Valor itself
     when its login is in 1Password (`bridges/meet/google.py`); when Meet
     still does not open signed in, plain Chrome on the call profile at Meet
@@ -146,25 +157,31 @@ def sign_in(profile: str | None = None, *, chrome: str = CHROME, poll_s: float =
     its passkey step is done (the Captain, 2026-11-13). A Chrome already
     holding the profile is left alone: a call's is named, any other is the
     window to sign in from, which may be left open, since the next call
-    quits it. 0 when Meet opens signed in."""
+    quits it. 0 when Meet opens signed in as that account."""
     from bridges.meet import MEET_HOME, a_call, holder, on_meet, settled
 
-    profile = profile or settings.meet_profile
+    who = who or Account.own()
+    profile = profile or who.profile
     if (pid := holder(profile)) is not None:
         if a_call(pid):
             say(f"the call profile is in use by a call's Chrome (pid {pid}); run this again after the call")
         else:
-            say(f"the call profile is already open in Chrome (pid {pid}): sign in as valor@yuda.me there; "
+            say(f"the call profile is already open in Chrome (pid {pid}): sign in as {who.email} there; "
                 "the window may be left open, the next call quits it")  # fmt: skip
         return 1
-    if on_meet(asyncio.run(settled(profile, renew=True))):
-        say(f"signed in as {account(profile)}; {settings.machine} can join calls")
+    if on_meet(asyncio.run(settled(profile, renew=True, account=who))) and signed_in_as(profile, who.email):
+        say(f"signed in as {who.email}; {settings.machine} can join calls")
         return 0
-    if email := account(profile):
+    if (email := account(profile)) and email.lower() != who.email:
+        say(
+            f"the call profile is signed in as {email}, not {who.email}: in the Chrome window, sign out and sign "
+            f"in as {who.email}, then quit Chrome with ⌘Q once Meet's home page shows (Ctrl-C here to give up)"
+        )
+    elif email:
         say(f"Google wants the sign-in as {email} verified again: in the Chrome window, click Next and verify, "
             "then quit Chrome with ⌘Q once Meet's home page shows (Ctrl-C here to give up)")  # fmt: skip
     else:
-        say("sign in as valor@yuda.me in the Chrome window, then quit Chrome with ⌘Q once Meet's home page "
+        say(f"sign in as {who.email} in the Chrome window, then quit Chrome with ⌘Q once Meet's home page "
             "shows (Ctrl-C here to give up)")  # fmt: skip
     Path(profile).mkdir(parents=True, exist_ok=True)
     child = subprocess.Popen(
@@ -180,10 +197,19 @@ def sign_in(profile: str | None = None, *, chrome: str = CHROME, poll_s: float =
         if child.poll() is None:
             child.terminate()  # a clean exit, which saves the cookies
         child.wait()
-    if (email := account(profile)) and on_meet(url := asyncio.run(settled(profile))):
-        say(f"signed in as {email}; {settings.machine} can join calls")
-        return 0
-    say(f"not signed in{f' (Meet stayed on {url})' if email else ''}; run this again to sign in: {SIGN_IN}")
+    email = account(profile)
+    if email and on_meet(url := asyncio.run(settled(profile, account=who))):
+        if signed_in_as(profile, who.email):
+            say(f"signed in as {who.email}; {settings.machine} can join calls")
+            return 0
+        say(
+            f"signed in as {email}, not {who.email}; sign out of {email} there and run this again: "
+            f"{who.sign_in}"
+        )
+        return 1
+    say(
+        f"not signed in{f' (Meet stayed on {url})' if email else ''}; run this again to sign in: {who.sign_in}"
+    )
     return 1
 
 
@@ -221,10 +247,11 @@ async def begin(
     prep: str,
     effect_key: str,
     starts: str | None = None,
+    account: str | None = None,
 ) -> str:
     """Start the call session and write its first report, that Valor is
-    joining, with no link, inside the caller's transaction. Returns the
-    session's id."""
+    joining, with no link, inside the caller's transaction; the call joins
+    as `account` (an address), else own. Returns the session's id."""
     chat = asking.chat or {}
     harness_name, model = resolve_seat("frontier")
     brief = tasks.Brief(
@@ -242,6 +269,8 @@ async def begin(
     call = {"url": url, "code": code, "machine": settings.machine, "asked_by": asked_by, "prep": prep}
     if starts:
         call["starts"] = starts
+    if account:
+        call["account"] = account
     await tasks.start(conn, brief, marker={"sdlc": 1, "call": call, "effect_key": effect_key}, by="valor",
                       via="meet.join")  # fmt: skip
     await report(
@@ -1815,8 +1844,9 @@ class Call:
         the call's loop, which keeps mixing and playing meanwhile."""
         argv = ["lookup", self.sheet, about] if about else ["read", self.sheet]
         run = await asyncio.create_subprocess_exec(
-            sys.executable, str(SHEET_PY), *argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
+            sys.executable, str(SHEET_PY), *argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**os.environ, **call_account(self.info).env},
+        )  # fmt: skip
         out, err = await run.communicate()
         if run.returncode != 0:
             _log(f"call {self.id}: the backlog read failed: {err.decode().strip()}")
@@ -2222,10 +2252,12 @@ class Call:
         from bridges.meet import Refused, SignInNeeded
 
         url = self.info["url"]
+        who = call_account(self.info)
         again = (
-            f"Google wants Valor's sign-in on {settings.machine} verified again; at that Mac run: {SIGN_IN}"
+            f"Google wants Valor's sign-in as {who.email} on {settings.machine} verified again; at that Mac "
+            f"run: {who.sign_in}"
         )
-        if not profile_ready(self.page.profile) and not await self.page.renew(url):
+        if not signed_in_as(self.page.profile, who.email) and not await self.page.renew(url):
             return again
         for renewed in (False, True):
             try:

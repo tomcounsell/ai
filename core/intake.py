@@ -48,7 +48,8 @@ task's project's, and every email in it, whoever sent it, steers the chat
 session that sent the root while it is open (a Slack room's session hears
 Tom's reply to its email: the incident of 2026-11-21). Otherwise the thread
 has one chat session of its own, under the sending task's project, else,
-for an owned sender, the project listing the sender (`email:<address>`),
+for mail to a project's own Google account's mailbox (`mailbox_project`),
+that project whoever sent it, else, for an owned sender, the project listing the sender (`email:<address>`),
 else its domain (`email:@<domain>`), else `valor`; an unowned sender's
 email in a thread no task here sent is bound `none`. Every email the bridge
 records in it, Tom's or a project sender's, is a `message.steered` row
@@ -472,15 +473,34 @@ def owns(channel: str, id: str) -> bool:
     )
 
 
-def takes_email(sender: str, root: str | None) -> bool:
-    """Whether this Mac's email bridge receives an email: one in a thread
-    whose root a Mac sent (`mail.machine_of`) is that Mac's whoever sent
-    it; any other is its sender's owner's (`owns`). Valor's own mail is
-    never received."""
-    if sender == settings.email_address:
+# Google's own notices of an invite or a share, mailed to a client's account:
+# the invites routine handles invites, and a share needs no reply.
+GOOGLE_NOTICES = ("calendar-notification@google.com", "drive-shares-dm-noreply@google.com")
+
+
+def takes_email(sender: str, root: str | None, mailbox: str | None = None) -> bool:
+    """Whether this Mac's email bridge receives an email that came to
+    `mailbox` (own by default): one in a thread whose root a Mac sent
+    (`mail.machine_of`) is that Mac's whoever sent it; one to the mailbox
+    of a project's own Google account (`mailbox_project`) is received from
+    anyone but Google's notices; any other is its sender's owner's
+    (`owns`). Mail from any of Valor's addresses is never received."""
+    if sender == settings.email_address or any(s.google == sender for s in workspace.Spec.here()):
         return False
     tag = mail.machine_of(root or "")
-    return tag == mail.machine_tag() if tag is not None else owns("email", sender)
+    if tag is not None:
+        return tag == mail.machine_tag()
+    if mailbox_project(mailbox) is not None:
+        return sender not in GOOGLE_NOTICES
+    return owns("email", sender)
+
+
+def mailbox_project(mailbox: str | None) -> workspace.Spec | None:
+    """The project placed here whose own Google account (`google`) the
+    mailbox is; of two sharing it, the first listing chats. None for
+    Valor's own mailbox."""
+    found = [s for s in workspace.Spec.here() if mailbox and s.google == mailbox.lower()]
+    return next((s for s in found if s.chats), found[0] if found else None)
 
 
 def _domain(address: str) -> str:
@@ -739,8 +759,11 @@ async def _bind(conn, p: dict[str, Any]) -> str | None:
     session = None
     if team is None and p["channel"] == "email":
         team, session = await _thread_owner(conn, p)
-        # No send here: the sender's rule, for an owned sender only, since
-        # a root tagged with this Mac is received from anyone.
+        # No send here: the mailbox's project, for mail to a project's own
+        # Google account; else the sender's rule, for an owned sender only,
+        # since a root tagged with this Mac is received from anyone.
+        if team is None:
+            team = mailbox_project((p.get("headers") or {}).get("mailbox"))
         if team is None and owns("email", p["sender_id"]):
             team = _project_for(p)
     if team is not None:

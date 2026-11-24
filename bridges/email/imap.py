@@ -159,9 +159,15 @@ def drop(conn: imaplib.IMAP4) -> None:
         pass
 
 
-def inbound(parsed: parse.Parsed, uid: bytes, uidvalidity: str):
+def inbound(parsed: parse.Parsed, uid: bytes, uidvalidity: str, mailbox: str):
+    """The message as intake receives it, with the mailbox it came to."""
     fields = dict(parsed.fields)
-    fields["headers"] = {**fields["headers"], "uid": uid.decode(), "uidvalidity": uidvalidity}
+    fields["headers"] = {
+        **fields["headers"],
+        "uid": uid.decode(),
+        "uidvalidity": uidvalidity,
+        "mailbox": mailbox,
+    }
     return intake.Inbound(**fields)
 
 
@@ -336,7 +342,11 @@ async def poll(cfg: Config, conn: imaplib.IMAP4, db, ends: Ends | None = None) -
     uidvalidity = await _thread(ends, select_inbox, conn)
     uids = await _thread(ends, search, conn, cfg.since)
     heads = await _thread(ends, headers, conn, uids)
-    mine = [u for u in uids if u in heads and intake.takes_email(heads[u]["sender"], heads[u]["chat_id"])]
+    mine = [
+        u
+        for u in uids
+        if u in heads and intake.takes_email(heads[u]["sender"], heads[u]["chat_id"], cfg.address)
+    ]
 
     seen: set[bytes] = set()
     by_root: dict[str, list[bytes]] = {}
@@ -362,7 +372,7 @@ async def poll(cfg: Config, conn: imaplib.IMAP4, db, ends: Ends | None = None) -
             parsed.fields["attachments"] = [
                 await _thread(ends, bridge.transcribe, a) for a in parsed.fields["attachments"]
             ]
-            result = await intake.receive(db, inbound(parsed, u, uidvalidity))
+            result = await intake.receive(db, inbound(parsed, u, uidvalidity, cfg.address))
         except imaplib.IMAP4.abort, psycopg.OperationalError:
             raise  # the IMAP connection or the database's is gone; the watch replaces it
         except Exception:

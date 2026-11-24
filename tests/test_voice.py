@@ -582,11 +582,11 @@ def test_an_email_audio_attachment_is_transcribed(tmp_path, monkeypatch, heard):
         "fetch": lambda conn, u: (mail.as_bytes(), None), "mark_seen": lambda conn, u: None,
     }.items():  # fmt: skip
         monkeypatch.setattr(imap, name, fn)
-    monkeypatch.setattr(imap.intake, "takes_email", lambda who, root: True)
+    monkeypatch.setattr(imap.intake, "takes_email", lambda who, root, mailbox: True)
     monkeypatch.setattr(imap.intake, "recorded", recorded)
     monkeypatch.setattr(imap.intake, "receive", receive)
     with bridges.configure(inbound_dir=str(tmp_path / "inbound")):
-        assert run(imap.poll(SimpleNamespace(since=None), imaplib.IMAP4, None)) == 1
+        assert run(imap.poll(SimpleNamespace(since=None, address="valor@yuda.me"), imaplib.IMAP4, None)) == 1
     memo, pdf = got[0].attachments
     assert memo["transcript"].startswith("words of ") and Path(memo["path"]).read_bytes() == b"memo"
     assert "transcript" not in pdf

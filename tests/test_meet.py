@@ -10,10 +10,12 @@ is ended by the kernel's sweep; the call's transcript reads through
 import asyncio
 import json
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from bridges.meet import google
 from core import broker, call, db, intake, ledger, machine, notices, record, router, session, tasks
 from core.machine import State
 from core.settings import settings
@@ -66,7 +68,7 @@ async def asking_session(dsn, team) -> tasks.Brief:
 
 
 def joiner(brief, dsn, started):
-    async def create():
+    async def create(env=None):
         return URL, CODE
 
     return meet.MeetJoin(brief, dsn, create=create, start=started.append)
@@ -253,16 +255,15 @@ def test_a_join_with_the_profile_signed_out_names_the_sign_in(dsn, team):
         return await join(dsn, brief, [])
 
     out = run(go())
-    assert out.kind == "failed" and "not signed in" in out.error and call.SIGN_IN in out.error
+    assert out.kind == "failed" and "not signed in" in out.error and google.SIGN_IN in out.error
 
 
 def test_a_join_with_the_profile_signed_out_goes_ahead_when_valors_login_is_held(dsn, team, monkeypatch):
     """The Pirate and the Bald, never signed in: the call signs in itself
     (`Call.joined`) with the login in 1Password."""
-    from bridges.meet import google
 
     (team.profile / "Default" / "Preferences").write_text(json.dumps({"account_info": []}))
-    monkeypatch.setattr(google, "secret", lambda field: "x")
+    monkeypatch.setattr(google, "secret", lambda field, account=None: "x")
     started: list[str] = []
 
     async def go():
@@ -292,6 +293,67 @@ def test_meet_join_keeps_an_invited_calls_start_and_refuses_one_without_a_zone(d
     naive, info = run(go())
     assert naive.kind == "refused" and "zone" in naive.error
     assert info["starts"] == "2026-11-12T14:00:00Z" and info["url"] == URL
+
+
+# -- which Google account joins (docs/plans/9f4967d9-google-per-project.md) --------
+
+CLIENT = "valor@client.test"
+
+
+def client_account(tmp_path, team):
+    """The team's project names its own Google account, whose call profile
+    is signed in as it, beside own's."""
+    spec = tmp_path / "projects" / f"{team.project}.toml"
+    spec.write_text(spec.read_text() + f'google = "{CLIENT}"\n')
+    signed_in(Path(f"{team.profile}-{CLIENT}"), email=CLIENT)
+
+
+async def join_as(dsn, team, **payload):
+    """A join's outcome, its call's marker and the gws env its new Meet was made with."""
+    made = []
+
+    async def create(env=None):
+        made.append(env)
+        return URL, CODE
+
+    brief = await asking_session(dsn, team)
+    p = {"reply_to": at(1), "topic_id": None, "prep": "", **payload}
+    async with await db.connect(dsn) as conn:
+        out = await broker.request(conn, broker.Performers(meet.MeetJoin(brief, dsn, create=create, start=lambda s: None)),
+                                   brief.id, broker.Action("meet.join", "new", p), request_id="t1/join.json")  # fmt: skip
+        info = await call.marker(conn, out.result["session_id"]) if out.kind == "done" else None
+    return out, info, made
+
+
+def test_a_join_is_the_projects_account_unless_it_names_another(dsn, team, tmp_path):
+    client_account(tmp_path, team)
+    out, info, made = run(join_as(dsn, team))
+    assert out.kind == "done" and info["account"] == CLIENT
+    assert made == [{"GOOGLE_WORKSPACE_CLI_CONFIG_DIR": str(Path.home() / ".config" / f"gws-{CLIENT}")}]
+    assert call.call_account(info).profile == f"{team.profile}-{CLIENT}"
+
+    async def stop():  # one call at a time on a Mac
+        async with await db.connect(dsn) as conn:
+            await tasks.stop(conn, out.result["session_id"], reason="ended", by="tom", via="chat")
+
+    run(stop())
+    # An invite to Valor's own address, in the client's call chat: own's profile.
+    out, info, made = run(join_as(dsn, team, account="valor@yuda.me"))
+    assert out.kind == "done", out.error
+    assert "account" not in info and made == [{}]
+    assert call.call_account(info).profile == str(team.profile)
+
+
+def test_a_join_refuses_an_account_that_is_not_a_string(dsn, team):
+    out, _, made = run(join_as(dsn, team, account=["valor@yuda.me"]))
+    assert out.kind == "refused" and "account" in out.error and made == []
+
+
+def test_a_profile_signed_in_as_the_other_address_fails_naming_the_accounts_sign_in(dsn, team, tmp_path):
+    client_account(tmp_path, team)
+    signed_in(Path(f"{team.profile}-{CLIENT}"), email="valor@yuda.me")  # the wrong address
+    out, _, made = run(join_as(dsn, team))
+    assert out.kind == "failed" and f"meet-sign-in --account {CLIENT}" in out.error and made == []
 
 
 # -- the call session -------------------------------------------------------------

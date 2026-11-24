@@ -9,8 +9,10 @@ only the asking thread is given, so no one waits to be let in. The payload
 names the thread it was asked in (`reply_to`, Telegram's `topic_id`) and
 `prep`, the asking turn's notes on the topic, read before the call.
 
+It joins as the payload's `account`, else the project's Google account,
+else Valor's own (`google.Account`), on that account's call profile.
 Under `meet:<machine>`, one call at a time on this Mac: it fails when the
-Mac's call profile is not signed in and Valor's own Google login is not in
+account's call profile is not signed in as it and its Google login is not in
 1Password to sign it in with (`bridges/meet/google.py`), naming the step
 that signs it in, or when the Mac is in a call (naming it); otherwise it
 opens the call session and its first report, that Valor is joining
@@ -24,6 +26,7 @@ before a crash is left unused, its link given to no one.
 
 import asyncio
 import json
+import os
 import re
 import subprocess
 import sys
@@ -44,11 +47,12 @@ def group_chat(chat: dict[str, str] | None) -> bool:
     return bool(chat) and channels.group(chat["channel"], chat["chat_id"])
 
 
-async def create_space() -> tuple[str, str]:
-    """A new Meet, open to anyone with its link: (link, meeting code)."""
+async def create_space(env: dict[str, str] | None = None) -> tuple[str, str]:
+    """A new Meet, open to anyone with its link, made by the account whose
+    gws `env` is given (own by default): (link, meeting code)."""
     proc = await asyncio.create_subprocess_exec(
         "gws", "meet", "spaces", "create", "--json", json.dumps({"config": {"accessType": "OPEN"}}),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env={**os.environ, **(env or {})},
     )  # fmt: skip
     out, err = await proc.communicate()
     if proc.returncode != 0:
@@ -80,7 +84,9 @@ class MeetJoin:
         'on that topic; ask it in the same turn as the thread\'s "Starting a call" line, with notes from what '
         "you already hold (your Calls section): its worker reads up while Valor joins. Your next prompt says "
         "Valor is joining; once Valor is in, the call posts the link in the thread itself, so post no link "
-        "yourself, and none when the call reports it could not join."
+        "yourself, and none when the call reports it could not join. Add `\"account\": \"<address>\"` to join "
+        "as that Google account of Valor's (an invited call's \"Join as\"); without it the call joins as the "
+        "project's account."
     )
 
     def __init__(self, brief: tasks.Brief, dsn: str | None = None, *, create=create_space, start=spawn):
@@ -91,9 +97,10 @@ class MeetJoin:
             return 'the target is "new" or a Meet link (https://meet.google.com/abc-defg-hij)'
         p = action.payload
         if not all(
-            p.get(k) is None or isinstance(p[k], str) for k in ("reply_to", "topic_id", "prep", "starts")
+            p.get(k) is None or isinstance(p[k], str)
+            for k in ("reply_to", "topic_id", "prep", "starts", "account")
         ):
-            return "reply_to, topic_id, prep and starts must each be a string or null"
+            return "reply_to, topic_id, prep, starts and account must each be a string or null"
         if p.get("starts") is not None:
             try:
                 zoned = datetime.fromisoformat(p["starts"]).tzinfo is not None
@@ -121,10 +128,14 @@ class MeetJoin:
         return {"session_id": session_id}
 
     async def _open(self, conn, action: broker.Action, key: str) -> str:
-        if not call.profile_ready() and not google.secret("password"):
+        p = action.payload
+        who = google.Account(p["account"].lower()) if p.get("account") else google.Account.of(
+            (self.brief.project or {}).get("name")
+        )
+        if not who.ready() and not google.secret("password", who):
             raise broker.Failed(
-                "this Mac's call profile is not signed in to Google; Tom signs it in once, as Valor, at the Mac in Terminal: "
-                + call.SIGN_IN
+                f"this Mac's call profile for {who.email} is not signed in to Google as {who.email}; Tom signs it "
+                f"in once, at the Mac in Terminal: {who.sign_in}"
             )
         busy = await call.in_progress(conn)
         if busy is not None:
@@ -134,14 +145,13 @@ class MeetJoin:
                 f"{asked.get('chat_id')}; one call at a time on this Mac"
             )
         if action.target == "new":
-            url, code = await self.create()
+            url, code = await self.create(who.env)
         else:
             url, code = action.target, MEET_URL.fullmatch(action.target)[1]
-        p = action.payload
         async with conn.transaction():
             session_id = await call.begin(conn, self.brief, url=url, code=code, reply_to=p.get("reply_to"),
                                           topic_id=p.get("topic_id"), prep=p.get("prep") or "", effect_key=key,
-                                          starts=p.get("starts"))  # fmt: skip
+                                          starts=p.get("starts"), account=None if who.is_own else who.email)  # fmt: skip
         return session_id
 
     async def lookup(self, action: broker.Action, key: str) -> dict[str, Any] | None:
