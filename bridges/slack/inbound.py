@@ -49,8 +49,19 @@ def wanted(msg: dict[str, Any], own: str) -> bool:
         msg.get("subtype") in SUBTYPES
         and bool(msg.get("user"))
         and msg.get("user") not in (own, SLACKBOT)
-        and not msg.get("bot_id")
+        and not is_bot(msg)
     )
+
+
+def is_bot(msg: dict[str, Any]) -> bool:
+    """Whether a bot wrote `msg`. A person writing through an app with
+    their own token (Yudame Tools, Geekbot) gets the app's `bot_id` too,
+    and a `bot_profile` naming no bot user; a bot's own post names its
+    user there. A `bot_id` with no `bot_profile` shows no person: a bot's."""
+    if not msg.get("bot_id"):
+        return False
+    profile = msg.get("bot_profile")
+    return not profile or profile.get("user_id") == msg.get("user")
 
 
 async def reaction(

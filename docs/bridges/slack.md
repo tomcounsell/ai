@@ -205,11 +205,16 @@ the send decides (below).
 
 Any other DM, and a channel no project lists, is not received.
 Valor's own posts (the event's `user` is the token's own id) are dropped,
-live and in gap fill; so are bot messages and Slackbot's (`USLACKBOT`,
+live and in gap fill; so are bots' posts and Slackbot's (`USLACKBOT`,
 which carry no `bot_id`), and every subtype but none,
 `file_share`, `thread_broadcast`, and `me_message`. They reach a session only as the
 `posted` of the next message someone else writes there (The record,
 below).
+A bot's post is one with a `bot_id` whose `bot_profile` is missing or
+names the message's `user` as its own (`inbound.is_bot`). A person
+writing through an app with their own token, Tom through Yudame Tools
+say, gets the app's `bot_id` too, but a `bot_profile` naming no user or
+another one: that is their message, and it is received.
 
 **Tom's reactions.** A `reaction_added` by one of
 `VALOR_OPERATOR_SLACK_IDS` on Valor's own post, in a chat this bridge
