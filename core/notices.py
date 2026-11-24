@@ -207,12 +207,17 @@ async def owe(conn, task_id: str) -> list[str]:
     return [m for m in made if m]
 
 
-async def unanswered(conn, task_id: str, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+async def unanswered(
+    conn, task_id: str, rows: list[dict[str, Any]], *, people: bool = False
+) -> dict[str, Any] | None:
     """The message a chat session has not answered: its latest
     `message.steered`, or the message an earlier session of the same chat
     ended without answering and handed on (its `ended` report), when no
     turn collected after it went through. So a message survives any number
-    of sessions that end on it. None for a task that is no chat session."""
+    of sessions that end on it. None for a task that is no chat session.
+    With `people`, a message another chat's session handed on (`handed_on`)
+    is passed over: it was never said in this chat, so nobody here waits on
+    it (the usage-limit notice, `core/limit.py`)."""
     from core import tasks
 
     chat = (await tasks.brief(conn, task_id)).chat
@@ -222,7 +227,7 @@ async def unanswered(conn, task_id: str, rows: list[dict[str, Any]]) -> dict[str
         p = r["payload"]
         if r["type"] == "turn.collected" and p.get("verdict") != "failed":
             return None
-        if r["type"] == "message.steered":
+        if r["type"] == "message.steered" and not (people and p.get("handed_on")):
             return p
         if r["type"] == "child.reported" and p.get("kind") == "ended" and p.get("child_id"):
             try:
@@ -230,7 +235,7 @@ async def unanswered(conn, task_id: str, rows: list[dict[str, Any]]) -> dict[str
             except KeyError:
                 continue
             if earlier.chat == chat:
-                return await unanswered(conn, earlier.id, await ledger.read(conn, earlier.id))
+                return await unanswered(conn, earlier.id, await ledger.read(conn, earlier.id), people=people)
     return None
 
 

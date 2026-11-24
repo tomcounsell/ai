@@ -14,7 +14,8 @@ task: it is due again at the reset (`router.retry_due`).
 `notify` is the one exception to "only a chat session's own turn speaks as
 Valor" (`docs/plans/one-voice.md`), because Tom asked for it by name: after
 a limit failure, a chat session holding a person's unanswered message
-(`notices.unanswered`, through earlier ended sessions of the chat too) sends
+(`notices.unanswered`, through earlier ended sessions of the chat too; a
+message handed on from another chat is no one waiting here, 2026-11-24) sends
 one fixed sentence, a reply to that message, through the chat's own send.
 Once per chat per limit window: its request id is `limit/<until>`. Every
 row of it is `quiet`, so the session sleeps until the reset. No model
@@ -104,7 +105,7 @@ async def notify(
     request_id = f"limit/{last['payload']['until']}"
     if any(r["payload"].get("request_id") == request_id for r in rows if r["type"].startswith("effect.")):
         return None
-    said = await notices.unanswered(conn, task_id, rows)
+    said = await notices.unanswered(conn, task_id, rows, people=True)
     if said is None:
         return None
     reset = datetime.fromisoformat(last["payload"]["until"])

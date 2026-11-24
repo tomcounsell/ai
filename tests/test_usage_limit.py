@@ -254,6 +254,66 @@ def test_a_session_holding_only_a_handed_on_message_tells_its_sender(dsn, tmp_pa
     assert notice["payload"]["reply_to"] == "12004"
 
 
+HANDED = {
+    "by": "tom",
+    "chat": "slack:T9/C9",
+    "note": "From another room's session; nothing to post here.",
+    "verified": True,
+}
+
+
+async def handed(dsn, task, mid="handon:ec55b864020e7501:02c685233ae4"):
+    await says(dsn, task, "the message handed on", mid=mid, handed_on=HANDED)
+
+
+def test_the_24_nov_case_a_handed_on_message_gets_no_notice_in_the_room(dsn, tmp_path):
+    """The Captain, 2026-11-24: the Mastery room's session held only a
+    hand-on when its turn hit the limit, and the notice was requested into
+    that room as a reply to the `handon:` id."""
+    with bridges.operator(tmp_path):
+        task = run(chat_task(dsn, chat_id="T1/C1"))
+        run(handed(dsn, task))
+        run(step(dsn, task, limited()))
+        written = run(bridges.rows(dsn, task))
+    assert not held(written)
+    assert typed(written, "step.failed")[-1]["until"] and not typed(written, "task.ended")
+
+
+@pytest.mark.parametrize("person_first", [True, False])
+def test_a_persons_message_beside_a_hand_on_still_gets_its_notice(dsn, tmp_path, person_first):
+    async def go():
+        task = await chat_task(dsn, chat_id="T1/C1")
+        if person_first:
+            await says(dsn, task, "any news?", mid="1700000000.000300")
+            await handed(dsn, task)
+        else:
+            await handed(dsn, task)
+            await says(dsn, task, "any news?", mid="1700000000.000300")
+        await step(dsn, task, limited())
+        return await bridges.rows(dsn, task)
+
+    with bridges.operator(tmp_path):
+        (notice,) = held(run(go()))
+    assert notice["action_type"] == "slack.send_message" and notice["target"] == "T1/C1"
+    assert notice["payload"]["reply_to"] == "1700000000.000300"
+
+
+def test_an_earlier_session_that_ended_holding_only_a_hand_on_gets_no_notice(dsn, tmp_path):
+    async def go():
+        first = await chat_task(dsn, chat_id="T1/C1")
+        await handed(dsn, first)
+        second = await chat_task(dsn, chat_id="T1/C1")
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, second, "child.reported",
+                                {"from": first, "kind": "ended", "about_key": "ended:1", "child_id": first,
+                                 "text": "unanswered"})  # fmt: skip
+        await step(dsn, second, limited())
+        return await bridges.rows(dsn, second)
+
+    with bridges.operator(tmp_path):
+        assert not held(run(go()))
+
+
 def test_an_ordinary_failure_still_ends_at_four_tries(dsn, tmp_path):
     with bridges.operator(tmp_path):
         task = run(chat_task(dsn))
