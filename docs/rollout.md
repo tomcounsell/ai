@@ -67,11 +67,15 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    `harnesses/pi.py`); `sentry-cli`, `officecli`, `gws`; byob for the
    browser (an MCP server in `~/.claude.json`, not a command); `ffmpeg` (the voice process decodes and encodes audio with it).
    The headless browser `look` runs (`VALOR_BROWSER`, [browser.md](browser.md)):
-   `PLAYWRIGHT_SKIP_BROWSER_GC=1 uv tool run --from playwright==1.58.0 playwright install chromium-headless-shell`.
+   `uv venv ~/.local/share/valor-browser && uv pip install --python ~/.local/share/valor-browser/bin/python playwright==1.58.0 && PLAYWRIGHT_SKIP_BROWSER_GC=1 ~/.local/share/valor-browser/bin/playwright install chromium-headless-shell`.
    That Playwright pins build 1208, the one `settings.browser` names; the
-   kernel's own Playwright installs a newer build. Without the variable an
-   install deletes every build no linked Playwright names, including ones
-   other projects use. It is done when
+   kernel's own Playwright installs a newer build. Any Playwright install
+   deletes every build no installed Playwright names (its links in
+   `ms-playwright/.links`). The variable stops this install deleting other
+   projects' builds; the venv, which no cache clean removes, keeps naming
+   1208 so later installs leave it. A `uv tool run` install named it from
+   uv's cache, and once that was cleaned the next install elsewhere deleted
+   1208 (the Captain and the Cowboy, 2026-11-24). It is done when
    `~/Library/Caches/ms-playwright/chromium_headless_shell-1208/INSTALLATION_COMPLETE` exists.
 3. **The checkout.** The kernel runs from `~/src/ai`. On a Mac with the old
    system there: `git -C ~/src/ai branch retired/old-main`, then

@@ -63,7 +63,9 @@ text reached it on 2026-10-25.
 **The browser.** `settings.browser` (`VALOR_BROWSER`) names one fixed build,
 `chromium_headless_shell-1208` in `~/Library/Caches/ms-playwright/`, never the
 newest in the cache. A Mac gets it in `rollout.md` step 2, from
-Playwright 1.58.0 (the kernel's own Playwright pins a newer build). A turn that
+Playwright 1.58.0 in its own venv, `~/.local/share/valor-browser` (the
+kernel's own Playwright pins a newer build); that venv keeps the build
+named, so another Playwright's install does not delete it. A turn that
 installs Playwright into its own project sets `PLAYWRIGHT_BROWSERS_PATH` to
 a directory in its workspace (a task has no package cache of its own).
 
