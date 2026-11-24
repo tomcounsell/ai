@@ -105,6 +105,7 @@ class Session:
     def __init__(self):
         self.sent: list[tuple[str, dict]] = []
         self.inbox: asyncio.Queue = asyncio.Queue()
+        self.handling = False  # a message yielded, its handling not yet back for the next
 
     async def send_realtime_input(self, **kw):
         self.sent.append(("realtime", kw))
@@ -120,7 +121,11 @@ class Session:
             m = await self.inbox.get()
             if isinstance(m, Exception):
                 raise m
-            yield m
+            self.handling = True
+            try:
+                yield m
+            finally:
+                self.handling = False
             if m.server_content and m.server_content.turn_complete:
                 return
 
@@ -263,10 +268,15 @@ async def in_call(dsn, team, page=None, gemini=None, **kw):
 
 
 async def settle(the, s=3.0):
-    """Until every post and job is idle."""
+    """Until every message pushed to Live is handled (a tool call awaits the
+    database before it queues its post), and every post and job is idle."""
+
+    def live_idle():
+        return the.session is None or (the.session.inbox.empty() and not the.session.handling)
+
     for _ in range(int(s / 0.02)):
         await asyncio.sleep(0.02)
-        if the.posts.empty() and not [j for j in the.jobs if not j.done()] and not the.asking:
+        if live_idle() and the.posts.empty() and not [j for j in the.jobs if not j.done()] and not the.asking:
             await asyncio.sleep(0.05)
             if the.posts.empty() and not the.jobs:
                 return

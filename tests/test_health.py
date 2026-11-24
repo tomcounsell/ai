@@ -224,7 +224,7 @@ def terminate_all(dsn: str) -> None:
     """What a restart of the server does to every session of this database."""
     with psycopg.connect(owner(dsn), autocommit=True) as c:
         c.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                  "WHERE datname = current_database() AND pid <> pg_backend_pid()")  # fmt: skip
+                  "WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'")  # fmt: skip
 
 
 @pytest.fixture
