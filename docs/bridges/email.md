@@ -43,7 +43,9 @@ in at that Mac, never copied) and `EMAIL_SINCE.<address>`, the day its
 watch starts, so mail already there is never received
 ([plans/9f4967d9-google-per-project.md](../plans/9f4967d9-google-per-project.md)).
 `keys` reports each of them `kept` or `missing`. Each mailbox has its own
-watch, so one failing leaves the others running. Mail to it is the
+watch, so one failing leaves the others running. The bridge reads its
+mailboxes at each use: one whose keys or spec arrive after it started is
+sent from at once and watched from its next tick. Mail to it is the
 project's, whoever sent it (`intake.mailbox_project`), but Google's notices
 of an invite or a share (`intake.GOOGLE_NOTICES`; the invites routine handles
 invites), and mail from any of Valor's own addresses is never received; a send under the project leaves from it

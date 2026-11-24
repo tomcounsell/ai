@@ -499,7 +499,9 @@ def mailbox_project(mailbox: str | None) -> workspace.Spec | None:
     """The project placed here whose own Google account (`google`) the
     mailbox is; of two sharing it, the first listing chats. None for
     Valor's own mailbox."""
-    found = [s for s in workspace.Spec.here() if mailbox and s.google == mailbox.lower()]
+    if not mailbox or mailbox.lower() == settings.email_address.lower():
+        return None
+    found = [s for s in workspace.Spec.here() if s.google == mailbox.lower()]
     return next((s for s in found if s.chats), found[0] if found else None)
 
 

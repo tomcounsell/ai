@@ -116,7 +116,8 @@ The routines the kernel holds:
   [invite-calls.md](plans/invite-calls.md)): lists the calendar of each of
   Valor's Google accounts on this Mac (own, and each a project placed here
   names in `google`), all first, for the next 14 days (a list that fails is
-  `calendar.unlisted`, and the others go on) and, for each event (its copies
+  `calendar.unlisted`, and the others go on; the run fails when no
+  account's calendar could be read) and, for each event (its copies
   on several calendars, by `iCalUID`, once) with a Meet link that Valor
   organizes or is invited to, whose project (by the specs' `invites`) is
   placed on this Mac, patches Valor's `needsAction` to `accepted` on the

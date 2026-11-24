@@ -6,7 +6,9 @@ description: Keep a product room's backlog Sheet (Google Sheets, valor@yuda.me) 
 # The product Sheet
 
 One Google Sheet per client project (in its product room where it has
-one), owned by valor@yuda.me, in its own Drive folder with its companion
+one), owned by valor@yuda.me (or, for a project whose spec names `google`,
+by that account or a shared drive in its domain, which `sheet.py` reaches
+as it since the turn's gws is that account), in its own Drive folder with its companion
 Doc, copied from the template "Product sheet template" (`TEMPLATE` in `sheet.py`). The product
 role (`skills/sdlc/roles/product.md`) and the persona's "Run the project" and
 "How product decisions are made" say how to act; this says how the
@@ -60,7 +62,7 @@ edits one), and report per project what it had, what it lacked, what was
 filled, and the Sheet, Doc and folder links. It is a list Valor runs and
 reports on; nothing waits on it.
 1. **Sheet, Doc and folder.** Look for a Sheet URL in the spec's `rooms`
-   and for `<Product> product` in valor@yuda.me's Drive first: a project
+   and for `<Product> product` in the turn's gws account's Drive first: a project
    that has a Sheet gets `python3 sheet.py doc SHEET --share tom@yuda.me`
    (it moves a Sheet loose in My Drive into its own folder, replaces the
    old Guide tab with Columns, links the Doc on Goal), plus any Queue or

@@ -166,7 +166,8 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    3. its mailbox: an app password made on the account, typed into
       `mail-keys` with the other `<NAME>.<address>` keys and
       `EMAIL_SINCE.<address>` as today's date (`python -m bridges.email
-      keys` names them), then the email bridge restarted;
+      keys` names them); no restart: the bridge reads its mailboxes at each
+      use and watches a new one from its next tick;
    4. its calendar's unanswered Meet invites and its inbox's mail, by sender
       and subject, reported before the spec names it, since the `invites`
       routine then accepts them, emailing their organizers.

@@ -265,3 +265,13 @@ def test_the_brief_says_which_account_gws_is_and_how_to_reach_own(dsn, projects)
     assert f"GOOGLE_WORKSPACE_CLI_CONFIG_DIR={Path.home() / '.config' / 'gws'} gws" in client
     assert "every email.send leaves from it" in client
     assert "Google:" not in plain
+
+
+def test_a_spec_naming_valors_own_address_takes_no_mail_for_it(projects):
+    """`google` equal to own is own (`Account.is_own`), so own's mailbox
+    keeps its sender rule."""
+    (projects / "odd.toml").write_text(
+        SPEC.format(name="odd") + f'google = "{OWN}"\nchats = ["slack:T0ABC/C0ODD"]\n'
+    )
+    assert intake.mailbox_project(OWN) is None
+    assert not intake.takes_email("stranger@nowhere.test", f"<CAK+{uuid.uuid4().hex}@mail.gmail.com>", OWN)
