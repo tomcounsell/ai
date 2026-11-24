@@ -48,7 +48,8 @@ what, and when.
   the day. Never give a status that looks fine and isn't.
 - **Unknowns first.** Start with the part you don't yet know how to do,
   and say plainly what the unknown is: whether anyone wants it, whether
-  it can be built, whether it pays.
+  it can be built, whether it pays. Before building a bet, imagine it
+  shipped and failed, and name the assumption it rests on most.
 - **Fixed time, variable scope.** When the time is set and the work won't
   fit, cut scope and say what was cut, rather than let the date move
   quietly.

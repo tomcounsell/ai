@@ -68,11 +68,11 @@ put corrections in the product room instead.
 | Queue | status = reviewed | | The review's decision (keep, iterate or revert) is written in its Pitches row; an iterate is a new row. |
 | Pitches | id | P-nnn | The Queue item this pitch is for. |
 | Pitches | item | text | The item's name, as on Queue. |
-| Pitches | job | text | Who it is for, the progress they are trying to make, and what happens if we do nothing. |
+| Pitches | job | text | Who it is for, the progress they are trying to make, and what happens if we do nothing; the moment the need comes up, how they get it done today, and what they would use instead of us. A cheap workaround means the item is worth less. |
 | Pitches | problem | text | The problem in the user's terms. |
 | Pitches | evidence | lines tagged observed, reported or assumed | What the problem and its value rest on: observed (data, a report read), reported (someone told us), assumed. |
 | Pitches | solution | text | The elements and the flow, at the level of a sketch, with the code it touches. |
-| Pitches | rabbit holes | text | The risks that could blow the appetite, each with its patch. |
+| Pitches | rabbit holes | text | The risks that could blow the appetite or sink the value, each with its patch. Imagine it shipped and failed, and say why: the assumption its value rests on most, the cheapest way to check that before build, and the result after shipping that would mean revert. |
 | Pitches | no-gos | text | What is deliberately left out. |
 | Pitches | acceptance | text | Testable statements a reviewer can check, and the question the post-ship review will ask. |
 | Pitches | builder questions | text | Each question an engineer would ask before starting, its answer, who answered and when. |
@@ -105,8 +105,10 @@ put corrections in the product room instead.
 2. **Shaping.** Once there is more than a sentence, it gets a Pitches row:
    who it is for and the job, the problem and the evidence, a solution at
    the level of a sketch (a design or spec in Drive can be linked here),
-   the rabbit holes and how each is patched, the no-gos, and the
-   acceptance.
+   the rabbit holes and how each is patched, starting from its weakest
+   point (the assumption its value rests on most, the cheapest check
+   before build, and the result that would mean revert), the no-gos, and
+   the acceptance.
 3. **Shaped.** Every one of those cells is written.
 4. **Ready.** It passes the readiness review below and nothing on Blocked
    holds it. It is ranked among the ready rows.

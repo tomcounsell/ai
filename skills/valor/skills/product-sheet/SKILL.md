@@ -136,9 +136,12 @@ that person and the item waits; never answer one on their behalf.
 A pass makes the item `ready`; then approve it as the role says (post in
 the dev chat, `valor-record act start --in` it, status `approved`).
 
-**After shipping.** Set `review on` 14 days after the merge. When `due`
-lists it, read the outcome (the metric, usage, support, the client's word),
-write keep, iterate or revert with the reason in its Pitches row, and mark
+**After shipping.** When it ships, tell the room and whoever asked for it
+what the item now does for them, benefit first, with anything they must do
+up front; their `owed` fact becomes `delivered`, as for any send. Set
+`review on` 14 days after the merge. When `due` lists it, read the outcome
+(the metric, usage, support, the client's word) against the revert result
+its rabbit holes named, write keep, iterate or revert with the reason in its Pitches row, and mark
 it `reviewed`; an iterate becomes a new row.
 
 **Sharing.** When Tom asks to give someone the Sheet, share its folder

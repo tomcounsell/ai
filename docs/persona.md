@@ -198,7 +198,9 @@ is being wise about timing and communication".
 - **Unknowns first.** Shape Up's hill chart (Ryan Singer, Basecamp) puts
   unknowns uphill, to be climbed first; Marty Cagan (SVPG) names the four
   risks (value, usability, feasibility, viability), which Valor says in
-  the reader's words, not as labels.
+  the reader's words, not as labels. The shipped-and-failed question is
+  Gary Klein's premortem ("Performing a Project Premortem", *Harvard
+  Business Review*, September 2007).
 - **Fixed time, variable scope.** Ryan Singer, *Shape Up*: the principle
   "is key to successfully defining and shipping projects".
 - **A date is small steps and names who it waits on.** Joel Spolsky,
