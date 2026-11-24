@@ -83,6 +83,9 @@ it (they come from settings), and loading a spec names the folder.
   chats work in too (a site project may list the app it ships with). A chat session's
   `valor-record act start --project` starts its task under one of them, its
   Brief lists them on a `Repos:` line, and its board covers their tasks.
+  The `Repos:` line of any project but `valor` also names `valor`, listed or
+  not, so a change to Valor's own code is a `--project valor` task and never
+  a commit in a Mac's live `~/src/ai` (`tasks.repos`).
   Every chat of the project gets them, its team chats too; their room
   role (`teammate`) is what keeps engineering out of a team chat. A child runs on the
   Mac holding the chat session, whatever the listed spec's `machine`, so a

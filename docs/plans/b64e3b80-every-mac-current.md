@@ -12,11 +12,11 @@ client, person or chat id goes in a commit; ops scripts stay in the task's
   `37d54a137`: none has it yet (merges roll only on the merging Mac; the
   rest wait for an update). Their last rollouts succeeded; "ahead N" in
   `git status` is a stale `origin/main`, not a local commit.
-- Who wrote to the Captain's `~/src/ai`: two PsyOPTIMAL tasks, both told
+- Who wrote to the Captain's `~/src/ai`: two tasks of a client project, both told
   to. Task 85346cd18c7a (2026-11-13 17:47) made branch
   `valor/85346cd1-sheet-order` and a worktree of `~/src/ai` in its own
   workspace and committed the `order` fix there. On 2026-11-21 the
-  PsyOPTIMAL chat session started 49df20ab251e with "rebase commit
+  client project's chat session started 49df20ab251e with "rebase commit
   ea83aeadb onto the current main of /Users/valorengels/src/ai ... get it
   onto main by that repo's normal route"; its build rebased (16:37) and
   fast-forwarded the live `main` (reflog: `merge
