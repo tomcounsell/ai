@@ -201,24 +201,30 @@ def runner(
             model=resolve_model(ctx.routine.model),
             routine=ctx.routine.name,
         )
-        home = Path(settings.work_dir).expanduser() / run_id / "titles"
+        # The titling calls' home, removed with the run's directory when the
+        # run ends: the run is never provisioned, so reclaim never sees it.
+        run_dir = Path(settings.work_dir).expanduser() / run_id
+        home = run_dir / "titles"
         home.mkdir(parents=True, exist_ok=True)
-        gw = gateway(ctx.dsn)
-        await gw.start()
-        base = gw.issue(run_id, "titles")
         written = unwritten = 0
         try:
-            # The gateway records this lock as each call's holder.
-            async with routines.holding(ctx.conn, f"run:{run_id}"):
-                for spec in placed:
-                    w, u = await sync(
-                        ctx.conn, run_id, spec, ctx.now, gws or settings.gws,
-                        lambda b: _title(claude or settings.claude, base, home, b),
-                    )  # fmt: skip
-                    written, unwritten = written + w, unwritten + u
-                await gw.drain(run_id)
+            gw = gateway(ctx.dsn)
+            await gw.start()
+            base = gw.issue(run_id, "titles")
+            try:
+                # The gateway records this lock as each call's holder.
+                async with routines.holding(ctx.conn, f"run:{run_id}"):
+                    for spec in placed:
+                        w, u = await sync(
+                            ctx.conn, run_id, spec, ctx.now, gws or settings.gws,
+                            lambda b: _title(claude or settings.claude, base, home, b),
+                        )  # fmt: skip
+                        written, unwritten = written + w, unwritten + u
+                    await gw.drain(run_id)
+            finally:
+                await gw.close()
         finally:
-            await gw.close()
+            await asyncio.to_thread(workspace.rmtree, run_dir)
         summary = f"{len(placed)} calendars: {written} written, {unwritten} not written"
         return Ran(run_id, "finished", summary)
 

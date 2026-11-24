@@ -316,14 +316,17 @@ def test_the_routine_writes_each_block_once_and_keeps_hand_made_events(fresh, tm
                 await fire("11-09 12:00")
                 last = cal.calls()[calls:]
                 run_rows = []
-                for child in await tasks.children(
+                children = await tasks.children(
                     conn, (await routines.ensure(conn, routines.load("hours")))[0]
-                ):
+                )
+                for child in children:
                     run_rows += await ledger.read(conn, child)
             await runner.cleanup()
-            return first, one, rerun, three, last, run_rows
+            return first, one, rerun, three, last, run_rows, children
 
-        first, one, rerun, three, last, run_rows = asyncio.run(go())
+        first, one, rerun, three, last, run_rows, children = asyncio.run(go())
+        # Each run's titling home goes with the run: no run leaves a directory.
+        assert children and not any((tmp_path / "work" / c).exists() for c in children)
 
     titled = {
         ("11-01 23:30", "11-02 00:00"), ("11-02 00:00", "11-02 00:30"), ("11-03 10:00", "11-03 10:30"),
@@ -370,6 +373,41 @@ def test_the_routine_writes_each_block_once_and_keeps_hand_made_events(fresh, tm
     charged = [r["payload"] for r in run_rows if r["type"] == "gateway.charged"]
     assert len(charged) == 6 and {c["turn_id"] for c in charged} == {"titles"}
     assert "hours" in first
+
+
+@pytest.mark.parametrize("fails", ["sync", "drain"])
+def test_a_run_that_fails_leaves_no_directory(fresh, tmp_path, monkeypatch, fails):
+    """A run whose calendar sync or gateway drain raises still removes its
+    directory: 23 runs' folders were left on the Captain by 2026-11-24."""
+
+    class Drains(_Gateway):
+        async def drain(self, run_id):
+            raise RuntimeError("drain failed")
+
+    async def broken_sync(*args, **kwargs):
+        raise RuntimeError("sync failed")
+
+    if fails == "sync":
+        monkeypatch.setattr(hours, "sync", broken_sync)
+    else:
+        monkeypatch.setattr(hours, "sync", lambda *a, **k: asyncio.sleep(0, (0, 0)))
+    with bridges.operator(tmp_path):
+        (tmp_path / "projects" / "a.toml").write_text(
+            SPEC.format(
+                name="a", chats='"telegram:-1001"', more='calendar = {id = "cal-a", since = 2026-11-01}\n'
+            )
+        )
+        run = hours.runner(gateway=lambda d: (Drains if fails == "drain" else _Gateway)(d))
+
+        async def go():
+            async with await db.connect(fresh) as conn:
+                with pytest.raises(RuntimeError, match=f"{fails} failed"):
+                    await routines.run(conn, "hours", {"hours": run}, now=at("11-06 12:00").astimezone(UTC),
+                                       dsn=fresh)  # fmt: skip
+                return await tasks.children(conn, (await routines.ensure(conn, routines.load("hours")))[0])
+
+        children = asyncio.run(go())
+        assert len(children) == 1 and not (tmp_path / "work" / children[0]).exists()
 
 
 def test_a_long_title_is_cut_at_a_word():
