@@ -13,6 +13,8 @@ All three crossed Macs, and each Mac has its own ledger (docs/machine.md).
 
 One mechanism, extended: `act steer` (`tools/chat_tasks.py` `TaskSteer`) gains a chat target.
 - **CLI** (`tools/valor_record.py`). `valor-record act steer --in CHAT --from RECORD [--text NOTE] --by WHO`. With `--in`, no TASK is taken. `act_request` sends `target` = CHAT and payload `{in, from, text, by}`; `steer`'s names gain `in` and `from`. Without `--in`, it behaves as today.
+- **`--by` on a hand-on** is who asked for it to be handed on. It is kept as `handed_on.asked_by` and is never the speaker's attribution, which is always taken from the origin record.
+- **Naming CHAT.** No new listing surface: `valor-record chats` stays the session's own project's, so no session sees another client's rooms. The guidance says to read a Slack room's id with the Slack tools (`list_channels`) and pass `slack:<team>/<channel id>`; a Telegram room is named by the id the asker or the record gives. A chat no spec takes gives an error naming the chat given.
 - **Performer.** `refuse`, `perform` and `lookup` branch on `payload.in`. With `in`, the task-child refusal does not apply, since it is about a task target; no refusal is added. `perform` reads RECORD, a `message.received` row, from this Mac's ledger, within the asking project's reach (`record.reach`, the scope `valor-record messages` reads; outside it, the existing `NotFound`). It builds an `Inbound` for CHAT:
   - **Channel and chat:** channel and chat id are CHAT's, and `chat_kind` is the target's (`channels.group`).
   - **Copied unchanged:** `sender_id`, `sender_name`, `sent_at` and `text`.
@@ -20,6 +22,7 @@ One mechanism, extended: `act steer` (`tools/chat_tasks.py` `TaskSteer`) gains a
   - **Left empty:** `reply_to`, `topic_id`, `thread`, `posted` and `headers`, since they name posts in another room.
   - **`message_id`:** `handon:<effect key>`, so the same request twice records once.
   - **`handed_on`:** `{chat, message_id, channel, verified, by, project, session, machine, note}`. `by` and `verified` are decided here from the origin record, by the existing `intake._from_operator` (`tom` when it is the operator, else the sender's name). The receiving side never re-derives them from a sender id copied across channels.
+- **Transactions.** The record is read and the Inbound built in one transaction, which closes before any ssh. No transaction or lock is held across the remote call (10 s connect, 300 s at most). The local path calls `intake.receive` in its own transaction.
 - **Where it goes.** The owning Mac is the `machine` of the spec that takes CHAT (`Spec.all()`, `takes`).
   - **This Mac:** `intake.receive`.
   - **Another Mac:** the watch's `ssh(host, command)` moves from `routines/watch/runner.py` to `core/remote.py` with an optional stdin, and the watch and the hand-on both call it. It runs `cd ~/src/ai && .venv/bin/python -m core receive` with the Inbound as JSON on stdin. The host is the spec's `machine` used as an ssh host (`valorengels@<host>`), as `VALOR_WATCH` names hosts. A `VALOR_MACHINE` value that is no ssh hostname fails like any connection.
@@ -32,11 +35,12 @@ One mechanism, extended: `act steer` (`tools/chat_tasks.py` `TaskSteer`) gains a
   - **Wakes:** it wakes the session even in a `mentions` room.
   - **Attribution:** `by` is `handed_on.by`, and `handed_on` is kept on the steer row.
   - **No reaction:** `reactions.on_bound` sets nothing on it, since there is no platform message, so nothing reaches the room.
-- **Reading.** `chat_line` renders `[when] Tom Counsell (handed on from <origin chat>, by your <project> session on <Mac>; not said in this chat): <verbatim words>`, then `Valor's note: ...` when there is one, and files as "kept on <Mac>".
+- **Reading.** `chat_line` renders `[when] Tom Counsell (handed on from <origin chat>, by your <project> session on <Mac>; not said in this chat): <verbatim words>`, then `Valor's note: ...` when there is one, and files as "kept on <Mac>". The line names no message id and no thread, since `handon:` is no platform id and offers nothing to reply to.
 - **Guidance.** One place: `skills/sdlc/converse.md`, beside `act start --in`.
   - **Hand it on:** a message or ask for another project's room is handed on with `--from` rather than retyped or posted there, and the asker is told where it went.
   - **Which rooms:** hand on only within the asker's project or to a room whose people may hear it, never one client's words into another client's room. This is the existing rule that what a chat said stays that chat's.
   - **Receiving:** a handed-on message is that person's, said elsewhere, and its room did not see it. What the session posts there must make sense to the room's members without it. The session decides what its room hears and starts any task itself.
+  - **Posting about it:** a post about a handed-on message goes top-level in the room, never as a thread reply to it.
   - **Reporting back:** when the asker should hear the result where they asked, hand a short note back the same way.
 - **Docs.** Updated where they describe this:
   - `core/intake.py`'s binding table and ownership paragraph, and the docstrings of `tools/chat_tasks.py` and `routines/watch/runner.py`.
@@ -67,7 +71,10 @@ Expected: Cowboy→Pirate, Captain and Bald; Pirate→Cowboy; Captain→Cowboy. 
 - **Case 2.** An email record is handed into a Slack room on another Mac:
   - the subject and body arrive verbatim, and the sender is the From address;
   - the row's `verified` is false and `by` is not `tom`.
-- **Fields.** The received row's `reply_to`, `topic_id` and `thread` are empty, `chat_kind` is the target's, and an attachment carries no path.
+- **Fields.** The received row's `reply_to`, `topic_id` and `thread` are empty, `chat_kind` is the target's, and an attachment carries no path. `thread_tag` gives none for it, and `chat_line` shows no message id to reply to.
+- **Attribution.** `--by` that names someone else is kept as `asked_by`, and the row's `by` is still the origin's.
+- **Naming.** A `slack:<team>/<channel id>` that another Mac's spec lists resolves to that Mac; one no spec lists gives an error naming it.
+- **No lock across ssh.** With the remote runner blocked, another transaction can take the asking session's locks.
 - **CLI.** `act steer --in CHAT --from R` with no TASK reaches the performer, unrefused.
 - **Edges:**
   - a handed-on "stop" into Tom's own chat is a steer, and no task stops;
