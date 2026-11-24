@@ -49,7 +49,7 @@ on first use if removed.
   Jev calls go to the hosted API (`core/settings.py:305`). Ask Tom before
   removing it.
 
-## Deleted 2026-11-21
+## Deleted 2026-11-21, and since
 
 Every model this inventory found unused, deleted on Tom's word ("you should
 know which ones are used and can delete the ones that aren't", 2026-11-21).
@@ -65,6 +65,7 @@ and its app not installed or not set to use it. 28.6 GB freed in all.
 | superwhisper's models, `~/Library/Application Support/superwhisper` | 1.0 GB Captain, 562 MB Pirate | Captain, Pirate | The superwhisper app was not installed on these two Macs; the folder was what an uninstall left. |
 | u2net (`~/.u2net/u2net.onnx`) | 176 MB | Captain | rembg's background-removal model; no repository on the Captain uses rembg, and rembg downloads it again on first use. |
 | Yudame Tools `canary-180m-flash-Q8_0.gguf` | 218 MB | Pirate | The Pirate's Dictation is on Accurate (Parakeet), by default. Choosing Fast downloads Canary again. |
+| mlx-community/whisper-medium.en-mlx, whisper-small.en-mlx | 1.5 GB and 481 MB (1.87 GiB freed) | Captain | Deleted 2026-11-24. A client task downloaded them that day to transcribe a video, and it had ended; no process held them. Valor's own path is the voice service, which transcribed after a restart. |
 
 A model found unused later is listed here before it is deleted. Deleting:
 `ollama rm NAME` for Ollama; `hf cache rm -y model/ORG/NAME` (the `hf` in

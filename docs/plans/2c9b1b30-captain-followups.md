@@ -4,56 +4,23 @@ Follow-ups task 89a67ebc named and left. Stakes: the code change writes
 `task.ended` rows (permanent ledger rows) on every Mac's routine runs; the
 rest is a reversible install and the deletion of two re-downloadable models.
 
-## 1. A routine's finished run stays open (bug)
+## 1. A routine's finished run listed as open (bug)
 
-**Observed.** `routines.hours` starts its run with `tasks.start_child` and
-returns `Ran(run_id, "finished", …)`; nothing ever writes a terminal row, so
-the run folds to `judge` for good and `tasks.open_ids` lists it. Not only
-hours: `summary`, `conditions` and `verify` do the same. On the Cowboy,
-`valor-record tasks` lists five verify runs (11-19 to 11-23) in `judge`
-though each has `suite.ran` and `workspace.removed`. The open runs count in
-every queue line and the reconciler's list of a project's open tasks.
+**Observed.** `valor-record tasks` lists each routine run as `judge` for
+good (the hours runs; five verify runs on the Cowboy, 11-19 to 11-23).
+**Cause, found in build:** a run starts with no `sdlc` marker, so
+`machine.fold` reads it as legacy: the kernel never schedules it, and
+`tasks.open_ids` and the status page (`node`) already leave it out.
+`record._state` alone printed the legacy fold's default state, `judge`.
+(The critiqued design, writing `task.ended` on each run, would have
+changed nothing: the legacy fold ignores that row.)
 
-**Fix, in one place: `core/routines.py` `_fire`.** After it appends
-`routine.ran`, it ends every run that the objective's `routine.ran` rows
-(the new one and earlier ones) name `finished` or `failed` and that is not
-yet merged, ended or stopped. The row is written by `routines` itself, not
-`verdicts.end` (whose payload is `reason`, `by: kernel`): under
-`task:<run>`, folded first as `verdicts.end` does, `task.ended`
-`{"kind": "decided", "by": "routine", "text": …}`. `text` is
-`Done: <summary>` for `finished`, the summary for `failed`, so
-`notices.ended_text` and `record._result` read it as any decided end.
-Earlier runs are ended at each routine's next firing on each Mac, so the
-backlog (23+ hours runs on the Captain, the verify runs here) clears with
-no hand-run script. `started`, `continued`, `running` and `nothing_due`
-end nothing, so `open_node`'s sweep continues as now.
-
-**A runner that raises.** Hours (and conditions, summary) start a new child
-every firing, so a run whose runner raises after `start_child` gets no
-`routine.ran` and would stay open forever. `_fire` notes the ledger's last
-event id before calling the runner; when the runner raises, it ends each
-child of the objective whose `task.started` (marker naming this routine)
-is past that id, with `text` `the run raised: <repr>`, and re-raises. The
-error still surfaces as it does today (the command exits non-zero, the
-launchd log has the traceback); no runner changes, and the existing
-`pytest.raises` test in `tests/test_hours.py` stands, with one more assert.
-A verify run continued by a later firing is not past the id, so a raise
-in a continued sweep leaves it to its next firing, as now.
-
-Consequence, accepted: each ended run owes its quiet `ended` report
-(`notices.owe`, a routine result: wakes nothing). The first firing after
-rollout writes one per backlogged run.
-
-**Tests** (with the routine tests that drive `routines.run`, real ledger):
-a `finished` run is ENDED with `Done: <summary>`, `by: routine`, and out of
-`open_ids`; a `failed` run is ENDED with the bare summary;
-`started`/`running` runs stay open and `open_node` still returns them;
-`nothing_due` writes nothing; an earlier `finished` run still open is
-ended at the next firing; a stopped or already-ended run gets no second
-row; another routine's open run is untouched; in
-`test_a_run_that_fails_leaves_no_directory` (sync and drain raising) the
-run is ENDED with `the run raised: RuntimeError(...)` and the error still
-propagates; a runner raising before it starts a child ends nothing.
+**Fix:** `machine.label(rows)`, the status page's labels (`calibration`,
+`stopped`, `node`, else the state), used by `tasks.index` and
+`record._state`; a chat session that is not stopped still reads `open`.
+**Test** (`tests/test_record.py`): a routine's objective and run read
+`node`, an SDLC task `judge`, a stopped session `stopped`; it fails on the
+old code.
 
 ## 2. The screenshot browser on the Captain
 
