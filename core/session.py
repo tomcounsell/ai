@@ -1002,7 +1002,6 @@ async def _reply_all(conn, action: broker.Action) -> tuple[broker.Action, str | 
         **mail.reply_all(row[0], mailbox),
         "body": action.payload.get("body") or "",
         "files": action.payload.get("files") or [],
-        **({} if mailbox == settings.email_address else {"from": mailbox}),
     }
     return broker.Action("email.send", ",".join(sorted(payload["to"])), payload), None
 

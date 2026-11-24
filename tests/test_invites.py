@@ -25,6 +25,8 @@ SPEC = 'name = "{name}"\nrepo = "unused"\nkind = "plain"\nsuite = "true"\nchats 
 
 GWS = r"""#!{python}
 import json, os, pathlib, sys
+from datetime import datetime
+t = datetime.fromisoformat
 # Each account's calendar is its own file, by the gws folder it runs with.
 who = os.environ.get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "gws").rsplit("/", 1)[-1]
 if pathlib.Path({tmp!r}, who + ".fails").exists():
@@ -38,7 +40,7 @@ with pathlib.Path({log!r}).open("a") as f:
     f.write(json.dumps({{"method": method, "params": params, "body": body, "who": who}}) + "\n")
 if method == "list":
     found = [e for e in events.values() if "recurrence" not in e
-             and e["end"]["dateTime"] > params["timeMin"] and e["start"]["dateTime"] < params["timeMax"]]
+             and t(e["end"]["dateTime"]) > t(params["timeMin"]) and t(e["start"]["dateTime"]) < t(params["timeMax"])]
     print(json.dumps({{"items": sorted(found, key=lambda e: e["start"]["dateTime"])}}))
 elif method == "get":
     print(json.dumps(events[params["eventId"]]))
@@ -362,3 +364,18 @@ def test_valors_other_address_matches_no_project_but_its_domain_still_does(setup
 
     assert project(CLIENT, "ops@yuda.me")[0] == "valor"
     assert project(CLIENT, "jo@acme.com") == ("acme", None)
+
+
+def test_copies_in_different_time_zones_are_one_event_joined_as_the_projects_account(setup, fresh):
+    """Each calendar lists the start in its own zone: the same instant is one event."""
+    from datetime import timezone
+
+    own = setup
+    client = with_account(own)
+    uid = {"iCalUID": "zones@google.com"}
+    own.put("own-copy", organizer="jo@acme.com", start=START.astimezone(timezone(timedelta(hours=7))), **uid)
+    client.put("client-copy", organizer="jo@acme.com", me={**VALOR, "email": CLIENT},
+               start=START.astimezone(timezone(timedelta(hours=-5))), **uid)  # fmt: skip
+    fire(fresh, own, START - timedelta(minutes=8))
+    (w,) = wakes(fresh)
+    assert f"Join as: {CLIENT}" in w["text"]

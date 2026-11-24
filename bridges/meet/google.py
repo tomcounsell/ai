@@ -50,7 +50,7 @@ class Account:
         project, no `google`, or a spec that does not load."""
         try:
             google = workspace.Spec.load(project).google if project else None
-        except workspace.Refused, FileNotFoundError:
+        except workspace.Refused:
             google = None
         return cls(google) if google else cls.own()
 

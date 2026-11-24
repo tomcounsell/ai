@@ -27,8 +27,9 @@ against a new Meet with a second device of Valor's account
 
 - **`meet.join`** (`act`), a group chat session's: target a Meet link or
   `new` (`gws meet spaces create`, open to anyone with the link), payload
-  the thread asked in (`reply_to`, `topic_id`) and `prep`, the session's
-  notes on the topic. The asking session first answers the ask in its
+  the thread asked in (`reply_to`, `topic_id`), `prep`, the session's
+  notes on the topic, and optionally `account`, the Google account to join
+  as (else the project's `google`, else Valor's own). The asking session first answers the ask in its
   thread with one line, "Starting a call, link in a moment", and requests
   `meet.join` in the same turn, its notes from what it already holds; the
   call's worker reads up while Valor joins, and the notes reach the voice

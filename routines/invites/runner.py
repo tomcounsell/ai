@@ -177,7 +177,9 @@ def runner(
                 continue
             for e in listed.get("items") or []:
                 if _counts(e):
-                    copies.setdefault((e["iCalUID"], e["start"]["dateTime"]), []).append((who, e))
+                    # Each calendar gives the start in its own zone: grouped by the instant.
+                    at = datetime.fromisoformat(e["start"]["dateTime"]).astimezone(UTC).isoformat()
+                    copies.setdefault((e["iCalUID"], at), []).append((who, e))
         accepted = woke = 0
         for (uid, _), found in copies.items():
             name, why = match(found[0][1], specs)

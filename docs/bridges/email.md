@@ -23,14 +23,14 @@ prints its launchd job. The last section lists the modules.
 
 ## Receiving
 
-**The mailbox.** One mailbox, Valor's (`email_address`), on Gmail over IMAP
+**The mailbox.** Valor's own mailbox (`email_address`), on Gmail over IMAP
 (`imap_host`, port 993) and SMTP (`smtp_host`, port 587, STARTTLS), with
 certificates verified. The bridge signs in with an app password held
 only in `mail-keys` in the kernel key directory (mode 600), copied from
 the Cowboy's ([rollout.md](../rollout.md), step 5); it is in no vault `.env`
 or 1Password vault a turn reads, and `python -m bridges.email keys`, which
 copies only the users, reports the password `kept` when `mail-keys` holds
-it and otherwise `missing` with the copy from the Cowboy to run, never a value. Every message Valor sends leaves from this address, as Valor,
+it and otherwise `missing` with the copy from the Cowboy to run, never a value. Every message Valor sends leaves from this address, as Valor (a project naming `google` sends from its own mailbox, below),
 and only as a chat session's `email.send`: `gws`'s Google sign-in reads
 mail and cannot send it ([plans/one-voice-mail.md](../plans/one-voice-mail.md)).
 
@@ -143,7 +143,8 @@ When a task on this Mac sent the root, every email in the thread, whoever
 sent it, steers that task while it is an open chat session (a Slack room's
 session hears Tom's reply to the email it sent); otherwise the thread's
 first recorded email starts the thread's chat session, under the sending
-task's project, else the project listing the sender (`email:<address>`),
+task's project, else, for mail to a project's own mailbox, that project
+(`intake.mailbox_project`, from `headers.mailbox`), else the project listing the sender (`email:<address>`),
 else `valor` (an unowned sender's email in a thread no task here sent is
 bound to nothing), opening with
 the thread's earlier recorded emails; every later one is a steer on that
@@ -310,8 +311,9 @@ and reports read the operator as the kernel does.
 
 ## What the bridge never does
 
-- **Routing.** It does not map senders or domains to projects, workspaces,
-  or customers, and does not merge threads by subject line.
+- **Routing.** It does not map senders, domains or mailboxes to projects,
+  workspaces, or customers (intake does, from the specs and the bridge's
+  `headers.mailbox`), and does not merge threads by subject line.
 - **Triage or judgement.** It does not classify mail, screen for prompt
   injection, or decide what deserves a reply. Inbound mail is data [7].
 - **Persona rewriting.** It does not draft, rephrase, add prefixes, or
