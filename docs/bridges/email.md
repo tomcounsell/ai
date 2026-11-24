@@ -53,7 +53,7 @@ invites), and mail from any of Valor's own addresses is never received; a send u
 and a send whose mailbox is not on the Mac fails, never leaving from
 Valor's own instead.
 
-**The watch.** The bridge holds one IMAP connection and waits on it with
+**The watch.** The bridge holds one IMAP connection per mailbox and waits on each with
 IDLE (RFC 2177), so new mail arrives as an event: the server's `EXISTS`
 response ends the wait. RFC 3501 section 5.4 lets a server log out a client
 idle for 30 minutes, so the bridge ends IDLE and issues it again every 29
@@ -335,9 +335,9 @@ and reports read the operator as the kernel does.
 
 | Module | Holds |
 |---|---|
-| `bridges/email/__init__.py` | `EmailBridge`: `channel`, `limits`, `performers()` giving `email.send`'s `(perform, lookup)`, and `run(outbox)`, the IMAP watch beside each released send and each Sent Mail lookup as a task of its own, reconnected on `tick()` |
+| `bridges/email/__init__.py` | `EmailBridge`: `channel`, `limits`, `performers()` giving `email.send`'s `(perform, lookup)`, and `run(outbox)`, each mailbox's IMAP watch beside each released send and each Sent Mail lookup as a task of its own, reconnected on `tick()` |
 | `bridges/email/__main__.py` | The verbs `run`, `keys`, and `--plist` (`KeepAlive`, logs in `log_dir/email.log`); `run` logs at INFO, each line `time level message` |
-| `bridges/email/config.py` | `Config`, from settings and `mail-keys`; the passwords are held here only |
+| `bridges/email/config.py` | `Config`, from settings and `mail-keys` (`for_account`, a project's own mailbox from its `<NAME>.<address>` keys); the passwords are held here only |
 | `bridges/email/parse.py` | Raw mail to a record's fields, and attachments to files |
 | `bridges/email/imap.py` | The watch: search, receive, and IDLE (`IDLE_REISSUE_S`) |
 | `bridges/email/smtp.py` | `perform` and `lookup` |
