@@ -35,7 +35,7 @@ received and sent as the new account, and the client's Sheets owned by valor@yud
 
 **Rollout (the Captain), in order.** Steps 1–4 change no spec.
 1. Rename the item, then run `meet-sign-in --account`.
-2. The Captain already has the client's OAuth client (made by hand 2026-11-24, `~/.config/gws-mastery`),
+2. The Captain already has the client's OAuth client (made by hand 2026-11-24 in a hand-named gws folder),
    kept: its folder becomes `~/.config/gws-<email>` (the old name a link to it). With the file keyring
    backend, log in again through that client with only `calendar`, `spreadsheets`, `drive`, `documents`,
    `gmail.readonly`, `meetings.space.*`, `openid` and `userinfo.email` (the hand login has `gmail.modify`,
