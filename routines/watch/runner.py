@@ -19,7 +19,8 @@ Each run reads each target's `python -m core health` over ssh
   once when it has been unreachable `UNREACHABLE_REPORT`.
 
 Each run also reports, once a day, each read target and this Mac whose
-free disk is under `DISK_LOW_GB` (`_disk`).
+free disk is under `DISK_LOW_GB`, and each whose update is failing
+(`health.failing_update`; `_daily`).
 
 A row is written only when a target's state changes. A report goes to the
 operator chat's session (`notices.request`), Valor's own voice in Tom's DM;
@@ -38,7 +39,7 @@ from typing import Any
 
 import sentry_sdk
 
-from core import intake, ledger, notices
+from core import health, intake, ledger, notices
 from core.routines import Context, Ran
 from core.settings import settings
 
@@ -124,15 +125,22 @@ async def _tell(conn, key: str, text: str) -> None:
         sentry_sdk.capture_message(text, level="fatal")
 
 
-async def _disk(ctx, host: str, free: float | None) -> None:
-    """Once a day per Mac, a report when its free disk is under `DISK_LOW_GB`.
-    No Sentry event where no session hears it: each Mac's watch reports its
-    own disk, and the Cowboy's reaches Tom (the Captain's own notices went
-    unheard six times before its disk filled, 2026-11-19)."""
+async def _daily(ctx, host: str, free: float | None, update: dict[str, Any] | None) -> None:
+    """Once a day per Mac, a report when its free disk is under `DISK_LOW_GB`,
+    and one while its update is failing. No Sentry event where no session
+    hears it: each Mac's watch reports its own, and the Cowboy's reaches Tom
+    (the Captain's own disk notices went unheard six times before its disk
+    filled, 2026-11-19; its update failed 2,775 times, 2026-11-21 to 11-24,
+    and only its own log said so)."""
     if free is not None and free < DISK_LOW_GB:
         await notices.request(ctx.conn, STREAM, kind="rollout", about_key=f"disk:{host}:{ctx.now:%Y-%m-%d}",
                               text=f"{host} has {free:.0f} GB of disk left. Builds start failing when it fills; "
                               "what should go?")  # fmt: skip
+    if update:
+        await notices.request(ctx.conn, STREAM, kind="rollout", about_key=f"update:{host}:{ctx.now:%Y-%m-%d}",
+                              text=f"{host}'s update has failed since {update.get('since')} UTC, at "
+                              f"{update.get('step')}: {str(update.get('reason'))[:300]}. It takes no merged "
+                              "change until that is cleared.")  # fmt: skip
 
 
 def runner(*, remote: Remote = ssh, holds: Path | None = None, targets: tuple[str, ...] | None = None):
@@ -145,7 +153,8 @@ def runner(*, remote: Remote = ssh, holds: Path | None = None, targets: tuple[st
         here = holds or Path(HOLDS).expanduser()
         last = await _last(ctx.conn, ctx.objective)
         said = []
-        await _disk(ctx, settings.machine, shutil.disk_usage(Path.home()).free / 1e9)
+        await _daily(ctx, settings.machine, shutil.disk_usage(Path.home()).free / 1e9,
+                     await health.failing_update(ctx.conn))  # fmt: skip
         for host in watched:
             was = last.get(host) or {}
             state, detail = await _watch(ctx, remote, host, was, here)
@@ -162,7 +171,7 @@ def runner(*, remote: Remote = ssh, holds: Path | None = None, targets: tuple[st
                             f"I have not been able to reach {host} since {was['at']:%Y-%m-%d %H:%M} UTC "
                             "(asleep, off, or off the network). Nothing on it is held back for this.")  # fmt: skip
             return "unreachable", {}
-        await _disk(ctx, host, h.get("free_gb"))
+        await _daily(ctx, host, h.get("free_gb"), h.get("update"))
         if h.get("healthy"):
             await _holds(remote, host, False, here)
             return "healthy", {}

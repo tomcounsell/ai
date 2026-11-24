@@ -354,22 +354,49 @@ def stage_text(state: machine.State | str) -> str | None:
     return path.read_text().strip() if path.is_file() else None
 
 
+# The project whose repository is Valor's own code (its skills, tools, kernel).
+VALOR = "valor"
+
+
 def repos(name: str | None) -> str | None:
-    """The chat's repositories, for a chat session whose project lists
-    `projects`: its own first, each with its repository, and how
-    `valor-record act start --project` chooses one. None for a project listing none."""
+    """The chat's repositories, for a chat session of a project: its own
+    first, each project its spec lists in `projects`, and, for any project
+    but Valor's own, `VALOR` (when its spec loads), with how `valor-record
+    act start --project` chooses one. Valor's code is listed everywhere
+    since a room on another project had no route to it: told to land a
+    skill fix "on the current main of ~/src/ai", a PsyOPTIMAL task
+    committed onto the Captain's live checkout, and every update there
+    failed for three days (2026-11-21). None for no project, a spec that
+    does not load, or a project with nothing beside its own."""
     try:
         own = workspace.Spec.load(name) if name else None
     except workspace.Refused:
         return None
-    if own is None or not own.projects:
+    if own is None:
         return None
-    found = [f"{own.name} ({own.repo})"]
-    found += [f"{listed} ({workspace.Spec.load(listed).repo})" for listed in own.projects]
-    return (
+    listed = [(p, workspace.Spec.load(p).repo) for p in own.projects]
+    valor = None
+    if own.name != VALOR and VALOR not in own.projects:
+        try:
+            valor = workspace.Spec.load(VALOR)
+        except workspace.Refused:
+            valor = None
+    if valor is not None:
+        listed.append((VALOR, valor.repo))
+    if not listed:
+        return None
+    found = [f"{own.name} ({own.repo})", *(f"{p} ({repo})" for p, repo in listed)]
+    text = (
         "; ".join(found) + f". A task starts under {own.name} unless `valor-record act start --project` "
         "names another of these; pick the one the request is about, and ask in the chat when it is unclear."
     )
+    if valor is not None:
+        text += (
+            f" A change to Valor's own code (its skills, tools or kernel) is a task under `--project {VALOR}`, "
+            "whose merge reaches every Mac by its update; never commit in a Mac's live checkout of it "
+            "(`~/src/ai`), which stops that Mac's updates."
+        )
+    return text
 
 
 def channel_text(offered: list[str], name: str = "channel.md") -> str:

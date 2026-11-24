@@ -803,6 +803,8 @@ def test_health_fix_reopens_tailscale_at_once_and_shares_the_spacing_with_the_ke
 
     monkeypatch.setattr(health, "probe", probe)
     monkeypatch.setattr(health, "services", lambda agents: {})
+    monkeypatch.setattr(health, "failing_update", lambda conn: probe())
+    monkeypatch.setattr(health.db, "connect", lambda dsn: _no_conn())
     tailscale_app.running = False
     out = run(health.report(agents=tmp_path))
     assert out["tailscale"] == "not running" and out["healthy"] and acts(tailscale_app) == []
@@ -812,6 +814,19 @@ def test_health_fix_reopens_tailscale_at_once_and_shares_the_spacing_with_the_ke
     assert health.reopen_tailscale("not running") == "spaced" and len(acts(tailscale_app)) == 1
     tailscale_app.running, tailscale_app.state = True, "Running"
     assert run(health.report(fix=True, agents=tmp_path))["fixed"] == {}
+
+
+async def _no_conn():
+    """A stand-in connection where the test has no database to read."""
+
+    class Conn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    return Conn()
 
 
 def disk_reports(dsn) -> list[dict]:
@@ -863,3 +878,114 @@ def test_the_watch_reports_each_mac_low_on_disk_once_a_day(fresh, tmp_path, monk
     assert "tonight" not in text["pirate"] and events == []
     run(go(today + timedelta(days=1)))
     assert len(disk_reports(fresh)) == 6
+
+
+# -- a failing update -----------------------------------------------------------------
+
+
+def _rollout(dsn, effect_id: str, kind: str, **payload) -> None:
+    async def go():
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, "updates", kind, {"effect_id": effect_id, **payload})
+
+    run(go())
+
+
+def _failing(dsn):
+    async def go():
+        async with await db.connect(dsn) as conn:
+            return await health.failing_update(conn)
+
+    return run(go())
+
+
+def test_health_reports_an_update_failing_now_and_nothing_once_each_failure_ended(
+    fresh, monkeypatch, tmp_path
+):
+    """The Captain's update failed 2,775 times (2026-11-21 to 11-24) and
+    only its own log said so: `health` gives the open failures' oldest time
+    and the newest step and reason; a failure later ended, however it
+    ended, is not one; a fetch failure with no sha is; and a database that
+    fails its probe gives None without reading the ledger."""
+    monkeypatch.setattr(health, "services", lambda agents: {"com.valor.kernel": 1})
+    monkeypatch.setattr(health, "tailscale", lambda: None)
+    assert _failing(fresh) is None
+    a, b, c = (ledger.new_id() for _ in range(3))
+    for outcome, effect in (("done", a), ("up_to_date", b), ("superseded", c)):
+        _rollout(fresh, effect, "rollout.failed", sha="1" * 40, step="fast-forward", reason="diverged")
+        _rollout(fresh, effect, "rollout.ended", outcome=outcome)
+    assert _failing(fresh) is None
+    old, fetch = ledger.new_id(), ledger.new_id()
+    _rollout(
+        fresh, old, "rollout.failed", sha="2" * 40, step="fast-forward", reason="the checkout has diverged"
+    )
+    _rollout(fresh, fetch, "rollout.failed", sha="", step="fetch", reason="could not resolve host")
+    got = _failing(fresh)
+    first = datetime.fromisoformat(got["since"])
+    assert (got["step"], got["reason"]) == ("fetch", "could not resolve host")
+    assert run(health.report(fresh, agents=tmp_path))["update"] == got
+    _rollout(fresh, fetch, "rollout.ended", outcome="done")
+    assert _failing(fresh) == {"since": first.isoformat(), "step": "fast-forward",
+                               "reason": "the checkout has diverged"}  # fmt: skip
+
+    async def down(dsn=None):
+        return psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr(health, "probe", down)
+    out = run(health.report("dbname=nowhere host=/nonexistent", agents=tmp_path))
+    assert out["update"] is None and out["healthy"] is False
+    _rollout(fresh, old, "rollout.ended", outcome="done")
+    assert _failing(fresh) is None
+
+
+def update_reports(dsn) -> list[dict]:
+    async def go():
+        async with await db.connect(dsn) as conn:
+            found = await (
+                await conn.execute(
+                    "SELECT payload FROM events WHERE type = 'child.reported' AND payload->>'from' = 'watch' "
+                    "AND payload->>'about_key' LIKE 'update:%%' ORDER BY id"
+                )
+            ).fetchall()
+            return [r[0] for r in found]
+
+    return run(go())
+
+
+def test_the_watch_reports_each_mac_whose_update_fails_once_a_day(fresh, tmp_path):
+    """Reported the way low disk is (`disk:`): each read target whose
+    health has `update`, and this Mac from its own ledger, once a day each,
+    again the next day while it fails, and not once it has cleared; a
+    failing update is not broken, so it holds nothing."""
+    from routines.watch import runner as watch
+
+    objective = run(new_task(fresh))
+    holds = tmp_path / "holds"
+    failing = {"since": "2026-11-21T16:37:18+00:00", "step": "fast-forward",
+               "reason": "the checkout at 7fb4 has diverged from 37d5"}  # fmt: skip
+    peers = Peers(captain={**GOOD, "update": failing}, bald=GOOD)
+    mine = ledger.new_id()
+    _rollout(fresh, mine, "rollout.failed", sha="3" * 40, step="dependencies", reason="uv sync exited 2")
+
+    async def go(now):
+        async with await db.connect(fresh) as conn:
+            ctx = SimpleNamespace(conn=conn, objective=objective, now=now)
+            await watch.runner(remote=peers, holds=holds, targets=("captain", "bald"))(ctx)
+
+    today = datetime(2026, 11, 22, 1, tzinfo=UTC)
+    run(go(today))
+    run(go(today + timedelta(hours=3)))
+    told = {r["about_key"]: r["text"] for r in update_reports(fresh)}
+    assert sorted(told) == sorted(["update:captain:2026-11-22", f"update:{settings.machine}:2026-11-22"])
+    assert told["update:captain:2026-11-22"] == (
+        "captain's update has failed since 2026-11-21T16:37:18+00:00 UTC, at fast-forward: "
+        "the checkout at 7fb4 has diverged from 37d5. It takes no merged change until that is cleared."
+    )
+    assert "at dependencies: uv sync exited 2" in told[f"update:{settings.machine}:2026-11-22"]
+    assert not list(holds.glob("hold-*"))
+    run(go(today + timedelta(days=1)))
+    assert len(update_reports(fresh)) == 4
+    _rollout(fresh, mine, "rollout.ended", outcome="done")
+    peers.states["captain"] = GOOD
+    run(go(today + timedelta(days=2)))
+    assert len(update_reports(fresh)) == 4

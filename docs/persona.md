@@ -668,8 +668,10 @@ persona change reaches a running session at its next turn
 A chat session's Brief also carries its chat's `Room:` description there
 (`intake.room`, docs/bridges/telegram.md), its role's guidance
 (`skills/sdlc/roles/<role>.md`, from the spec's `chat_roles`; `intake.role`)
-after `converse.md`, and, when its spec lists
-`projects`, a `Repos:` line naming each repository (`tasks.repos`), so
+after `converse.md`, and a `Repos:` line naming each repository its spec
+lists in `projects` and, for any project but `valor`, Valor's own, with
+the rule that a change to Valor's code is a `--project valor` task and
+never a commit in a Mac's live `~/src/ai` (`tasks.repos`), so
 both survive compaction as the persona does. Every Brief, a chat
 session's or a task's, whose project's spec lists `email_cc` carries an
 `Email CC:` line naming them, read from the spec at each turn

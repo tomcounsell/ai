@@ -160,9 +160,14 @@ The routines the kernel holds:
   or unreachable for 24 h, is reported once to the operator chat's session,
   or as a fatal Sentry event on a Mac with no such session.
   Each run also reports, once a day each, every target it read and its own
-  Mac with under 15 GB free; with no session to hear it the report stays a
-  quiet row, since the Cowboy's watch reports every Mac (the Captain's own
-  notices went unheard six times before its disk filled, 2026-11-19).
+  Mac with under 15 GB free, and each whose update is failing (`health`'s
+  `update`: a `rollout.failed` with no `rollout.ended`, since when, at
+  which step and why; not part of healthy, so it holds nothing); with no
+  session to hear it the report stays a quiet row, since the Cowboy's watch
+  reports every Mac (the Captain's own disk notices went unheard six times
+  before its disk filled, 2026-11-19, and its update failed 2,775 times
+  from 2026-11-21 to 11-24 with only its log saying so). The update's own
+  notice to the failing Mac's session, after three tries, stays as it is.
 - **summary** (01:30 daily, ceiling `act`, installed on every Mac; issue
   #3679, [the plan](plans/78a8c31b-nightly-summary.md)): for each project
   placed on this Mac, the Bangkok days after its last summary's `through`

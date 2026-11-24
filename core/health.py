@@ -45,7 +45,8 @@ passes inside it) is acted on, checked at most every `TAILNET_EVERY_S`.
 `services` lists this Mac's launchd services (a loaded `com.valor.*` job
 whose plist keeps it alive) with each one's pid, None when it is not
 running; `report` is `python -m core health`'s JSON: the probe, the
-services, free disk.
+services, free disk, and an update failing now (`failing_update`), which
+the peer's `watch` reports once a day.
 """
 
 import asyncio
@@ -57,6 +58,7 @@ import plistlib
 import shutil
 import subprocess
 import time
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -312,11 +314,32 @@ def kick(label: str) -> str | None:
     return None if done.returncode == 0 else f"exit {done.returncode}: {done.stderr.strip()[-200:]}"
 
 
+# Every `rollout.failed` row whose merge or update has no `rollout.ended`:
+# the oldest one's time, and the newest one's step and reason.
+FAILING = (
+    "SELECT min(f.at), (array_agg(f.payload->>'step' ORDER BY f.id DESC))[1], "
+    "(array_agg(f.payload->>'reason' ORDER BY f.id DESC))[1] FROM events f WHERE f.type = 'rollout.failed' "
+    "AND NOT EXISTS (SELECT 1 FROM events e WHERE e.type = 'rollout.ended' "
+    "AND e.payload->>'effect_id' = f.payload->>'effect_id')"
+)
+
+
+async def failing_update(conn) -> dict[str, Any] | None:
+    """This Mac's update failing now (`core/serve.py` `_failed`): `since`
+    (UTC ISO), the latest `step` and `reason`; None when every failed
+    rollout has since ended (done, up to date or superseded)."""
+    since, step, reason = await (await conn.execute(FAILING)).fetchone()
+    if since is None:
+        return None
+    return {"since": since.astimezone(UTC).isoformat(timespec="seconds"), "step": step, "reason": reason}
+
+
 async def report(dsn: str | None = None, *, fix: bool = False, agents: Path = AGENTS) -> dict[str, Any]:
     """`python -m core health [--fix]`: the probe, the services, Tailscale,
     free disk. `--fix` restarts a curably failing server, starts each
     service with no pid, and reopens a down Tailscale; it touches no
-    running process. Tailscale is not part of `healthy`."""
+    running process. Tailscale is not part of `healthy`, nor is `update`
+    (`failing_update`, None while the database fails its probe)."""
     failed = await probe(dsn)
     running = await asyncio.to_thread(services, agents)
     tailnet = await asyncio.to_thread(tailscale)
@@ -327,7 +350,11 @@ async def report(dsn: str | None = None, *, fix: bool = False, agents: Path = AG
         "services": running,
         "tailscale": tailnet,
         "free_gb": round(shutil.disk_usage(Path.home()).free / 1e9, 1),
+        "update": None,
     }
+    if failed is None:
+        async with await db.connect(dsn) as conn:
+            out["update"] = await failing_update(conn)
     if fix:
         fixed: dict[str, Any] = {}
         if out["curable"]:

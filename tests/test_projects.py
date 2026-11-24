@@ -175,10 +175,41 @@ def test_every_chat_of_a_project_listing_projects_names_its_repositories(dsn, dm
         return [await text(s) for s in sessions]
 
     main, side, plain = run(go())
-    line = f"\nRepos: {site} (https://example.com/site.git); {app} (https://example.com/app.git). "
+    line = f"\nRepos: {site} (https://example.com/site.git); {app} (https://example.com/app.git)"
     assert line in main and line in side
     assert "valor-record act start --project" in main.split("\nRepos: ", 1)[1].split("\n", 1)[0]
-    assert "\nRepos: " not in plain
+    assert "\nRepos: " not in plain or "\nRepos: plain" in plain  # a valor spec another test wrote adds it
+
+
+def test_every_room_but_valors_own_is_given_the_route_to_valors_code(tmp_path):
+    """A PsyOPTIMAL task, told to land a skill fix "on the current main of
+    ~/src/ai", committed onto the Captain's live checkout and stopped its
+    updates for three days (2026-11-21): every other project's room lists
+    Valor's repository and says a change there is a `--project valor` task."""
+    with bridges.configure(projects_dir=str(tmp_path)):
+        _route_to_valor()
+
+
+def _route_to_valor() -> None:
+    site, app = names()
+    spec(site, projects=[app], repo="https://example.com/site.git")
+    spec(app, repo="https://example.com/app.git")
+    spec(f"lone{site}", repo="https://example.com/lone.git")
+    assert tasks.repos(f"lone{site}") is None  # no valor spec: nothing beside its own
+    assert tasks.repos(site).startswith(
+        f"{site} (https://example.com/site.git); {app} (https://example.com/app.git). "
+    )
+    assert "--project valor" not in tasks.repos(site)
+
+    spec("valor", repo="https://example.com/ai.git")
+    lone, listed = tasks.repos(f"lone{site}"), tasks.repos(site)
+    assert lone.startswith(f"lone{site} (https://example.com/lone.git); valor (https://example.com/ai.git). ")
+    assert listed.startswith(f"{site} (https://example.com/site.git); {app} (https://example.com/app.git); "
+                             "valor (https://example.com/ai.git). ")  # fmt: skip
+    for text in (lone, listed):
+        assert "a task under `--project valor`" in text and "`~/src/ai`" in text
+    assert tasks.repos("valor") is None  # Valor's own rooms list nothing beside it
+    assert tasks.repos("missing") is None
 
 
 # -- the board covers the listed projects ---------------------------------------------
