@@ -18,12 +18,16 @@ not have been posted in: a hand-on is never posted in either room
 
 ## Fix
 
-`core/limit.py` `notify`: when the unanswered message `said` carries
-`handed_on`, return None, so no notice is requested. Nothing else changes. A
-person's own message in the chat, and the ended-session hand-off
-(`child.reported` kind `ended`, already tested), still get their notice. The
-limit wait and retry are untouched. Update the module docstring sentence on
-who is told by one clause.
+`core/notices.py` `unanswered` gains a keyword, `people=False`. With
+`people=True`, a `message.steered` carrying `handed_on` is skipped and the
+walk goes on back to the latest steer without one. The keyword is passed into
+its `ended`-report recursion, so an earlier session that ended holding only a
+hand-on yields None. Every other caller is unchanged. `hears` and `owe`'s
+ended report still carry hand-ons, and rightly so. `core/limit.py` `notify`
+calls `unanswered(..., people=True)`. A person's message is found even when a
+hand-on came after it, and a session holding only hand-ons sends no notice.
+The limit wait and retry are untouched. The module docstring gets one clause:
+a handed-on message is never a person waiting in that chat.
 
 ## Out of scope
 
@@ -40,12 +44,15 @@ who is told by one clause.
    with `handed_on` (by tom, from another chat, `message_id` `handon:…`). A
    limit step is taken. No `limit/` effect is held. The task still waits for
    the reset (`step.failed` with `until`, no `task.ended`).
-2. **A person's message after a hand-on still gets its notice.** The same
-   session gets a hand-on, then a person's own message in the room, then a
-   limit step. Exactly one notice is held, replying to the person's
-   `message_id`.
-3. The existing suite passes unchanged, including the ended-session hand-off
-   and each chat kind's send.
+2. **A person, then a hand-on.** A person's own message, then a hand-on, then
+   a limit step. Exactly one notice is held, replying to the person's
+   `message_id`. This fails under a check on `unanswered`'s single result.
+3. **A hand-on, then a person.** The same in the other order. Exactly one
+   notice is held, replying to the person.
+4. **An earlier session ended holding only a hand-on.** The next session of
+   the chat (`child.reported` kind `ended`) hits the limit. No notice is held.
+5. The existing suite passes unchanged, including the ended-session hand-off
+   of a person's message and each chat kind's send.
 
 ## Rollout
 
