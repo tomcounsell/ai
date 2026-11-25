@@ -1131,7 +1131,7 @@ def test_the_mind_is_told_valors_tools_how_to_answer_and_when_to_leave():
         and "Asked what was decided, answer from the meeting now, with no tool" in text
     )
     # Tom, 2026-11-12: anyone may ask Valor to leave, goodbyes all round end it, a scheduled end does not.
-    assert "Call `leave` when anyone in the call asks you to leave" in text and "said goodbye" in text
+    assert "Call `leave` only when anyone in the call asks you to leave" in text and "said goodbye" in text
     assert "Never leave because the meeting's scheduled time has passed" in text
     assert "Tom" not in call.TOOLS[-1]["description"]
 
@@ -3363,3 +3363,20 @@ def test_a_round_google_refuses_is_asked_again_and_each_copy_is_charged_its_inpu
     usages = [x["usage"] for x in got if "usage" in x]
     assert len(usages) == call.HEDGE and usages[0]["candidates_token_count"] == 5
     assert all(u["prompt_token_count"] == 100 and "candidates_token_count" not in u for u in usages[1:])
+
+
+def test_valors_name_is_heard_as_transcripts_write_it_and_not_in_other_words(dsn, team):
+    """2026-11-25: "Valar", "Valour" and "ValorStop" in one live call."""
+
+    async def go():
+        _, the = await a_call_of(dsn, team, Page(), Gemini())
+        return the.named
+
+    named = run(go())
+    assert all(
+        named.search(x)
+        for x in ("Valor, hi", "val, look", "Valar, please", "Valour, tell", "ValorStop, wait")
+    )
+    assert not any(
+        named.search(x) for x in ("the value of it", "a valid point", "Valerie, coffee", "valorous")
+    )

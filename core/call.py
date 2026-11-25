@@ -671,7 +671,7 @@ INSTRUCTIONS = (
     "decision about a client "
     "relationship (pricing, terms, hiring or pay) is one line: it is for Tom.\n"
     "- Call `post` only for what the room should read (a link, a figure, a list), never for a read-back.\n"
-    '- Call `leave` when anyone in the call asks you to leave (`why` "asked"), or when everyone has wrapped up '
+    '- Call `leave` only when anyone in the call asks you to leave (`why` "asked"), or everyone has wrapped up '
     'and said goodbye (`why` "wrapped up"); say goodbye. Never leave because the meeting\'s '
     "scheduled time has passed.\n\n"
     "How you work, from your persona:\n\n{conduct}\n\n{process}"
@@ -1200,8 +1200,9 @@ EARS_QUIET_S = 1.0
 # Tom's call (2026-11-06) were 0.22-0.24 s of sound he did not go on from;
 # the one he meant ran 0.5 s and on.
 BARGE_S = 0.4
-# Valor's name as a transcript writes it down, misheard too ("Val", "Valer", 2026-11-18).
-MISHEARD = ("valer", "val")
+# Valor's name as a transcript writes it down, misheard too ("Val", "Valer", 2026-11-18; "Valar",
+# "Valour", 2026-11-25).
+MISHEARD = ("valer", "val", "valar", "valour")
 # Characters of the call so far in each turn: at about four a token, the
 # context Live's compression held (`CALL_CONTEXT`).
 CALL_SO_FAR = CALL_CONTEXT
@@ -1334,7 +1335,8 @@ class Call:
         self.say_next: list[tuple[str, str]] = []  # answers asked aloud, for the next reply to open with
         self.aloud: set[str] = set()  # the questions asked aloud, by their words
         first = persona.identity(settings.persona_dir)["name"].split()[0].lower()
-        self.named = re.compile(rf"\b(?:{'|'.join(map(re.escape, (first, *MISHEARD)))})\b", re.IGNORECASE)
+        # Run into the next word too ("ValorStop", the transcriber, 2026-11-25).
+        self.named = re.compile(rf"(?i:\b(?:{'|'.join(map(re.escape, (first, *MISHEARD)))}))(?:\b|(?=[A-Z]))")
         self.sheet: str | None = None  # the project's backlog Sheet, read as the call starts (`run`)
         self.instruction = ""  # the mind's (`system`), as the call starts
         self.socket, self.clock = socket, clock
