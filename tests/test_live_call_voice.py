@@ -87,6 +87,7 @@ async def session(
     listen_s: int = 8,
     during: list[tuple[float, str]] = (),
     send=None,
+    decisions: str = DECISIONS,
 ) -> dict:
     """Live's first voiced audio, in seconds on `audio`'s clock, what it
     said and the tools it called, with `before` sent as the conversation so
@@ -115,7 +116,7 @@ async def session(
                     for fc in m.tool_call.function_calls if m.tool_call else []:
                         out["tools"].append(fc.name)
                         result = {"ask": call.ASKED, "settle": "recorded", "post": "posted",
-                                  "open_decisions": DECISIONS}.get(fc.name, "nothing recorded")  # fmt: skip
+                                  "open_decisions": decisions}.get(fc.name, "nothing recorded")  # fmt: skip
                         scheduling = None
                         if fc.name in quiet:
                             scheduling = (
@@ -508,3 +509,72 @@ def test_an_answer_noted_while_valor_talks_is_given_in_his_next_reply(voice):
             "said"
         ]
         assert "212" in said or "two hundred" in said.lower(), said
+
+
+# P-040 (Tom, 2026-11-25): three steps that only carry out an approved rename,
+# and one departure from it. The project is made up.
+RENAME = (
+    "Tom approved the rename on 2026-11-17: the Customer model becomes Account, with the names Account and "
+    "account_id, everywhere. Four steps are built. Steps 1 to 3 carry that out as approved: step 1 renames the "
+    "model, step 2 renames the API fields to account_id, step 3 renames the admin labels. Step 4 departs from "
+    "it: to skip a slow migration, the builder kept the old database table name, customers, under the renamed "
+    "model; that name is not on Tom's approved list, and keeping it means two names for one thing. "
+    "Recommendation: keep the old table name for now."
+)
+RENAME_OPEN = "Open for Tom:\n- t7/q7: Keep the old table name, customers, under the renamed Account model?"
+TABLE = re.compile(r"table|customers|old name", re.IGNORECASE)
+
+
+def test_work_that_carries_out_a_decision_is_status_and_only_the_departure_is_asked_after_it_is_explained(
+    voice,
+):
+    """The 2026-11-25 call asked a yes for steps that only carried out an
+    approved plan, and asked before explaining. Asked what is open, Valor
+    says the three steps follow the approved rename and asks nothing about
+    them; its only question is the kept table name, explained first."""
+    asked = voice("Okay Valor, where are we on the rename? What do you need from me?")
+    for _ in range(3):
+        said = asyncio.run(session(asked, prep=RENAME, listen_s=20, decisions=RENAME_OPEN))["said"]
+        assert TABLE.search(said), said
+        sentences = [x.strip() for x in re.split(r"(?<=[.?!])\s+", said) if x.strip()]
+        questions = [i for i, x in enumerate(sentences) if x.endswith("?")]
+        for i in questions:  # every question is about the departure, after it was explained
+            assert TABLE.search(sentences[i]) or any(TABLE.search(x) for x in sentences[max(0, i - 2) : i]), (
+                said
+            )
+            assert any(TABLE.search(x) and not x.endswith("?") for x in sentences[:i]), said
+        assert not re.search(r"approv\w*[^.?]*step (1|2|3|one|two|three)[^.]*\?", said, re.IGNORECASE), said
+
+
+def test_told_no_valor_changes_course_and_never_asks_it_again(voice):
+    """The 2026-11-25 call asked a rejected item three more times. Told no
+    by Tom, Valor says the new course; asked what is next, with a stale prep
+    note still recommending the old name, it does not ask about it again."""
+    u = lambda text: {"role": "user", "parts": [{"text": f"Tom Counsell: {text}"}]}
+    m = lambda text: {"role": "model", "parts": [{"text": text}]}
+    before = [
+        u("Where are we on the rename?"),
+        m("Steps 1 to 3 follow the rename you approved on 17 November: the model, the API fields and the admin "
+          "labels now say Account. One thing departs from it: to skip a slow migration, step 4 kept the old "
+          "table name, customers, under the Account model, so one thing would have two names. I'd keep it for "
+          "now. Do you want the old table name kept?"),
+    ]  # fmt: skip
+    no = voice("No. Rename the table too. I don't want two names for one thing.")
+    stale = call.PREPARED.format(notes=(
+        "Step 4: the old table name, customers, kept under Account. Recommendation: keep it, to skip a slow "
+        "migration of 3 million rows. Follow-up: renaming later costs the same migration."
+    ))  # fmt: skip
+    nexts = voice("Okay. What else is there?")
+    for _ in range(3):
+        said = asyncio.run(session(no, before, RENAME, [stale], listen_s=20, decisions=RENAME_OPEN))["said"]
+        back = [x for x in re.split(r"(?<=[.?!])\s+", said) if x.endswith("?") and TABLE.search(x)]
+        assert said.strip() and not back, said  # the new course, the no never asked back
+        then = [*before, u("No. Rename the table too. I don't want two names for one thing."),
+                m(said or "Understood: the table is renamed to accounts too, so there is one name.")]  # fmt: skip
+        said = asyncio.run(
+            session(nexts, then, RENAME, [stale], listen_s=12, decisions="Open for Tom:\n- nothing")
+        )["said"]
+        asked_again = [x for x in re.split(r"(?<=[.?!])\s+", said) if x.endswith("?") and TABLE.search(x)]
+        assert not asked_again and not re.search(
+            r"keep(ing)? (the )?(old )?(table )?name", said, re.IGNORECASE
+        ), said

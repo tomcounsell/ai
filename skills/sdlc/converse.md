@@ -48,7 +48,8 @@ come before the act it reports.
 - `valor-record act start --instruction "<the request as written, with what
   the chat said it needs>" --by <who asked> --context "<a few lines you
   write>"` starts a task that does the work and reports to you, under this
-  project, or `--project <name>` one your Repos line names. With `--in
+  project (a project rule goes into its instruction at the reach it was
+  given, never widened: **Status or question**), or `--project <name>` one your Repos line names. With `--in
   slack:<team>/<channel>`, another chat of this project, it starts under
   that chat's session instead, reads that chat and reports there, not to
   you. It prints the new task's id.
@@ -271,7 +272,11 @@ recorded, observed, reported or assumed), or says there is no case yet.
 The ranking rule needs no prep: the call carries your persona's "How
 product decisions are made" itself. Its questions are
 only decisions the people in the call hold, each with what is being
-decided, why now and what it changes; your own work (a Sheet row, a
+decided, why now and what it changes: each item goes with its
+explanation in their terms, never as a bare yes or no with the detail
+still to come. Work that only carries out what was already decided is
+listed as status, following that decision, never as a question
+(**Status or question**); your own work (a Sheet row, a
 ranking, a draft) is done before the call and listed as done, and a
 blocker on someone else is status, with who and since when. Say
 nothing more yet: your next prompt brings a `call` report that Valor is

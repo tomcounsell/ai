@@ -59,12 +59,25 @@ against a new Meet with a second device of Valor's account
   first (`Call.prepare`; Tom, 2026-11-17, P-038). The prep leaves out what
   the call has settled, read-backs and catches on it included, and Live is
   told a settled item stays settled, whatever a note lists (twice a prep
-  note's catch on a settled item had Valor raise it again, 2026-11-19). With one other person,
+  note's catch on a settled item had Valor raise it again, 2026-11-19). Each
+  prep is given Tom's read-backs so far in the call, so a decision stays out
+  after it scrolls out of the prep's 40-line window, and a prep under way
+  when Tom settles something is dropped for the one that settle queues
+  (2026-11-25: a prep written before Tom's no relisted the item under
+  another label, and Valor asked it three more times). The reading and the
+  prep give each item what it is and what it changes, in the person's
+  terms, and whether it only carries out a decision (status) or needs an
+  answer, each decision named once. With one other person,
   Valor leads: a settled item's read-back opens the next; with more, the
   who-is-here note says the next item waits until someone asks for it. Live decides when Valor is addressed and
   speaks; its tools ask the worker (a fresh `call` turn in the session's
   checkout, on the call's gateway), post, read the open decisions,
-  record Tom's read-backs and, when the project's spec names a backlog
+  record Tom's read-backs (`settle`: its ids as `open_decisions` gives
+  them, or a bare question id, or a task id with one open question,
+  matched against the board's open questions; an id that matches none is
+  said back to Live, so it is never told "recorded" for nothing, and the
+  read-back is posted and kept for the prep either way; 2026-11-25, ids
+  of another form were dropped) and, when the project's spec names a backlog
   Sheet in its rooms, read it (`backlog`: `sheet.py lookup` on how
   someone described an item, or the whole Queue in order), and look a
 person up (`person`: their dossier on the call's project, by name or loose
