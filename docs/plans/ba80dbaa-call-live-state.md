@@ -48,11 +48,16 @@ not built). The rest waits for that turn's answer.
   `_settles` matched (`_decisions`, now mid-call); queues an update. `ids` is optional (P-040's diff
   makes it so; kept or done here): every decision goes through `settle`, one on no open question
   included, so none lives only in the topics text. A worker update begun before a settle is dropped and
-  queued again (P-040's rule, kept). A question asked while an update runs cancels it and the update is
+  queued again (P-040's rule, kept). `settle` gains an optional `by` (who decided, as the call names
+  them); left out with one other person in the call, it is that person; the fact is about them
+  (`memory.known`), as `_decisions` does today. A question asked while an update runs cancels it and the update is
   queued again after the answer, so a lookup never waits on an update (the builder checks a cancelled
   worker turn ends cleanly; the update's own time is logged and stated). The end-of-call summary is told the
   decisions already recorded and lists only others, so none is written twice. Answering the open
   question itself stays at the end (no acting mid-call).
+- **The end keeps them.** `end`'s summary step merges the state's recorded decisions (text, `by`,
+  fact name) into `decided`, so notes.md, summary.json and the report's decided lines list them;
+  `_decisions` writes facts only for the summary's others.
 - `INSTRUCTIONS`: the `[note]` line names the state note as the call's one record of what is open and
   decided; topics come in any order; a decided topic is never asked again; call `settle` on every
   decision, read back, with the open-decision ids it answers or none; L2's line only if chosen.
@@ -64,7 +69,9 @@ Fake Live (`tests/test_call.py`): a settle puts the decision in the next state n
 turn; a state note replaces the last in `told` and `so_far` holds one; an unchanged state is not noted
 again; a reading or update that lands after a settle reaches Live with the decision on top; an update
 begun before a settle is dropped and requeued; a settle writes its decision fact and ids before `end`,
-and the summary prompt carries it; a settle with no `ids` is in the state as decided and written as a
+and the summary prompt carries it; a mid-call settle is in notes.md, summary.json and the report's decided lines with its fact
+written once; a settle with `by` (and one without, in a 1:1) writes its fact about that person;
+a settle with no `ids` is in the state as decided and written as a
 fact; a question asked during an update cancels it and the update runs after the answer; a state over
 a quarter of `CALL_SO_FAR` reaches a fresh session whole, the transcript cut instead; a session opened
 after the reading gets the state, not the reading, in its instruction.
