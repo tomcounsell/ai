@@ -26,38 +26,49 @@ Task 808204576aca. The script is outside this repo:
 
 ## What will be built (in the vault script)
 
-1. `export HOMEBREW_NO_SUDO=1` next to the other `HOMEBREW_*` settings at the
-   top, with a comment that cites this case. Homebrew then skips its sudo probes
-   (`next if sudo && !SystemCommand.sudo_available?`) and fails any step that
-   really needs root at once ("sudo is disabled by HOMEBREW_NO_SUDO") instead of
-   prompting. No capability is lost: a 04:00 run has no person, no terminal and
-   no cached credential, so sudo never succeeded on any Mac unattended. On the
-   Pirate and the Captain it already failed, just later. This is Homebrew's
-   documented switch, not a new check.
-2. **A cask that can only be upgraded with a person present** (brew's output
-   contains `sudo is disabled by HOMEBREW_NO_SUDO`) is logged with the existing
-   skip words, `SKIP (<cask>): needs a person at the Mac (sudo) — leaving it
-   outdated`, in place of `FAILED: <cask>`. Its apps are relaunched as on any
-   failure, and it is added to one line in the existing status file
-   (`yudame-tools/status/<Mac>.txt`): `needs a person: <cask> <installed>`, or
-   `none`. The file is rewritten every run, so the line holds only tonight's
-   casks. Nothing persistent and no new list: the cask stays at its version
-   because the step fails without changing anything, and it is retried each
-   night. The output is captured with `tee` into a temp file; the exit status
-   stays brew's under `pipefail`.
-3. **Apps the run quit come back however it ends.** Today they are relaunched
-   after success, failure or a quit timeout, but not when the run itself is
-   ended mid-upgrade (as on 11-25, had the script been killed rather than brew).
-   An `EXIT` trap, plus `TERM`/`INT`/`HUP` traps that exit, relaunches any app
-   in the current cask's `running_apps` that is not running. `running_apps` is
-   cleared after each cask's relaunch, so the trap only acts on a cask that was
+Reuse (hard rule 10): Yudame Tools' `Resources/nightly.sh` met the same hang
+(Ollama's launchctl probe on a Touch ID sheet, 2026-10-28, 04:02-09:28) and
+already has the three pieces: `HOMEBREW_NO_SUDO` with `SUDO_ASKPASS` unset
+(lines 37-42), a sudo-failure grep (221) and a reopen-on-TERM trap (285).
+The vault script takes the same wording and patterns.
+
+1. Near the top, beside the other `HOMEBREW_*` settings: `export
+   HOMEBREW_NO_SUDO=1; unset SUDO_ASKPASS`, with nightly.sh's comment adapted
+   to cite both cases (10-28 and 11-25). Homebrew then skips its sudo probes
+   (`next if sudo && !SystemCommand.sudo_available?`) and fails a step that
+   really needs root at once ("sudo is disabled by HOMEBREW_NO_SUDO"). Nothing
+   is lost: a 04:00 run has no person, no terminal and no cached credential, so
+   sudo never succeeded unattended on any Mac.
+2. **A cask that needs a person.** The upgrade's output goes to a temp file as
+   well as the log. When it fails and the file matches nightly.sh's grep
+   (`no password was provided|a terminal is required|a password is required|sudo is
+   disabled`), the line is `SKIP (<cask>): needs a person at the Mac (sudo) —
+   leaving it outdated` instead of `FAILED: <cask>`. Its apps are relaunched as on
+   any failure, and the token and installed version go into `NEEDS_PERSON`. It stays
+   at its version because the step fails before changing anything, and it is
+   retried each night. Yudame Tools' parser (Run.swift:212) reads it as a skip.
+3. **Quit apps come back however the run ends.** The upgrade runs in the
+   background, `brew upgrade --cask --greedy-auto-updates "$cask" > >(tee "$out")
+   2>&1 & pid=$!; wait $pid`, because bash runs a trap only after a foreground
+   command ends, and `wait` is interrupted at once. A `TERM`/`INT`/`HUP` trap
+   kills `$pid`, logs and relaunches each app in `running_apps` that is not
+   running (`RELAUNCH: <app> (run ended)`), and exits 143. That is well inside
+   launchd's 20-second ExitTimeOut before its SIGKILL. `running_apps` is cleared
+   once a cask's own relaunch has run, so the trap acts only on a cask that was
    cut short.
-4. Sync: the vault copy is the source; each Mac's `~/.local/bin` copy follows at
-   its next run (setup step 1), and the build copies it now through the same
-   `valor-run` one-shot route task ecde7682ce91 used. It waits for iCloud to
-   deliver the vault file first (that task's Captain slip) and checks
-   sha256 on all four.
-5. `SETUP.md`: one line saying unattended runs never use sudo, and what a
+4. **Status file.** `yudame_tools()` rewrites `yudame-tools/status/<Mac>.txt`
+   early in each run, in a subshell, without the new line. After the cask loop
+   the script adds `needs a person: <cask> <version>, ...` or `needs a person:
+   none` (also `none` on a watch-held night, which upgrades nothing). It writes
+   `<file>.new` and renames it into place, as the existing code does, so iCloud
+   never syncs a partial file. A run cut short before the loop ends leaves the
+   line absent, which is how the file says the run did not finish.
+5. Sync: the vault copy is the source; each Mac's `~/.local/bin` copy follows at
+   its next run (setup step 1). The build copies it now through the same
+   `valor-run` one-shot route task ecde7682ce91 used, after waiting for iCloud to
+   deliver the vault file (that task's Captain slip), and checks sha256 on all
+   four.
+6. `SETUP.md`: one line saying unattended runs never use sudo, and what a
    `needs a person` status line means.
 
 ## Out of scope
@@ -69,24 +80,27 @@ Task 808204576aca. The script is outside this repo:
 - 1Password and iTerm refusing to quit; Yudame Tools' own `nightly.sh` (its
   Homebrew Updates is off on all four Macs).
 - No timeout, no new gate or check (the brief forbids them, and none is needed
-  once the wait is gone). This adds no governance: item 1 sets a Homebrew
-  environment switch, items 2 and 3 fix the restore and report paths.
+  once the wait is gone). This adds no governance: item 1 sets Homebrew's own
+  switch, as Yudame Tools' nightly already does, and items 2-4 fix the restore
+  and report paths.
 
 ## Tests (test-step.sh, fake brew)
 
-- `HOMEBREW_NO_SUDO=1` is in brew's environment for every call.
-- A fake cask upgrade that prints `sudo is disabled by HOMEBREW_NO_SUDO` and
-  fails: `SKIP (<cask>): needs a person` logged, no `FAILED: <cask>`, its app
-  relaunched (`open -a`), the status file has `needs a person: <cask> ...`.
-- A plain failure (other output): `FAILED: <cask>` as before, not listed.
-- A clean night: the status line reads `needs a person: none`.
-- A run killed with TERM while the fake brew sleeps mid-upgrade: the quit app
-  is reopened and the script exits.
-- A frozen cask is still skipped before any quit; a watch hold still upgrades
-  nothing and quits nothing.
+- `HOMEBREW_NO_SUDO=1` is in brew's environment and `SUDO_ASKPASS` is not.
+- A fake cask upgrade prints `sudo is disabled by HOMEBREW_NO_SUDO` and fails:
+  `SKIP (<cask>): needs a person` is logged and `FAILED: <cask>` is not. The app
+  is relaunched (`open -a`), and the status file has `needs a person: <cask> ...`
+  with no `.new` left.
+- A plain failure (other output): `FAILED: <cask>` as before, and the line
+  reads `none`.
+- A clean night and a watch-held night: `needs a person: none`.
+- TERM mid-upgrade: the fake brew sleeps 30 s and the test sends TERM to the
+  script. Within 5 s the script has exited and `open -a <app>` was called. The
+  test fails under a deferred trap.
+- A frozen cask is still skipped before any quit.
 - The existing 66 cases still pass; `bash -n`.
 - Live, on the Cowboy, through a `valor-run` one-shot job and not the turn's
-  sandbox (which refuses sudo itself): run the new script's path for
+  sandbox (which refuses sudo itself): the new script's upgrade path for
   `ollama-app`. It upgrades 0.40.17 → 0.40.18 with no Touch ID sheet and no
   wait, and Ollama is running afterwards. On the Bald, `brew` with the new
   environment reports sudo unavailable in seconds.
