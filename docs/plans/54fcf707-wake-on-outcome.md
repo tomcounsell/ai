@@ -34,14 +34,23 @@ outcome ("it has not gone out yet", another turn) or late.
    it needs `post:` naming an effect file (`.json`), else the existing
    "not set" error with the form in it. `wakes()` gives such a wake
    `due` = the `at` of the first `effect.outcome` or `effect.refused` row
-   for that effect's id, and no `due` until then (`owed` skips it). A reply
-   to the post still drops it; a finished turn that was given it spends it.
+   for that effect's id, gathered from all rows before the wake loop as
+   `sent` and `gone` are, so an outcome written before its turn's
+   `turn.collected` (a performer that finishes inline during collection)
+   counts; `due` is then at least `set_at`. When the post is already
+   `gone` at collection (the entry carries an error, has no `effect_id`,
+   or the turn requested no such file), `due` = `set_at`: woken at once
+   and told it never went out. Otherwise no `due` yet (`owed` skips a
+   `None`). A reply to the post still drops it; a finished turn that was
+   given it spends it.
    `_wake_report` says "You asked to be woken once <file> had its outcome",
    then the existing sent/gone wording. `wake_due` is unchanged.
 2. `skills/sdlc/converse.md`: one sentence under "A wake is yours to set":
    when you owe something once a send lands (a note back, a check on it),
    write `outcome post: <file>`; a send that owes nothing after sets none.
-3. Docs that describe `wake.md`: `core/session.py` and `core/signals.py`
+3. `core/record.py` `waits`: a wake with `due` None shows as due when
+   the send lands, not a time.
+4. Docs that describe `wake.md`: `core/session.py` and `core/signals.py`
    docstrings, `docs/harnesses.md` row, `docs/bridges/telegram.md` line.
 
 Out of scope: any outcome waking a session that did not ask; a second
@@ -60,6 +69,11 @@ already open their next prompt; changing what a delay wake does.
 - A send with no wake: the outcome lands, `wake_due` stays false (the cost
   case: no turn added).
 - A failed or refused outcome makes it due, reported as "never went out".
+- The outcome row ordered before the wake's `turn.collected`: due at once,
+  and the next prompt reports it.
+- An `outcome post: mail.json` whose entry carries an error, and one naming
+  a file the turn did not write: due at once, reported "never went out".
+- `waits` lists a not-yet-due outcome wake without a time.
 - A reply to the mail before the outcome drops it.
 - `outcome` with no post, or with a message id, is "not set" with the error.
 - The converse prompt carries the new sentence.
