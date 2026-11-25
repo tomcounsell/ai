@@ -562,103 +562,116 @@ def toms_dm(tmp_path):
     return bridges.configure(operator_channel="slack", operator_chat=tom, operator_slack_ids=(tom,))
 
 
-async def confirmations(dsn) -> tuple[tasks.Brief, list[dict]]:
+async def ended(dsn, brief) -> dict:
+    """The asking session's `ended` call report."""
+    (got,) = [r for r in await reports(dsn, brief.id) if r["about_key"].endswith(":ended")]
+    return got
+
+
+async def no_confirm_sent(dsn) -> bool:
+    """Nothing went to Tom's DM to confirm: it has no session, or one with no call report."""
     async with await db.connect(dsn) as conn:
-        dm = await tasks.brief(conn, await intake.chat_session(conn, "slack", settings.operator_chat))
-    return dm, [r for r in await reports(dsn, dm.id) if r["about_key"].endswith(":confirm")]
+        dm = await intake.chat_session(conn, "slack", settings.operator_chat)
+    return dm is None or not [r for r in await reports(dsn, dm) if r.get("kind") == "call"]
 
 
-def test_tom_alone_with_valor_settles_nothing_until_his_thumbs_up_and_the_latest_readback_wins(
-    dsn, team, tmp_path
+def by_meet_call(brief, dsn, task, q, text):
+    action = broker.Action(
+        "task.answer", task, {"text": text, "by": "tom", "via": "meet call", "question_id": q}
+    )
+    return chat_tasks.TaskAnswer(brief, dsn).perform(action, ledger.new_id())
+
+
+@pytest.mark.parametrize("others", [["Tom Counsell"], ["Tom Counsell", "Logan"]], ids=["1:1", "group"])
+def test_what_tom_settles_in_a_call_counts_with_no_thumbs_up_and_the_asking_session_answers_it(
+    dsn, team, tmp_path, others
 ):
-    """Meet names people by display name only, which anyone with the link
-    can set, so even alone with Valor Tom's read-backs answer nothing in
-    the call: they go to his DM, one read-back settling three, the latest
-    `done` one per question, a failed one none."""
+    """Tom, 2026-11-25: a Meet display name is trusted, 1:1 or group. The
+    asking session's report lists the latest `done` read-back per question
+    (a failed post settles none), tells it to answer each by tom via meet
+    call and post a notice, asks no 👍 and sends nothing to Tom's DM; its
+    answers are accepted."""
 
     async def go():
         with toms_dm(tmp_path):
-            _brief, session_id = await a_call(dsn, team)
-            await append(dsn, session_id, ("call.participant", {"id": "d1", "name": TOM}))
-            qs = [await waiting(dsn, team, t) for t in ("Ship Friday?", "Freeze the API?", "Drop IE?")]
+            brief, session_id = await a_call(dsn, team)
+            await append(dsn, session_id, *[("call.participant", {"id": f"d{n}", "name": who})
+                                            for n, who in enumerate(others)])  # fmt: skip
+            qs = [
+                await waiting(dsn, team, t)
+                for t in ("Ship Friday?", "Freeze the API?", "Drop IE?", "Use Redis?")
+            ]
             settles = [{"task_id": t, "question_id": q} for t, q in qs]
-            await readback(dsn, session_id, "Ship Friday, freeze the API, drop IE.", settles)
+            await readback(dsn, session_id, "Ship Friday, freeze the API, drop IE.", settles[:3])
             await readback(dsn, session_id, "Correction: ship Monday.", settles[:1])
-            await readback(dsn, session_id, "Never left.", settles[1:2], done=False)
+            await readback(dsn, session_id, "Never left.", settles[3:], done=False)
             await end(dsn, session_id)
-            return qs, await confirmations(dsn)
+            got = await ended(dsn, brief)
+            unconfirmed = await no_confirm_sent(dsn)
+            for c in got["settles"]:
+                await by_meet_call(brief, dsn, c["task_id"], c["question_id"], c["text"])
+            return qs, got, unconfirmed
 
-    qs, (_dm, (confirm,)) = run(go())
-    assert all(answers(dsn, t) == [] for t, _ in qs)
-    said = {(c["task_id"], c["question_id"]): c["text"] for c in confirm["confirm"]}
+    qs, got, unconfirmed = run(go())
+    said = {(c["task_id"], c["question_id"]): c["text"] for c in got["settles"]}
     assert said == {qs[0]: "Correction: ship Monday.", qs[1]: "Ship Friday, freeze the API, drop IE.",
                     qs[2]: "Ship Friday, freeze the API, drop IE."}  # fmt: skip
+    text = got["text"]
+    assert "act answer" in text and "--by tom" in text and '"meet call"' in text and "notice" in text
+    assert "with no 👍 asked" in text and "confirm" not in text.lower() and unconfirmed
+    for t, _ in qs[:3]:
+        (a,) = answers(dsn, t)
+        assert (a["provenance"]["by"], a["provenance"]["via"]) == ("tom", "meet call")
+    assert answers(dsn, qs[3][0]) == []
 
 
-def test_a_thumbs_up_on_a_question_since_replaced_is_refused_and_the_new_one_stays_open(dsn, team, tmp_path):
+def test_another_sessions_answer_a_stale_id_and_a_question_replaced_since_the_call_are_refused(
+    dsn, team, tmp_path
+):
     async def go():
         with toms_dm(tmp_path):
-            _brief, session_id = await a_call(dsn, team)
+            brief, session_id = await a_call(dsn, team)
             await append(dsn, session_id, ("call.participant", {"id": "d1", "name": TOM}))
             task, q1 = await waiting(dsn, team, "Ship Friday?")
             await readback(dsn, session_id, "Ship Friday.", [{"task_id": task, "question_id": q1}])
             await end(dsn, session_id)
             async with await db.connect(dsn) as conn:
-                await session.answer(conn, task, "yes", by="tom", via="slack reaction :+1:")
-            q2 = await ask_again(dsn, task, "Which region?")
-            dm, _ = await confirmations(dsn)
-            action = broker.Action("task.answer", task, {"text": "Ship Friday.", "by": "tom", "via": "meet call",
-                                                         "question_id": q1})  # fmt: skip
+                stranger = await tasks.brief(conn, session_id)  # a session the report did not go to
+            good = broker.Action("task.answer", task, {"text": "Ship Friday.", "by": "tom", "via": "meet call",
+                                                       "question_id": q1})  # fmt: skip
+            async with await db.connect(dsn) as conn:
+                refused_elsewhere = await chat_tasks.TaskAnswer(stranger, dsn).refuse(conn, good)
+                refused_here = await chat_tasks.TaskAnswer(brief, dsn).refuse(conn, good)
             with pytest.raises(LookupError):
-                await chat_tasks.TaskAnswer(dm, dsn).perform(action, "k1")
-            return task, q2
+                await by_meet_call(brief, dsn, task, "not-it", "Ship Friday.")
+            async with await db.connect(dsn) as conn:
+                await session.answer(conn, task, "yes", by="tom", via="chat")
+            q2 = await ask_again(dsn, task, "Which region?")
+            with pytest.raises(LookupError):
+                await by_meet_call(brief, dsn, task, q1, "Ship Friday.")
+            return task, q2, refused_elsewhere, refused_here
 
-    task, q2 = run(go())
+    task, q2, refused_elsewhere, refused_here = run(go())
+    assert refused_elsewhere and refused_here is None
     assert [a["text"] for a in answers(dsn, task)] == ["yes"]
     assert machine.fold(run(bridges.rows(dsn, task))).open_question == q2
 
 
-def test_with_others_present_readbacks_go_to_toms_slack_dm_which_answers_on_his_thumbs_up(
-    dsn, team, tmp_path
-):
-    """The DM's session gets one `call` report with each read-back, and its
-    `task.answer` with the read-back's question id is accepted; another
-    session's is refused, and so is a stale question id."""
+def test_no_call_text_still_asks_a_thumbs_up_for_what_a_call_settled():
+    """Tom, 2026-11-25: no second confirmation in chat after a call."""
+    from pathlib import Path
 
-    async def go():
-        with toms_dm(tmp_path):
-            tom = settings.operator_chat
-            brief, session_id = await a_call(dsn, team)
-            await append(dsn, session_id, ("call.participant", {"id": "d1", "name": TOM}),
-                         ("call.participant", {"id": "d2", "name": "Logan"}))  # fmt: skip
-            task, q = await waiting(dsn, team, "Ship Friday?")
-            await readback(dsn, session_id, "Ship Friday.", [{"task_id": task, "question_id": q}])
-            await end(dsn, session_id)
-            async with await db.connect(dsn) as conn:
-                dm = await intake.chat_session(conn, "slack", tom)
-                dm_brief = await tasks.brief(conn, dm)
-            got = await reports(dsn, dm)
-            answer = chat_tasks.TaskAnswer(dm_brief, dsn)
-            other = chat_tasks.TaskAnswer(brief, dsn)
-            stale = broker.Action("task.answer", task, {"text": "Ship Friday.", "by": "tom", "via": "meet call",
-                                                        "question_id": "not-it"})  # fmt: skip
-            good = broker.Action("task.answer", task, {"text": "Ship Friday.", "by": "tom", "via": "meet call",
-                                                       "question_id": q})  # fmt: skip
-            async with await db.connect(dsn) as conn:
-                refused_elsewhere = await other.refuse(conn, good)
-                refused_here = await answer.refuse(conn, good)
-            with pytest.raises(LookupError):
-                await answer.perform(stale, "k1")
-            done = await answer.perform(good, "k2")
-            return task, q, got, refused_elsewhere, refused_here, done
-
-    task, q, got, refused_elsewhere, refused_here, done = run(go())
-    (confirm,) = [r for r in got if r["about_key"].endswith(":confirm")]
-    assert confirm["confirm"] == [{"task_id": task, "question_id": q, "text": "Ship Friday."}]
-    assert "Ship Friday." in confirm["text"] and "👍" in confirm["text"]
-    assert refused_elsewhere and refused_here is None and done["question_id"] == q
-    (a,) = answers(dsn, task)
-    assert a["provenance"]["via"] == "meet call"
+    root = Path(call.__file__).parent.parent
+    for path in ("core/call.py", "skills/sdlc/converse.md", "docs/bridges/meet.md", "docs/data.md",
+                 "tools/chat_tasks.py"):  # fmt: skip
+        text = " ".join((root / path).read_text().split())
+        for phrase in (
+            "only on Tom's 👍",
+            "confirm by 👍",
+            "only once he confirms it",
+            "on his 👍 on its post",
+        ):
+            assert phrase not in text, (path, phrase)
 
 
 # -- what the call writes ----------------------------------------------------------------
@@ -809,22 +822,20 @@ def test_the_call_transcript_reads_in_order_from_the_asking_chats_project_only_a
     assert lines[-3]["text"] == f"line {record.MOST + 4}"
 
 
-def test_readbacks_go_to_toms_dm_whatever_name_he_joined_under(dsn, team, tmp_path):
-    """Display names are self-set, so the 👍 in Tom's DM is the one check:
-    Tom joined as "Tom C", and his read-back still reaches the DM."""
+def test_tom_settles_whatever_name_he_joined_under(dsn, team, tmp_path):
+    """Tom joined as "Tom C": his read-back still reaches the asking session to answer."""
 
     async def go():
         with toms_dm(tmp_path):
-            _brief, session_id = await a_call(dsn, team)
+            brief, session_id = await a_call(dsn, team)
             await append(dsn, session_id, ("call.participant", {"id": "d1", "name": "Tom C"}))
             task, q = await waiting(dsn, team, "Ship Friday?")
             await readback(dsn, session_id, "Ship Friday.", [{"task_id": task, "question_id": q}])
             await end(dsn, session_id)
-            return task, q, await confirmations(dsn)
+            return task, q, await ended(dsn, brief)
 
-    task, q, (_dm, (confirm,)) = run(go())
-    assert confirm["confirm"] == [{"task_id": task, "question_id": q, "text": "Ship Friday."}]
-    assert answers(dsn, task) == []
+    task, q, got = run(go())
+    assert got["settles"] == [{"task_id": task, "question_id": q, "text": "Ship Friday."}]
 
 
 # -- the profile's lock (the Captain, 2026-11-03) ------------------------------

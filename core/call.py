@@ -26,10 +26,10 @@ the worker answers that came after leaving and the questions left
 unanswered), `task.ended` unless the session was stopped, the decisions
 the call settled, `effect.refused` for each `meet.say` or
 `meet.send_message` never delivered (a thread copy still goes), and the
-report. Meet names people by display name only, which anyone with an open Meet's link can set, so Tom's read-backs (a
-post's `settles`) go to his Slack DM's session,
-which posts them and answers each on his 👍 with its question id
-(`confirms`), refused unless it is still the task's open question. The call's own process writes the end; a kernel
+report. Tom's read-backs (a post's `settles`) count as said in the call, 1:1 or group, with no 👍 in chat (Tom,
+2026-11-25: "Meets display name is trustworthy enough for our purposes"): the report has the asking chat's
+session answer each with its question id (`settles`), refused unless it is still the task's open question, act
+on it, and post the read-backs in the thread as a notice. The call's own process writes the end; a kernel
 wake writes it for a call whose process died (`sweep`).
 
 **The call's process** (`python -m core call SESSION`, `run`) holds
@@ -382,7 +382,7 @@ async def end(
             await ledger.append(
                 conn, session_id, "task.ended", {"kind": "call", "by": "valor", "reason": reason}
             )
-        settled = await _settle(conn, session_id, rows)
+        settled, answerable = await _settle(conn, session_id, rows)
         dropped = await _leftovers(conn, session_id, rows, stopped)
         call = await marker(conn, session_id) or {}
         code, thread = call.get("code"), f"reply_to {(call.get('asked_by') or {}).get('reply_to')}"
@@ -417,13 +417,17 @@ async def end(
         ]
         lines += [f"Asked of your worker and never answered: {q}" for q in unanswered]
         lines += dropped
-        await report(conn, session_id, "ended", "\n".join(lines))
+        await report(conn, session_id, "ended", "\n".join(lines), settles=answerable)
     return True
 
 
-async def _settle(conn, session_id: str, rows: list[dict[str, Any]]) -> list[str]:
-    """Answer the questions Tom's read-backs settle (module docstring);
-    each answer and refusal as a line of the report."""
+async def _settle(
+    conn, session_id: str, rows: list[dict[str, Any]]
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Tom's read-backs (module docstring), the latest `done` one per
+    question: the report's lines telling the asking chat's session to
+    answer each and act, and the list it may answer (`settles`). Only Tom
+    settles in a call (INSTRUCTIONS), so each is answered `--by tom`."""
     held = {r["payload"]["effect_id"]: r["payload"] for r in rows if r["type"] == "effect.held"}
     readbacks: dict[tuple[str, str], str] = {}
     for r in rows:
@@ -438,44 +442,27 @@ async def _settle(conn, session_id: str, rows: list[dict[str, Any]]) -> list[str
         for q in (action.get("payload") or {}).get("settles") or []:
             readbacks[(q["task_id"], q["question_id"])] = action["payload"]["text"]
     if not readbacks:
-        return []
-    return await _confirm(conn, session_id, readbacks)
-
-
-async def _confirm(conn, session_id: str, readbacks: dict[tuple[str, str], str]) -> list[str]:
-    """Meet gives display names only, which anyone with an open Meet's link
-    can set, so no word in a call is proven Tom's: the read-backs go to his
-    Slack DM's session, which asks his 👍 on each (Tom, 2026-10-27: by
-    account, else by 👍 in his DM)."""
-    dm = await intake.operator_session(conn) if settings.operator_channel == "slack" else None
-    if dm is None:
-        return [
-            f"Not answered: Tom has no Slack DM here to confirm by 👍: {t} ({text})"
-            for (t, _), text in readbacks.items()
-        ]
-    confirm = [{"task_id": t, "question_id": q, "text": text} for (t, q), text in readbacks.items()]
+        return [], []
+    settles = [{"task_id": t, "question_id": q, "text": text} for (t, q), text in readbacks.items()]
     head = (
-        "Tom settled these in a Meet call, which shows display names only. Post each to him here and, on his 👍 on its post, "
-        'answer it with `valor-record act answer` (`--via "meet call"`, its `--question-id`):'
+        "Tom settled these in the call; each counts as said, with no 👍 asked. Answer each now with "
+        '`valor-record act answer TASK --text "<its read-back>" --by tom --via "meet call" --question-id Q`, '
+        "carry it out, and post the read-backs in the thread the call was asked in as one notice of what is "
+        "now being done, asking nothing:"
     )
-    text = "\n".join(
-        [head, *(f"- task {c['task_id']}, question {c['question_id']}: {c['text']}" for c in confirm)]
-    )
-    channel, chat_id = settings.operator_channel, settings.operator_chat
-    project = (await tasks.brief(conn, session_id)).project
-    await to_session(
-        conn, channel, chat_id, f"call:{session_id}:confirm", text, project=project, confirm=confirm
-    )
-    return [f"Sent to Tom's Slack DM to confirm by 👍: task {c['task_id']}: {c['text']}" for c in confirm]
+    return [
+        head,
+        *(f"- task {c['task_id']}, question {c['question_id']}: {c['text']}" for c in settles),
+    ], settles
 
 
-async def confirms(conn, dm_session: str, task_id: str) -> bool:
-    """Whether a call sent `task_id`'s read-back to this session to confirm."""
+async def settles(conn, session_id: str, task_id: str) -> bool:
+    """Whether a call's report gave this session `task_id`'s read-back to answer."""
     row = await (
         await conn.execute(
             "SELECT 1 FROM events WHERE task_id = %s AND type = 'child.reported' AND payload->>'kind' = 'call' "
-            "AND payload->'confirm' @> %s::jsonb",
-            (dm_session, json.dumps([{"task_id": task_id}])),
+            "AND payload->'settles' @> %s::jsonb",
+            (session_id, json.dumps([{"task_id": task_id}])),
         )
     ).fetchone()
     return row is not None
@@ -661,12 +648,16 @@ INSTRUCTIONS = (
     "- A task anyone gives you in the call (to note something down, look into it, build it, fill records) is "
     "ordinary work: say in a sentence that it is noted. Your notes on the call carry it to your chat "
     "session after the call.\n"
-    "- When someone asks what is open, call `open_decisions` and go through what is theirs to decide as "
-    '"In a call" below says, and let them decide each one. With anyone but Tom in the call, a decision about a client '
+    '- When someone asks what is open, call `open_decisions` and walk through the items as "In a call" below '
+    "says: explain each in their terms, say which only carry out what was already decided (status, no ask), and "
+    "ask once for each that needs their answer, after explaining it. A no changes course and is never asked "
+    "again. With anyone but Tom in the call, a decision about a client "
     "relationship (pricing, terms, hiring or pay) is one line: it is for Tom. Never say an id aloud.\n"
     "- When Tom settles open decisions (one idea may settle several), read his answer back in a sentence and "
-    "call `settle` with the ids it settles. Only Tom settles decisions; a correction is a new `settle`. With "
-    "only one person here, that read-back ends by opening the next item: no later turn comes for it. With more "
+    "call `settle` with the ids it settles, as `open_decisions` gives them (none when it settles no open "
+    "decision). Only Tom settles decisions; a correction is a new `settle`. With only one person here, that "
+    "read-back ends by opening the next item, explained, asking a yes only when it needs one: no later turn "
+    "comes for it. With more "
     "people here, it ends with the read-back: the next item waits until someone asks for it.\n"
     '- Call `leave` when anyone in the call asks you to leave (`why` "asked"), or when everyone has wrapped up '
     'and said goodbye (`why` "wrapped up"). Never leave because the meeting\'s scheduled time has passed: stay while people are still '
@@ -682,10 +673,10 @@ TOOLS = [
      "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
     {"name": "open_decisions", "description": "The decisions open for Tom on this project, with their ids.",
      "parameters": {"type": "object", "properties": {}}},
-    {"name": "settle", "description": "Record Tom's answer to open decisions: the read-back, and each "
-     "`task id/question id` it settles.", "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {
+    {"name": "settle", "description": "Record Tom's answer: the read-back, and each open decision it "
+     "settles, as `task id/question id` or the question's id (none when it settles no open decision).", "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {
          "ids": {"type": "array", "items": {"type": "string"}}, "readback": {"type": "string"}},
-         "required": ["ids", "readback"]}},
+         "required": ["readback"]}},
     {"name": "person", "description": "A person's dossier on this project, by their name or a loose description: "
      "internal or external, and their dated facts (role, organisation, asks, decisions, what is owed and "
      'delivered). With "everyone", the project\'s people, its own team first, with role and organisation.',
@@ -715,7 +706,9 @@ READ_UP = (
     "else its open tasks). Write short notes for the call, adding only what the notes before it lack: what it "
     "is about, what is known and open, and what you would recommend, each recommendation with its concrete "
     "case (what happened, when, where it is recorded; observed, reported or assumed) or saying there is no "
-    "case yet."
+    "case yet. For each item: what it is and what it changes, in the person's terms, and whether it only "
+    "carries out what was already decided (status, no question) or needs their answer (a departure, a real "
+    "choice or a risk). Name each decision once, under one label."
 )
 # The worker's depth on what is coming, prepared on the call's events (P-038, Tom, 2026-11-17).
 PREPARE = (
@@ -723,9 +716,13 @@ PREPARE = (
     "call so far and the notes before it, take the next two items or open questions the call has not reached "
     "yet. Leave out everything the call has settled or said is covered, even where it adds work: no "
     "read-back of it and no catch on it, since Valor raising it again reopens a settled item. "
-    "For each, in short notes: its case (what happened, when, where it is recorded; observed, reported "
-    "or assumed), the numbers, and the two or three follow-ups likely asked, each answered a level below the "
-    "last (an example, the mechanism, the step). Answer only `nothing ahead` when nothing is left.\n\n"
+    "For each, in short notes: what it is and what it changes, in the person's terms; whether it only carries "
+    "out what was already decided (status, no question) or needs their answer (a departure, a real choice or "
+    "a risk); its case (what happened, when, where it is recorded; observed, reported or assumed), the "
+    "numbers, and the two or three follow-ups likely asked, each answered a level below the last (an "
+    "example, the mechanism, the step). Name each decision once, under the label the call uses. Answer only "
+    "`nothing ahead` when nothing is left.\n\n"
+    "Settled in this call (leave each out, under any name):\n{settled}\n\n"
     "The call so far:\n{so_far}"
 )
 PREPARED = (
@@ -1187,6 +1184,7 @@ class Call:
         self.reading, self.read_note = self.reader is not None, ""
         self.read_told = False  # the Live session has the reading, in its config or a note
         self.preparer, self.prep_queued = preparer, False
+        self.settled: list[str] = []  # Tom's read-backs in this call, kept out of every prep (`_prepare`)
         self.told: list[str] = []  # the notes kept for a fresh session (`so_far`): answers, steers, the prep
         self.pending: list[str] = []  # those noted while no session was open, for the next to open
         self.aloud: set[str] = set()  # the questions asked aloud, by their words
@@ -1790,14 +1788,19 @@ class Call:
             elif fc.name == "open_decisions":
                 async with await self._connect() as conn:
                     result = await decisions(conn, self.project)
-            elif fc.name == "settle" and args.get("ids") and str(args.get("readback") or "").strip():
-                settles = [
-                    {"task_id": t.strip(), "question_id": q.strip()}
-                    for t, _, q in (str(i).partition("/") for i in args["ids"])
-                    if t.strip() and q.strip()
-                ]
-                self.posts.put_nowait(Post(reply.id, str(args["readback"]).strip(), True, settles))
-                result = "recorded"
+            elif fc.name == "settle" and str(args.get("readback") or "").strip():
+                readback = str(args["readback"]).strip()
+                ids = [str(i).strip() for i in args.get("ids") or [] if str(i).strip()]
+                _log(f"call {self.id}: settle ids {ids!r}")
+                settles, unmatched = await self._settles(ids)
+                self.settled.append(readback)
+                self.posts.put_nowait(Post(reply.id, readback, True, settles))
+                result = (
+                    f"recorded the read-back, but no open decision is {', '.join(unmatched)}: say in a sentence "
+                    "that it is noted and not yet recorded against an open decision"
+                    if unmatched
+                    else "recorded"
+                )
             elif fc.name == "leave":
                 self.leave(LEAVES.get(str(args.get("why") or ""), "Valor left the call"))
                 result = "leaving"
@@ -1822,6 +1825,37 @@ class Call:
         )
         if out:
             await session.send_tool_response(function_responses=out)
+
+    async def _settles(self, ids: list[str]) -> tuple[list[dict[str, str]], list[str]]:
+        """The open decisions `settle`'s ids name, and the ids that name
+        none. `task/question` is taken as given (the session's answer refuses one no
+        longer open); a bare id is the project's open question with that
+        id, or the one open question of the task with that id (2026-11-25:
+        the voice passed ids of another form and nothing was recorded)."""
+        settles, bare = [], []
+        for i in ids:
+            t, slash, q = i.partition("/")
+            if slash and t.strip() and q.strip():
+                settles.append({"task_id": t.strip(), "question_id": q.strip()})
+            else:
+                bare.append(i)
+        if not bare:
+            return settles, []
+        from core import board
+
+        spec = board.board_spec(self.project)
+        open_ = []
+        if spec is not None:
+            async with await self._connect() as conn:
+                open_ = (await board.snapshot(conn, spec))["open"]
+        unmatched = []
+        for i in bare:
+            hits = [q for q in open_ if q["question_id"] == i] or [q for q in open_ if q["task_id"] == i]
+            if len(hits) == 1:
+                settles.append({"task_id": hits[0]["task_id"], "question_id": hits[0]["question_id"]})
+            else:
+                unmatched.append(i)
+        return settles, unmatched
 
     async def _person(self, about: str) -> str:
         """The dossiers of the call's project's people `about` fits
@@ -2034,15 +2068,20 @@ class Call:
         none is; never posted. "nothing ahead" notes nothing."""
         if self.left:
             return
+        settled = len(self.settled)
+        prompt = PREPARE.format(
+            settled="\n".join(f"- {r}" for r in self.settled) or "(nothing yet)",
+            so_far="\n".join(self.lines[-40:]) or "(nothing yet)",
+        )
         try:
-            notes = (
-                await self.preparer(PREPARE.format(so_far="\n".join(self.lines[-40:]) or "(nothing yet)"))
-            ).strip()
+            notes = (await self.preparer(prompt)).strip()
         except tasks.TaskStopped:
             return
         except Exception as exc:  # noqa: BLE001  a prep that fails leaves the call as it was
             _log(f"call {self.id}: the worker's prep failed: {exc!r}")
             return
+        if len(self.settled) != settled:
+            return  # written before a settle, which queued a fresh prep (2026-11-25: it relisted the settled item)
         if notes and "nothing ahead" not in notes.lower()[:40] and not self.left:
             head = PREPARED.partition("{")[0]  # only the newest prep is kept
             self.told = [t for t in self.told if not t.startswith(head)]
@@ -2385,7 +2424,7 @@ class Call:
         head = (
             "Decided in the call, now facts of the project (kind decision): carry each that changes a backlog "
             "item or an open question to where it lives (its Sheet row, the task waiting on it); an open "
-            "question is still answered only on Tom's 👍:"
+            "question Tom settled is answered as the lines on his read-backs say:"
         )
         return [head, *(f"- {t} (fact {names[str(n)]})" for n, t in enumerate(texts, 1))]
 

@@ -1125,6 +1125,72 @@ def test_a_settle_posts_the_readback_with_its_settles_and_copies_it(dsn, team, q
     )
 
 
+def test_a_settle_resolves_bare_ids_against_the_open_decisions_and_says_what_matched_none(
+    dsn, team, quick, monkeypatch
+):
+    """The 2026-11-25 call's one settle carried no `settles`: its ids were
+    not `task/question`. A bare question id, or a task id with exactly one
+    open question, is that decision; a task with two open questions, or an
+    id that is no open decision, records nothing and the tool's answer says
+    so, as a turn of its own."""
+    from core import board
+
+    open_ = [{"task_id": t, "question_id": q} for t, q in
+             [("t1", "q1"), ("t2", "q2"), ("t3", "q3"), ("t4", "q4a"), ("t4", "q4b")]]  # fmt: skip
+
+    async def snapshot(conn, spec):
+        return {"open": open_}
+
+    monkeypatch.setattr(board, "board_spec", lambda name: object())
+    monkeypatch.setattr(board, "snapshot", snapshot)
+
+    async def go():
+        c = await in_call(dsn, team)
+        ids = ["t1/q1", "q2", "t3", "t4", "zz"]
+        await push(
+            c.session, audio(), said("Rename it."), tool("settle", ids=ids, readback="Rename it."), done()
+        )
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id)
+
+    c, done_ = run(go())
+    (post,) = [e for e in done_ if e["type"] == "meet.send_message" and e["payload"].get("settles")]
+    assert post["payload"]["settles"] == [{"task_id": "t1", "question_id": "q1"},
+        {"task_id": "t2", "question_id": "q2"}, {"task_id": "t3", "question_id": "q3"}]  # fmt: skip
+    assert _schedules(c.session) == [("settle", WHEN_IDLE)]
+    (result,) = [
+        r.response["result"] for k, kw in c.session.sent if k == "tool" for r in kw["function_responses"]
+    ]
+    assert "no open decision is t4, zz" in result and "q4a" not in str(post)
+    assert c.the.settled == ["Rename it."]
+
+
+def test_a_settle_with_no_ids_or_no_board_still_posts_its_readback_and_records_none(dsn, team, quick):
+    """With no ids, or bare ids on a project with no board, the read-back
+    is still posted and kept for the prep, with no `settles`, never an
+    error."""
+
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, audio(), said("Noted."), tool("settle", readback="Keep it weekly."), done())
+        await push(
+            c.session, audio(), said("Noted."), tool("settle", ids=["q9"], readback="No to IE."), done()
+        )
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id)
+
+    c, done_ = run(go())
+    posts = [e["payload"] for e in done_ if e["type"] == "meet.send_message"]
+    assert {"text": "Keep it weekly."} in posts and {"text": "No to IE."} in posts
+    assert c.the.settled == ["Keep it weekly.", "No to IE."]
+    results = [
+        r.response["result"] for k, kw in c.session.sent if k == "tool" for r in kw["function_responses"]
+    ]
+    assert results[0] == "recorded" and "no open decision is q9" in results[1]
+
+
 def _schedules(session) -> list[tuple[str, object]]:
     return [(r.name, r.scheduling) for k, kw in session.sent if k == "tool" for r in kw["function_responses"]]
 
@@ -3239,7 +3305,63 @@ def test_in_a_one_to_one_valor_opens_the_next_item_and_more_detail_is_taught_not
     assert "Speak only when someone addresses you" in flat
     assert "Speak only when someone addresses you" not in " ".join(call.INSTRUCTIONS.split())
     assert "With only one person here, that read-back ends by opening the next item" in told
-    assert "and let them decide each one" in told and "let them choose" not in told
+    assert "let them decide each one" not in told and "let them choose" not in told
+    assert (
+        "With only one person here, that read-back ends by opening the next item, explained, asking a yes only when it needs one"
+        in told
+    )
+
+
+def test_a_stakeholder_is_asked_only_what_is_theirs_once_and_after_it_is_explained():
+    """P-040 (Tom, 2026-11-25): a call asked for a yes before explaining
+    anything, asked about steps that only carried out an approved plan, and
+    asked a decided item again; a task's instruction had widened a rule
+    about new names to every migration. The test for status or question is
+    in "How product decisions are made", which every turn and the call
+    read; explain-first and ask-once are in "In a call"."""
+    process = " ".join(persona.section(settings.persona_dir, "How product decisions are made").split())
+    flat = " ".join(persona.section(settings.persona_dir, "In a call").split())
+    told = " ".join(call.live_config("acme", "", None).system_instruction.split())
+    test = [
+        (
+            "Work that only carries out what was already decided (a stated requirement, a name or plan already "
+            "approved) is status: say it is following that decision, and ask nothing."
+        ),
+        "A question is only a departure from it, a real choice, or a risk",
+        "A project rule is carried at the reach it was given, never widened",
+    ]
+    for line in test:
+        assert line in process and line in told
+    for line in [
+        (
+            "Never ask for a yes on something you have not yet explained in their terms; when the detail is not in "
+            "yet, say what the item is and ask nothing."
+        ),
+        "What only carries out a decision is said as following it, with no ask",
+        "Ask once for each item that needs their answer; a no changes course and is never asked again.",
+        "an explanation may run longer when it catches someone up on an item they have not seen",
+        "Opening it means explaining it; ask a yes only when that item needs one.",
+    ]:
+        assert line in flat and line in told
+    assert (
+        "say which only carry out what was already decided (status, no ask), and ask once for each that needs their answer, after explaining it"
+        in told
+    )
+    for prompt in (call.READ_UP, call.PREPARE):
+        flat_prompt = " ".join(prompt.split())
+        assert (
+            "whether it only carries out what was already decided (status, no question) or needs their answer"
+            in flat_prompt
+        )
+        assert "what it is and what it changes, in the person's terms" in flat_prompt
+    assert "Name each decision once, under the label the call uses." in call.PREPARE
+    assert "Settled in this call (leave each out, under any name):\n{settled}" in call.PREPARE
+    converse = " ".join((Path(__file__).parents[1] / "skills/sdlc/converse.md").read_text().split())
+    assert "never as a bare yes or no with the detail still to come" in converse
+    assert (
+        "listed as status, following that decision, never as a question (**Status or question**)" in converse
+    )
+    assert "a project rule goes into its instruction at the reach it was given, never widened" in converse
     assert 'A note opening "Your worker prepared" is depth on items still to come' in told
     assert call.PREPARED.startswith("Your worker prepared")
     from core import __main__ as kernel
@@ -3294,12 +3416,16 @@ def test_prep_runs_on_the_queue_moving_not_on_talk_and_questions_go_first(dsn, t
     `open_decisions`), in a group call too, never because the call talked
     on; events during a prep are one more prep; a question asked meanwhile
     is answered first, posted and noted as ever. "nothing ahead" notes
-    nothing."""
-    gate, order = asyncio.Event(), []
+    nothing. A prep under way when Tom settles an item is dropped, and the
+    next lists each read-back of the call as settled, whatever has scrolled
+    out of its window (2026-11-25: a prep written before Tom's no relisted
+    the item, and it was asked again)."""
+    gate, order, prompts = asyncio.Event(), [], []
     replies = iter(["nothing ahead", "Item two: 0.4 percent of imports fail.", "Item three: blocked on QA."])
 
     async def preparer(prompt):
         order.append("prep")
+        prompts.append(prompt)
         if len(order) == 2:
             await gate.wait()
         return next(replies)
@@ -3336,7 +3462,10 @@ def test_prep_runs_on_the_queue_moving_not_on_talk_and_questions_go_first(dsn, t
     assert talked == ["prep"]  # talk alone starts no prep, and "nothing ahead" was noted as nothing
     assert order == ["prep", "prep", "When did the import ship?", "prep"]
     notes = [t for t, _ in _prepared(c.session)]
-    assert len(notes) == 2 and "0.4 percent" in notes[0] and "blocked on QA" in notes[1]
+    assert len(notes) == 1 and "blocked on QA" in notes[0]  # the prep a settle overtook is never noted
+    assert "Settled in this call (leave each out, under any name):\n(nothing yet)" in prompts[0]
+    assert "- Ship Monday.\n" in prompts[1] and "Drop IE." not in prompts[1]
+    assert "- Ship Monday.\n- Drop IE.\n" in prompts[2]
     assert not [p for p in c.page.posts if "0.4 percent" in p or "nothing ahead" in p]
     assert any("Tuesday." in p for p in c.page.posts)
     say = call.SAY_ANSWER.format(question="When did the import ship?", answer="Tuesday.")

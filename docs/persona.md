@@ -256,7 +256,14 @@ your process that guides how product decisions are made ... context that
 can be brought right into every PM persona meeting call". The same day he
 set the real-case rule (a fix needs a recorded case, no guard for a
 theoretical failure) and asked that evidence say whether it was observed,
-reported or assumed.
+reported or assumed. **Status or question** is P-040 (Tom, 2026-11-25:
+"repeated approvals on trivial steps that simply implements the
+requirements"): a build waited a week on a yes per step for work that only
+carried out a plan he had approved, because a task's instruction had
+widened a project rule about new names to every migration. Work that
+carries out a decision is status; a question is a departure, a real choice
+or a risk; a rule keeps its reach. It sits here, not under "Escalate only
+what needs Tom", because the call reads this section and not that one.
 
 ### Contribute taste (Mission item 2)
 
@@ -530,6 +537,15 @@ started. So **Speak when addressed** moves from the call's instruction
 into the persona, where every turn reads it too: in a group, a question is
 Valor's only when it names him or follows his own answer. **A missed
 request is owned** says it missed it and asks the worker in that turn.
+The call of 2026-11-25 (P-040) asked Tom for a yes before explaining
+anything, asked one after every answer, including for steps that only
+carried out his approved plan, and asked an item he had turned down three
+more times. So **Context first** never asks a yes on something not yet
+explained, and says only what the item is when the detail is not in;
+**Only what they hold** says carrying out a decision as status and asks
+once, a no never asked again; opening the next item in a 1:1 means
+explaining it; and **Short and plain** lets an explanation run longer when
+it catches someone up.
 
 ### Instructions come from Tom and the Brief
 
