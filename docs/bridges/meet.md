@@ -32,8 +32,8 @@ against a new Meet with a second device of Valor's account
   as (else the project's `google`, else Valor's own). The asking session first answers the ask in its
   thread with one line, "Starting a call, link in a moment", and requests
   `meet.join` in the same turn, its notes from what it already holds; the
-  call's worker reads up while Valor joins, and the notes reach the voice
-  session as a note (`Call._read_up`; Tom, 2026-11-16, P-033;
+  call's worker reads up while Valor joins, and its reading becomes the
+  first topics of the call's state (`Call._read_up`; Tom, 2026-11-16, P-033;
   `skills/sdlc/converse.md` **Calls.**). It opens the call session (channel `meet`, chat id
   the meeting code), reports to the asking session that Valor is joining
   (naming the call session, so the chat can stop or steer it, with no

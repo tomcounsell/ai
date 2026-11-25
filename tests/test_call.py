@@ -3654,6 +3654,66 @@ def test_the_state_updates_on_the_queue_moving_and_a_settle_overtakes_one_under_
     assert not [p for p in c.page.posts if "0.4 percent" in p or "no change" in p]
 
 
+def test_an_update_asked_while_a_stopped_one_winds_down_is_one_update_and_the_call_runs_on(dsn, team, quick):
+    """Review, 2026-11-25: a worker turn takes a while to stop (its process
+    killed and reaped). A `prepare()` while it does, after a question
+    stopped it, queued a second update beside the first, and `work` spun on
+    the two forever, freezing the call. It is one update, run after the
+    answer, and the call goes on."""
+    order, first = [], asyncio.Event()
+
+    async def preparer(prompt):
+        order.append("prep")
+        if len(order) == 1:
+            first.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.2)  # a slow stop
+                order.append("stopped")
+                raise
+        return f"Topics {len(order)}."
+
+    async def worker(question):
+        order.append(question)
+        return "Tuesday."
+
+    async def go():
+        starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        c = await in_call(dsn, team, worker=worker, preparer=preparer, starts=starts)
+        assert await until(lambda: first.is_set())
+        await push(c.session, tool("ask", question="When did the import ship?"), done())
+        await asyncio.sleep(0.05)
+        c.the.prepare()  # Valor's "I'll check" turn ends while the update stops
+        assert await until(lambda: "Topics" in c.the.topics)
+        await asyncio.sleep(0.3)
+        queued = [q for q in list(c.the.questions._queue) if q is call.PREP]
+        await settle(c.the)
+        await finish(c)
+        return queued
+
+    queued = run(go())
+    assert order == ["prep", "stopped", "When did the import ship?", "prep"] and queued == []
+
+
+def test_a_decision_before_any_topics_keeps_the_notes_before_the_call_in_the_state(dsn, team, quick):
+    """Review, 2026-11-25: a settle before the first update rendered a state
+    with no topics, which replaces the notes before the call, so the voice
+    lost them. Until there are topics, the state carries those notes."""
+
+    async def go():
+        c = await in_call(dsn, team)
+        await push(c.session, audio(), said("Monday."), tool("settle", readback="Ship Monday."), done())
+        assert await until(lambda: _prepared(c.session))
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    c = run(go())
+    ((text, _),) = _prepared(c.session)
+    assert "- Ship Monday." in text and c.the.info["prep"] in text and "(nothing yet)" not in text
+
+
 def test_a_question_stops_an_update_under_way_and_the_update_runs_after_its_answer(dsn, team, quick):
     """A lookup never waits on an update (P-041): asked while one runs, the
     update is stopped, the question answered, posted and noted, and the

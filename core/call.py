@@ -1824,8 +1824,7 @@ class Call:
                 decision = {"decision": readback, "by": by, "at": _clock(self.now()), "settles": settles,
                             "source": f"Meet call {self.info['code']} {day}, read back at {_clock(self.now())}"}  # fmt: skip
                 self.decided.append(decision)
-                self._spawn(self._record(decision))
-                await self._show()
+                self._spawn(self._record(decision))  # Live is told at its turn's end (`_content`)
                 self.posts.put_nowait(Post(reply.id, readback, True, settles))
                 result = (
                     f"recorded the read-back, but no open decision is {', '.join(unmatched)}: say in a sentence "
@@ -2067,7 +2066,7 @@ class Call:
         """An update of the state, unless a question comes while it runs:
         then the update is stopped and asked again after it, and the
         question is returned, so a lookup never waits on an update."""
-        update, again = asyncio.create_task(self._update()), False
+        update, again, taken = asyncio.create_task(self._update()), False, False
         try:
             while not update.done():
                 got = asyncio.create_task(self.questions.get())
@@ -2077,7 +2076,7 @@ class Call:
                     with contextlib.suppress(asyncio.CancelledError):
                         await got
                 elif (question := got.result()) is PREP:
-                    again = True  # an update asked meanwhile runs after this one
+                    taken = True  # an update asked meanwhile, taken off the queue: it runs after this one
                 else:
                     again = again or not update.done()
                     return question
@@ -2087,8 +2086,11 @@ class Call:
                 update.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await update
-            if again:
+            # One PREP queued at most: `work` puts a PREP back while the queue is not empty, so two
+            # would spin it forever (review, 2026-11-25). Only the one taken here is no longer queued.
+            if taken:
                 self.prep_queued = False
+            if again or taken:
                 self.prepare()
 
     async def _read_up(self) -> None:
@@ -2104,7 +2106,7 @@ class Call:
         except Exception as exc:  # noqa: BLE001  a reading that fails leaves the chat's notes
             _log(f"call {self.id}: the worker's reading failed: {exc!r}")
             notes = ""
-        self.topics = self.topics or notes or READ_NONE
+        self.topics = notes or f"{self.info.get('prep') or ''}\n{READ_NONE}".strip()
         self.reading = False
         await self._show()
 
@@ -2119,13 +2121,15 @@ class Call:
 
     def state(self) -> str:
         """The meeting now, as the voice is told it: what the call decided,
-        then the worker's topics."""
+        then the worker's topics, or the notes before the call until there
+        are any (a settle before the first update left the voice with none)."""
         decided = [
             f"- {d['decision']}" + (f" ({', '.join(d['by'])}, {d['at']})" if d["by"] else f" ({d['at']})")
             for d in self.decided
         ]
         return STATE.format(
-            decided="\n".join(decided) or "(nothing yet)", topics=self.topics or "(nothing yet)"
+            decided="\n".join(decided) or "(nothing yet)",
+            topics=self.topics or self.info.get("prep") or "(nothing yet)",
         )
 
     async def _show(self) -> None:

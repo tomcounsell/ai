@@ -43,7 +43,7 @@ AGENDA = (
 def rendered(topics: str, decided: list[str] = ()) -> str:
     """The state note as the call renders it (`Call.state`), each decision Tom's."""
     made = [{"decision": d, "by": ["Tom Counsell"], "at": "0:04"} for d in decided]
-    return call.Call.state(SimpleNamespace(topics=topics, decided=made))
+    return call.Call.state(SimpleNamespace(topics=topics, decided=made, info={}))
 
 
 PREPARED = rendered(
