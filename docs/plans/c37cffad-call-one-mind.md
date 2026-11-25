@@ -30,8 +30,9 @@ constants from `ef5172ac1^:core/call.py`, taken, not rewritten); **L** today's `
   final punctuation), plus 4 with a third device's "mm-hm" in a pause. The call's mix is recorded and the
   candidates are run over that recording, so all see the same Meet audio. Truth: the script's pause
   and end positions aligned to the recording by energy (-45 dBFS, as `lt.py`).
-- **Tom's real calls.** The right channel of recordings in the meetings store on this Mac
-  (`settings.meetings_store`, 2026-11-13 and 2026-11-16 calls): 40 or more pauses of 0.5 s or more
+- **Tom's real calls.** The right channel (others; left is Valor, checked) of the 2026-11-13 and
+  2026-11-16 recordings, fetched from Drive (`meta.json` links, `gws drive files get alt=media`) to the
+  task folder, outside the repo: 40 or more pauses of 0.5 s or more
   after which the same speaker resumes before Valor speaks (mid-thought), and the ends followed by
   Valor's channel or 3 s of quiet (turn ends), labelled by a script the test holds and spot-checked
   against the stored transcript. Audio and labels stay out of the repo (path from an env var).
@@ -97,24 +98,15 @@ decision, unbuilt.
   `test_a_state_waits_out_valors_turn_and_is_not_told_twice`, `test_a_long_state_reaches_a_fresh_session_whole`,
   `test_a_state_done_while_no_session_is_open_is_noted_once_to_the_next`, live L1/L2). Kept from
   P-041: `state()`, `decided`, `topics`, settle recording, UPDATE and their tests. `Gemini.summarise`
-  stays. No flag keeps both. Metering charges ears and voice at their `gemini_price`.
+  stays. No flag keeps both. `spending.GEMINI_PRICES` gains `gemini-3.5-transcribe-live`,
+  `gemini-3.5-flash-lite`, `gemini-3.8-flash`, `gemini-3.8-flash-tts` (else charged unpriced at the top rate).
   `docs/bridges/meet.md`, `core/README.md` updated.
 
 ## Tests
 
-Fake ears, mind and voice in `tests/test_call.py`; every test that faked Live is moved, not dropped:
-a turn end runs the mind once with the current state; a `settle` before the reply is in the state
-before the voice plays; speech before first sound cancels and reruns; a turn that called `settle`
-(A) then cancelled by more speech and rerun (`settle` B) leaves one decision, B, and one fact, and a
-cancelled `post` or `ask` is never sent, nor marked asked; lookups run before commit; a group turn
-with `settle` and an empty reply records the decision once; a typed line's reply is posted, not
-spoken; a worker answer while quiet starts one turn opening with it, and one mid-reply waits for its
-end; a steer and the reading reach the next turn's prompt; no reply to the only person asks once;
-an unposted line is said aloud; side talk by another person in a
-group before first sound does not cancel; barge-in by the person answered
-cuts and records the said part; the other person talking does not; group side talk gets silence; a
-tool error is said; the 10-minute reopen drops no audio and keeps the stretch; the holding line at
-5 s and only once; sentences play in order. **Step 4 live** (`test_live_call_voice.py` rewritten,
+Fake ears, mind and voice in `tests/test_call.py`: one test per rule in the bullets above (each
+held effect, commit, cancel and rerun, each non-speech input, the reopen, the holding line, sentence
+order); every test that faked Live is moved, not dropped. **Step 4 live** (`test_live_call_voice.py` rewritten,
 then `test_live_meet.py` through Meet, 3 runs): P-041's acceptance: three topics out of order, a
 decision that changes another, a stale note; no decided item asked again, the decision stated when
 asked, `settle` called mid-call. Delay per reply (median, p90, max) and reruns per call reported.
