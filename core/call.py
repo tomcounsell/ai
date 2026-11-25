@@ -757,8 +757,10 @@ STATE = (
     "nothing about this note).\nDecided in this call (each is decided: never ask it again, under any name):\n"
     "{decided}\n\nTopics:\n{topics}"
 )
-# Kept for every turn (`Call.told`), the newest within a quarter of `CALL_SO_FAR`.
+# Kept for every turn (`Call.told`), the newest within a quarter of `CALL_SO_FAR`; one Valor has said is
+# marked so, or it opened four replies in a row (the live Meet test, 2026-11-25).
 ANSWERED = 'Your worker answered "{question}" (posted in the chat): {answer}'
+SAID = 'Your worker answered "{question}", and you have said it (posted in the chat): {answer}\nSay it again only when asked.'
 # Built on the chat session's stated default, no objection from Tom in five minutes, 2026-11-18; his to reverse.
 # An answer asked for aloud is given when Valor next speaks (2026-11-18: it
 # was posted only, and said 11 minutes later). Never as a turn of its own: at
@@ -1618,7 +1620,8 @@ class Call:
                 f"call {self.id}: turn {t.id} written in {self.clock() - began:.1f} s: {written.strip()[:80]!r}"
             )
             await self._commit(t, spoken=False)  # a turn with no words commits as the mind ends
-            if t.typed and written.strip():
+            # Posted by the mind's own `post`, its words are not posted again (twice in the live Meet test).
+            if t.typed and written.strip() and not [n for n, _ in t.held if n == "post"]:
                 self.posts.put_nowait(Post(t.id, written.strip(), True))
             if written.strip():
                 self.prepare()  # an exchange: the worker updates the state (P-041)
@@ -1663,7 +1666,7 @@ class Call:
             await self._do(t, name, args)
         if spoken and t.say:
             self.say_next = [a for a in self.say_next if a not in t.say]
-            self.told += [ANSWERED.format(question=q, answer=a) for q, a in t.say]
+            self.told += [SAID.format(question=q, answer=a) for q, a in t.say]
 
     async def _tool(self, t: Turn, name: str, args: dict[str, Any]) -> str:
         """A tool the mind called: a lookup now; `settle`, `ask`, `post` and

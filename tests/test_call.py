@@ -841,6 +841,22 @@ def test_a_typed_line_is_answered_in_the_chat_never_aloud(dsn, team, quick):
     assert not c.the.aloud and not c.the.say_next  # asked in the chat, answered in the chat
 
 
+def test_a_typed_answer_the_mind_posted_itself_is_not_posted_again(dsn, team, quick):
+    """Posted twice in the live Meet test (2026-11-25)."""
+
+    async def go():
+        c = await in_call(dsn, team)
+        c.gemini.minds.append(
+            [("post", {"text": "Launch: Thursday the 4th."}), "The launch is Thursday the 4th."]
+        )
+        c.the.chat(LOGAN, "Valor, can you post the launch date here?")
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    assert run(go()).page.posts[1:] == ["Launch: Thursday the 4th."]
+
+
 def test_a_failed_post_gets_no_copy_and_is_said_aloud_once_valor_is_quiet(dsn, team, quick):
     """Every post of a call failed and Live was told each went, so it said
     nothing (the Captain, 2026-11-18): the join line among them."""
@@ -948,9 +964,7 @@ def test_an_answer_asked_aloud_opens_the_next_reply_and_is_never_a_turn_of_its_o
     c, quiet = run(go())
     say = call.SAY_ANSWER.format(question="What did we ship?", answer="The import, on Tuesday.")
     assert quiet == 1 and say in c.gemini.prompts[1] and say not in c.gemini.prompts[2]
-    assert c.the.told == [
-        call.ANSWERED.format(question="What did we ship?", answer="The import, on Tuesday.")
-    ]
+    assert c.the.told == [call.SAID.format(question="What did we ship?", answer="The import, on Tuesday.")]
     assert not c.the.say_next
 
 
@@ -2230,7 +2244,7 @@ def test_a_question_the_chat_session_passes_on_goes_to_the_worker_unposted_and_i
         call.SAY_ANSWER.format(question="How many signups last week?", answer="212 signups.")
         in c.gemini.prompts[0]
     )
-    assert c.the.told == [call.ANSWERED.format(question="How many signups last week?", answer="212 signups.")]
+    assert c.the.told == [call.SAID.format(question="How many signups last week?", answer="212 signups.")]
 
 
 def test_a_stop_before_valor_is_let_in_leaves_within_seconds(dsn, team, quick):

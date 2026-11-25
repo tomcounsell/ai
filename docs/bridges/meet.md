@@ -125,12 +125,13 @@ against a new Meet with a second device of Valor's account
   (`settings.call_voice_model`, voice `settings.call_voice`); a turn is
   one `meet.say`, requested at its first sound, its audio held until
   released and settled with what played; the answer to a typed line is
-  posted, never said. The call cuts Valor off when the person he answers
+  posted, never said, once (not again when the mind posted it itself). The call cuts Valor off when the person he answers
   speaks over him, and stops the rest of the turn; side talk does not.
   A worker's answer to an `ask` made aloud is posted and, once it is in the
   chat, given by the next reply, opening it, never as a turn of its own
   (said at a pause, it spoke over Tom answering Valor's own question,
-  2026-11-19); one asked in the chat is posted and kept; one the chat fails
+  2026-11-19), then kept marked as said (unmarked, it opened four replies
+  in the live Meet test, 2026-11-25); one asked in the chat is posted and kept; one the chat fails
   is said as unposted, once. A steer of the call is posted in its chat and
   kept for every turn; one opening `look up:` goes to the call's worker
   instead, unposted, its answer given as an `ask` made aloud (the chat
