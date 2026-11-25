@@ -1828,7 +1828,7 @@ class Call:
 
     async def _settles(self, ids: list[str]) -> tuple[list[dict[str, str]], list[str]]:
         """The open decisions `settle`'s ids name, and the ids that name
-        none. `task/question` is taken as given (the confirm refuses one no
+        none. `task/question` is taken as given (the session's answer refuses one no
         longer open); a bare id is the project's open question with that
         id, or the one open question of the task with that id (2026-11-25:
         the voice passed ids of another form and nothing was recorded)."""
