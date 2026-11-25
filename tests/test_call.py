@@ -3339,7 +3339,7 @@ def test_a_round_google_refuses_is_asked_again_and_each_copy_is_charged_its_inpu
     class Models:
         async def generate_content_stream(self, model, contents, config):
             asked.append(model)
-            if len(asked) <= 2:  # both copies of the first ask
+            if len(asked) <= call.HEDGE:  # every copy of the first ask
                 raise errors.ServerError(503, {"error": {"message": "high demand", "status": "UNAVAILABLE"}})
 
             async def chunks():
@@ -3359,7 +3359,7 @@ def test_a_round_google_refuses_is_asked_again_and_each_copy_is_charged_its_inpu
         ]
 
     got = run(go())
-    assert [x["text"] for x in got if "text" in x] == ["Monday."] and len(asked) == 2 + call.HEDGE
+    assert [x["text"] for x in got if "text" in x] == ["Monday."] and len(asked) == 2 * call.HEDGE
     usages = [x["usage"] for x in got if "usage" in x]
     assert len(usages) == call.HEDGE and usages[0]["candidates_token_count"] == 5
     assert all(u["prompt_token_count"] == 100 and "candidates_token_count" not in u for u in usages[1:])
