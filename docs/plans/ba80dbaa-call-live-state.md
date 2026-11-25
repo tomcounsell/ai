@@ -34,8 +34,10 @@ not built). The rest waits for that turn's answer.
   time and the open-question ids it answered) and the worker's topics text. Rendered as one note:
   "The meeting now (replaces every earlier state): Decided in this call (stands over anything below) …
   Topics …". `PREPARED` and `READ_IN` go: the prep and the reading become the topics text. Only the
-  newest state is in `told`, so a fresh session's `so_far` carries it once. Noted only when its
-  text changed (context growth).
+  newest state is in `told`; `so_far` keeps it whole and cuts the transcript tail first (not the
+  quarter that drops a long state). `_read_up` no longer appends the reading to `info["prep"]`: once a
+  state exists, a session opened mid-call gets the state in place of the setup prep, so no stale list
+  sits beside it. Noted only when its text changed (context growth).
 - **Updated after every exchange.** `PREPARE` becomes `UPDATE`: given the current state, the decisions
   and the call since the last update, the worker rewrites the topics: each topic once under the label
   the call uses, its state (open, decided and what, parked), what it touches; a topic a decision
@@ -43,12 +45,17 @@ not built). The rest waits for that turn's answer.
   after each of Valor's turns that spoke and on `settle`, on the worker's one lane, questions first.
 - **A decision at once.** `settle` writes the decision into the state and notes it before any worker
   turn; writes it as a dated decision fact of the project citing the call and the question ids
-  `_settles` matched (`_decisions`, now mid-call); queues an update. A worker update begun before a
-  settle is dropped and queued again (P-040's rule, kept). The end-of-call summary is told the
+  `_settles` matched (`_decisions`, now mid-call); queues an update. `ids` is optional (P-040's diff
+  makes it so; kept or done here): every decision goes through `settle`, one on no open question
+  included, so none lives only in the topics text. A worker update begun before a settle is dropped and
+  queued again (P-040's rule, kept). A question asked while an update runs cancels it and the update is
+  queued again after the answer, so a lookup never waits on an update (the builder checks a cancelled
+  worker turn ends cleanly; the update's own time is logged and stated). The end-of-call summary is told the
   decisions already recorded and lists only others, so none is written twice. Answering the open
   question itself stays at the end (no acting mid-call).
 - `INSTRUCTIONS`: the `[note]` line names the state note as the call's one record of what is open and
-  decided; topics come in any order; a decided topic is never asked again; L2's line only if chosen.
+  decided; topics come in any order; a decided topic is never asked again; call `settle` on every
+  decision, read back, with the open-decision ids it answers or none; L2's line only if chosen.
 - `docs/bridges/meet.md`, `live_config`'s docstring: the state, the measured delay.
 
 ## Tests
@@ -57,11 +64,18 @@ Fake Live (`tests/test_call.py`): a settle puts the decision in the next state n
 turn; a state note replaces the last in `told` and `so_far` holds one; an unchanged state is not noted
 again; a reading or update that lands after a settle reaches Live with the decision on top; an update
 begun before a settle is dropped and requeued; a settle writes its decision fact and ids before `end`,
-and the summary prompt carries it; a settle naming no open question is still in the state as decided;
-a question asked meanwhile goes before the update.
+and the summary prompt carries it; a settle with no `ids` is in the state as decided and written as a
+fact; a question asked during an update cancels it and the update runs after the answer; a state over
+a quarter of `CALL_SO_FAR` reaches a fresh session whole, the transcript cut instead; a session opened
+after the reading gets the state, not the reading, in its instruction.
+Moved, not dropped: the tests built on `PREPARED`/`READ_IN`/`READ_NONE` (tests/test_call.py ~3074,
+3143, 3244; tests/test_live_call_voice.py ~40, 206, 221, 231, 264, 474: 1:1 next item, group wait,
+asked-for-more, mid-reply note, settled item not reopened) take the rendered state note, and the live
+ones are rerun (3 runs) as the evidence P-038/P-040's voice behaviour still holds.
 Live, the acceptance (**L3**, 3 runs): three topics raised out of order; a decision on one that changes
 another; then the stale reading arrives through the Call's own render. Valor does not ask the decided
-topic again, states the decision when asked, says the affected topic changed. Delay per reply printed
+topic again, states the decision when asked, says the affected topic changed, and called `settle`
+with the read-back during the run (so the decision is recorded mid-call). Delay per reply printed
 and written into `live_config`'s docstring.
 
 ## Out of scope
