@@ -533,7 +533,7 @@ async def _run_task(task_id: str) -> str:
 
 async def _call(session_id: str) -> str:
     """A Meet call's process (`core/call.py`), spawned by `meet.join`: the
-    page (`bridges/meet`), its Gemini Live session (the key from
+    page (`bridges/meet`), its Gemini ears, mind and voice (the key from
     `python -m core google-key`), and the worker, on the call's own
     gateway. It holds `meet:call:<session>` and `run:<session>` while it
     lives, the holder of its metered Gemini calls."""

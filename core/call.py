@@ -641,18 +641,17 @@ INSTRUCTIONS = (
     "(posted in the call's chat instead when you answer a typed line): plain spoken sentences, one to three "
     "short ones, never lists, markdown, ids or symbols. When nothing is yours to answer, write nothing at "
     "all: you stay silent.\n\n"
-    "Each turn brings who is here, the meeting now, notes kept for you, the call so far (`[minute] name "
-    "(how): words`, yours as Valor), and what to answer now.\n\n"
     '- When to speak is "In a call" below. With only one other person here, everything they say is to '
     'you: answer it, and lead the call as "In a call" says.\n'
     "- The meeting now is the call's one record of what is open and decided: speak on a topic from it. "
     "Topics come in any order: follow the person. A decided or covered topic stays decided: never ask or "
     "raise it again, under any name, whatever an older line says. Asked what was decided, answer from the "
     "meeting now, with no tool.\n"
-    "- Whenever something is decided in what you answer, call `settle` first, before you write: the "
-    "read-back, `by` who decided, and the ids of the open decisions it settles (`open_decisions`), if any. "
-    "The ids are only those `open_decisions` returned; with none, give none. Then read the decision back in "
-    "a sentence. Only Tom settles open decisions; a correction is a new `settle`. With only one person here, "
+    "- When the person you answer decides something just now (picks an option, says yes to a choice, says it "
+    "is decided), call `settle` once, before you write: the read-back, `by` who decided, and the ids of the "
+    "open decisions it settles (`open_decisions`), if any. Choosing what to discuss, a proposal and your own "
+    "recommendation are no decision. The ids are only those `open_decisions` returned; with none, give none. "
+    "Then read the decision back in a sentence. Only Tom settles open decisions; a correction is a new `settle`. With only one person here, "
     "that read-back ends by opening the next open topic in the meeting now, explained, asking a yes only when "
     "it needs one; with none open there, ask what they want to take next. With more people here, it ends with "
     "the read-back: the next item waits until someone asks for it.\n"
@@ -670,7 +669,7 @@ INSTRUCTIONS = (
     "ask once for each that needs their answer, after explaining it. With anyone but Tom in the call, a "
     "decision about a client "
     "relationship (pricing, terms, hiring or pay) is one line: it is for Tom.\n"
-    "- Call `post` only for what the room should read (a link, a figure, a list).\n"
+    "- Call `post` only for what the room should read (a link, a figure, a list), never for a read-back.\n"
     '- Call `leave` when anyone in the call asks you to leave (`why` "asked"), or when everyone has wrapped up '
     'and said goodbye (`why` "wrapped up"); say goodbye in your reply. Never leave because the meeting\'s '
     "scheduled time has passed: stay while people are still talking.\n\n"
@@ -880,17 +879,20 @@ class Gemini:
         )
         return self.client.aio.live.connect(model=settings.call_ears_model, config=config)
 
-    async def think(self, instruction: str, contents: list, tools: list[dict]):
+    async def think(self, instruction: str, contents: list, tools: list[dict], *, words_only: bool = False):
         """One round of the mind (`settings.call_mind_model`), streamed:
         each part as `{"part"}` with its `text` (not a thought) or its
-        `call` (name, args), then `{"usage"}`. The parts go back into
-        `contents` as they came, thought signatures and all."""
+        `call` (name, args), then `{"usage"}`; `words_only`, no tool calls.
+        The parts go back into `contents` as they came, thought signatures
+        and all."""
         from google.genai import types
 
         model = settings.call_mind_model
+        mode = types.FunctionCallingConfigMode.NONE if words_only else types.FunctionCallingConfigMode.AUTO
         config = types.GenerateContentConfig(
             system_instruction=instruction,
             tools=[types.Tool(function_declarations=[types.FunctionDeclaration(**t) for t in tools])],
+            tool_config=types.ToolConfig(function_calling_config=types.FunctionCallingConfig(mode=mode)),
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             thinking_config=types.ThinkingConfig(thinking_level="minimal" if "lite" in model else "low"),
         )
@@ -1567,10 +1569,12 @@ class Call:
                 return
             contents: list = [{"role": "user", "parts": [{"text": prompt}]}]
             tools = [*TOOLS, *([BACKLOG] if self.sheet else [])]
-            written, left = "", ""
-            for _ in range(MIND_ROUNDS):
+            written, left, done = "", "", set()
+            for n in range(MIND_ROUNDS):
                 parts, calls = [], []
-                async for got in self.gemini.think(self.instruction, contents, tools):
+                # The last round writes: Flash-Lite called `settle` round after round and said nothing (2026-11-25).
+                last = n == MIND_ROUNDS - 1
+                async for got in self.gemini.think(self.instruction, contents, tools, words_only=last):
                     if "usage" in got:
                         usage.append(got["usage"])
                         continue
@@ -1584,7 +1588,18 @@ class Call:
                         await self._sentence(t, sentence)
                 if not calls:
                     break
-                results = [await self._tool(t, name, args) for name, args in calls]
+                results = []
+                for (
+                    name,
+                    args,
+                ) in calls:  # one call twice in a turn is done once (2026-11-25: `settle` 3 times)
+                    key = (name, json.dumps(args, sort_keys=True))
+                    results.append(
+                        "done already: now write your reply"
+                        if key in done
+                        else await self._tool(t, name, args)
+                    )
+                    done.add(key)
                 contents += [{"role": "model", "parts": parts}, {"role": "user", "parts": [
                     {"function_response": {"name": n, "response": {"result": r}}}
                     for (n, _), r in zip(calls, results, strict=True)]}]  # fmt: skip
@@ -1684,7 +1699,11 @@ class Call:
         if name == "open_decisions":
             self.prepare()
             async with await self._connect() as conn:
-                return await decisions(conn, self.project)
+                found = await decisions(conn, self.project)
+            # Settled here, answered only once the call ends: never offered as open again (2026-11-25,
+            # a question Tom had settled was raised again from this list).
+            settled = {f"- {q['task_id']}/{q['question_id']}:" for d in self.decided for q in d["settles"]}
+            return "\n".join(x for x in found.splitlines() if not x.startswith(tuple(settled)))
         return f"not done: {name} needs its arguments"
 
     async def _do(self, t: Turn, name: str, args: dict[str, Any]) -> None:

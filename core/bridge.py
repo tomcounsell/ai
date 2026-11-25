@@ -44,10 +44,10 @@ impossible send at request time without importing a bridge:
   `chat.postMessage`, which truncates past 40,000); 1 GB per file (its
   file upload limit).
 - Local: none. The local chat page shows any text and no files.
-- Meet: 500 characters a post; no files. A spoken turn is Gemini Live's
+- Meet: 500 characters a post; no files. A spoken turn is the call's own
   audio, so `meet.say` carries the turn it gates, not text. A call's own
   process (`core/call.py`) performs both, never a bridge's outbox, and
-  turns are not offered them (docs/plans/meet.md, docs/plans/gemini-live.md).
+  turns are not offered them (docs/plans/meet.md, docs/bridges/meet.md).
 """
 
 import asyncio
@@ -274,7 +274,7 @@ async def _refuse_local(conn, action: broker.Action) -> str | None:
 
 
 async def _refuse_say(conn, action: broker.Action) -> str | None:
-    """A call's spoken turn: the id of the Live turn whose audio it gates."""
+    """A call's spoken turn: the id of the turn whose audio it gates."""
     turn = action.payload.get("turn")
     return None if isinstance(turn, str) and turn.strip() else 'a say names its turn: {"turn": "<id>"}'
 

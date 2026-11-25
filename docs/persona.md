@@ -496,7 +496,7 @@ persona asks for the cooperation anyway because it makes correction cheap.
 
 ### In a call (Mission item 6)
 
-A Live call's model reads no turn's persona, only its own instruction. Tom's
+A call's model reads no turn's persona, only its own instruction. Tom's
 first full call (2026-11-06) showed what that cost: bare recommendations,
 a challenged question asked again, "offline" with no where, items that were
 not his, a switch of language. `conduct.md`'s "In a call" section is the

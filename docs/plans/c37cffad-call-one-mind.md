@@ -57,30 +57,30 @@ decision, unbuilt.
   stretches (`_speakers`, `_close_stretch`, `call.heard`, who is answered, barge-in cut). Reopened at a
   quiet moment before its 10-minute limit and on a drop, with no audio lost across the switch.
 - **Mind.** On each turn end, one streamed call to `settings.call_mind_model` (default
-  `gemini-3.5-flash-lite`; `gemini-3.8-flash`, or a Claude model through the call's gateway, as the
-  value): system prompt from today's `INSTRUCTIONS` and "In a call" rules, P-041's `state()` read fresh
+  `gemini-3.5-flash-lite`; `gemini-3.8-flash` as the value. Claude is cut from this change: it needs a
+  per-call gateway token, the Anthropic SDK and a second tool format; built if Gemini fails acceptance):
+  system prompt from today's `INSTRUCTIONS` and "In a call" rules, P-041's `state()` read fresh
   each turn, the transcript so far; tools the existing `ask`, `post`, `settle`, `open_decisions`,
-  `backlog`, `person`, `leave` on today's handlers, declared once and given to Gemini as function
-  declarations and to Claude as tool schemas. Told to call `settle` before replying to a decision. An
-  empty reply is silence (side talk in a group). Metered by the path that serves it: `gemini_price` for
-  Gemini, the gateway's own metering for Claude.
+  `backlog`, `person`, `leave` on today's handlers. Told to call `settle` once, before replying, when
+  the person decides. One call twice in a turn is done once; the last round writes words only. An
+  empty reply is silence (side talk in a group). Metered at `gemini_price`.
 - **A turn commits at first sound, or at the mind's end if it has no words.** Until then only the
   lookups (`backlog`, `open_decisions`, `person`) run. `settle`, `post`, `ask` and `leave` are held: each
   returns its acknowledgement at once as `_tools` does today (asked, posting, recorded, leaving), so the
   mind writes its reply, and runs in order just before the first sentence plays (`settle` first, so
   the state holds the decision before Valor speaks of it). A turn that ends with no reply (group side
   talk, a silent `settle` or `leave`) and was not cancelled runs its held effects when the mind ends.
-  `ask`'s dedupe (`self.asked`) applies at commit, so a dropped ask marks nothing asked. The holding
-  line below does not commit. Speech from the person being answered before commit cancels the turn,
+  `ask`'s dedupe (`self.asked`) applies at commit, so a dropped ask marks nothing asked. Speech from the person being answered before commit cancels the turn,
   drops what it held, and reruns it from fresh state with the new words, so a premature turn end costs
   time, never a duplicate effect or talk-over. Others' speech in a group does not cancel (the
-  barge-in rule): it is in the next turn's transcript.
+  barge-in rule): it is in the next turn's transcript. A group turn dropped because its person went on
+  is answered when they finish, named or not.
 - **What is not speech.** Every input Live got by `_tell` goes to the mind:
   - Kept notes (the worker's `ANSWERED`, `STEERED`, `READ_IN`) sit in the mind's prompt beside
     `state()` every turn (newest first, within today's `so_far` budget, the state whole).
-  - A worker's answer, a steer or the reading arriving while the call is quiet and Valor is not
-    replying starts one turn whose input is that note (today's "open your next reply with it");
-    arriving mid-reply, it waits for that reply's end, then does the same.
+  - A worker's answer, a steer or the reading starts no turn of its own (Tom, 2026-11-19: said at a
+    pause it spoke over him; hold it for the next opportunity to talk): an answer asked aloud opens
+    the next reply, once; the rest are in every turn's prompt.
   - A typed line (`_typed`) is a turn end whose reply is posted, not spoken (`self.typed`,
     `typed_posted` as today).
   - `_answer_alone` and `NAMED_NOTE`'s ask (no reply to the only person, or to one naming Valor in a
@@ -88,8 +88,8 @@ decision, unbuilt.
     whose reply is spoken.
 - **Voice.** Replies split by the old `SENTENCE` regex; each sentence to `gemini-3.8-flash-tts` in
   `settings.call_voice` (Alnilam), the next synthesized while one plays, into today's `_play`, `meet.say`
-  and `_cut` (the said text is now exact). With no sentence 5 s after a turn end, Valor says one short
-  holding line (the observed 8-13 s tails).
+  and `_cut` (the said text is now exact). No holding line (Tom's answer to step 1, 2026-11-25): the slow
+  tail is measured in step 4 and reported, and one is added only if he asks.
 - **Removed** (step 5, same change): the Live session (`Gemini.connect`, `live_config`, `note`,
   `send_client_content`, resumption, fresh-session rebuild, the `kept` resend, the stall watch),
   `settings.call_model`, and P-041's Live-only half: `_show`, `state_told`, the state held while Live's
@@ -105,7 +105,7 @@ decision, unbuilt.
 ## Tests
 
 Fake ears, mind and voice in `tests/test_call.py`: one test per rule in the bullets above (each
-held effect, commit, cancel and rerun, each non-speech input, the reopen, the holding line, sentence
+held effect, commit, cancel and rerun, each non-speech input, the reopen, the repeated call, sentence
 order); every test that faked Live is moved, not dropped. **Step 4 live** (`test_live_call_voice.py` rewritten,
 then `test_live_meet.py` through Meet, 3 runs): P-041's acceptance: three topics out of order, a
 decision that changes another, a stale note; no decided item asked again, the decision stated when

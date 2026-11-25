@@ -305,8 +305,8 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    job): over plain ssh the login keychain is locked, Chrome cannot read
    the profile's cookies and drops them, signing it out (the Captain's,
    2026-11-03). Copying Google's cookies in from another profile does not
-   sign it in: Google signed the copy out within a minute. A call speaks
-   through Gemini Live (docs/plans/gemini-live.md): it needs `google-key`
+   sign it in: Google signed the copy out within a minute. A call hears,
+   thinks and speaks through Gemini (docs/bridges/meet.md): it needs `google-key`
    (step 5, or `$PY -m core google-key`, which reads the paid "Gemini API
    Key Yudame Tools" from 1Password's `Yudame Secrets` with `op read`), the
    dependencies (`uv sync`, for `google-genai`), and `gws` signed in as

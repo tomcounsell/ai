@@ -27,7 +27,7 @@ disk.
 
 Yudame Tools' paths are in `yudame/yudame-tools`. Valor's own code runs no
 Ollama model. Its judgement calls are hosted ([machine.md](machine.md)), and
-its Meet calls are heard by Gemini Live.
+its Meet calls are heard by Gemini's live transcriber.
 
 ## Kept: a project's, downloads itself again
 
@@ -60,7 +60,7 @@ and its app not installed or not set to use it. 28.6 GB freed in all.
 |---|---|---|---|
 | gemma4:e2b (Ollama) | 7.2 GB each | Cowboy, Captain, Bald | No code read the vault `.env` settings that named it (removed with it). The old system retired it (`config/models.py:184,201` at `old-system`). Ollama's logs show only granite4.1:3b loading. |
 | granite3.2-vision (Ollama) | 2.4 GB | Captain | Named nowhere. An earlier cleanup (task 7f96f2f1) removed it from the Cowboy as unused. |
-| mlx-community/whisper-large-v3-turbo, whisper-base.en-mlx; Systran/faster-whisper-small.en; pipecat-ai/smart-turn-v3 | 2.25 GB together | Cowboy | No code names them. One-off transcriptions downloaded the Whisper models; Valor's own path is the voice service. Valor's Meet calls used Smart Turn until 2026-11-05, when they moved to Gemini Live. |
+| mlx-community/whisper-large-v3-turbo, whisper-base.en-mlx; Systran/faster-whisper-small.en; pipecat-ai/smart-turn-v3 | 2.25 GB together | Cowboy | No code names them. One-off transcriptions downloaded the Whisper models; Valor's own path is the voice service. Valor's Meet calls used Smart Turn until 2026-11-05, when they moved to Gemini Live; measured again for P-042 (2026-11-25), it ended a turn in 40% of short pauses and was not taken back. |
 | mlx-community/whisper-small.en-mlx | 481 MB | Bald | As above; downloaded by a turn on 2026-11-21. |
 | superwhisper's models, `~/Library/Application Support/superwhisper` | 1.0 GB Captain, 562 MB Pirate | Captain, Pirate | The superwhisper app was not installed on these two Macs; the folder was what an uninstall left. |
 | u2net (`~/.u2net/u2net.onnx`) | 176 MB | Captain | rembg's background-removal model; no repository on the Captain uses rembg, and rembg downloads it again on first use. |

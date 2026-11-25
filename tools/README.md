@@ -32,7 +32,7 @@ Installed into every turn's `bin/` (`core/workspace.py` `WORKSPACE_TOOLS`, befor
 
 `voice.py`, the launchd job `com.valor.voice` (`python -m tools.voice run | fetch | --plist`), on `127.0.0.1:settings.voice_port` (8714). One process holds Parakeet for every bridge on the Mac, since it peaks near 1.7 GB resident.
 
-- `POST /transcribe {path}` -> `{text}`: Parakeet TDT 0.6B v3 (`settings.asr_model`, the model Handy runs) through onnx-asr, int8 on the CPU, with Silero VAD so any length is cut into segments; ffmpeg decodes any audio first. A Meet call is heard by Gemini Live instead (`core/call.py`, docs/plans/gemini-live.md). The bridges call it through `core.bridge.transcribe` for every `audio/*` attachment, waiting at most `TRANSCRIBE_TIMEOUT_S` (600 s).
+- `POST /transcribe {path}` -> `{text}`: Parakeet TDT 0.6B v3 (`settings.asr_model`, the model Handy runs) through onnx-asr, int8 on the CPU, with Silero VAD so any length is cut into segments; ffmpeg decodes any audio first. A Meet call is heard by Gemini's live transcriber instead (`core/call.py`, docs/bridges/meet.md). The bridges call it through `core.bridge.transcribe` for every `audio/*` attachment, waiting at most `TRANSCRIBE_TIMEOUT_S` (600 s).
 
 The engine is the function `listen`: another model is a setting (`VALOR_ASR_MODEL`), another engine is one function.
 

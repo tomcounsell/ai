@@ -9,7 +9,7 @@ One process holds the model, so the three bridges share one copy
 - `POST /transcribe {"path": ...}` -> `{"text": ...}`: ffmpeg decodes any
   audio to 16 kHz mono; Parakeet (`settings.asr_model`, through onnx-asr,
   int8, on the CPU) with onnx-asr's Silero VAD, so any length is cut into
-  segments. A Meet call is heard by Gemini Live instead (`core/call.py`).
+  segments. A Meet call is heard by Gemini's live transcriber instead (`core/call.py`).
 
 The engine is `listen`: a new model is a setting, a new engine is one
 function. The model loads on first use and stays loaded; inference runs on

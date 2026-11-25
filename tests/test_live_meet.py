@@ -1,5 +1,5 @@
-"""Valor in a real Google Meet call on Gemini Live (docs/plans/gemini-live.md,
-the live checks).
+"""Valor in a real Google Meet call, speaking from one mind (P-042; the
+live checks of docs/plans/c37cffad-call-one-mind.md).
 
 Runs only when `VALOR_LIVE=1` and `VALOR_MEET_LIVE=1`, on a Mac whose call
 profile is signed in as Valor, with `gws` signed in as Valor (it makes a
@@ -9,16 +9,17 @@ google-key` reads it). The call runs as the kernel runs it (`python -m core
 call`'s `_call`). Two other devices of Valor's own account, from copies of
 the profile, join it: one asks aloud and in the chat, the other talks over
 the call as a third person would. The gap from the end of each spoken
-question to Valor's first sound at the asking device is measured, the way
-the cascaded pipeline's was (`page.play` resolving to the first frame), so
-the two compare. The worker is a stub turn.
+question to Valor's first sound at the asking device is measured and
+printed, each reply's: the delay per reply. The worker is a stub turn;
+its reading and every update of the call's state list the launch date as
+open, as a note written before the decision would.
 """
 
 import asyncio
-import contextlib
 import itertools
 import json
 import os
+import re
 import shutil
 import statistics
 import sys
@@ -42,54 +43,32 @@ pytestmark = [
         reason="a live Meet call: VALOR_LIVE=1 and VALOR_MEET_LIVE=1",
     ),
 ]
-# The call's length. Live's own go-away came 57 minutes into Tom's call
-# (2026-11-12), so a run past one session's life sets VALOR_LIVE_LONG_S.
-LONG_S = int(os.environ.get("VALOR_LIVE_LONG_S", "720"))
-# Half a minute of one person talking: a healthy Live sent nothing back for
-# longer than the stall inside a turn like it, and was resumed (Tom's call, 2026-11-06).
-MONOLOGUE = (
-    "Valor, let me walk you through where the launch stands before you answer. The import shipped on "
-    "Tuesday and the first customers moved their data over the same afternoon. Support had a quiet week, "
-    "with two questions about date formats and one about a missing column, all fixed by Thursday. Marketing "
-    "has the email drafted, the landing page is in review, and the pricing table still needs the annual "
-    "plan added. Sales wants a short demo video, which nobody has started yet. So, in one sentence, what "
-    "do you think is the riskiest part of launching on Monday?"
-)
 LOOKED_UP = "The import's error rate is 0.4 percent."
-# Lookups whose answers come in while Valor speaks and while another device
-# talks (Tom's calls, 2026-11-19: the answer's own turn spoke over him): the
-# words that ask each, its answer, and the seconds the stub worker takes.
-LATE = {
-    "sign": ("There were 212 signups last week.", 6),
-    "invoice": ("The printer's invoice is 340 dollars.", 3),
-}
+# What the worker writes as the call's topics, before the decision and after it (the stale note).
+TOPICS = (
+    "- Support rota: open; who covers launch week.\n- Pricing page copy: open; the draft says launch Monday.\n"
+    "- Launch date: open; recommend Monday the 1st."
+)
+DECIDE = "Valor, on the launch date: we go Thursday the 4th, not Monday. That's decided."
+ASK = "Valor, what did we decide on the launch date, and does it change anything else?"
 
 
-def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_outlasts_a_reconnect(
-    dsn, tmp_path, monkeypatch
-):
+def test_valor_speaks_from_one_mind_in_a_real_call(dsn, tmp_path, monkeypatch):
     from kokoro_onnx import Kokoro
 
     from core import __main__ as kernel
 
     def turn_for(prompt, resume, b):
-        # A reading or prep holding the answer let Live say it without asking (2026-11-18): only a
-        # question gets it.
-        text = LOOKED_UP if prompt.startswith("Asked in the call:") else "nothing ahead"
-        late = [
-            v
-            for k, v in LATE.items()
-            if prompt.startswith("Asked in the call:") and k in prompt.splitlines()[0].lower()
-        ]
-        text, wait = late[0] if late else (text, 0)
+        text = LOOKED_UP if prompt.startswith("Asked in the call:") else TOPICS
 
         def build(url, brief, turn_id, news="", subagent=""):
-            return runs.TurnCommand(argv=[sys.executable, "-c", f"import time; time.sleep({wait})"], env={},
-                                    cwd=b.workspace, harness="stub", parse=lambda out: {"text": text})  # fmt: skip
+            return runs.TurnCommand(argv=[sys.executable, "-c", "pass"], env={}, cwd=b.workspace,
+                                    harness="stub", parse=lambda out: {"text": text})  # fmt: skip
 
         return build
 
     monkeypatch.setattr(kernel, "_turn_for", turn_for)
+    monkeypatch.setattr(call, "EARS_S", 150.0)  # the transcriber reopens in the call, as at nine minutes
     keyfile = tmp_path / "keys" / "google-key"
     key = credentials.op_read(settings.google_key_ref, settings.vault_env)
     assert credentials.store_keys(keyfile, {call.GOOGLE_KEY: key})[call.GOOGLE_KEY] in ("written", "kept")
@@ -97,64 +76,11 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
     chat = f"T0ABC/C{uuid.uuid4().hex[:8].upper()}"
     folder = Path(settings.tts_model_dir).expanduser()
     kokoro = Kokoro(str(folder / "kokoro-v1.0.onnx"), str(folder / "voices-v1.0.bin"))
-    seen: dict = {"gaps": {}, "chat": [], "frames": [], "unheard_s": 0.0, "log": [], "refused": False}
-    speakers, log, connect = call.Call._speakers, call._log, call.Gemini.connect
-
-    drop = asyncio.Event()
-
-    def dropping(receive):  # the session drops when `drop` is set, as Tom's did an hour in
-        async def dropped():
-            it = receive().__aiter__()
-            while True:
-                nxt, stop = asyncio.ensure_future(it.__anext__()), asyncio.ensure_future(drop.wait())
-                await asyncio.wait({nxt, stop}, return_when=asyncio.FIRST_COMPLETED)
-                if stop.done():
-                    nxt.cancel()
-                    drop.clear()
-                    raise ConnectionError("1008 Requested entity already exists (forced by the test)")
-                stop.cancel()
-                try:
-                    m = nxt.result()
-                except StopAsyncIteration:
-                    return
-                yield m
-
-        return dropped
-
-    @contextlib.asynccontextmanager
-    async def refusing(self, config):  # the first resume's handle refused, as in Tom's call (2026-11-12)
-        if config.session_resumption.handle and not seen["refused"]:
-            seen["refused"] = True
-            raise RuntimeError("1008 BidiGenerateContent session not found or expired (forced by the test)")
-        async with connect(self, config) as session:
-            session.receive = dropping(session.receive)
-            yield session
-
-    monkeypatch.setattr(call.Gemini, "connect", refusing)
-
-    async def measured(self, loud, seconds):  # the most speech sent with nothing back from Live
-        await speakers(self, loud, seconds)
-        seen["unheard_s"] = max(seen["unheard_s"], self.unheard)
-
-    monkeypatch.setattr(call.Call, "_speakers", measured)
+    seen: dict = {"gaps": {}, "chat": [], "log": []}
+    log = call._log
     monkeypatch.setattr(call, "_log", lambda text: (seen["log"].append(text), log(text)))
 
-    # Valor joins muted, as Meet joins a large call (the Captain, 2026-11-18);
-    # it is muted again before the question below, as Meet may mute later.
-    valor, ready = [], Page.ready
-    mute = "document.querySelector('button[aria-label=\"Turn off microphone\"]')?.click()"
-
-    async def muted(self):
-        if self.profile == settings.meet_profile:
-            valor.append(self)
-            await self.evaluate(mute)
-        await ready(self)
-
-    monkeypatch.setattr(Page, "ready", muted)
-
     async def go():
-        # `_call` connects by `settings.dsn()`: the test database here. The asking
-        # device's display name is Valor's, so it stands in for Tom's.
         with bridges.operator(tmp_path, meet_profile=settings.meet_profile, database=settings.test_database,
                               operator_name="Valor Engels", meetings_store=str(tmp_path / "store" / "Meetings"),
                               summary_model=os.environ.get("VALOR_LIVE_SUMMARY_MODEL", settings.summary_model)):  # fmt: skip
@@ -169,8 +95,6 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                 await intake.bind(conn)
                 asking = await tasks.brief(conn, await intake.chat_session(conn, "slack", chat))
 
-            # Asked as a chat's turn asks (join-first, P-033): `meet.join` for a
-            # new Meet; the kernel's start is the `_call` below.
             async def created():
                 nonlocal url
                 url, code = await meet_space()
@@ -183,7 +107,7 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                                            asking.id, broker.Action("meet.join", "new", {
                                                "reply_to": "1790000000.000100", "topic_id": None, "starts": None,
                                                "prep": "Logan wants to talk about the launch: the import shipped "
-                                                       "Tuesday, the launch is Monday."}),
+                                                       "Tuesday, the launch date is still open."}),
                                            request_id=f"{uuid.uuid4().hex}/join.json")  # fmt: skip
             assert out.kind == "done", out
             (session,) = opened
@@ -196,10 +120,7 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
             a, b = Device(tmp_path / "a", seen), Device(tmp_path / "b", seen)
             calling = None
             try:
-                # The asking device is in first, so it sees Valor's join line
-                # (the recording notice) arrive in the chat.
                 await a.join(url)
-                started = time.time()
                 calling = asyncio.create_task(kernel._call(session))
                 for _ in range(90):
                     if call.JOIN_LINE in seen["chat"]:
@@ -207,61 +128,53 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                     await asyncio.sleep(1)
                 seen["notice"] = call.JOIN_LINE in seen["chat"]
                 await asyncio.sleep(5)
-                seen["gaps"]["hello"] = await a.ask(kokoro, "Hello.")
-                await asyncio.sleep(6)
-                await valor[0].evaluate(mute)
-                seen["gaps"]["question"] = await a.ask(
-                    kokoro, "Valor, what shipped this week, and when is the launch?"
-                )
-                await asyncio.sleep(8)
+                gaps = seen["gaps"]
+                gaps["hello"] = await a.ask(kokoro, "Hello.")
+                # A thought with a pause in it: no sound of Valor's before it is done (the step-1 rule).
+                seen["pauses"] = []
+                for pause in (1.0, 1.4):
+                    seen["pauses"].append(await a.pause(kokoro, "So the thing I want to settle today is,",
+                                                        pause, "whether we launch on Monday or on Thursday."))  # fmt: skip
+                await asyncio.sleep(4)
+                # P-041's acceptance: three topics out of order, a decision that changes another, the stale note.
+                gaps["rota"] = await a.ask(kokoro, "Valor, let's take the support rota first.")
+                gaps["pricing"] = await a.ask(kokoro, "Hold that. Where is the pricing page copy?")
+                gaps["decide"] = await a.ask(kokoro, DECIDE)
+                seen["decide_at"] = time.time()
+                await asyncio.sleep(3)  # the worker's update, listing the launch date as open, lands
+                gaps["next"] = await a.ask(kokoro, "Okay. What's next?")
+                seen["asked_at"] = time.time()
+                gaps["asked"] = await a.ask(kokoro, ASK)
                 seen["typed"] = await a.typed("Valor, can you post the launch date here?")
-                seen["gaps"]["lookup"] = await a.ask(
+                gaps["lookup"] = await a.ask(
                     kokoro, "Valor, please have your worker look up the import's error rate in the code."
                 )
-                for _ in range(90):
+                for _ in range(60):
                     if any(LOOKED_UP in t for t in seen["chat"]):
                         break
                     await asyncio.sleep(1)
                 seen["looked_up"] = any(LOOKED_UP in t for t in seen["chat"])
-                # Valor's chat fails (as every post did on the Captain, 2026-11-18):
-                # the answer to a typed line is said aloud instead.
-                await valor[0].evaluate("() => { window.sent_ = window.sendChatMessage; "
-                                        "window.sendChatMessage = async () => false; }")  # fmt: skip
-                seen["unposted"] = await a.typed("Valor, can you post the launch time here too?")
-                await valor[0].evaluate("() => { window.sendChatMessage = window.sent_; }")
-                await asyncio.sleep(4)
                 seen["barge_at"] = await a.cut_in(kokoro, "Valor, tell me a story of five or six sentences about a "
                                                   "launch party.", "Valor, stop. Wait a moment.")  # fmt: skip
                 await asyncio.sleep(6)
                 await b.join(url)
                 await asyncio.sleep(8)
-                await a.ask(kokoro, "Valor, ask your worker to look up the printer's invoice total.")
                 seen["side_talk_frames"] = await b.side(kokoro, "Hey Sam, did you get the invoice from the printer "
                                                         "yesterday? I need it for the books.", a)  # fmt: skip
-                await asyncio.sleep(3)
-                await a.ask(kokoro, "Valor, ask your worker to look up last week's signup count.")
+                # Two people at once: Logan asks Valor while Sam talks over him.
+                seen["both"] = await a.both(kokoro, "Valor, who covers support in launch week?", b,
+                                            "Sam, could you grab me a coffee after this?")  # fmt: skip
+                gaps["both"] = seen["both"]["gap"]
                 seen["over_at"] = await a.cut_in(
-                    kokoro,
-                    "Valor, tell me a story of five or six sentences about a rocket launch.",
-                    "Sam, could you grab me a coffee after this?",
-                    by=b,
-                )
-                await asyncio.sleep(10)
-                await b.leave()
-                await asyncio.sleep(6)
-                await a.ask(kokoro, MONOLOGUE)  # its answer may come late: the wait below takes it
-                await asyncio.sleep(10)
-                drop.set()  # the session drops; its handle is refused; a fresh one carries on
-                await asyncio.sleep(10)
-                seen["gaps"]["after_fresh"] = await a.ask(kokoro, "Valor, are you still with us?")
-                during = []  # a call that goes on is talked in, as a real one is
-                while time.time() - started < LONG_S:
-                    await asyncio.sleep(min(240, max(0, LONG_S - (time.time() - started))))
-                    during.append(await a.ask(kokoro, "Valor, quick check, are you still on the call?"))
-                seen["gaps"]["during"] = max(during, default=0.0)
-                seen["gaps"]["after_reconnect"] = await a.ask(kokoro, "Valor, are you still there?")
+                    kokoro, "Valor, tell me a story of five or six sentences about a rocket launch.",
+                    "Sam, could you grab me a coffee after this?", by=b,
+                )  # fmt: skip
                 await asyncio.sleep(8)
-                # A wrap-up to everyone, which the operator's "Valor, leave" match misses: the model leaves.
+                await b.leave()
+                while time.time() - a.joined_at < call.EARS_S + 20:  # past the transcriber's reopen
+                    await asyncio.sleep(5)
+                gaps["after_reopen"] = await a.ask(kokoro, "Valor, are you still with us?")
+                await asyncio.sleep(6)
                 await a.ask(kokoro, "Thanks everyone, that's all for today, we're done. Goodbye!", wait=False)
                 reason = await asyncio.wait_for(calling, 300)
                 calling = None
@@ -270,66 +183,53 @@ def test_valor_on_gemini_live_answers_when_addressed_keeps_out_of_side_talk_and_
                     calling.cancel()
                 await a.close()
                 await b.close()
-            return session, asking.id, reason, url
+            return session, asking.id, reason
 
-    session, asking_id, reason, url = asyncio.run(go())
+    session, asking_id, reason = asyncio.run(go())
     rows = asyncio.run(bridges.rows(dsn, session))
-    # The call posts its own link in the asking thread, once Valor is in.
-    joined = next((i for i, r in enumerate(rows) if r["type"] == "call.joined"), None)
-    assert joined is not None, f"Valor never joined: {reason}"
-    (link,) = [i for i, r in enumerate(rows) if r["type"] == "effect.held"
-               and r["payload"]["request_id"] == "meet/link/copy"]  # fmt: skip
-    assert joined < link and f"I'm in: {url}" in json.dumps(rows[link]["payload"])
     report = next(r["payload"]["text"] for r in asyncio.run(bridges.rows(dsn, asking_id))
                   if r["type"] == "child.reported" and r["payload"]["about_key"].endswith(":ended"))  # fmt: skip
-    says = [
-        {**r["payload"]["result"], "at": r["at"].timestamp()}
-        for r in rows
-        if r["type"] == "effect.outcome" and "spoken_text" in (r["payload"]["result"] or {})
-    ]
-    for step in ("barge_at", "over_at"):  # the say that ended as the other voice spoke
+    says = [{**r["payload"]["result"], "at": r["at"].timestamp()} for r in rows
+            if r["type"] == "effect.outcome" and "spoken_text" in (r["payload"]["result"] or {})]  # fmt: skip
+    for step in ("barge_at", "over_at"):
         w = seen[step]
         w["cut"] = any(x["cut"] for x in says if w["over"] <= x["at"] <= w["over"] + 6)
-    resumed = [
-        r for r in rows if r["type"] == "gateway.charged" and r["payload"].get("model") == settings.call_model
-    ]
+    said = lambda after: next((x["spoken_text"] for x in says if x["at"] > after), "")
     gaps = seen["gaps"]
-    stalls = [line for line in seen["log"] if "after speech; resuming" in line]
-    fresh = [line for line in seen["log"] if "opening a fresh one" in line]
-    reopened = [line for line in seen["log"] if "is open (resumed)" in line]
-    print(json.dumps({"gaps": gaps, "typed": seen["typed"], "looked_up": seen["looked_up"],
-                      "notice": seen["notice"], "unposted": seen["unposted"],
-                      "side_talk_frames": seen["side_talk_frames"], "barge": seen["barge_at"], "over": seen["over_at"],
-                      "says": says, "charged_turns": len(resumed), "reason": reason, "report": report,
-                      "unheard_s": round(seen["unheard_s"], 1), "stalls": stalls, "fresh": fresh,
-                      "resumed": reopened, "long_s": LONG_S}, indent=1))  # fmt: skip
-    # One voice at a time: no say began before the one before it ended, and no
-    # lookup answer was a turn of its own; both answers reached the chat.
+    print(json.dumps({"gaps": gaps, "pauses": seen["pauses"], "both": seen["both"], "typed": seen["typed"],
+                      "says": says, "reason": reason, "report": report,
+                      "reopened": [x for x in seen["log"] if "reopening the transcriber" in x],
+                      "dropped": [x for x in seen["log"] if "dropped before its first sound" in x]}, indent=1))  # fmt: skip
+    d = sorted(g for g in gaps.values() if g != float("inf"))
+    print(f"live: delay per reply (end of question to first sound at the asker), {len(d)} replies: median "
+          f"{statistics.median(d):.2f} s, p90 {d[int(0.9 * (len(d) - 1))]:.2f} s, max {d[-1]:.2f} s")  # fmt: skip
+    # One voice at a time.
     spans = sorted((x["at"] - x["played_s"], x["at"]) for x in says if x["played_s"])
     assert all(b0 >= a1 - 0.3 for (_, a1), (b0, _) in itertools.pairwise(spans)), spans
-    assert not [line for line in seen["log"] if "(a reply asked)" in line and "asked aloud" in line]
-    posted = [r["payload"]["result"]["posted"] for r in rows
-              if r["type"] == "effect.outcome" and "posted" in (r["payload"]["result"] or {})]  # fmt: skip
-    assert all(any(answer in t for t in posted) for answer, _ in LATE.values()), posted
-    # No stall-resume in a healthy call, a half-minute monologue included.
-    assert not stalls
     # Answered when addressed, and to "Hello" with one other person there.
-    assert all(g < 30 for g in gaps.values())
-    # Reported, not a bar: Tom dropped the 2 s median target (2026-11-05, docs/plans/gemini-live.md).
-    print(f"live: reply gap median {statistics.median(gaps.values()):.2f} s over {len(gaps)} questions")
-    # The recording notice seen in the chat by the device already there.
-    assert seen["notice"]
-    # A post the chat failed was said aloud, and nothing reached the chat.
-    assert seen["unposted"]["frames"] and not seen["unposted"]["chat"]
+    assert all(g < 30 for g in gaps.values()), gaps
+    # No sound of Valor's inside a pause the asker went on from.
+    assert not [p for p in seen["pauses"] if p["cut_off"]], seen["pauses"]
+    # P-041: the decision recorded in the call, never asked again, stated when asked with what it changed.
+    decided = [r["payload"] for r in rows if r["type"] == "effect.held" and r["payload"]["action_type"]
+               == "meet.send_message" and re.search(r"thursday", r["payload"]["payload"]["text"], re.IGNORECASE)]  # fmt: skip
+    assert decided, "no read-back of the decision was posted"
+    for x in says:
+        for q in re.split(r"(?<=[.?!])\s+", x["spoken_text"]):
+            if q.endswith("?") and x["at"] > seen["decide_at"]:
+                assert not re.search(r"launch date|monday|thursday", q, re.IGNORECASE), x
+    asked = said(seen["asked_at"])
+    assert re.search(r"thursday", asked, re.IGNORECASE) and re.search(
+        r"pricing|copy", asked, re.IGNORECASE
+    ), asked
     # The typed question answered in the chat, not aloud; the lookup posted.
-    assert seen["typed"]["chat"] and not seen["typed"]["frames"]
-    assert seen["looked_up"]
-    # Silence in side talk; cut off by the person asking, not by side talk.
+    assert seen["notice"] and seen["typed"]["chat"] and not seen["typed"]["frames"] and seen["looked_up"]
+    # Silence in side talk; cut off by the person asking, not by side talk; heard over crosstalk.
     assert seen["side_talk_frames"] == 0
     assert seen["barge_at"]["cut"] and not seen["over_at"]["cut"]
-    # A refused resume opened a fresh session, and Valor answered after it.
-    assert seen["refused"] and len(fresh) == 1 and gaps["after_fresh"] < 30
-    # Everyone's goodbye is the model's leave, past the fresh session, and Gemini's summary file.
+    assert seen["both"]["gap"] < 30
+    # The transcriber reopened in the call, and Valor heard and answered after it.
+    assert [x for x in seen["log"] if "reopening the transcriber" in x] and gaps["after_reopen"] < 30
     assert reason == call.LEAVES["wrapped up"]
     assert "Gemini's summary of the call is" in report
 
@@ -370,6 +270,7 @@ class Device:
                 break
             await asyncio.sleep(1)
         await self.page.ready()
+        self.joined_at = time.time()
 
     async def say(self, kokoro, text: str) -> float:
         """Speak `text` into the call; when it ends playing."""
@@ -391,6 +292,44 @@ class Device:
         later = [t for t in self.voice if t > end]
         await self.quiet()
         return (later[0] - end) if later else float("inf")
+
+    async def pause(self, kokoro, first: str, pause_s: float, then: str) -> dict:
+        """`first`, `pause_s` of quiet, then `then`, one stream: whether
+        Valor's sound reached here before `then` was done (a cut-off), and
+        the seconds from its end to his first sound."""
+        await self.quiet()
+        one, rate = kokoro.create(first, voice="af_heart", lang="en-us")
+        two, _ = kokoro.create(then, voice="af_heart", lang="en-us")
+        pcm = np.concatenate([one, np.zeros(int(pause_s * rate), np.float32), two])
+        ahead = await self.page.stream((np.clip(pcm, -1, 1) * 32767).astype("<i2").tobytes(), rate, True)
+        end = time.time() + ahead
+        start = end - len(pcm) / rate
+        for _ in range(120):
+            await asyncio.sleep(0.25)
+            if self.voice and self.voice[-1] > end:
+                break
+        early = [t for t in self.voice if start + len(one) / rate < t < end]
+        later = [t for t in self.voice if t > end]
+        await self.quiet()
+        return {
+            "pause_s": pause_s,
+            "cut_off": bool(early),
+            "gap": (later[0] - end) if later else float("inf"),
+        }
+
+    async def both(self, kokoro, text: str, other, over: str) -> dict:
+        """Say `text` while `other` says `over` at the same time; the
+        seconds from the end of `text` to Valor's first sound here."""
+        await self.quiet()
+        mine, theirs = await asyncio.gather(self.say(kokoro, text), other.say(kokoro, over))
+        end = max(mine, theirs)
+        for _ in range(120):
+            await asyncio.sleep(0.25)
+            if self.voice and self.voice[-1] > end:
+                break
+        later = [t for t in self.voice if t > end]
+        await self.quiet()
+        return {"gap": (later[0] - end) if later else float("inf")}
 
     async def quiet(self, s: float = 2.0) -> None:
         """Until Valor has been silent `s` seconds."""

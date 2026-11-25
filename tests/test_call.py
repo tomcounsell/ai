@@ -158,6 +158,7 @@ class Gemini:
         self.tools: list[list[str]] = []
         self.results: list[tuple[str, str]] = []  # each tool's answer, as the mind was given it
         self.spoken: list[str] = []
+        self.words_only: list[bool] = []  # each round's
         self.voice_s = 0.5
         self.think_gate = self.speak_gate = self.hear_gate = None
         self.held_sentences: set[str] | None = None  # only these wait on `speak_gate`, when set
@@ -179,7 +180,7 @@ class Gemini:
         self.ears.append(ears)
         yield ears
 
-    async def think(self, instruction, contents, tools):
+    async def think(self, instruction, contents, tools, words_only=False):
         if len(contents) == 1:
             self.prompts.append(contents[0]["parts"][0]["text"])
             self.instructions.append(instruction)
@@ -189,7 +190,10 @@ class Gemini:
                              for p in contents[-1]["parts"]]  # fmt: skip
         if self.think_gate is not None:
             await self.think_gate.wait()
+        self.words_only.append(words_only)
         for item in self.minds.pop(0) if self.minds else []:
+            if words_only and not isinstance(item, str):
+                continue
             if isinstance(item, str):
                 yield {"part": {"text": item}, "text": item}
             else:
@@ -730,6 +734,29 @@ def test_someone_else_talking_before_valors_first_sound_drops_nothing(dsn, team,
     assert said_texts(run(go())) == ["Monday."]
 
 
+def test_a_call_repeated_in_a_turn_is_done_once_and_its_last_round_writes_words(dsn, team, quick):
+    """Flash-Lite called `settle` round after round, recorded it each time
+    and said nothing (the live tests, 2026-11-25): one call twice in a turn
+    is done once, and the turn's last round is for words only."""
+    settle_ = ("settle", {"readback": "Ship Monday."})
+
+    async def go():
+        c = await in_call(dsn, team, alone())
+        c.gemini.minds += [[settle_]] * (call.MIND_ROUNDS - 1) + [[settle_, "Ship Monday, then."]]
+        await says(c, TOMS, "Ship it Monday.")
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id)
+
+    c, done_ = run(go())
+    assert [d["decision"] for d in c.the.decided] == ["Ship Monday."] and c.page.posts[1:] == ["Ship Monday."]
+    assert [r for _, r in c.gemini.results][1:] == ["done already: now write your reply"] * (
+        call.MIND_ROUNDS - 2
+    )
+    assert c.gemini.words_only == [False] * (call.MIND_ROUNDS - 1) + [True]
+    assert said_texts(done_) == ["Ship Monday, then."]
+
+
 def test_a_newer_turn_drops_one_not_yet_said_and_waits_out_one_that_is(dsn, team, quick):
     async def go():
         page = Page()
@@ -975,6 +1002,30 @@ def test_a_settle_resolves_bare_ids_against_the_open_decisions_and_says_what_mat
     assert [(d["decision"], d["by"]) for d in c.the.decided] == [("Rename it.", [TOM])]  # a 1:1: Tom decided
 
 
+def test_a_question_settled_in_the_call_is_never_offered_as_open_again(dsn, team, quick, monkeypatch):
+    """Settled questions are answered only once the call ends, and the list
+    still had one Tom settled minutes before (the live tests, 2026-11-25)."""
+
+    async def decisions(conn, project):
+        return "Open for Tom:\n- t1/q1: Ship Monday?\n- t2/q2: Drop IE?"
+
+    monkeypatch.setattr(call, "decisions", decisions)
+
+    async def go():
+        c = await in_call(dsn, team, alone())
+        c.gemini.minds += [[("settle", {"ids": ["t1/q1"], "readback": "Ship Monday."})], ["Shipping Monday."],
+                           [("open_decisions", {})], ["Only IE is open."]]  # fmt: skip
+        await says(c, TOMS, "Ship it Monday.")
+        await settle(c.the)
+        await says(c, TOMS, "What's open?")
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert c.gemini.results[-1] == ("open_decisions", "Open for Tom:\n- t2/q2: Drop IE?")
+
+
 def test_a_settle_with_no_ids_or_no_board_still_posts_its_readback_and_records_none(dsn, team, quick):
     """With no ids, or bare ids on a project with no board, the read-back
     is still posted and in the state as decided, with no `settles`, never
@@ -1038,7 +1089,7 @@ def test_the_mind_is_told_valors_tools_how_to_answer_and_when_to_leave():
     )
     assert "write nothing at all: you stay silent" in text and "never lists, markdown, ids or symbols" in text
     assert (
-        "call `settle` first, before you write" in text
+        "call `settle` once, before you write" in text
         and "Asked what was decided, answer from the meeting now, with no tool" in text
     )
     # Tom, 2026-11-12: anyone may ask Valor to leave, goodbyes all round end it, a scheduled end does not.

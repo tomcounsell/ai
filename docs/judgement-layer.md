@@ -442,7 +442,7 @@ Notes per shape:
     emoji's rubric says it fits only work done or plainly asked for, and the
     completed question says that no text sent means agreement. Rows are
     quiet (`ledger.QUIET_SITES`).
-14. Retired 2026-11-05: Gemini Live decides when Valor speaks
+14. Retired 2026-11-05: the call's own model decides when Valor speaks
     (docs/plans/gemini-live.md). Until then it was asked by a call's own process (`core/call.py`) at the end of each turn
     heard or typed in the call, while the front model drafts (not asked
     when one other person is in the call: then every turn is
