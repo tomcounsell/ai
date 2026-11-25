@@ -324,7 +324,10 @@ scheduler, supervisor, or watchdog on the machine.
   The nightly Homebrew job (`com.valor.brew-nightly`, the vault's) runs
   through it too, and so does Yudame Tools' 04:00 job, which only cleans
   the disk there, its Homebrew Updates switched off ([rollout.md](rollout.md),
-  step 9).
+  step 9). It never uses sudo (`HOMEBREW_NO_SUDO`): a Mac with Touch ID for
+  sudo otherwise waits on a fingerprint nobody gives. A cask that needs sudo
+  is skipped and named on the `needs a person:` line of that Mac's status
+  file in the vault, and the apps a run quit are reopened however it ends.
 - **Stop is not `launchctl`.** Stopping a task is `python -m core stop`,
   which fences it in the database, revokes its gateway token, and kills the
   turn's process group. Unloading a LaunchAgent stops a service; it is not
