@@ -578,7 +578,7 @@ class Settings:
         default_factory=lambda: _env("VALOR_CALL_EARS_MODEL", "gemini-3.5-transcribe-live")
     )
     call_mind_model: str = field(
-        default_factory=lambda: _env("VALOR_CALL_MIND_MODEL", "gemini-3.5-flash-lite")
+        default_factory=lambda: _env("VALOR_CALL_MIND_MODEL", "gemini-3.8-flash")
     )
     call_voice_model: str = field(
         default_factory=lambda: _env("VALOR_CALL_VOICE_MODEL", "gemini-3.8-flash-tts")

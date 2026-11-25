@@ -65,7 +65,8 @@ against a new Meet with a second device of Valor's account
   opens in a row post one line and leave.
   Each turn it ends is one `call.heard` row, said by whoever spoke most in
   it. A turn that is Valor's starts a turn of the mind
-  (`settings.call_mind_model`, `gemini-3.5-flash-lite` by default): with
+  (`settings.call_mind_model`, `gemini-3.8-flash` by default; Flash-Lite
+  recorded a decision no one made in the live Meet test, 2026-11-25): with
   one other person here, all they say; in a group, what names him (as
   transcripts write it too, "Val"), what follows straight on from his
   answer, or the rest of a turn its person went on from; words the

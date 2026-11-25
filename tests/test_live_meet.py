@@ -95,7 +95,7 @@ def test_valor_speaks_from_one_mind_in_a_real_call(dsn, tmp_path, monkeypatch):
                 await intake.bind(conn)
                 asking = await tasks.brief(conn, await intake.chat_session(conn, "slack", chat))
 
-            async def created():
+            async def created(env=None):
                 nonlocal url
                 url, code = await meet_space()
                 return url, code

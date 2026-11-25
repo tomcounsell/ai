@@ -1309,13 +1309,13 @@ def test_each_turn_ear_and_voice_is_opened_then_charged_by_modality(dsn, team, q
     by = {}
     for c in charged:
         by.setdefault(c["model"], []).append(c["usd_micros"])
-    mind, voice, ears = (spending.gemini_price(m) for m in ("gemini-3.5-flash-lite", "gemini-3.8-flash-tts",
+    mind, voice, ears = (spending.gemini_price(m) for m in ("gemini-3.8-flash", "gemini-3.8-flash-tts",
                                                             "gemini-3.5-transcribe-live"))  # fmt: skip
-    assert by["gemini-3.5-flash-lite"] == [spending.gemini_cost(MIND_USAGE, mind)] * 2
+    assert by["gemini-3.8-flash"] == [spending.gemini_cost(MIND_USAGE, mind)] * 2
     assert by["gemini-3.8-flash-tts"] == [spending.gemini_cost(VOICE_USAGE, voice)]
     assert by["gemini-3.5-transcribe-live"] == [spending.gemini_cost(EARS_USAGE, ears)]
     assert all(not o["unpriced"] for o in opened.values())
-    first = next(o for o in opened.values() if o["model"] == "gemini-3.5-flash-lite")
+    first = next(o for o in opened.values() if o["model"] == "gemini-3.8-flash")
     assert first["holder"] is None or first["holder"].startswith("run:")
     assert first["estimate_usd_micros"] == spending.gemini_worst_case(
         mind, call.CALL_CONTEXT, call.MIND_OUT_MOST

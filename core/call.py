@@ -680,7 +680,8 @@ TURN = "{here}\n\n{state}\n\n{kept}{reading}The call so far:\n{so_far}\n\nNow: {
 NOW_SPOKEN = "answer what {name} said last, above."
 NOW_GROUP = (
     "{name} spoke last, above. Answer only if it names you or follows straight on from your own answer; "
-    "a question without your name is to the person they were talking with: then write nothing."
+    "a question without your name is to the person they were talking with: then write nothing. Two people "
+    "talking at once run together in one line: answer the part said to you."
 )
 NOW_UNCAUGHT = "{name}, the only one here, spoke to you, words you did not catch: say so in a few words."
 NOW_TYPED = "answer what {name} typed, the last line above; your reply is posted in the call's chat."
@@ -1518,7 +1519,7 @@ class Call:
     def _answer(self, now: str, who: str | None, *, typed: bool = False) -> None:
         """A turn of the mind answering `now`; a turn before it not yet said
         is dropped, what it held with it: the newer has all it heard."""
-        if self.turn is not None and not self.turn.committed:
+        if self.turn is not None and not self.turn.committed and not self.turn.dropped:
             self._drop(self.turn, "a newer turn")
         t = Turn(ledger.new_id(), now, typed, who, after=self.turn)
         t.reply = Reply(t.id)
