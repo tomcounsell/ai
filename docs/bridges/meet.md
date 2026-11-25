@@ -60,8 +60,11 @@ against a new Meet with a second device of Valor's account
   in 92; it ends a turn 1.3 to 1.4 s after the last word (median), and in
   about one pause in eight under 1.5 s, two in five between 1 and 1.5 s,
   it ends one the person goes on from. Its stream lasts ten minutes, so it
-  is reopened at a quiet moment in its ninth minute (`EARS_S`), and on a
-  drop; what is said while none is open is sent to the next. Two failed
+  is reopened at a quiet moment in its ninth minute (`EARS_S`), the next
+  one open before the last is let go, which hears out what it was hearing
+  for `EARS_HANDOVER_S` (an utterance begun as one was closed was never
+  heard, the live Meet test, 2026-11-25); one that drops is opened again,
+  and what is said while none is open is sent to the next. Two failed
   opens in a row post one line and leave.
   Each turn it ends is one `call.heard` row, said by whoever spoke most in
   it. A turn that is Valor's starts a turn of the mind

@@ -1195,6 +1195,7 @@ STATE_S = 2.0
 EARS_S = 540.0
 EARS_EARLY_S = 60.0
 EARS_QUIET_S = 1.0
+EARS_HANDOVER_S = 2.0  # a transcriber let go hears out what it was hearing this long
 # This much unbroken sound from the person Valor answers cuts him off, or,
 # before his first sound, drops the turn. At 0.2 s three of four cuts in
 # Tom's call (2026-11-06) were 0.22-0.24 s of sound he did not go on from;
@@ -1526,40 +1527,59 @@ class Call:
 
     async def listen(self) -> None:
         """The transcriber for the whole call, reopened before its stream's
-        ten minutes end (`EARS_S`) and when it drops; what is said meanwhile
-        goes to the next (`_tick`). After `RECONNECTS` failed opens in a row
-        (6 of 55 opens timed out on the handshake, 2026-11-25), one line in
-        the chat and the call leaves."""
-        failed = 0
-        while not self.leaving.is_set():
-            opened = False
-            try:
-                async with self.gemini.hear() as ears:
-                    self.ears, self.ears_at, failed, opened = ears, self.clock(), 0, True
-                    _log(f"call {self.id}: the transcriber is open")
-                    receiving = asyncio.create_task(self._receive(ears))
-                    due = asyncio.create_task(self._ears_due())
-                    try:
-                        await asyncio.wait({receiving, due}, return_when=asyncio.FIRST_COMPLETED)
-                    finally:
-                        self.ears = None
-                        for task in (receiving, due):
-                            task.cancel()
-                        await asyncio.gather(receiving, due, return_exceptions=True)
-                    if receiving.done() and not receiving.cancelled() and receiving.exception() is not None:
-                        raise receiving.exception()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001  a lost transcriber is reopened, or the call leaves
-                failed += not opened
-                _log(f"call {self.id}: the transcriber {'dropped' if opened else 'failed to open'}: {exc!r}")
-            finally:
-                self.ears = None
-            if failed >= RECONNECTS:
-                self.posts.put_nowait(Post(None, LOST_LINE, False))
-                self.leave("Valor lost its hearing connection")
-            elif failed:
-                await asyncio.sleep(1)
+        ten minutes end (`EARS_S`), the next one open before the last is let
+        go, so nothing said meanwhile is lost (an utterance begun as one was
+        closed was never heard, the live Meet test, 2026-11-25); the last
+        hears out what it was hearing for `EARS_HANDOVER_S`. One that drops
+        is opened again, what is said meanwhile kept for it (`_tick`). After
+        `RECONNECTS` failed opens in a row (6 of 55 opens timed out on the
+        handshake, 2026-11-25), one line in the chat and the call leaves."""
+        failed, current = 0, None  # (the session's context, its receiver)
+        try:
+            while not self.leaving.is_set():
+                opening = self.gemini.hear()
+                try:
+                    ears = await opening.__aenter__()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001  a refused open is tried again, or the call leaves
+                    failed += 1
+                    _log(f"call {self.id}: the transcriber failed to open: {exc!r}")
+                    if failed >= RECONNECTS:
+                        self.posts.put_nowait(Post(None, LOST_LINE, False))
+                        self.leave("Valor lost its hearing connection")
+                        return
+                    await asyncio.sleep(1)
+                    continue
+                failed = 0
+                if current is not None:
+                    self._spawn(self._let_go(*current))
+                self.ears, self.ears_at = ears, self.clock()
+                current = (opening, asyncio.create_task(self._receive(ears)))
+                _log(f"call {self.id}: the transcriber is open")
+                due = asyncio.create_task(self._ears_due())
+                await asyncio.wait({current[1], due}, return_when=asyncio.FIRST_COMPLETED)
+                due.cancel()
+                if current[1].done():  # it dropped: hear into `unsent` until the next is open
+                    self.ears = None
+                    exc = None if current[1].cancelled() else current[1].exception()
+                    _log(f"call {self.id}: the transcriber dropped: {exc!r}")
+                    with contextlib.suppress(Exception):
+                        await opening.__aexit__(None, None, None)
+                    current = None
+        finally:
+            self.ears = None
+            if current is not None:
+                await self._let_go(*current, wait=0.0)
+
+    async def _let_go(self, opening, receiving: asyncio.Task, wait: float | None = None) -> None:
+        """A transcriber no longer sent to, closed once it has heard out what
+        it was hearing."""
+        await asyncio.sleep(EARS_HANDOVER_S if wait is None else wait)
+        receiving.cancel()
+        await asyncio.gather(receiving, return_exceptions=True)
+        with contextlib.suppress(Exception):
+            await opening.__aexit__(None, None, None)
 
     async def _ears_due(self) -> None:
         """Until the transcriber is to be reopened: at a quiet moment in the

@@ -112,6 +112,7 @@ class Ears:
         self.sent: list[types.Blob] = []
         self.inbox: asyncio.Queue = asyncio.Queue()
         self.handling = False  # a message yielded, its handling not yet back for the next
+        self.closed = False
 
     async def send_realtime_input(self, **kw):
         self.sent.append(kw["audio"])
@@ -178,7 +179,10 @@ class Gemini:
             raise ConnectionError("refused")
         ears = Ears()
         self.ears.append(ears)
-        yield ears
+        try:
+            yield ears
+        finally:
+            ears.closed = True
 
     async def think(self, instruction, contents, tools, words_only=False):
         if len(contents) == 1:
@@ -1360,27 +1364,33 @@ def test_a_stopped_task_refuses_a_turn_and_the_call_leaves(dsn, team):
 # -- the ears ----------------------------------------------------------------
 
 
-def test_the_transcriber_is_reopened_before_its_ten_minutes_and_nothing_said_meanwhile_is_lost(
+def test_the_transcriber_is_reopened_before_its_ten_minutes_the_next_open_before_the_last_is_let_go(
     dsn, team, quick, monkeypatch
 ):
+    """An utterance begun as the transcriber was closed for its reopen was
+    never heard (the live Meet test, 2026-11-25): the last one hears on
+    until the next is open, then hears out what it was hearing."""
     monkeypatch.setattr(call, "EARS_S", 1.0)
     monkeypatch.setattr(call, "EARS_EARLY_S", 0.6)
     monkeypatch.setattr(call, "EARS_QUIET_S", 0.1)
+    monkeypatch.setattr(call, "EARS_HANDOVER_S", 0.3)
 
     async def go():
         c = await in_call(dsn, team)
         c.gemini.hear_gate = asyncio.Event()
-        assert await until(lambda: c.the.ears is None, s=3)
-        await talk(c.the, LOGAN, 0.6)  # said while no transcriber is open
+        first = c.ears
+        assert await until(lambda: c.the.clock() - c.the.ears_at >= 0.5, s=3)
+        await asyncio.sleep(0.5)  # due: the next one is opening, held
+        await talk(c.the, LOGAN, 0.6)  # said while it opens
+        during = (c.the.ears is first, sum(len(b.data) for b in first.sent if any(b.data)))
         c.gemini.hear_gate.set()
-        assert await until(lambda: len(c.gemini.ears) == 2)
-        await asyncio.sleep(0.1)
+        assert await until(lambda: len(c.gemini.ears) == 2 and c.the.ears is c.gemini.ears[1])
+        assert await until(lambda: first.closed, s=2)
         await finish(c)
-        return c
+        return during
 
-    c = run(go())
-    loud_bytes = sum(len(b.data) for b in c.gemini.ears[1].sent if any(b.data))
-    assert loud_bytes >= int(0.5 * call.RATE) * 2
+    still, loud_bytes = run(go())
+    assert still and loud_bytes >= int(0.5 * call.RATE) * 2
 
 
 def test_a_dropped_transcriber_reopens_and_the_call_carries_on(dsn, team, quick):
