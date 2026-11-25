@@ -63,13 +63,28 @@ decision, unbuilt.
   declarations and to Claude as tool schemas. Told to call `settle` before replying to a decision. An
   empty reply is silence (side talk in a group). Metered by the path that serves it: `gemini_price` for
   Gemini, the gateway's own metering for Claude.
-- **A turn commits at first sound.** Until then only the lookups (`backlog`, `open_decisions`,
-  `person`) run; `settle`, `post`, `ask` and `leave` are held and run in order just before the reply's first
-  sentence plays (`settle` first, so the state holds the decision before Valor speaks of it); the
-  holding line below does not commit a turn. Speech
-  from the person being answered before first sound cancels the turn, drops what it held, and reruns
-  it with the new words, so a premature turn end costs time, never a duplicate effect or talk-over.
-  Others' speech in a group does not cancel (the barge-in rule): it is in the next turn's transcript.
+- **A turn commits at first sound, or at the mind's end if it has no words.** Until then only the
+  lookups (`backlog`, `open_decisions`, `person`) run. `settle`, `post`, `ask` and `leave` are held: each
+  returns its acknowledgement at once as `_tools` does today (asked, posting, recorded, leaving), so the
+  mind writes its reply, and runs in order just before the first sentence plays (`settle` first, so
+  the state holds the decision before Valor speaks of it). A turn that ends with no reply (group side
+  talk, a silent `settle` or `leave`) and was not cancelled runs its held effects when the mind ends.
+  `ask`'s dedupe (`self.asked`) applies at commit, so a dropped ask marks nothing asked. The holding
+  line below does not commit. Speech from the person being answered before commit cancels the turn,
+  drops what it held, and reruns it from fresh state with the new words, so a premature turn end costs
+  time, never a duplicate effect or talk-over. Others' speech in a group does not cancel (the
+  barge-in rule): it is in the next turn's transcript.
+- **What is not speech.** Every input Live got by `_tell` goes to the mind:
+  - Kept notes (the worker's `ANSWERED`, `STEERED`, `READ_IN`) sit in the mind's prompt beside
+    `state()` every turn (newest first, within today's `so_far` budget, the state whole).
+  - A worker's answer, a steer or the reading arriving while the call is quiet and Valor is not
+    replying starts one turn whose input is that note (today's "open your next reply with it");
+    arriving mid-reply, it waits for that reply's end, then does the same.
+  - A typed line (`_typed`) is a turn end whose reply is posted, not spoken (`self.typed`,
+    `typed_posted` as today).
+  - `_answer_alone` and `NAMED_NOTE`'s ask (no reply to the only person, or to one naming Valor in a
+    group) start a turn with that note as input, as they ask Live today; `UNPOSTED` starts a turn
+    whose reply is spoken.
 - **Voice.** Replies split by the old `SENTENCE` regex; each sentence to `gemini-3.8-flash-tts` in
   `settings.call_voice` (Alnilam), the next synthesized while one plays, into today's `_play`, `meet.say`
   and `_cut` (the said text is now exact). With no sentence 5 s after a turn end, Valor says one short
@@ -91,7 +106,11 @@ Fake ears, mind and voice in `tests/test_call.py`; every test that faked Live is
 a turn end runs the mind once with the current state; a `settle` before the reply is in the state
 before the voice plays; speech before first sound cancels and reruns; a turn that called `settle`
 (A) then cancelled by more speech and rerun (`settle` B) leaves one decision, B, and one fact, and a
-cancelled `post` or `ask` is never sent; lookups run before commit; side talk by another person in a
+cancelled `post` or `ask` is never sent, nor marked asked; lookups run before commit; a group turn
+with `settle` and an empty reply records the decision once; a typed line's reply is posted, not
+spoken; a worker answer while quiet starts one turn opening with it, and one mid-reply waits for its
+end; a steer and the reading reach the next turn's prompt; no reply to the only person asks once;
+an unposted line is said aloud; side talk by another person in a
 group before first sound does not cancel; barge-in by the person answered
 cuts and records the said part; the other person talking does not; group side talk gets silence; a
 tool error is said; the 10-minute reopen drops no audio and keeps the stretch; the holding line at
