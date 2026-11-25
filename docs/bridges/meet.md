@@ -64,7 +64,9 @@ against a new Meet with a second device of Valor's account
   notes before the call. For a call asked for in a chat, the worker's
   reading is the state's first topics, never added to those notes (until
   it is in, the instruction says Valor is still reading up, while asking
-  the worker and taking tasks go on as usual). The worker updates the
+  the worker and taking tasks go on as usual). Until the state has topics
+  it carries the notes before the call in their place, and a reading that
+  fails keeps them. The worker updates the
   topics (`UPDATE`) after the reading (or as an invited call starts),
   after each turn Valor spoke, and after each `settle`, `backlog` or
   `open_decisions`, never on a timer, coalesced (`Call.prepare`; P-038).
