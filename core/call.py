@@ -857,6 +857,53 @@ SUMMARY_SCHEMA = {
 GOOGLE_KEY = "GOOGLE_API_KEY"
 
 
+HEDGE = 2  # copies of each round of the mind asked at once (`Gemini.think`)
+RETRY_S = (1.0, 3.0)  # waits before asking a failed round again
+
+
+async def first_of(starts: list[Callable[[], Any]]):
+    """The items of whichever of `starts` (each making an async iterator)
+    yields first; the others are stopped then. One that fails before its
+    first item leaves the rest; when all do, the last failure is raised."""
+    got: asyncio.Queue = asyncio.Queue()
+    over = object()
+
+    async def pump(i, start):
+        try:
+            async for item in start():
+                await got.put((i, item, None))
+            await got.put((i, over, None))
+        except Exception as exc:  # noqa: BLE001  handed to the reader
+            await got.put((i, None, exc))
+
+    runs = [asyncio.create_task(pump(i, start)) for i, start in enumerate(starts)]
+    winner, failed = None, 0
+    try:
+        while True:
+            i, item, exc = await got.get()
+            if winner is None and exc is not None:
+                failed += 1
+                if failed == len(runs):
+                    raise exc
+                continue
+            if winner is None:
+                winner = i
+                for j, run in enumerate(runs):
+                    if j != i:
+                        run.cancel()
+            if i != winner:
+                continue
+            if exc is not None:
+                raise exc
+            if item is over:
+                return
+            yield item
+    finally:
+        for run in runs:
+            run.cancel()
+        await asyncio.gather(*runs, return_exceptions=True)
+
+
 class Gemini:
     """Valor's Gemini API (the key `python -m core google-key` copies from
     the vault): a call's ears, mind and voice, and its summary."""
@@ -889,8 +936,13 @@ class Gemini:
         each part as `{"part"}` with its `text` (not a thought) or its
         `call` (name, args), then `{"usage"}`; `words_only`, no tool calls.
         The parts go back into `contents` as they came, thought signatures
-        and all."""
-        from google.genai import types
+        and all. `HEDGE` copies are asked at once and the first to answer is
+        taken (`first_of`): one copy's first sentence came in 5.7 s median,
+        9.5 s p90, two's in 4.0 and 6.4 (2026-11-25); each other copy is
+        charged its input. A round none of them answers, a 503 or 429 among
+        them (four silent turns in one live run, 2026-11-25), is asked again
+        after `RETRY_S`."""
+        from google.genai import errors, types
 
         model = settings.call_mind_model
         mode = types.FunctionCallingConfigMode.NONE if words_only else types.FunctionCallingConfigMode.AUTO
@@ -901,21 +953,39 @@ class Gemini:
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             thinking_config=types.ThinkingConfig(thinking_level="minimal" if "lite" in model else "low"),
         )
-        usage = None
-        async for got in await self.client.aio.models.generate_content_stream(
-            model=model, contents=contents, config=config
-        ):
-            usage = got.usage_metadata or usage
-            content = got.candidates[0].content if got.candidates else None
-            for part in (content.parts if content else None) or []:
-                if part.function_call:
-                    yield {
-                        "part": part,
-                        "call": (part.function_call.name, dict(part.function_call.args or {})),
-                    }
-                else:
-                    yield {"part": part, "text": "" if part.thought else part.text or ""}
-        yield {"usage": usage.model_dump(mode="json", exclude_none=True) if usage else {}}
+
+        async def stream():
+            async for got in await self.client.aio.models.generate_content_stream(
+                model=model, contents=contents, config=config
+            ):
+                yield got
+
+        for wait in (*RETRY_S, None):
+            usage, began = None, False
+            try:
+                async for got in first_of([stream] * HEDGE):
+                    usage, began = got.usage_metadata or usage, True
+                    content = got.candidates[0].content if got.candidates else None
+                    for part in (content.parts if content else None) or []:
+                        if part.function_call:
+                            yield {
+                                "part": part,
+                                "call": (part.function_call.name, dict(part.function_call.args or {})),
+                            }
+                        else:
+                            yield {"part": part, "text": "" if part.thought else part.text or ""}
+            except errors.APIError as exc:
+                if began or wait is None or not (exc.code == 429 or exc.code >= 500):
+                    raise
+                _log(f"the mind's round failed ({exc.code}); asking again in {wait} s")
+                await asyncio.sleep(wait)
+                continue
+            got = usage.model_dump(mode="json", exclude_none=True) if usage else {}
+            asked = {"prompt_token_count": got.get("prompt_token_count", 0),
+                     "prompt_tokens_details": got.get("prompt_tokens_details", [])}  # fmt: skip
+            for extra in [got, *[asked] * (HEDGE - 1)]:
+                yield {"usage": extra}
+            return
 
     async def speak(self, text: str):
         """`text` in Valor's voice (`settings.call_voice` on

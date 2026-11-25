@@ -3288,3 +3288,78 @@ def test_a_question_stops_an_update_under_way_and_the_update_runs_after_its_answ
     assert order == ["prep", "stopped", "When did the import ship?", "prep"]
     assert any("Tuesday." in p for p in c.page.posts)
     assert c.the.say_next == [("When did the import ship?", "Tuesday.")]  # asked aloud: for the next reply
+
+
+# -- the mind's rounds, hedged and asked again -----------------------------------------
+
+
+def test_the_first_copy_to_answer_is_taken_a_failed_one_left_and_all_failing_raise():
+    async def copy(delay, items, fail=None):
+        await asyncio.sleep(delay)
+        if fail:
+            raise fail
+        for item in items:
+            yield item
+
+    async def read(*starts):
+        return [x async for x in call.first_of(list(starts))]
+
+    stopped = []
+
+    async def slow():
+        try:
+            await asyncio.sleep(5)
+            yield "late"
+        finally:
+            stopped.append(True)
+
+    assert run(read(lambda: copy(0.05, ["a", "b"]), slow)) == ["a", "b"] and stopped == [True]
+    assert run(read(lambda: copy(0, [], RuntimeError("503")), lambda: copy(0.05, ["ok"]))) == ["ok"]
+    with pytest.raises(RuntimeError, match="second"):
+        run(read(lambda: copy(0, [], RuntimeError("first")), lambda: copy(0.02, [], RuntimeError("second"))))
+
+
+def _chunk(text):
+    return types.GenerateContentResponse(
+        candidates=[types.Candidate(content=types.Content(parts=[types.Part(text=text)]))],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=100, candidates_token_count=5
+        ),
+    )
+
+
+def test_a_round_google_refuses_is_asked_again_and_each_copy_is_charged_its_input(monkeypatch):
+    """Four turns of one live run ended in silence on "503 high demand"
+    (2026-11-25): the round is asked again and answered."""
+    from google.genai import errors
+
+    monkeypatch.setattr(call, "RETRY_S", (0.01, 0.01))
+    asked = []
+
+    class Models:
+        async def generate_content_stream(self, model, contents, config):
+            asked.append(model)
+            if len(asked) <= 2:  # both copies of the first ask
+                raise errors.ServerError(503, {"error": {"message": "high demand", "status": "UNAVAILABLE"}})
+
+            async def chunks():
+                yield _chunk("Monday.")
+
+            return chunks()
+
+    the = call.Gemini.__new__(call.Gemini)
+    the.client = SimpleNamespace(aio=SimpleNamespace(models=Models()))
+
+    async def go():
+        return [
+            x
+            async for x in the.think(
+                "instruction", [{"role": "user", "parts": [{"text": "When?"}]}], call.TOOLS
+            )
+        ]
+
+    got = run(go())
+    assert [x["text"] for x in got if "text" in x] == ["Monday."] and len(asked) == 2 + call.HEDGE
+    usages = [x["usage"] for x in got if "usage" in x]
+    assert len(usages) == call.HEDGE and usages[0]["candidates_token_count"] == 5
+    assert all(u["prompt_token_count"] == 100 and "candidates_token_count" not in u for u in usages[1:])
