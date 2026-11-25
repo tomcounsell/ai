@@ -1194,11 +1194,15 @@ STATE_S = 2.0
 EARS_S = 540.0
 EARS_EARLY_S = 60.0
 EARS_QUIET_S = 1.0
+# This long quiet after words the transcriber has written so far starts the mind on them, about a
+# second before its own end of turn (2026-11-25); Valor's first sound still waits for that end.
+EARLY_S = 0.4
 # This much unbroken sound from the person Valor answers cuts him off, or,
 # before his first sound, drops the turn. At 0.2 s three of four cuts in
 # Tom's call (2026-11-06) were 0.22-0.24 s of sound he did not go on from;
 # the one he meant ran 0.5 s and on.
 BARGE_S = 0.4
+WORD = re.compile(r"[\w']+")
 # Valor's name as a transcript writes it down, misheard too ("Val", "Valer", 2026-11-18).
 MISHEARD = ("valer", "val")
 # Characters of the call so far in each turn: at about four a token, the
@@ -1251,6 +1255,9 @@ class Turn:
     committed: bool = False
     dropped: bool = False
     task: asyncio.Task | None = None
+    early: str | None = None  # the words it was started on before the transcriber's end of turn
+    line: str = ""  # their line, given to the mind before it is in the call's lines
+    confirmed: asyncio.Event | None = None  # set by that end of turn, on the same words
 
     def done(self) -> bool:
         return (self.task is None or self.task.done()) and (
@@ -1361,6 +1368,8 @@ class Call:
         self.me: str | None = None
         self.energy: dict[str, float] = {}  # each person's speech in the turn being heard
         self.heard = ""  # the transcriber's words of that turn so far
+        self.interim = ""  # its words of that turn as it writes them, before its end
+        self.started_early = False  # a turn was started on `interim` in this quiet
         self.heard_at: float | None = None
         self.last_voice = 0.0
         self.lines: list[str] = []  # the call so far, for the mind, the worker and the summary
@@ -1470,40 +1479,68 @@ class Call:
         for who, v in voiced.items():
             self.energy[who] = self.energy.get(who, 0.0) + v * seconds
         if voiced:
-            self.last_voice = self.now()
+            self.last_voice, self.started_early = self.now(), False
+        elif self.interim and not self.started_early and self.now() - self.last_voice >= EARLY_S:
+            self.started_early = True
+            self._start_early()
         await self._say_unposted()
+
+    def _speaker(self, energy: dict[str, float]) -> str | None:
+        """Who spoke most in a turn; with one other person here, them."""
+        alone = len(self.present) == 1
+        return max(energy, key=energy.get) if energy else next(iter(self.present)) if alone else None
+
+    def _owed(self, who: str | None, text: str) -> str | None:
+        """What a turn of the mind is to answer of `who`'s `text`, when it is
+        Valor's: all of it with one other person here (Tom's "Hello",
+        unanswered, 2026-11-05); in a group, what names him or follows
+        straight on from his answer (the persona's "In a call"; side talk
+        with Sam was answered once Sam had left, 2026-11-05), or the rest of
+        a turn its person went on from. None otherwise."""
+        if who is None or self.leaving.is_set():
+            return None
+        name = self.names.get(who, "someone")
+        if len(self.present) == 1:
+            return NOW_SPOKEN.format(name=name)
+        follows = (bool(self.lines) and "] Valor (spoke" in self.lines[-1]) or who == self.went_on
+        return NOW_GROUP.format(name=name) if self.named.search(text) or follows else None
+
+    def _start_early(self) -> None:
+        """A turn of the mind on the words written so far, at `EARLY_S` of
+        quiet, when they are Valor's to answer: its first sound waits for
+        the transcriber's end of turn on the same words (`_turn_end`)."""
+        who, text = self._speaker(self.energy), self.interim.strip()
+        if (now := self._owed(who, text)) is not None:
+            line = f"[{_clock(self.now())}] {self.names.get(who, 'someone')} (spoke): {text}"
+            self._answer(now, who, early=text, line=line)
 
     async def _turn_end(self) -> None:
         """A turn the transcriber heard end: one `call.heard` row, said by
-        whoever spoke most in it, and an answer when it is Valor's: all of
-        it with one other person here (Tom's "Hello", unanswered,
-        2026-11-05); in a group, what names him or follows straight on
-        from his answer (the persona's "In a call"; side talk with Sam was
-        answered once Sam had left, 2026-11-05). Words it did not catch from
-        the only person here are asked for again; a group's turn dropped
-        because its person went on is answered when they finish. "Valor,
-        leave" from Tom leaves."""
+        whoever spoke most in it, and a turn of the mind when it is Valor's
+        (`_owed`), or the one started early on the same words let speak.
+        Words it did not catch from the only person here are asked for
+        again. "Valor, leave" from Tom leaves."""
         text, energy, at = self.heard.strip(), self.energy, self.heard_at
-        self.heard, self.energy, self.heard_at = "", {}, None
-        alone = len(self.present) == 1
-        who = max(energy, key=energy.get) if energy else next(iter(self.present)) if alone else None
+        self.heard, self.energy, self.heard_at, self.interim = "", {}, None, ""
+        who = self._speaker(energy)
         name = self.names.get(who, "someone") if who else "someone"
         if not text:
-            if alone and energy and not self.leaving.is_set():
+            if len(self.present) == 1 and energy and not self.leaving.is_set():
                 self._answer(NOW_UNCAUGHT.format(name=name), who)
             return
-        # Straight on from his answer, or going on from words whose turn they talked over.
-        follows = (bool(self.lines) and "] Valor (spoke" in self.lines[-1]) or who == self.went_on
+        now = self._owed(who, text)
         self.went_on = None
         await self._heard(who or "", name, text, "spoke")
         self.segments.append({"speaker": name, "start": round(at if at is not None else self.now(), 2),
                               "end": round(self.now(), 2), "text": text, "channel": "call"})  # fmt: skip
-        if self.leaving.is_set() or who is None:
-            return
-        if alone:
-            self._answer(NOW_SPOKEN.format(name=name), who)
-        elif self.named.search(text) or follows:
-            self._answer(NOW_GROUP.format(name=name), who)
+        t = self.turn
+        if t is not None and t.confirmed is not None and not t.dropped and not t.confirmed.is_set():
+            if who == t.answering and WORD.findall(text.lower()) == WORD.findall(t.early.lower()):
+                t.confirmed.set()
+                return
+            self._drop(t, "its words changed")
+        if now is not None:
+            self._answer(now, who)
 
     async def _heard(self, who: str, name: str, text: str, via: str) -> None:
         async with await self._connect() as conn:
@@ -1580,6 +1617,8 @@ class Call:
                 sc = m.server_content
                 if sc is not None and sc.input_transcription and sc.input_transcription.text:
                     self.heard += sc.input_transcription.text
+                if sc is not None and sc.interim_input_transcription and sc.interim_input_transcription.text:
+                    self.interim = sc.interim_input_transcription.text
                 kind = m.voice_activity.voice_activity_type if m.voice_activity else None
                 if kind == types.VoiceActivityType.ACTIVITY_START and self.heard_at is None:
                     self.heard_at = self.now()
@@ -1588,12 +1627,16 @@ class Call:
 
     # -- the mind --
 
-    def _answer(self, now: str, who: str | None, *, typed: bool = False) -> None:
+    def _answer(self, now: str, who: str | None, *, typed: bool = False, early: str | None = None,
+                line: str = "") -> None:  # fmt: skip
         """A turn of the mind answering `now`; a turn before it not yet said
         is dropped, what it held with it: the newer has all it heard."""
         if self.turn is not None and not self.turn.committed and not self.turn.dropped:
             self._drop(self.turn, "a newer turn")
-        t = Turn(ledger.new_id(), now, typed, who, after=self.turn)
+        t = Turn(ledger.new_id(), now, typed, who, after=self.turn, early=early, line=line,
+                 confirmed=asyncio.Event() if early is not None else None)  # fmt: skip
+        if early is not None:
+            _log(f"call {self.id}: turn {t.id} started early on {early[:60]!r}")
         t.reply = Reply(t.id)
         self.turn = t
         t.task = asyncio.create_task(self._turn(t))
@@ -1623,7 +1666,7 @@ class Call:
         notes = "Kept for you:\n" + "".join(f"- {k}\n" for k in kept) + "\n" if kept else ""
         here = self._here(sorted(self.names.get(i, "someone") for i in self.present))
         state = self.state()
-        tail = "\n".join(self.lines)
+        tail = "\n".join([*self.lines, *([t.line] if t.line else [])])
         room = max(0, CALL_SO_FAR - len(notes) - len(state))
         if len(tail) > room:
             tail = tail[len(tail) - room :].partition("\n")[2]
@@ -1729,6 +1772,8 @@ class Call:
         it before Valor speaks of it. An answer it opened with is given."""
         if t.committed:
             return
+        if t.confirmed is not None:
+            await t.confirmed.wait()
         while t.after is not None and not t.after.done():
             await asyncio.sleep(0.05)
         t.committed, self.answering = True, t.answering

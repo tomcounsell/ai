@@ -229,6 +229,12 @@ def activity(kind) -> types.LiveServerMessage:
     return types.LiveServerMessage(voice_activity=types.VoiceActivity(voice_activity_type=kind))
 
 
+def interim(text) -> types.LiveServerMessage:
+    return types.LiveServerMessage(
+        server_content=types.LiveServerContent(interim_input_transcription=types.Transcription(text=text))
+    )
+
+
 def ended(text="") -> list[types.LiveServerMessage]:
     """A turn the transcriber heard: its words, then its end."""
     return [*([heard(text)] if text else []), activity("ACTIVITY_END")]
@@ -3363,3 +3369,63 @@ def test_a_round_google_refuses_is_asked_again_and_each_copy_is_charged_its_inpu
     usages = [x["usage"] for x in got if "usage" in x]
     assert len(usages) == call.HEDGE and usages[0]["candidates_token_count"] == 5
     assert all(u["prompt_token_count"] == 100 and "candidates_token_count" not in u for u in usages[1:])
+
+
+# -- a turn started early on the words written so far ---------------------------------
+
+
+def test_the_mind_starts_on_the_words_so_far_and_speaks_once_the_turn_ends_on_them(dsn, team, quick):
+    """The transcriber writes the words about a second before its end of
+    turn (2026-11-25): the mind starts at `EARLY_S` of quiet, and its
+    first sound waits for that end, on the same words."""
+
+    async def go():
+        c = await in_call(dsn, team, alone())
+        c.gemini.minds.append(["Monday."])
+        await talk(c.the, TOMS, 0.4)
+        await push(c.ears, interim("When do we ship"), interim("When do we ship?"))
+        assert await until(lambda: c.gemini.prompts)
+        await asyncio.sleep(0.3)
+        before = (list(c.page.streams), [x for x in c.the.lines if "(spoke)" in x])
+        await push(c.ears, *ended("When do we ship?"))
+        await settle(c.the)
+        await finish(c)
+        return c, before, await effects(dsn, c.the.id), await bridges.rows(dsn, c.the.id)
+
+    c, (streams, lines), done_, rows = run(go())
+    assert streams == [] and lines == []  # nothing said, and no row, before the turn's end
+    assert c.gemini.prompts[0].rstrip().endswith(call.NOW_SPOKEN.format(name=TOM))
+    assert f"{TOM} (spoke): When do we ship?" in c.gemini.prompts[0] and len(c.gemini.prompts) == 1
+    assert said_texts(done_) == ["Monday."]
+    assert [r["payload"]["text"] for r in rows if r["type"] == "call.heard"] == ["When do we ship?"]
+
+
+def test_a_turn_started_early_is_dropped_when_the_words_change_and_the_end_answers_them(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team, alone())
+        c.gemini.minds += [[("settle", {"readback": "Ship Monday."})], ["Monday it is."], ["Tuesday, then."]]
+        await talk(c.the, TOMS, 0.4)
+        await push(c.ears, interim("Ship it Monday."))
+        assert await until(lambda: c.gemini.prompts)
+        await push(c.ears, *ended("Ship it Monday, no, Tuesday."))
+        await settle(c.the)
+        await finish(c)
+        return c, await effects(dsn, c.the.id)
+
+    c, done_ = run(go())
+    assert not c.the.decided and len(c.gemini.prompts) == 2 and "no, Tuesday." in c.gemini.prompts[1]
+    assert said_texts(done_) == ["Tuesday, then."]
+
+
+def test_in_a_group_words_not_to_valor_start_nothing_early(dsn, team, quick):
+    async def go():
+        c = await in_call(dsn, team)
+        await talk(c.the, LOGAN, 0.4)
+        await push(c.ears, interim("Tom, lunch after this?"))
+        await asyncio.sleep(0.6)
+        await push(c.ears, *ended("Tom, lunch after this?"))
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    assert run(go()).gemini.prompts == []
