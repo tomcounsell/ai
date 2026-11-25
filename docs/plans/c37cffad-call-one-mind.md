@@ -102,6 +102,11 @@ decision, unbuilt.
   `gemini-3.5-flash-lite`, `gemini-3.8-flash`, `gemini-3.8-flash-tts` (else charged unpriced at the top rate).
   `docs/bridges/meet.md`, `core/README.md` updated.
 
+- **Speed** (after step 4 measured 8.1 s median through Meet; the dev thread, 2026-11-25: hold, speed
+  first): each round asked twice at once, first answer taken; a 429 or 5xx round asked again; the mind
+  started on the transcriber's words so far, its first sound waiting for the end of turn. Cache, thinking
+  off and first clause measured, no gain, not built.
+
 ## Tests
 
 Fake ears, mind and voice in `tests/test_call.py`: one test per rule in the bullets above (each

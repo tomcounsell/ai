@@ -109,7 +109,18 @@ against a new Meet with a second device of Valor's account
   ends, and the list raised one Tom had settled, the live tests,
   2026-11-25). The mind writes its reply in the same answer as `settle`,
   `ask`, `post` or `leave`, and then needs no round more; a lookup's
-  answer comes back to it first (each round is a model call of 2 to 4 s). What a turn does in the world
+  answer comes back to it first (each round is a model call of 2 to 4 s).
+  Each round is asked twice at once and the first copy to answer is
+  taken (`call.first_of`; one copy's first sentence came in 5.7 s median,
+  9.5 s p90, two's in 4.0 and 6.4, 2026-11-25), the other charged its
+  input; a round Google refuses (429, 5xx: four turns of one live run
+  ended in silence on "503 high demand", 2026-11-25) is asked again after
+  1 s and 3 s. The mind starts on the transcriber's words so far at
+  `EARLY_S` (0.4 s) of quiet, about a second before its end of turn; the
+  turn's first sound and what it holds wait for that end on the same
+  words, and one whose words changed is dropped. Caching the instruction
+  (Google already caches about half of it on its own), thinking off and
+  speaking the first clause gained nothing measurable (2026-11-25). What a turn does in the world
   (`settle`, `ask`, `post`, `leave`) is acknowledged at once and done when
   the turn commits: at its first sound, a decision first, so the state has
   it before Valor speaks of it; or, saying nothing, when the mind is done.

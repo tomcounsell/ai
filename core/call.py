@@ -1194,8 +1194,9 @@ STATE_S = 2.0
 EARS_S = 540.0
 EARS_EARLY_S = 60.0
 EARS_QUIET_S = 1.0
-# This long quiet after words the transcriber has written so far starts the mind on them, about a
-# second before its own end of turn (2026-11-25); Valor's first sound still waits for that end.
+# This long quiet, with the words the transcriber has written so far unchanged as long, starts the mind
+# on them before its own end of turn; Valor's first sound still waits for that end. On the quiet alone
+# the words lacked their last one 11 times in 15 (the live Meet test, 2026-11-25).
 EARLY_S = 0.4
 # This much unbroken sound from the person Valor answers cuts him off, or,
 # before his first sound, drops the turn. At 0.2 s three of four cuts in
@@ -1369,6 +1370,7 @@ class Call:
         self.energy: dict[str, float] = {}  # each person's speech in the turn being heard
         self.heard = ""  # the transcriber's words of that turn so far
         self.interim = ""  # its words of that turn as it writes them, before its end
+        self.interim_at = 0.0  # when they last changed
         self.started_early = False  # a turn was started on `interim` in this quiet
         self.heard_at: float | None = None
         self.last_voice = 0.0
@@ -1480,7 +1482,10 @@ class Call:
             self.energy[who] = self.energy.get(who, 0.0) + v * seconds
         if voiced:
             self.last_voice, self.started_early = self.now(), False
-        elif self.interim and not self.started_early and self.now() - self.last_voice >= EARLY_S:
+        elif (
+            self.interim and not self.started_early
+            and self.now() - max(self.last_voice, self.interim_at) >= EARLY_S
+        ):  # fmt: skip
             self.started_early = True
             self._start_early()
         await self._say_unposted()
@@ -1617,8 +1622,11 @@ class Call:
                 sc = m.server_content
                 if sc is not None and sc.input_transcription and sc.input_transcription.text:
                     self.heard += sc.input_transcription.text
-                if sc is not None and sc.interim_input_transcription and sc.interim_input_transcription.text:
-                    self.interim = sc.interim_input_transcription.text
+                so_far = (
+                    sc.interim_input_transcription.text if sc and sc.interim_input_transcription else None
+                )
+                if so_far and so_far != self.interim:
+                    self.interim, self.interim_at = so_far, self.now()
                 kind = m.voice_activity.voice_activity_type if m.voice_activity else None
                 if kind == types.VoiceActivityType.ACTIVITY_START and self.heard_at is None:
                     self.heard_at = self.now()
