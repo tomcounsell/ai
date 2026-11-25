@@ -8,10 +8,14 @@ re-asked a decided item three times. Research: task 562c1741852b's report, shape
 
 ## Base
 
-P-041 (task ba80dbaa6235) owns the live meeting state (`Call.state`, `settle` writing a decision into it
-and the record at once, the worker's UPDATE). This item reads that state; it builds no second one and
-changes none of its recording. Step 1 needs neither. Steps 2-5 branch from `origin/main` once P-041's
-state has merged; if it has not by then, the step-1 question says so and the default is to wait for it.
+P-041 (task ba80dbaa6235, branch commit ffa06866a, unmerged) owns the live meeting state: `Call.state()`,
+`decided`, `topics`, `settle` writing a decision into it and the record at once, the worker's UPDATE.
+This item reads that state, builds no second one, and changes none of its recording. Step 1 needs
+neither. Steps 2-5 branch from `origin/main` once P-041 has merged; if it has not by then, the step-1
+report says so and the default is to wait for it. The steer the request asks for (P-041 keeps its state
+and recording; its pushing state notes into Live and its L1/L2 live tests are on hold) is not this
+task's to send: it has no channel. The plan delivery hands it to the reporting session, and the step-1
+report repeats it if P-041's ledger shows it was not received.
 
 ## Step 1: ears and turn end, measured and reported first
 
@@ -32,13 +36,19 @@ constants from `ef5172ac1^:core/call.py`, taken, not rewritten); **L** today's `
   Valor's channel or 3 s of quiet (turn ends), labelled by a script the test holds and spot-checked
   against the stored transcript. Audio and labels stay out of the repo (path from an env var).
 
-Measured per candidate and corpus: **cut-off rate** (a turn end inside a mid-thought pause), by pause
-length; **delay** from end of speech to turn end, median, p90, max; missed ends (none within 5 s).
-**Go** (my default, stated in the report) if one of A, B, C cuts off at most 1 in 10 mid-thought pauses
-of 1.5 s or less on both corpora, no more often than L, with median delay 1.5 s or less. The builder
-writes the table, the choice and go/no-go to `.valor/question.md` for thread 1795612622.181159 and ends
-the turn; default: go on the chosen candidate. No-go stops the task and names the fallback (ElevenLabs
-for turn-taking, Valor's mind as its custom LLM) as the product room's decision, unbuilt.
+Measured per candidate and corpus, by pause length: **(a) false turn ends**: a turn end inside a
+mid-thought pause. Under this design that costs a rerun of the mind (time, tokens), not talk-over,
+since speech before first sound cancels the turn (below). **(b) effective cut-offs**: false turn ends
+where the speaker does not resume within turn end + the first-sound time, the mind plus TTS measured
+by the same test on each utterance's words (the report's 2.9-4.3 s is the check). Also: **delay** from
+end of speech to turn end, median, p90, max; missed ends (none within 5 s).
+**Go** (my default, stated in the report) if one of A, B, C has (b) at most 1 in 10 mid-thought pauses
+of 1.5 s or less on both corpora, no more often than L's cut-offs, (a) at most 1 in 3 such pauses
+(a rerun at most every third pause), and median delay to turn end 1.5 s or less. The builder
+writes both rates, the delays, the choice and go/no-go to `.valor/question.md` for thread
+1795612622.181159 and ends the turn; default: go on the chosen candidate. No-go stops the task and
+names the fallback (ElevenLabs for turn-taking, Valor's mind as its custom LLM) as the product room's
+decision, unbuilt.
 
 ## Steps 2-5: one change that switches over (`core/call.py`, `core/settings.py`)
 
@@ -46,32 +56,50 @@ for turn-taking, Valor's mind as its custom LLM) as the product room's decision,
   stretches (`_speakers`, `_close_stretch`, `call.heard`, who is answered, barge-in cut). Reopened at a
   quiet moment before its 10-minute limit and on a drop, with no audio lost across the switch.
 - **Mind.** On each turn end, one streamed call to `settings.call_mind_model` (default
-  `gemini-3.5-flash-lite`; `gemini-3.8-flash` or a Claude model through the call's gateway as the
-  value): system prompt from today's `INSTRUCTIONS` and "In a call" rules, P-041's rendered state read
-  fresh each turn, the transcript so far; tools the existing `ask`, `post`, `settle`, `open_decisions`,
-  `backlog`, `person`, `leave` on today's handlers. Told to call `settle` before replying to a decision.
-  An empty reply is silence (side talk in a group). Speech arriving before Valor's first sound cancels
-  the turn and reruns it with the new words, so a premature turn end costs time, not a cut-off.
+  `gemini-3.5-flash-lite`; `gemini-3.8-flash`, or a Claude model through the call's gateway, as the
+  value): system prompt from today's `INSTRUCTIONS` and "In a call" rules, P-041's `state()` read fresh
+  each turn, the transcript so far; tools the existing `ask`, `post`, `settle`, `open_decisions`,
+  `backlog`, `person`, `leave` on today's handlers, declared once and given to Gemini as function
+  declarations and to Claude as tool schemas. Told to call `settle` before replying to a decision. An
+  empty reply is silence (side talk in a group). Metered by the path that serves it: `gemini_price` for
+  Gemini, the gateway's own metering for Claude.
+- **A turn commits at first sound.** Until then only the lookups (`backlog`, `open_decisions`,
+  `person`) run; `settle`, `post`, `ask` and `leave` are held and run in order just before the reply's first
+  sentence plays (`settle` first, so the state holds the decision before Valor speaks of it); the
+  holding line below does not commit a turn. Speech
+  from the person being answered before first sound cancels the turn, drops what it held, and reruns
+  it with the new words, so a premature turn end costs time, never a duplicate effect or talk-over.
+  Others' speech in a group does not cancel (the barge-in rule): it is in the next turn's transcript.
 - **Voice.** Replies split by the old `SENTENCE` regex; each sentence to `gemini-3.8-flash-tts` in
   `settings.call_voice` (Alnilam), the next synthesized while one plays, into today's `_play`, `meet.say`
   and `_cut` (the said text is now exact). With no sentence 5 s after a turn end, Valor says one short
   holding line (the observed 8-13 s tails).
 - **Removed** (step 5, same change): the Live session (`Gemini.connect`, `live_config`, `note`,
   `send_client_content`, resumption, fresh-session rebuild, the `kept` resend, the stall watch),
-  `settings.call_model`. `Gemini.summarise` stays. No flag keeps both. Metering charges ears, mind and
-  voice at their `gemini_price`. `docs/bridges/meet.md`, `core/README.md` updated.
+  `settings.call_model`, and P-041's Live-only half: `_show`, `state_told`, the state held while Live's
+  turn runs, the state in `told`/`so_far` and in a fresh session, and their tests
+  (`test_a_fresh_session_is_told_the_workers_answers_the_steers_and_the_newest_state`,
+  `test_a_state_waits_out_valors_turn_and_is_not_told_twice`, `test_a_long_state_reaches_a_fresh_session_whole`,
+  `test_a_state_done_while_no_session_is_open_is_noted_once_to_the_next`, live L1/L2). Kept from
+  P-041: `state()`, `decided`, `topics`, settle recording, UPDATE and their tests. `Gemini.summarise`
+  stays. No flag keeps both. Metering charges ears and voice at their `gemini_price`.
+  `docs/bridges/meet.md`, `core/README.md` updated.
 
 ## Tests
 
 Fake ears, mind and voice in `tests/test_call.py`; every test that faked Live is moved, not dropped:
 a turn end runs the mind once with the current state; a `settle` before the reply is in the state
-before the voice plays; speech before first sound cancels and reruns; barge-in by the person answered
+before the voice plays; speech before first sound cancels and reruns; a turn that called `settle`
+(A) then cancelled by more speech and rerun (`settle` B) leaves one decision, B, and one fact, and a
+cancelled `post` or `ask` is never sent; lookups run before commit; side talk by another person in a
+group before first sound does not cancel; barge-in by the person answered
 cuts and records the said part; the other person talking does not; group side talk gets silence; a
 tool error is said; the 10-minute reopen drops no audio and keeps the stretch; the holding line at
 5 s and only once; sentences play in order. **Step 4 live** (`test_live_call_voice.py` rewritten,
 then `test_live_meet.py` through Meet, 3 runs): P-041's acceptance: three topics out of order, a
 decision that changes another, a stale note; no decided item asked again, the decision stated when
-asked, `settle` called mid-call. Delay per reply (median, p90, max) reported. Full suite under 5 min.
+asked, `settle` called mid-call. Delay per reply (median, p90, max) and reruns per call reported.
+Full suite under 5 min.
 
 ## Out of scope
 
