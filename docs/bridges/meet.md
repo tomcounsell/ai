@@ -115,12 +115,11 @@ against a new Meet with a second device of Valor's account
   9.5 s p90, two's in 4.0 and 6.4, 2026-11-25), the other charged its
   input; a round Google refuses (429, 5xx: four turns of one live run
   ended in silence on "503 high demand", 2026-11-25) is asked again after
-  1 s and 3 s. The mind starts on the transcriber's words so far at
-  `EARLY_S` (0.4 s) of quiet, about a second before its end of turn; the
-  turn's first sound and what it holds wait for that end on the same
-  words, and one whose words changed is dropped. Caching the instruction
-  (Google already caches about half of it on its own), thinking off and
-  speaking the first clause gained nothing measurable (2026-11-25). What a turn does in the world
+  1 s and 3 s. Tried and not kept (2026-11-25): caching the instruction
+  (Google already caches about half of it on its own), thinking off,
+  speaking the first clause (the first sentence comes whole), and starting
+  the mind on the transcriber's words so far (they lack the turn's last
+  word until its end). What a turn does in the world
   (`settle`, `ask`, `post`, `leave`) is acknowledged at once and done when
   the turn commits: at its first sound, a decision first, so the state has
   it before Valor speaks of it; or, saying nothing, when the mind is done.
