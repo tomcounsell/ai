@@ -17,23 +17,28 @@ made-up projects and names; no client, people or schema details.
   names into "every migration is a question" (row 122105). Nine PRs waited
   a week.
 - A decided item was asked again three times (12:42, 13:46, 14:02). The
-  prep notes listed it as open under a second label. The one `settle` the
-  call made (row 181143) carried no `settles`, so nothing was recorded and
-  no new prep ran.
+  prep notes listed it as open under a second label. `PREPARE` sees only the
+  last 40 lines of the call (`call.py:2039`), so a no said earlier has
+  scrolled out by the next prep, which relists the item. (Every `settle`
+  queues a prep whatever its ids, `call.py:1806`: the parse failure below
+  did not stop preps; it only kept the decision off the open question.)
 
 ## Change
 
-1. **Persona, `persona/conduct.md`** (one text for every turn and the call):
-   - "Escalate only what needs Tom" gains a line: work that only carries out
-     what was already decided (a stated requirement, a name or plan already
-     approved) is status, never a question. A question is only a departure
-     from it, a real choice, or a risk. A project rule is carried at the
-     reach it was given, never widened.
+1. **Persona, `persona/conduct.md`**. The call reads only "In a call" and
+   "How product decisions are made" (`call.py:815-816`), so the test goes in
+   the second, which every turn and the call both read:
+   - "How product decisions are made" gains a bullet: work that only carries
+     out what was already decided (a stated requirement, a name or plan
+     already approved) is status, never a question. A question is only a
+     departure from it, a real choice, or a risk. A project rule is carried
+     at the reach it was given, never widened.
    - "In a call", **Context first**: never ask for a yes on something you
      have not yet explained in the person's terms. When the detail is not in
      yet, say what the item is and ask nothing.
    - **Only what they hold**: what carries out a decision is said as
-     following it, with no ask.
+     following it, with no ask (the test above, "How product decisions are
+     made").
    - **Short and plain**: an explanation may run longer when it catches
      someone up on an item they have not seen.
 2. **`core/call.py` `INSTRUCTIONS`**:
@@ -53,7 +58,11 @@ made-up projects and names; no client, people or schema details.
      `act start`: an instruction carries a project rule at its own reach.
 4. **Bug: prep lists a settled item as open** (`Call`):
    - The call keeps its read-backs (`self.settled`). `PREPARE` gets them as
-     "Settled in this call (leave each out, under any name)".
+     "Settled in this call (leave each out, under any name)", so a decision
+     stays out of the notes after it scrolls out of the 40-line window.
+   - Only Tom settles, so only his decisions are kept. A no from someone
+     else in the call stays as today, in the window only. Out of scope: no
+     recorded case yet.
    - A prep that started before the newest `settle` is dropped when it
      returns. That settle has already queued a fresh prep.
 5. **Bug: settle ids that did not parse** (`_tools`, `settle`):
@@ -61,11 +70,16 @@ made-up projects and names; no client, people or schema details.
      knows those ids only after calling `open_decisions`, which in this case
      it did only when asked "what is open". Any other form was dropped, and
      the tool still answered "recorded".
-   - Fix: a bare question id or task id is resolved against
-     `decisions`' open list. `ids` becomes optional, so a read-back with no
+   - Fix: a bare id is resolved against `board.snapshot(conn, spec)["open"]`
+     (not `decisions`' display text). A question id is unique
+     (`ledger.new_id`) and resolves to its question. A task id resolves only
+     when that task has exactly one open question; with several it is
+     unmatched. `ids` becomes optional, so a read-back with no
      id still posts, is kept in `self.settled` and queues a prep.
    - The tool's answer names any id that matched no open decision, so Live
-     is never told "recorded" for nothing. The raw ids go to `meet.log`.
+     is never told "recorded" for nothing. That answer is not in
+     `ACKNOWLEDGED`, so it is scheduled `WHEN_IDLE` and Live says aloud that
+     nothing was recorded for it (intended). The raw ids go to `meet.log`.
 6. `docs/bridges/meet.md` and `docs/persona.md` say the same.
 
 ## Out of scope (no-gos)
@@ -78,7 +92,8 @@ trimming.
 ## Tests
 
 - `tests/test_call.py`, wording: the persona and `INSTRUCTIONS` carry the new
-  lines; "let them decide each one" is gone (the test at :3242 is updated);
+  lines, and the status-or-question test and the explain-first line reach
+  `call.live_config(...).system_instruction`; "let them decide each one" is gone (the test at :3242 is updated);
   the 1:1 read-back line stays; `PREPARE`/`READ_UP` ask for the explanation
   and the status/answer split; converse.md carries the prep test and the
   rule-reach line.
@@ -87,13 +102,15 @@ trimming.
   at a gate while a settle comes is not noted, and the next prep's notes
   are (`test_prep_runs_on_the_queue...` is updated to match).
 - `tests/test_call.py`, settle: ids `t1/q1`, a bare `q2` and a bare `t3`
-  resolve against a stub open list. An unknown id is reported in the tool
-  result and not recorded. A settle with no ids posts the read-back, carries
+  (one open question) resolve against the board's open list. A bare `t4`
+  whose task holds two open questions is unmatched and records neither. An
+  unknown id is reported in the tool result, which is scheduled `WHEN_IDLE`
+  (not silent), and is not recorded. A settle with no ids posts the read-back, carries
   no `settles` and queues a prep.
 - `tests/test_live_call_voice.py` (VALOR_LIVE=1), made-up project: prep
   holding three items that implement a stated requirement and one
   departure. Asked what is open, Valor reports the three as following the
   decision with no ask, and explains the departure before asking about it.
-  Told no, it says the new course, and over the next two replies never asks
+  Told no by Tom (who settles it), it says the new course, and over the next two replies never asks
   about it again. Each run three times, as the existing live tests do.
 - Full suite under 5 minutes; the live file run once on this Mac.
