@@ -169,16 +169,20 @@ class GeminiPrice:
     checked: date
 
 
-# A Meet call's Live model and the model that summarises a call
-# (docs/plans/gemini-live.md). Each Live turn bills its whole context, which
-# `CALL_CONTEXT` bounds by compression. `gemini-3.1-pro-preview`'s rates
-# hold to 200K input tokens; past that, $4.00 in and $18.00 out.
+# A Meet call's ears, mind and voice (P-042) and the model that summarises a
+# call (docs/plans/gemini-live.md). A rate the page does not list for a model
+# (the transcriber's text in, its audio out; the TTS model's audio in) is its
+# side's listed one. `gemini-3.8-flash` and `-flash-tts` double on 2027-01-01.
+# `gemini-3.1-pro-preview`'s rates hold to 200K input tokens; past that, $4.00
+# in and $18.00 out.
 GEMINI_PRICES: dict[str, GeminiPrice] = {
-    "gemini-3.8-live": GeminiPrice(0.75, 3.00, 4.50, 12.00, date(2026, 11, 5)),
+    "gemini-3.5-transcribe-live": GeminiPrice(3.50, 3.50, 21.00, 21.00, date(2026, 11, 25)),
+    "gemini-3.5-flash-lite": GeminiPrice(0.30, 0.30, 2.50, 2.50, date(2026, 11, 25)),
+    "gemini-3.8-flash": GeminiPrice(0.75, 0.75, 3.75, 3.75, date(2026, 11, 25)),
+    "gemini-3.8-flash-tts": GeminiPrice(0.50, 0.50, 9.00, 9.00, date(2026, 11, 25)),
     "gemini-3.1-pro-preview": GeminiPrice(2.00, 2.00, 12.00, 12.00, date(2026, 11, 5)),
 }
-CALL_CONTEXT = 32_000  # tokens: a Live session's context is compressed past this
-CALL_OUTPUT_MOST = 8_000  # tokens a Live turn is taken to say at most, for its estimate
+CALL_CONTEXT = 32_000  # tokens: a call's turn is given the call so far up to about this (`call.CALL_SO_FAR`)
 
 # Tier names the API accepts for a priced tier.
 OPENAI_TIER_ALIASES: dict[str, str] = {"priority": "fast"}
@@ -566,10 +570,19 @@ class Settings:
         )
     )
     operator_name: str = field(default_factory=lambda: _env("VALOR_OPERATOR_NAME", "Tom Counsell"))
-    # A call speaks through Gemini Live in one of its voices, and Gemini
-    # summarises it (docs/plans/gemini-live.md). The call is saved in Yudame
-    # Tools' meeting store, whose app backs it up to Drive.
-    call_model: str = field(default_factory=lambda: _env("VALOR_CALL_MODEL", "gemini-3.8-live"))
+    # A call hears through Gemini's live transcriber, one text model writes
+    # every word Valor says, and Gemini's speech model says it in one of its
+    # voices (P-042); Gemini summarises it (docs/plans/gemini-live.md). The
+    # call is saved in Yudame Tools' meeting store, whose app backs it up to Drive.
+    call_ears_model: str = field(
+        default_factory=lambda: _env("VALOR_CALL_EARS_MODEL", "gemini-3.5-transcribe-live")
+    )
+    call_mind_model: str = field(
+        default_factory=lambda: _env("VALOR_CALL_MIND_MODEL", "gemini-3.5-flash-lite")
+    )
+    call_voice_model: str = field(
+        default_factory=lambda: _env("VALOR_CALL_VOICE_MODEL", "gemini-3.8-flash-tts")
+    )
     call_voice: str = field(default_factory=lambda: _env("VALOR_CALL_VOICE", "Alnilam"))
     summary_model: str = field(default_factory=lambda: _env("VALOR_SUMMARY_MODEL", "gemini-3.1-pro-preview"))
     # The paid Gemini key, "Gemini API Key Yudame Tools" in 1Password's

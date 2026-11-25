@@ -18,8 +18,6 @@ from math import ceil
 
 from core import ledger, tasks
 from core.settings import (
-    CALL_CONTEXT,
-    CALL_OUTPUT_MOST,
     GEMINI_PRICES,
     JUDGEMENT_PRICES,
     OPENAI_LOOPING_TOOLS,
@@ -386,7 +384,7 @@ def openai_cost(usage: dict, tier: str | None, tool_calls: dict, price: dict) ->
     return charged, unpriced
 
 
-# -- Gemini (a Meet call's Live session and its summary) -------------------------
+# -- Gemini (a Meet call's ears, mind and voice, and its summary) -------------------------
 
 
 def gemini_price(model: str) -> dict:
@@ -420,19 +418,17 @@ def gemini_cost(usage: dict, price: dict) -> int:
 
     units = side(usage.get("prompt_tokens_details"), usage.get("prompt_token_count"),
                  {True: price["audio_in"], False: price["text_in"]})  # fmt: skip
-    units += side(usage.get("response_tokens_details"), usage.get("response_token_count"),
+    # Live names the output `response_*`; generate_content names it `candidates_*`.
+    units += side(usage.get("response_tokens_details") or usage.get("candidates_tokens_details"),
+                  usage.get("response_token_count") or usage.get("candidates_token_count"),
                   {True: price["audio_out"], False: price["text_out"]})  # fmt: skip
     units += int(usage.get("thoughts_token_count") or 0) * price["text_out"]
     return _per_mtok(units)
 
 
-def gemini_worst_case(
-    price: dict, input_tokens: int = CALL_CONTEXT, output_tokens: int = CALL_OUTPUT_MOST
-) -> int:
+def gemini_worst_case(price: dict, input_tokens: int, output_tokens: int) -> int:
     """A Gemini response charged when no usage came back: its input as
-    audio in and its output as audio out, the higher rates. By default a
-    Live turn: its whole context, which compression keeps under
-    `CALL_CONTEXT`, and `CALL_OUTPUT_MOST` out."""
+    audio in and its output as audio out, the higher rates."""
     return _per_mtok(input_tokens * price["audio_in"] + output_tokens * price["audio_out"])
 
 
