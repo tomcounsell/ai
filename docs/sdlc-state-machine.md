@@ -245,7 +245,7 @@ writing `.valor/no_question.md` (`skills/sdlc/clarify.md`).
 `judge.decided` `thin` with `leg: chat`, and it stays in clarify for its life, one turn per wake,
 resumed in the same harness session. Only `stop.md` (`ended`), `compact.md` (a `/compact` turn in
 the same session before its next, [harnesses.md](harnesses.md), Compaction) and `wake.md` (a step
-after a delay with no new message, `session.wake_due`) count there; it answers by sends
+after a delay, or once a send it names has its outcome, with no new message, `session.wake_due`) count there; it answers by sends
 and starts work as tasks of its own, which report to it
 ([bridges/telegram.md](bridges/telegram.md), Chat sessions).
 
