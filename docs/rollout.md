@@ -264,14 +264,15 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    script to `~/.local/bin` and the plist, with its home, to
    `~/Library/LaunchAgents` and bootstrapping it; a plist put in place
    from a turn, whose sandbox cannot bootstrap, is loaded by the next
-   update (`permissions.ensure`). Until yudame-tools#8 each run also
-   removes Yudame Tools' own Homebrew job (`me.yuda.brew-status`), waiting
-   for a run in progress to end, so one set up again from the app runs at
-   most one more night beside it. Brew Status
-   (`yudame/brew-status`) ran it from 2026-10-28 morning and was removed
-   from all four Macs that day (Tom, Telegram 11762); Studio Tools'
-   Homebrew Updates replaces this job once it is deployed
-   (yudame/studio-tools#2). Tailscale is reopened by the kernel, not by
+   update (`permissions.ensure`). It is the one Homebrew job: Yudame
+   Tools' Homebrew Updates is switched off on each Mac (`defaults write
+   me.yuda.tools disabledTools -array <entries already there> homebrew`,
+   from 0.2.0, yudame-tools#8), and the app's own 04:00 job
+   (`me.yuda.brew-status`, set up with `~/.local/bin/brew-status setup
+   --launcher ~/Applications/Valor.app/Contents/MacOS/valor-run`) then runs
+   only Disk Cleanup. Brew Status (`yudame/brew-status`) ran Homebrew from
+   2026-10-28 morning and was removed from all four Macs that day (Tom,
+   Telegram 11762). Tailscale is reopened by the kernel, not by
    this job (docs/machine.md, Tailscale, reopened).
    On the Cowboy only, the update routine's job is printed with
    `VALOR_SNAPSHOT_DIR=$HOME/work-vault/_valor-desktop_` (`cd ~/src/ai &&
