@@ -113,10 +113,11 @@ against a new Meet with a second device of Valor's account
   2026-11-25). The mind writes its reply in the same answer as `settle`,
   `ask`, `post` or `leave`, and then needs no round more; a lookup's
   answer comes back to it first (each round is a model call of 2 to 4 s).
-  Each round is asked three times at once and the first copy to answer is
+  Each round is asked twice at once and the first copy to answer is
   taken (`call.first_of`; one copy's first sentence came in 5.7 s median,
-  9.5 s p90, two's in 4.0 and 6.4, three's 3.4 and 6.6 against two's 5.0
-  and 6.1 in the next runs, 2026-11-25), the others charged their
+  9.5 s p90, two's in 4.0 and 6.4; through Meet the delay per reply went
+  from 8.1 s median to 7.0, three copies the same as two, 2026-11-25), the
+  other charged its
   input; a round Google refuses (429, 5xx: four turns of one live run
   ended in silence on "503 high demand", 2026-11-25) is asked again after
   1 s and 3 s. Tried and not kept (2026-11-25): caching the instruction

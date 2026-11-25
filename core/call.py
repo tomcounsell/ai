@@ -857,7 +857,7 @@ SUMMARY_SCHEMA = {
 GOOGLE_KEY = "GOOGLE_API_KEY"
 
 
-HEDGE = 3  # copies of each round of the mind asked at once (`Gemini.think`)
+HEDGE = 2  # copies of each round of the mind asked at once (`Gemini.think`)
 RETRY_S = (1.0, 3.0)  # waits before asking a failed round again
 
 
@@ -938,8 +938,9 @@ class Gemini:
         The parts go back into `contents` as they came, thought signatures
         and all. `HEDGE` copies are asked at once and the first to answer is
         taken (`first_of`): one copy's first sentence came in 5.7 s median,
-        9.5 s p90, two's in 4.0 and 6.4, three's in 3.4 and 6.6 against
-        two's 5.0 and 6.1 in the next runs (2026-11-25); each other copy is
+        9.5 s p90, two's in 4.0 and 6.4; through Meet, the delay per reply
+        went from 8.1 s median to 7.0, and three copies measured the same as
+        two (2026-11-25); each other copy is
         charged its input. A round none of them answers, a 503 or 429 among
         them (four silent turns in one live run, 2026-11-25), is asked again
         after `RETRY_S`."""

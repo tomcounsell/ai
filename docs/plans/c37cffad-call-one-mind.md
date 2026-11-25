@@ -103,7 +103,7 @@ decision, unbuilt.
   `docs/bridges/meet.md`, `core/README.md` updated.
 
 - **Speed** (after step 4 measured 8.1 s median through Meet; the dev thread, 2026-11-25: hold, speed
-  first): each round asked three times at once, first answer taken; a 429 or 5xx round asked again. Cache,
+  first): each round asked twice at once, first answer taken; a 429 or 5xx round asked again. Cache,
   thinking off, first clause and an early start on the words so far measured, no gain, not kept.
 
 ## Tests
