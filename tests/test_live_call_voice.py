@@ -508,3 +508,102 @@ def test_an_answer_noted_while_valor_talks_is_given_in_his_next_reply(voice):
             "said"
         ]
         assert "212" in said or "two hundred" in said.lower(), said
+
+
+# P-041: the voice takes a replaced state of the meeting mid-call. A made-up project.
+STATE_BEFORE = (
+    "The meeting now (replaces every earlier state):\nTopics:\n- Launch date: open; recommend Monday the 1st.\n"
+    "- Pricing page copy: open; draft says launch Monday.\n- Support rota: open."
+)
+STATE_AFTER = (
+    "The meeting now (replaces every earlier state):\nDecided in this call (stands over anything below):\n"
+    "- Launch date: Thursday the 4th, not Monday (Tom Counsell, 10:12).\nTopics:\n"
+    "- Launch date: decided, Thursday the 4th.\n- Pricing page copy: changed by the launch date: the draft "
+    "says Monday and must say Thursday; open.\n- Support rota: open."
+)
+MEETING = {"name": "meeting", "description": "The meeting's current state: each topic once, decided, open or "
+           "parked, and what each decision changed.", "parameters": {"type": "object", "properties": {}}}  # fmt: skip
+MEETING_LINE = (
+    "\n- Before you speak on any topic of the meeting, call `meeting`: what it returns is the meeting's "
+    "state now and stands over every note."
+)
+
+
+async def replaced(voice, *, tool: bool) -> dict:
+    """A state note, then (with no `tool`) its replacement in silence, or
+    (with `tool`) the replacement only from `meeting`; then Tom asks what
+    was decided on the launch date. Whether Valor spoke on the notes, what
+    he said after the ask, the tools, and the seconds from the ask's end to
+    his first voice."""
+    from google.genai import types
+
+    key = credentials.read_key(settings.google_keyfile, call.GOOGLE_KEY, "google-key")
+    out = {"early": "", "said": "", "tools": [], "delay": None}
+    config = call.live_config("Valor", "Tom and Valor go through the launch.", None)
+    if tool:
+        config.system_instruction += MEETING_LINE
+        config.tools[0].function_declarations.append(types.FunctionDeclaration(**MEETING))
+    ask = voice("Valor, what did we decide on the launch date, and does it change anything else?")
+    phase = {"asked": None}
+    async with call.Gemini(key).connect(config) as s:
+        await s.send_client_content(**call.note(ALONE))
+        await s.send_client_content(**call.note(STATE_BEFORE))
+
+        async def receive():
+            while True:
+                async for m in s.receive():
+                    for fc in m.tool_call.function_calls if m.tool_call else []:
+                        out["tools"].append(fc.name)
+                        result = {"meeting": STATE_AFTER, "ask": call.ASKED}.get(fc.name, "nothing recorded")
+                        await s.send_tool_response(function_responses=[
+                            types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result})])  # fmt: skip
+                    sc = m.server_content
+                    text = (sc.output_transcription.text or "") if sc and sc.output_transcription else ""
+                    out["early" if phase["asked"] is None else "said"] += text
+                    for part in sc.model_turn.parts if sc and sc.model_turn else []:
+                        pcm = np.frombuffer(part.inline_data.data if part.inline_data else b"", "<i2")
+                        loud = len(pcm) and np.sqrt(np.mean((pcm / 32768.0) ** 2)) >= call.SPEAKING
+                        if loud and phase["asked"] is not None and out["delay"] is None:
+                            out["delay"] = time.monotonic() - phase["asked"]
+
+        async def feed(x):
+            for i in range(0, len(x), CHUNK):
+                await s.send_realtime_input(audio=types.Blob(
+                    data=call.pcm16(x[i : i + CHUNK]), mime_type=f"audio/pcm;rate={call.RATE}"))  # fmt: skip
+                await asyncio.sleep(CHUNK / call.RATE)
+
+        task = asyncio.create_task(receive())
+        quiet = lambda seconds: np.zeros(int(call.RATE * seconds), np.float32)
+        await feed(quiet(3))
+        if not tool:
+            await s.send_client_content(**call.note(STATE_AFTER))
+        await feed(quiet(6))
+        await feed(ask)
+        phase["asked"] = time.monotonic()
+        await feed(quiet(14))
+        task.cancel()
+    print(f"\nearly: {out['early']!r} said: {out['said']!r} tools: {out['tools']} delay: {out['delay']}")
+    return out
+
+
+@pytest.mark.parametrize("tool", [False, True], ids=["note", "meeting-tool"])
+def test_a_replaced_state_is_taken_silently_and_answered_from(voice, tool):
+    """P-041's unknown, first: a state note replaced mid-call (or read
+    from `meeting`) gets no reply of its own, and asked, Valor states the
+    newer decision and the topic it changed."""
+    for _ in range(3):
+        seen = asyncio.run(replaced(voice, tool=tool))
+        assert not seen["early"].strip(), seen
+        assert re.search(r"thursday", seen["said"], re.IGNORECASE), seen
+        assert not re.search(
+            r"\bmonday\b(?!.{0,40}(thursday|instead|not))", seen["said"], re.IGNORECASE
+        ) or re.search(r"thursday", seen["said"], re.IGNORECASE), seen
+        assert re.search(r"pricing|copy|page", seen["said"], re.IGNORECASE), seen
+
+
+def test_a_state_note_sent_during_a_long_reply_leaves_it_whole(voice):
+    """A whole replaced state noted 1.5 s into a long reply neither cuts nor
+    restarts it."""
+    for _ in range(3):
+        seen = asyncio.run(over_a_long_reply(voice, note=STATE_AFTER))
+        assert not seen["interrupted"] and re.search(r"rollout|roll out", seen["said"], re.IGNORECASE), seen
