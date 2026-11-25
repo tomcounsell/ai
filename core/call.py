@@ -399,7 +399,11 @@ async def end(
                 ),
             ]
         else:
-            why = f"Gemini could not summarise it ({summary['error']})" if summary else "no summary was made"
+            why = (
+                f"Gemini could not summarise it ({summary['error']})"
+                if (summary or {}).get("error")
+                else "no summary was made"
+            )
             lines = [
                 f"The call {call.get('url')} ended: {reason}.",
                 (
@@ -631,9 +635,10 @@ INSTRUCTIONS = (
     '- When to speak is "In a call" below. When a note says only one person is here with you, everything they '
     'say is to you: answer it, and lead the call as "In a call" says.\n'
     "- Lines that begin `[note]` tell you about the call (who is speaking, who is here, what your worker "
-    'found). Never answer a note or read one out, except as a note asks you to. A note opening "Your worker prepared" is depth on items '
-    "still to come: use it when the call reaches them. An item the call has settled or said is covered stays "
-    "settled: never raise it again, whatever a note says.\n"
+    'found). Never answer a note or read one out, except as a note asks you to. A note opening "The meeting now" is the call\'s one record of '
+    "what is open and decided, replacing the last and the notes before the call: speak on a topic from the "
+    "newest. Topics come in any order: follow the person. A decided or covered topic stays decided: never "
+    "ask or raise it again, whatever a note says.\n"
     "- A line that begins `[typed by NAME]` was typed in the call's chat: answer it only by calling `post`, "
     "never aloud.\n"
     "- For anything you would have to look up (code, records, documents, figures), call `ask` and say you "
@@ -653,9 +658,9 @@ INSTRUCTIONS = (
     "ask once for each that needs their answer, after explaining it. A no changes course and is never asked "
     "again. With anyone but Tom in the call, a decision about a client "
     "relationship (pricing, terms, hiring or pay) is one line: it is for Tom. Never say an id aloud.\n"
-    "- When Tom settles open decisions (one idea may settle several), read his answer back in a sentence and "
-    "call `settle` with the ids it settles, as `open_decisions` gives them (none when it settles no open "
-    "decision). Only Tom settles decisions; a correction is a new `settle`. With only one person here, that "
+    "- Whenever something is decided, read it back in a sentence and call `settle` at once: the read-back, "
+    "`by` who decided, and the ids of the open decisions it settles (`open_decisions`), if any. Only Tom "
+    "settles open decisions; a correction is a new `settle`. With only one person here, that "
     "read-back ends by opening the next item, explained, asking a yes only when it needs one: no later turn "
     "comes for it. With more "
     "people here, it ends with the read-back: the next item waits until someone asks for it.\n"
@@ -673,9 +678,11 @@ TOOLS = [
      "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
     {"name": "open_decisions", "description": "The decisions open for Tom on this project, with their ids.",
      "parameters": {"type": "object", "properties": {}}},
-    {"name": "settle", "description": "Record Tom's answer: the read-back, and each open decision it "
-     "settles, as `task id/question id` or the question's id (none when it settles no open decision).", "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {
-         "ids": {"type": "array", "items": {"type": "string"}}, "readback": {"type": "string"}},
+    {"name": "settle", "description": "Record a decision the moment it is made: the read-back, who decided "
+     "(`by`, as the call names them), and each open decision it settles, as `task id/question id` or the "
+     "question's id (none when it settles no open decision).", "behavior": "NON_BLOCKING", "parameters": {"type": "object", "properties": {
+         "ids": {"type": "array", "items": {"type": "string"}}, "readback": {"type": "string"},
+         "by": {"type": "array", "items": {"type": "string"}}},
          "required": ["readback"]}},
     {"name": "person", "description": "A person's dossier on this project, by their name or a loose description: "
      "internal or external, and their dated facts (role, organisation, asks, decisions, what is owed and "
@@ -697,39 +704,43 @@ ACKNOWLEDGED = {POSTING, "recorded", "leaving", ASKED}
 READING_LINE = (
     "- Your worker is still reading up for this call. Asked what that reading would hold, say you are still "
     "reading up, and answer from `backlog`, `person` and `open_decisions` meanwhile; everything else goes on "
-    "as usual: `ask` your worker, and take the tasks you are given. A note saying your reading is in brings "
-    "it: use it from then on, and say nothing about the note itself.\n"
+    "as usual: `ask` your worker, and take the tasks you are given. Once a note opening 'The meeting now' "
+    "comes, your reading is in: never say you are still reading up.\n"
 )
 READ_UP = (
     "Read up for this call while Valor joins it: the thread it was asked in ({where}), the project's record "
     "and memory on its topic, its open decisions and its priority queue (the product Sheet where it has one, "
-    "else its open tasks). Write short notes for the call, adding only what the notes before it lack: what it "
-    "is about, what is known and open, and what you would recommend, each recommendation with its concrete "
+    "else its open tasks). Write short notes for the call, covering the notes before it and what you found: "
+    "what it is about, what is known and open, and what you would recommend, each recommendation with its concrete "
     "case (what happened, when, where it is recorded; observed, reported or assumed) or saying there is no "
     "case yet. For each item: what it is and what it changes, in the person's terms, and whether it only "
     "carries out what was already decided (status, no question) or needs their answer (a departure, a real "
     "choice or a risk). Name each decision once, under one label."
 )
-# The worker's depth on what is coming, prepared on the call's events (P-038, Tom, 2026-11-17).
-PREPARE = (
-    "Prepare ahead for this call; nothing you write is posted, it reaches Valor's voice as a note. From the "
-    "call so far and the notes before it, take the next two items or open questions the call has not reached "
-    "yet. Leave out everything the call has settled or said is covered, even where it adds work: no "
-    "read-back of it and no catch on it, since Valor raising it again reopens a settled item. "
-    "For each, in short notes: what it is and what it changes, in the person's terms; whether it only carries "
-    "out what was already decided (status, no question) or needs their answer (a departure, a real choice or "
-    "a risk); its case (what happened, when, where it is recorded; observed, reported or assumed), the "
-    "numbers, and the two or three follow-ups likely asked, each answered a level below the last (an "
-    "example, the mechanism, the step). Name each decision once, under the label the call uses. Answer only "
-    "`nothing ahead` when nothing is left.\n\n"
-    "Settled in this call (leave each out, under any name):\n{settled}\n\n"
-    "The call so far:\n{so_far}"
+# The call's one live state, updated after every exchange (P-041, Tom, 2026-11-25: "I'd rather the
+# interaction be slow than have to repeat myself"); the depth on what is coming (P-038, 2026-11-17).
+UPDATE = (
+    "Update the state of this call; nothing you write is posted: it reaches Valor's voice as its one note on "
+    "the meeting, replacing the last. Write the topics: every topic of the call, from the notes before it, "
+    "the state now and the call so far, each once under the label the call uses, in the order they matter "
+    "now. For each, its state (open; decided, and what; parked) and what it touches; where a decision in this "
+    "call changes it, `changed:` and how. Everything decided in this call is decided under any name, even "
+    "where it adds work: never open again and no catch on it, since Valor raising it reopens it. "
+    "Then, for the next two open topics the call has not reached: what it is and what it changes, in the "
+    "person's terms; whether it only carries out what was already decided (status, no question) or needs "
+    "their answer (a departure, a real choice or a risk); its case (what happened, when, where it is "
+    "recorded; observed, reported or assumed), the numbers, and the two or three follow-ups likely asked, "
+    "each answered a level below the last (an example, the mechanism, the step). Name each decision once, "
+    "under the label the call uses. Answer only `no change` when the state needs none.\n\n"
+    "Decided in this call (each stays decided, under any name):\n{decided}\n\n"
+    "The state now:\n{topics}\n\nThe notes before the call:\n{prep}\n\nThe call so far:\n{so_far}"
 )
-PREPARED = (
-    "Your worker prepared, for when the call reaches it (say nothing about this note; an item the call has "
-    "settled stays settled, even where this lists it):\n{notes}"
+STATE = (
+    "The meeting now (replaces every earlier note on the meeting, the notes before the call included; say "
+    "nothing about this note).\nDecided in this call (each is decided: never ask it again, under any name):\n"
+    "{decided}\n\nTopics:\n{topics}"
 )
-# Kept for a fresh session (`Call.told`): the newest within a quarter of `CALL_SO_FAR`.
+# Kept for a fresh session (`Call.told`): the newest within a quarter of `CALL_SO_FAR`; the state is in its config.
 ANSWERED = 'Your worker answered "{question}" (posted in the chat): {answer}'
 # Built on the chat session's stated default, no objection from Tom in five minutes, 2026-11-18; his to reverse.
 # An answer asked for aloud is given when Valor next speaks (2026-11-18: it
@@ -750,11 +761,7 @@ STEERED = "Your chat session sent the call this, posted in the chat: {text}\nUse
 LOOK_UP = "look up:"
 LEAVES = {"asked": "Valor was asked to leave", "wrapped up": "everyone wrapped up and said goodbye"}
 PREP = object()  # a prep turn on the worker's lane (`Call.prepare`)
-READ_IN = (
-    "Your reading for this call is in: you are no longer reading up, so never say you are. Use it from now "
-    "on, and say nothing about this note:\n{notes}"
-)
-READ_NONE = "Your reading for this call did not come back; `ask` your worker for what you need."
+READ_NONE = "(Your reading for this call did not come back; `ask` your worker for what you need.)"
 # Offered when the call's project has a backlog Sheet (Tom, 2026-11-13).
 BACKLOG_LINE = (
     "- When someone asks about the backlog or an item on it (what is in it, the top priority, an item's size, "
@@ -794,7 +801,13 @@ def live_config(
     reply's language is the model's own from the audio (`SpeechConfig`'s
     language did not change it, 2026-11-16), which the persona section keeps
     English.
-    A fresh session in a call under way is told `so_far` (`Call.so_far`).
+    The call's state reaches Live as a note replacing the last, never a
+    tool: noted mid-call it was taken silently and answered from, 3 of 3,
+    and a `meeting` tool read before speaking was as right and half a
+    second slower; with it a reply came 1.1 to 1.2 s after the question,
+    as without (tests/test_live_call_voice.py, 2026-11-25). A fresh session
+    in a call under way starts from the state, in place of `prep` (`live`),
+    and is told `so_far` (`Call.so_far`).
     With a `sheet`, Valor has `backlog` and is told when to use it; while
     `reading`, that its reading is still coming."""
     from google.genai import types
@@ -847,12 +860,13 @@ SUMMARY = (
     "using only what was said:\n"
     "- topic: what the call was about, in two to five words, as its title;\n"
     "- summary: a short paragraph;\n- decisions: each decision made, and by: who made it, by their names as "
-    "the transcript gives them;\n"
+    "the transcript gives them; one of those recorded during the call (below) is never listed again, "
+    "however it is worded: a decision that only restates one gives its number as `restates`;\n"
     "- actions: each task from the call: each thing someone said they would do, each task someone gave or "
     "asked Valor for, and each thing Valor said it would do, with its owner (the one to do it) or null;\n"
     "- markdown: the full summary as a Markdown document: who joined, what was discussed, what was settled, "
     "what Valor answered and promised, and what is still open.\n\nValor's notes from before the call:\n{prep}"
-    "\n\nThe transcript:\n"
+    "\n\nDecided and recorded during the call, numbered:\n{recorded}\n\nThe transcript:\n"
 )
 SUMMARY_SCHEMA = {
     "type": "object",
@@ -860,7 +874,8 @@ SUMMARY_SCHEMA = {
         "topic": {"type": "string"},
         "summary": {"type": "string"},
         "decisions": {"type": "array", "items": {"type": "object", "properties": {
-            "decision": {"type": "string"}, "by": {"type": "array", "items": {"type": "string"}}},
+            "decision": {"type": "string"}, "by": {"type": "array", "items": {"type": "string"}},
+            "restates": {"type": "integer", "nullable": True}},
             "required": ["decision"]}},
         "actions": {"type": "array", "items": {"type": "object", "properties": {
             "task": {"type": "string"}, "owner": {"type": "string", "nullable": True}}, "required": ["task"]}},
@@ -886,12 +901,13 @@ class Gemini:
         return self.client.aio.live.connect(model=settings.call_model, config=config)
 
     async def summarise(
-        self, audio: Path, transcript: str, prep: str
+        self, audio: Path, transcript: str, prep: str, recorded: str = ""
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """The notes on a call from its recording, uploaded through the
         Files API (a request's own bytes stop near 20 MB) and deleted after,
-        its prep (an invite's title, the asking chat's topic) and its
-        transcript; with the response's usage."""
+        its prep (an invite's title, the asking chat's topic), the
+        decisions `recorded` during it and its transcript; with the
+        response's usage."""
         from google.genai import types
 
         files = self.client.aio.files
@@ -902,7 +918,10 @@ class Gemini:
                 up = await files.get(name=up.name)
             got = await self.client.aio.models.generate_content(
                 model=settings.summary_model,
-                contents=[up, SUMMARY.format(prep=prep.strip() or "(none)") + transcript],
+                contents=[
+                    up,
+                    SUMMARY.format(prep=prep.strip() or "(none)", recorded=recorded or "(none)") + transcript,
+                ],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json", response_schema=SUMMARY_SCHEMA
                 ),
@@ -1181,10 +1200,13 @@ class Call:
         self.worker, self.worker_ready, self.project = worker, worker_ready, project
         # A call asked for in a chat joins first; its worker's first turn reads up (`_read_up`).
         self.reader = reader if not info.get("starts") else None
-        self.reading, self.read_note = self.reader is not None, ""
-        self.read_told = False  # the Live session has the reading, in its config or a note
+        self.reading = self.reader is not None
         self.preparer, self.prep_queued = preparer, False
-        self.settled: list[str] = []  # Tom's read-backs in this call, kept out of every prep (`_prepare`)
+        # The call's one live state (P-041): what it decided, each the moment it was (`settle`), and the
+        # worker's topics (`_update`), told to Live as one note replacing the last (`_show`).
+        self.decided: list[dict[str, Any]] = []
+        self.topics = ""
+        self.state_told: str | None = None  # the state the open session was last given
         self.told: list[str] = []  # the notes kept for a fresh session (`so_far`): answers, steers, the prep
         self.pending: list[str] = []  # those noted while no session was open, for the next to open
         self.aloud: set[str] = set()  # the questions asked aloud, by their words
@@ -1453,9 +1475,10 @@ class Call:
             # A session reopened fresh is told the call so far, the kept notes in it.
             so_far = "" if self.handle or not (self.lines or self.sessions) else self.so_far()
             fresh, reading = self.handle is None, self.reading
+            state = self.state() if self.decided or self.topics else None
             config = live_config(
                 self.project or "",
-                self.info.get("prep") or "",
+                state or self.info.get("prep") or "",
                 self.handle,
                 so_far,
                 bool(self.sheet),
@@ -1466,11 +1489,9 @@ class Call:
                 async with self.gemini.connect(config) as session:
                     self.session, failed, opened = session, 0, True
                     self.sessions += 1
-                    if fresh and not reading:  # its config carries what was read
-                        self.read_told = True
-                    elif self.read_note and not self.read_told:  # read while it opened, or between sessions
-                        await self._note(self.read_note)
-                        self.read_told = True
+                    if fresh:  # its config carries the state, or the notes before the call
+                        self.state_told = state
+                    await self._show()  # a state newer than its config, or than a resumed session's
                     pending, self.pending = [t for t in self.pending if t not in so_far], []
                     for text in pending:
                         await self._note(text)
@@ -1598,6 +1619,9 @@ class Call:
                  f"{'silent' if wordless(text) else 'spoke' if reply.said else 'unsaid'}, {text[:80]!r}")  # fmt: skip
             if reply.typed and not self.typed_posted and not wordless(text):
                 self.posts.put_nowait(Post(reply.id, text, True))
+            if not wordless(text):
+                self.prepare()  # an exchange: the worker updates the state
+            await self._show()  # one held while the turn ran
             if reply.said is None:
                 await self._answer_alone(0.0)
             if reply.said is None:
@@ -1791,9 +1815,17 @@ class Call:
             elif fc.name == "settle" and str(args.get("readback") or "").strip():
                 readback = str(args["readback"]).strip()
                 ids = [str(i).strip() for i in args.get("ids") or [] if str(i).strip()]
-                _log(f"call {self.id}: settle ids {ids!r}")
+                by = [str(n).strip() for n in args.get("by") or [] if str(n).strip()]
+                if not by and len(self.present) == 1:  # a 1:1: the one other person decided
+                    by = [self.names.get(next(iter(self.present)), "someone")]
+                _log(f"call {self.id}: settle ids {ids!r} by {by!r}")
                 settles, unmatched = await self._settles(ids)
-                self.settled.append(readback)
+                day = self.started_at.astimezone().strftime("%Y-%m-%d")
+                decision = {"decision": readback, "by": by, "at": _clock(self.now()), "settles": settles,
+                            "source": f"Meet call {self.info['code']} {day}, read back at {_clock(self.now())}"}  # fmt: skip
+                self.decided.append(decision)
+                self._spawn(self._record(decision))
+                await self._show()
                 self.posts.put_nowait(Post(reply.id, readback, True, settles))
                 result = (
                     f"recorded the read-back, but no open decision is {', '.join(unmatched)}: say in a sentence "
@@ -1995,7 +2027,7 @@ class Call:
         """The worker's questions, one at a time; an answer is posted
         naming its question and noted to the session, or after leaving goes
         in the call's report. A call asked for in a chat reads up first.
-        Between questions, the preps `prepare` asks for."""
+        Between questions, the state updates `prepare` asks for."""
         if self.reader is not None:
             await self._read_up()
         self.prepare()
@@ -2006,8 +2038,8 @@ class Call:
                     self.questions.put_nowait(PREP)
                     continue
                 self.prep_queued = False
-                await self._prepare()
-                continue
+                if (question := await self._update_unless_asked()) is None:
+                    continue
             self.asking.append(question)
             try:
                 answer = await self.worker(question)
@@ -2031,11 +2063,40 @@ class Call:
                 self.posts.put_nowait(Post(None, f'On "{question}": {answer}', True,
                                            note=told.format(question=question, answer=answer)))  # fmt: skip
 
+    async def _update_unless_asked(self) -> str | None:
+        """An update of the state, unless a question comes while it runs:
+        then the update is stopped and asked again after it, and the
+        question is returned, so a lookup never waits on an update."""
+        update, again = asyncio.create_task(self._update()), False
+        try:
+            while not update.done():
+                got = asyncio.create_task(self.questions.get())
+                await asyncio.wait({update, got}, return_when=asyncio.FIRST_COMPLETED)
+                if not got.done():
+                    got.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await got
+                elif (question := got.result()) is PREP:
+                    again = True  # an update asked meanwhile runs after this one
+                else:
+                    again = again or not update.done()
+                    return question
+            return None
+        finally:
+            if not update.done():
+                update.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await update
+            if again:
+                self.prep_queued = False
+                self.prepare()
+
     async def _read_up(self) -> None:
         """The worker's reading for a call asked in a chat, done while Valor
-        joins (P-033): added to the notes before the call, which a Live
-        session opened later starts with, and noted once to one open now;
-        never posted."""
+        joins (P-033): the state's first topics, noted to the session (or
+        in the config of one opened later); never posted, and never added
+        to the notes before the call, where it would sit stale beside the
+        state."""
         try:
             notes = (await self.reader()).strip()
         except tasks.TaskStopped:
@@ -2043,50 +2104,79 @@ class Call:
         except Exception as exc:  # noqa: BLE001  a reading that fails leaves the chat's notes
             _log(f"call {self.id}: the worker's reading failed: {exc!r}")
             notes = ""
-        if notes:
-            self.info["prep"] = (
-                f"{self.info.get('prep') or ''}\n\nRead up while Valor joined:\n{notes}".strip()
-            )
-        self.read_note = READ_IN.format(notes=notes) if notes else READ_NONE
+        self.topics = self.topics or notes or READ_NONE
         self.reading = False
-        if self.session is not None:
-            await self._note(self.read_note)
-            self.read_told = True
+        await self._show()
 
     def prepare(self) -> None:
-        """Ask for a prep turn: after the reading (or as an invited call
-        starts), and each time the voice moves through the queue (`settle`,
-        `backlog`, `open_decisions`); never on a timer. Asks while one waits
-        are one."""
+        """Ask for an update of the state: after the reading (or as an
+        invited call starts), after each of Valor's turns that spoke, and
+        each time the voice moves through the queue (`settle`, `backlog`,
+        `open_decisions`); never on a timer. Asks while one waits are one."""
         if self.preparer is not None and not self.prep_queued:
             self.prep_queued = True
             self.questions.put_nowait(PREP)
 
-    async def _prepare(self) -> None:
-        """The worker's notes on the items still to come, noted to the
-        session with no reply asked (P-038), or to the next one to open when
-        none is; never posted. "nothing ahead" notes nothing."""
+    def state(self) -> str:
+        """The meeting now, as the voice is told it: what the call decided,
+        then the worker's topics."""
+        decided = [
+            f"- {d['decision']}" + (f" ({', '.join(d['by'])}, {d['at']})" if d["by"] else f" ({d['at']})")
+            for d in self.decided
+        ]
+        return STATE.format(
+            decided="\n".join(decided) or "(nothing yet)", topics=self.topics or "(nothing yet)"
+        )
+
+    async def _show(self) -> None:
+        """The state to the open session, as a note asking no reply, when
+        it is not what the session last had; while Live's turn runs it waits
+        for the turn's end (`_content`): a whole state noted mid-reply ended
+        one early, 1 of 4 in the live tests, 2026-11-25."""
+        if self.session is None or self.reply is not None or not (self.decided or self.topics):
+            return
+        text = self.state()
+        if text != self.state_told:
+            self.state_told = text
+            await self._tell(note(text))
+
+    async def _update(self) -> None:
+        """The worker's state of the meeting (P-041): the topics rewritten
+        from the decisions, the state now, the notes before the call and
+        the call so far, then shown; never posted. "no change" changes
+        nothing, and an update written before a settle is dropped: the
+        settle asked for another (2026-11-25: notes written before Tom's no
+        relisted the item, and it was asked again)."""
         if self.left:
             return
-        settled = len(self.settled)
-        prompt = PREPARE.format(
-            settled="\n".join(f"- {r}" for r in self.settled) or "(nothing yet)",
+        decided = len(self.decided)
+        prompt = UPDATE.format(
+            decided="\n".join(f"- {d['decision']}" for d in self.decided) or "(nothing yet)",
+            topics=self.topics or "(nothing yet)",
+            prep=self.info.get("prep") or "(none)",
             so_far="\n".join(self.lines[-40:]) or "(nothing yet)",
         )
+        began = time.monotonic()
         try:
-            notes = (await self.preparer(prompt)).strip()
+            topics = (await self.preparer(prompt)).strip()
         except tasks.TaskStopped:
             return
-        except Exception as exc:  # noqa: BLE001  a prep that fails leaves the call as it was
-            _log(f"call {self.id}: the worker's prep failed: {exc!r}")
+        except Exception as exc:  # noqa: BLE001  an update that fails leaves the state as it was
+            _log(f"call {self.id}: the worker's update failed: {exc!r}")
             return
-        if len(self.settled) != settled:
-            return  # written before a settle, which queued a fresh prep (2026-11-25: it relisted the settled item)
-        if notes and "nothing ahead" not in notes.lower()[:40] and not self.left:
-            head = PREPARED.partition("{")[0]  # only the newest prep is kept
-            self.told = [t for t in self.told if not t.startswith(head)]
-            self.pending = [t for t in self.pending if not t.startswith(head)]
-            await self._note(PREPARED.format(notes=notes), keep=True)
+        _log(f"call {self.id}: the worker's update took {time.monotonic() - began:.1f} s")
+        if len(self.decided) != decided or self.left or not topics or "no change" in topics.lower()[:40]:
+            return
+        self.topics = topics
+        await self._show()
+
+    async def _record(self, decision: dict[str, Any]) -> None:
+        """A decision as a fact of the project the moment it is made, with
+        the open decisions it settles; its name kept on it. One that fails
+        is written again at the end (`_decisions`), with the same source, so
+        a write cut short by the call's end is the same fact."""
+        async with await self._connect() as conn:
+            await self._decisions(conn, [decision], decision["source"])
 
     # -- the call's life --
 
@@ -2360,7 +2450,10 @@ class Call:
                     "route": "gemini", "estimated_input": est, "max_tokens": 16_000,
                     "estimate_usd_micros": spending.gemini_worst_case(price, est, 16_000),
                     "unpriced": price["unpriced"]})  # fmt: skip
-            notes, usage = await self.gemini.summarise(audio, transcript, self.info.get("prep") or "")
+            recorded = "\n".join(f"{n}. {d['decision']}" for n, d in enumerate(self.decided, 1))
+            notes, usage = await self.gemini.summarise(
+                audio, transcript, self.info.get("prep") or "", recorded
+            )
             async with await self._connect() as conn:
                 await spending.charge(conn, self.id, call_id, spending.gemini_cost(usage, price),
                                       {"model": settings.summary_model, "usage": usage})  # fmt: skip
@@ -2376,7 +2469,11 @@ class Call:
         segments = sorted(self.segments, key=lambda s: s["start"])
         # Linked in summary.json, which the app rewrites notes.md from; its
         # decisions and actions it escapes, so they stay as they are.
-        decided = [d for d in notes["decisions"] if d["decision"].strip()]
+        # What the call recorded as it went, then the summary's others: one restating a recorded one is left out.
+        decided = [
+            *self.decided,
+            *(d for d in notes["decisions"] if d["decision"].strip() and not d.get("restates")),
+        ]
         summary = {"summary": linked(notes["summary"], repo, links), "decisions": [d["decision"] for d in decided],
                    "actions": [{k: v for k, v in a.items() if k in ("task", "owner") and v} for a in notes["actions"]]}  # fmt: skip
         files = {
@@ -2400,33 +2497,47 @@ class Call:
 
     async def _decisions(self, conn, decided: list[dict[str, Any]], source: str) -> list[str]:
         """Each decision the call made as a dated fact of its project (kind
-        `decision`, citing the call), about those who made it whom the
-        project knows as people; the report's lines on them."""
+        `decision`, citing the call and the open decisions it settles), about
+        those who made it whom the project knows as people, its fact's name
+        kept on it; one already written (`fact`) is not written again. The
+        report's lines on them."""
         from core import memory
 
         if not decided:
             return []
-        spec, texts = self._spec("its decisions are not recorded as facts"), [d["decision"] for d in decided]
+        spec, todo = (
+            self._spec("its decisions are not recorded as facts"),
+            [d for d in decided if not d.get("fact")],
+        )
         try:
             if spec is None:
                 raise memory.Unavailable("the call has no project spec")
             writes = []
-            for d in decided:
+            for d in todo:
                 by = [n.strip() for n in d.get("by") or [] if n.strip()]
+                settles = ", ".join(f"{q['task_id']}/{q['question_id']}" for q in d.get("settles") or [])
                 claim = d["decision"] + (f" (decided by {', '.join(by)})" if by else "")
-                writes.append({"op": "fact", "kind": "decision", "claim": claim, "source": source,
+                claim += f" (settles {settles})" if settles else ""
+                writes.append({"op": "fact", "kind": "decision", "claim": claim, "source": d.get("source") or source,
                                "since": self.started_at.isoformat(), "about": await memory.known(conn, spec, by)})  # fmt: skip
-            names = await memory.fact_write(conn, spec, writes, via=f"Meet call, task {self.id}")
+            names = (
+                await memory.fact_write(conn, spec, writes, via=f"Meet call, task {self.id}")
+                if writes
+                else {}
+            )
         except (memory.Unavailable, memory.Refused) as exc:
             _log(f"call {self.id}: its decisions are not recorded as facts: {exc}")
             head = f"Decided in the call, not recorded as facts ({exc}); record each with `valor-record fact add --kind decision`:"
-            return [head, *(f"- {t}" for t in texts)]
+            done = [f"- {d['decision']} (fact {d['fact']})" for d in decided if d.get("fact")]
+            return [head, *(f"- {d['decision']}" for d in todo), *done]
+        for n, d in enumerate(todo, 1):
+            d["fact"] = names[str(n)]
         head = (
             "Decided in the call, now facts of the project (kind decision): carry each that changes a backlog "
             "item or an open question to where it lives (its Sheet row, the task waiting on it); an open "
             "question Tom settled is answered as the lines on his read-backs say:"
         )
-        return [head, *(f"- {t} (fact {names[str(n)]})" for n, t in enumerate(texts, 1))]
+        return [head, *(f"- {d['decision']} (fact {d['fact']})" for d in decided)]
 
     def _title(self, topic: str | None) -> str:
         """The call's topic, then the first names of those in it, Valor's last."""
@@ -2494,6 +2605,10 @@ class Call:
         await asyncio.gather(*jobs, return_exceptions=True)
         summary = await self.summarise()
         async with await self._connect() as conn:
+            if self.decided and not (summary or {}).get(
+                "path"
+            ):  # no summary: what the call recorded still reports
+                summary = {**(summary or {}), "decided": await self._decisions(conn, self.decided, "")}
             await end(conn, self.id, self.reason, late=self.late, unanswered=unanswered, summary=summary)
         return self.reason
 

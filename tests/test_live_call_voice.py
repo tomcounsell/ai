@@ -14,6 +14,7 @@ import asyncio
 import os
 import re
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -37,15 +38,21 @@ AGENDA = (
     "Tom and Valor review two items, in order: 1. shipping the import on Monday; 2. the onboarding emails, "
     "which are open: whether to send them from the product or from Tom's address."
 )
-PREPARED = call.PREPARED.format(
-    notes=(
-        "1. The import, Monday: QA passed 212 of 214 cases on 2026-11-16; the two failures are dates written "
-        "day-first, fixed in the parser, retested 2026-11-17. Follow-up, a level down: day-first dates fail "
-        "because the parser guessed month-first when both numbers are 12 or less; it now reads the account's "
-        "locale. Follow-up, a level further: 31 accounts use a day-first locale, 4 of them with over 10,000 rows.\n"
-        "2. Onboarding emails: from the product address, 38 percent opened in the September trial; from Tom's, "
-        "61 percent. Recommendation: Tom's address for the first email only."
-    )
+
+
+def rendered(topics: str, decided: list[str] = ()) -> str:
+    """The state note as the call renders it (`Call.state`), each decision Tom's."""
+    made = [{"decision": d, "by": ["Tom Counsell"], "at": "0:04"} for d in decided]
+    return call.Call.state(SimpleNamespace(topics=topics, decided=made))
+
+
+PREPARED = rendered(
+    "1. The import, Monday: QA passed 212 of 214 cases on 2026-11-16; the two failures are dates written "
+    "day-first, fixed in the parser, retested 2026-11-17. Follow-up, a level down: day-first dates fail "
+    "because the parser guessed month-first when both numbers are 12 or less; it now reads the account's "
+    "locale. Follow-up, a level further: 31 accounts use a day-first locale, 4 of them with over 10,000 rows.\n"
+    "2. Onboarding emails: from the product address, 38 percent opened in the September trial; from Tom's, "
+    "61 percent. Recommendation: Tom's address for the first email only."
 )
 ITEM_ONE = [
     {"role": "user", "parts": [{"text": "Tom Counsell: Let's do the import first. Where is it?"}]},
@@ -367,9 +374,10 @@ STAGES = (
 )
 
 
-async def over_a_long_reply(voice, *, barge: str = "", note: str = "") -> dict:
+async def over_a_long_reply(voice, *, barge: str = "", note: str = "", held: bool = False) -> dict:
     """Tom asks for the five stages; 1.5 s into Valor's reply, `note` is
-    noted and `barge` said over it. What Live was sent from then until its
+    noted (`held`, once his turn completes, as `Call._show` holds a state)
+    and `barge` said over it. What Live was sent from then until its
     turn completes is sent again after, as `Call._tick` sends what cut
     Valor off. What it heard, said, and whether it was interrupted."""
     from google.genai import types
@@ -412,7 +420,7 @@ async def over_a_long_reply(voice, *, barge: str = "", note: str = "") -> dict:
                 break
             await feed(quiet(0.1))
         await feed(quiet(1.5))
-        if note:
+        if note and not held:
             await s.send_client_content(**call.note(note))
         kept: list[np.ndarray] = []
         await feed(voice(barge) if barge else quiet(3), kept if barge else None)
@@ -420,6 +428,8 @@ async def over_a_long_reply(voice, *, barge: str = "", note: str = "") -> dict:
             if out["complete"]:
                 break
             await feed(quiet(0.04), kept if barge else None)
+        if note and held:
+            await s.send_client_content(**call.note(note))
         for chunk in kept:  # sent again once the turn is over
             await s.send_realtime_input(
                 audio=types.Blob(data=call.pcm16(chunk), mime_type=f"audio/pcm;rate={call.RATE}")
@@ -472,13 +482,14 @@ def test_a_prep_note_listing_a_settled_item_does_not_reopen_it(voice):
         u("Yes, show it from Friday noon."),
         m("Noted. What's the next item you'd like to review?"),
     ]
-    stale = call.PREPARED.format(notes=(
+    stale = rendered((
         "Notes for the next two unreached items: the loyalty stamps, then the allergen labels. One catch "
         "first, because it adds work.\n**Automatic late-order refunds**\n- The payment code doesn't do it "
         "today: refunds are manual. The step: one scheduled job plus one test. Recommend raising it now.\n"
         "**Loyalty stamps**\n- Ten stamps for a free loaf; 30 percent of regulars reach ten in a month. "
         "Recommend: yes.\n**Allergen labels**\n- Shown on the menu page only; the checkout lacks them."
-    ))  # fmt: skip
+    ), ["Refunds go out automatically when a delivery is over an hour late", "The driver tip screen stays as it is",
+        "The weekend opening hours banner shows from Friday noon"])  # fmt: skip
     for _ in range(3):
         said = asyncio.run(
             session(
@@ -512,60 +523,63 @@ def test_an_answer_noted_while_valor_talks_is_given_in_his_next_reply(voice):
 
 
 # P-041: the voice takes a replaced state of the meeting mid-call. A made-up project.
-STATE_BEFORE = (
-    "The meeting now (replaces every earlier state):\nTopics:\n- Launch date: open; recommend Monday the 1st.\n"
-    "- Pricing page copy: open; draft says launch Monday.\n- Support rota: open."
+STATE_BEFORE = rendered(
+    "- Launch date: open; recommend Monday the 1st.\n- Pricing page copy: open; draft says launch Monday.\n"
+    "- Support rota: open."
 )
-STATE_AFTER = (
-    "The meeting now (replaces every earlier state):\nDecided in this call (stands over anything below):\n"
-    "- Launch date: Thursday the 4th, not Monday (Tom Counsell, 10:12).\nTopics:\n"
+STATE_AFTER = rendered(
     "- Launch date: decided, Thursday the 4th.\n- Pricing page copy: changed by the launch date: the draft "
-    "says Monday and must say Thursday; open.\n- Support rota: open."
-)
-MEETING = {"name": "meeting", "description": "The meeting's current state: each topic once, decided, open or "
-           "parked, and what each decision changed.", "parameters": {"type": "object", "properties": {}}}  # fmt: skip
-MEETING_LINE = (
-    "\n- Before you speak on any topic of the meeting, call `meeting`: what it returns is the meeting's "
-    "state now and stands over every note."
+    "says Monday and must say Thursday; open.\n- Support rota: open.",
+    ["Launch on Thursday the 4th, not Monday"],
 )
 
 
-async def replaced(voice, *, tool: bool) -> dict:
-    """A state note, then (with no `tool`) its replacement in silence, or
-    (with `tool`) the replacement only from `meeting`; then Tom asks what
-    was decided on the launch date. Whether Valor spoke on the notes, what
-    he said after the ask, the tools, and the seconds from the ask's end to
-    his first voice."""
+async def meeting(voice, steps: list[tuple], before: list[dict] = (), notes: list[str] = ()) -> list[dict]:
+    """A 1:1 call with the call's settings: `notes` noted, `before` the
+    conversation so far, then each step in turn: `("note", text, s)` notes
+    `text` and waits `s` seconds; `("say", text, s)` is Tom saying `text`,
+    then `s` seconds quiet. Per step: what Valor said in it, the tools he
+    called with their arguments, and the seconds from its end to his first
+    voice. A non-blocking tool's reply is scheduled as `Call._tools` does."""
     from google.genai import types
 
     key = credentials.read_key(settings.google_keyfile, call.GOOGLE_KEY, "google-key")
-    out = {"early": "", "said": "", "tools": [], "delay": None}
+    out = [{"said": "", "tools": [], "delay": None, "end": None} for _ in steps]
+    at = {"i": 0}
+    quiet_tools = {t["name"] for t in call.TOOLS if t.get("behavior") == "NON_BLOCKING"}
     config = call.live_config("Valor", "Tom and Valor go through the launch.", None)
-    if tool:
-        config.system_instruction += MEETING_LINE
-        config.tools[0].function_declarations.append(types.FunctionDeclaration(**MEETING))
-    ask = voice("Valor, what did we decide on the launch date, and does it change anything else?")
-    phase = {"asked": None}
     async with call.Gemini(key).connect(config) as s:
-        await s.send_client_content(**call.note(ALONE))
-        await s.send_client_content(**call.note(STATE_BEFORE))
+        for text in [ALONE, *notes]:
+            await s.send_client_content(**call.note(text))
+        for turn in before:
+            await s.send_client_content(turns=turn, turn_complete=False)
 
         async def receive():
             while True:
                 async for m in s.receive():
+                    now = out[at["i"]]
                     for fc in m.tool_call.function_calls if m.tool_call else []:
-                        out["tools"].append(fc.name)
-                        result = {"meeting": STATE_AFTER, "ask": call.ASKED}.get(fc.name, "nothing recorded")
-                        await s.send_tool_response(function_responses=[
-                            types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result})])  # fmt: skip
+                        now["tools"].append((fc.name, dict(fc.args or {})))
+                        result = {"ask": call.ASKED, "settle": "recorded", "post": call.POSTING,
+                                  "open_decisions": "Open for Tom:\n- nothing"}.get(fc.name, "nothing recorded")  # fmt: skip
+                        scheduling = None
+                        if fc.name in quiet_tools:
+                            scheduling = (
+                                types.FunctionResponseScheduling.SILENT
+                                if now["said"] and result in call.ACKNOWLEDGED
+                                else types.FunctionResponseScheduling.WHEN_IDLE
+                            )
+                        await s.send_tool_response(function_responses=[types.FunctionResponse(
+                            id=fc.id, name=fc.name, response={"result": result}, scheduling=scheduling)])  # fmt: skip
                     sc = m.server_content
-                    text = (sc.output_transcription.text or "") if sc and sc.output_transcription else ""
-                    out["early" if phase["asked"] is None else "said"] += text
+                    now["said"] += (
+                        (sc.output_transcription.text or "") if sc and sc.output_transcription else ""
+                    )
                     for part in sc.model_turn.parts if sc and sc.model_turn else []:
                         pcm = np.frombuffer(part.inline_data.data if part.inline_data else b"", "<i2")
                         loud = len(pcm) and np.sqrt(np.mean((pcm / 32768.0) ** 2)) >= call.SPEAKING
-                        if loud and phase["asked"] is not None and out["delay"] is None:
-                            out["delay"] = time.monotonic() - phase["asked"]
+                        if loud and now["delay"] is None and now["end"] is not None:
+                            now["delay"] = time.monotonic() - now["end"]
 
         async def feed(x):
             for i in range(0, len(x), CHUNK):
@@ -575,39 +589,91 @@ async def replaced(voice, *, tool: bool) -> dict:
 
         task = asyncio.create_task(receive())
         quiet = lambda seconds: np.zeros(int(call.RATE * seconds), np.float32)
-        await feed(quiet(3))
-        if not tool:
-            await s.send_client_content(**call.note(STATE_AFTER))
-        await feed(quiet(6))
-        await feed(ask)
-        phase["asked"] = time.monotonic()
-        await feed(quiet(14))
+        await feed(quiet(1))
+        for i, (kind, text, wait) in enumerate(steps):
+            at["i"] = i
+            if kind == "note":
+                out[i]["end"] = time.monotonic()
+                await s.send_client_content(**call.note(text))
+            else:
+                await feed(voice(text))
+                out[i]["end"] = time.monotonic()
+            await feed(quiet(wait))
         task.cancel()
-    print(f"\nearly: {out['early']!r} said: {out['said']!r} tools: {out['tools']} delay: {out['delay']}")
+    for (kind, text, _), seen in zip(steps, out, strict=True):
+        print(f"\n{kind} {text[:50]!r}: said {seen['said']!r} tools {seen['tools']} delay {seen['delay']}")
     return out
 
 
-@pytest.mark.parametrize("tool", [False, True], ids=["note", "meeting-tool"])
-def test_a_replaced_state_is_taken_silently_and_answered_from(voice, tool):
-    """P-041's unknown, first: a state note replaced mid-call (or read
-    from `meeting`) gets no reply of its own, and asked, Valor states the
-    newer decision and the topic it changed."""
-    for _ in range(3):
-        seen = asyncio.run(replaced(voice, tool=tool))
-        assert not seen["early"].strip(), seen
-        assert re.search(r"thursday", seen["said"], re.IGNORECASE), seen
-        assert not re.search(
-            r"\bmonday\b(?!.{0,40}(thursday|instead|not))", seen["said"], re.IGNORECASE
-        ) or re.search(r"thursday", seen["said"], re.IGNORECASE), seen
-        assert re.search(r"pricing|copy|page", seen["said"], re.IGNORECASE), seen
+ASK = "Valor, what did we decide on the launch date, and does it change anything else?"
 
 
-def test_a_state_note_sent_during_a_long_reply_leaves_it_whole(voice):
-    """A whole replaced state noted 1.5 s into a long reply neither cuts nor
-    restarts it."""
+def test_a_replaced_state_is_taken_silently_and_answered_from(voice):
+    """P-041's unknown, first (2026-11-25): a state note replaced mid-call
+    gets no reply of its own, and asked, Valor states the newer decision and
+    the topic it changed (3 of 3; read from a `meeting` tool instead, also
+    3 of 3 and about half a second slower, so not built)."""
     for _ in range(3):
-        seen = asyncio.run(over_a_long_reply(voice, note=STATE_AFTER))
-        assert not seen["interrupted"] and re.search(r"rollout|roll out", seen["said"], re.IGNORECASE), seen
+        _, after, asked = asyncio.run(
+            meeting(voice, [("note", STATE_BEFORE, 3), ("note", STATE_AFTER, 6), ("say", ASK, 14)])
+        )
+        assert not after["said"].strip(), after
+        assert re.search(r"thursday", asked["said"], re.IGNORECASE), asked
+        assert re.search(r"pricing|copy|page", asked["said"], re.IGNORECASE), asked
+
+
+TOPICS = (
+    "- Support rota: open; who covers launch week.\n- Pricing page copy: open; the draft says launch Monday.\n"
+    "- Launch date: open; recommend Monday the 1st."
+)
+OUT_OF_ORDER = [
+    {"role": "user", "parts": [{"text": "Tom Counsell: Let's take the support rota first."}]},
+    {"role": "model", "parts": [{"text": "The support rota is open: who covers launch week."}]},
+    {"role": "user", "parts": [{"text": "Tom Counsell: Hold that. Where is the pricing page copy?"}]},
+    {"role": "model", "parts": [{"text": "The pricing copy is ready; the draft says we launch Monday."}]},
+]  # fmt: skip
+DECIDE = "Valor, on the launch date: we go Thursday the 4th, not Monday. That's decided."
+
+
+def test_topics_out_of_order_a_decision_is_recorded_kept_and_changes_what_it_touches(voice):
+    """P-041's acceptance (Tom, 2026-11-25: "I'd rather the interaction be
+    slow than have to repeat myself"): three topics raised out of order; a
+    decision on one that changes another, which Valor records with `settle`
+    there and then; then a state written before the decision arrives, as
+    the call renders it (the decision on top of the stale topics). Valor
+    says nothing to the note, never asks the decided topic again, states
+    the decision when asked and says the topic it touches changed. Each run
+    also asks the same with no state notes, for the delay they add."""
+    for _ in range(3):
+        decided, stale, asked = asyncio.run(meeting(voice, [
+            ("say", DECIDE, 10),
+            ("note", rendered(TOPICS, ["Launch on Thursday the 4th, not Monday"]), 4),
+            ("say", ASK, 15),
+        ], OUT_OF_ORDER, [rendered(TOPICS)]))  # fmt: skip
+        (readback,) = [a.get("readback", "") for n, a in decided["tools"] if n == "settle"]
+        assert re.search(r"thursday", readback, re.IGNORECASE), decided
+        assert not stale["said"].strip(), stale
+        said = asked["said"]
+        assert re.search(r"thursday", said, re.IGNORECASE) and re.search(
+            r"pricing|copy", said, re.IGNORECASE
+        ), said
+        again = [x for x in re.split(r"(?<=[.?!])\s+", said)
+                 if x.endswith("?") and re.search(r"launch|monday|thursday", x, re.IGNORECASE)]  # fmt: skip
+        assert not again and not [n for n, _ in asked["tools"] if n == "settle"], (
+            asked
+        )  # not asked or settled again
+        bare = asyncio.run(meeting(voice, [("say", DECIDE, 10), ("say", ASK, 15)], OUT_OF_ORDER))
+        print(f"\nDELAY with the state {asked['delay']}, without {bare[-1]['delay']}")
+
+
+def test_a_state_that_lands_during_a_long_reply_waits_for_its_end_and_leaves_it_whole(voice):
+    """A whole state noted 1.5 s into a long reply ended it after two of
+    five stages once in four (2026-11-25), so the call holds it until the
+    turn completes: the reply is whole, and the note asks no reply."""
+    for _ in range(3):
+        seen = asyncio.run(over_a_long_reply(voice, note=STATE_AFTER, held=True))
+        assert not seen["interrupted"] and seen["complete"] == 1, seen
+        assert re.search(r"rollout|roll out", seen["said"], re.IGNORECASE), seen
 
 
 # P-040 (Tom, 2026-11-25): three steps that only carry out an approved rename,
@@ -659,10 +725,15 @@ def test_told_no_valor_changes_course_and_never_asks_it_again(voice):
           "now. Do you want the old table name kept?"),
     ]  # fmt: skip
     no = voice("No. Rename the table too. I don't want two names for one thing.")
-    stale = call.PREPARED.format(notes=(
+    topics = (
         "Step 4: the old table name, customers, kept under Account. Recommendation: keep it, to skip a slow "
         "migration of 3 million rows. Follow-up: renaming later costs the same migration."
-    ))  # fmt: skip
+    )  # fmt: skip
+    # Written before the no: alone, then under the decision as the call shows it once settled.
+    stale, after = (
+        rendered(topics),
+        rendered(topics, ["No old table name: the table is renamed to accounts too"]),
+    )
     nexts = voice("Okay. What else is there?")
     for _ in range(3):
         said = asyncio.run(session(no, before, RENAME, [stale], listen_s=20, decisions=RENAME_OPEN))["said"]
@@ -671,7 +742,7 @@ def test_told_no_valor_changes_course_and_never_asks_it_again(voice):
         then = [*before, u("No. Rename the table too. I don't want two names for one thing."),
                 m(said or "Understood: the table is renamed to accounts too, so there is one name.")]  # fmt: skip
         said = asyncio.run(
-            session(nexts, then, RENAME, [stale], listen_s=12, decisions="Open for Tom:\n- nothing")
+            session(nexts, then, RENAME, [after], listen_s=12, decisions="Open for Tom:\n- nothing")
         )["said"]
         asked_again = [x for x in re.split(r"(?<=[.?!])\s+", said) if x.endswith("?") and TABLE.search(x)]
         assert not asked_again and not re.search(

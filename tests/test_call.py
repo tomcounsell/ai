@@ -152,6 +152,7 @@ class Gemini:
                                "markdown": "# The call\n\nShip PR #12 and ENG-633."}  # fmt: skip
         self.summarised: list[tuple[Path, str, bytes]] = []
         self.preps: list[str] = []
+        self.recorded: list[str] = []
 
     @contextlib.asynccontextmanager
     async def connect(self, config):
@@ -163,9 +164,10 @@ class Gemini:
         self.sessions.append(session)
         yield session
 
-    async def summarise(self, audio, transcript, prep):
+    async def summarise(self, audio, transcript, prep, recorded=""):
         self.summarised.append((audio, transcript, audio.read_bytes()[:12]))
         self.preps.append(prep)
+        self.recorded.append(recorded)
         if isinstance(self.notes, Exception):
             raise self.notes
         return self.notes, {"prompt_token_count": 1000, "response_token_count": 200,
@@ -1163,13 +1165,13 @@ def test_a_settle_resolves_bare_ids_against_the_open_decisions_and_says_what_mat
         r.response["result"] for k, kw in c.session.sent if k == "tool" for r in kw["function_responses"]
     ]
     assert "no open decision is t4, zz" in result and "q4a" not in str(post)
-    assert c.the.settled == ["Rename it."]
+    assert [d["decision"] for d in c.the.decided] == ["Rename it."]
 
 
 def test_a_settle_with_no_ids_or_no_board_still_posts_its_readback_and_records_none(dsn, team, quick):
     """With no ids, or bare ids on a project with no board, the read-back
-    is still posted and kept for the prep, with no `settles`, never an
-    error."""
+    is still posted and in the state as decided, with no `settles`, never
+    an error."""
 
     async def go():
         c = await in_call(dsn, team)
@@ -1184,7 +1186,10 @@ def test_a_settle_with_no_ids_or_no_board_still_posts_its_readback_and_records_n
     c, done_ = run(go())
     posts = [e["payload"] for e in done_ if e["type"] == "meet.send_message"]
     assert {"text": "Keep it weekly."} in posts and {"text": "No to IE."} in posts
-    assert c.the.settled == ["Keep it weekly.", "No to IE."]
+    assert [(d["decision"], d["settles"]) for d in c.the.decided] == [
+        ("Keep it weekly.", []),
+        ("No to IE.", []),
+    ]
     results = [
         r.response["result"] for k, kw in c.session.sent if k == "tool" for r in kw["function_responses"]
     ]
@@ -1623,18 +1628,20 @@ def test_a_refused_handle_opens_a_fresh_session_told_the_call_so_far(dsn, team, 
     assert [e["result"]["spoken_text"] for e in done_ if e["type"] == "meet.say"][-1] == "Still here."
 
 
-def test_a_fresh_session_is_told_the_workers_answers_the_steers_and_the_newest_prep(dsn, team, quick):
+def test_a_fresh_session_is_told_the_workers_answers_the_steers_and_the_newest_state(dsn, team, quick):
     """2026-11-18: a session opened fresh at 14:04 was told only what was
-    heard and said, not what the worker had answered or prepared."""
+    heard and said, not what the worker had answered or prepared. It is
+    told the answers and steers, and starts from the newest state (P-041),
+    the decision on top, never an older one."""
 
     async def go():
         async def worker(question):
             return "Tuesday."
 
-        replies = iter(["Item two: old prep.", "Item two: 0.4 percent of imports fail."])
+        replies = ["Item two: old prep.", "Item two: 0.4 percent of imports fail."]
 
         async def preparer(prompt):
-            return next(replies)
+            return replies.pop(0) if len(replies) > 1 else replies[0]
 
         starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
         c = await in_call(dsn, team, worker=worker, preparer=preparer, starts=starts)
@@ -1644,7 +1651,7 @@ def test_a_fresh_session_is_told_the_workers_answers_the_steers_and_the_newest_p
         await push(c.session, tool("settle", ids=["t1/q1"], readback="Ship Monday."), done())
         async with await db.connect(dsn) as conn:
             await ledger.append(conn, c.the.id, "message.steered", {"text": "The figure is 212."})
-        assert await until(lambda: len(c.the.told) == 3)
+        assert await until(lambda: len(c.the.told) == 2 and "0.4 percent" in c.the.topics)
         await settle(c.the)
         c.gemini.fail = 1
         await push(c.session, resume("h7"), ConnectionError("1008 Requested entity already exists"))
@@ -1658,6 +1665,11 @@ def test_a_fresh_session_is_told_the_workers_answers_the_steers_and_the_newest_p
     assert 'Your worker answered "When did the import ship?" (posted in the chat): Tuesday.' in told
     assert call.STEERED.format(text="The figure is 212.") in told
     assert "0.4 percent" in told and "old prep" not in told
+    assert (
+        told.count("The meeting now (replaces") == 1
+        and "Decided in this call" in told
+        and "- Ship Monday." in told
+    )
     assert not c.gemini.sessions[1].contents() or not any(
         "0.4 percent" in t or "chat session sent" in t for t, _ in c.gemini.sessions[1].contents()
     )  # told once, in the config
@@ -1965,6 +1977,168 @@ def test_what_a_call_decided_becomes_dated_facts_of_its_project_and_the_report_s
     assert kept["notes"] == "Shipping is Monday.\nShip Monday\nDrop the beta"
 
 
+def test_a_decision_settled_in_the_call_is_a_fact_before_it_ends_and_its_record_lists_it_once(
+    dsn, team, quick
+):
+    """P-041: a decision is recorded the moment it is settled, a fact of the
+    project citing the open decisions it settles, about whoever decided (in
+    a 1:1, with no `by`, the one other person). The summary is told what was
+    recorded; the end lists it in notes.md, summary.json and the report,
+    and one the summary restates in other words (`restates`) is not written
+    twice (the 2026-11-25 case: one decision under two labels)."""
+    from core import memory, workspace
+
+    notes = {"topic": "Shed", "summary": "The shed.", "markdown": "m", "actions": [],
+             "decisions": [{"decision": "The shed goes teal, not green", "by": ["Logan"], "restates": 1},
+                           {"decision": "Order the teal paint by Friday", "by": []}]}  # fmt: skip
+
+    async def go():
+        spec = workspace.Spec.load(team.project)
+        async with await db.connect(dsn) as conn:
+            await memory.fact_write(conn, spec, [{"op": "entity", "kind": "person", "name": "Logan"}])
+        c = await in_call(dsn, team, gemini=Gemini(notes=notes))
+        c.the.present = {LOGAN}  # a 1:1
+        await push(c.session, audio(), said("Teal it is."),
+                   tool("settle", ids=["t1/q1"], readback="Paint the shed teal."), done())  # fmt: skip
+        assert await until(lambda: c.the.decided and c.the.decided[0].get("fact"))
+        async with await db.connect(dsn) as conn:
+            during = (await memory.facts_read(conn, spec, {"kind": "decision"}))["facts"]
+        await settle(c.the)
+        store = c.the.store
+        await finish(c)
+        rows = await bridges.rows(dsn, c.brief.id)
+        (ended,) = [r["payload"] for r in rows if r["type"] == "child.reported"
+                    and r["payload"]["about_key"].endswith(":ended")]  # fmt: skip
+        async with await db.connect(dsn) as conn:
+            after = (await memory.facts_read(conn, spec, {"kind": "decision"}))["facts"]
+        return c, during, after, ended["text"], store
+
+    memory.reset()
+    try:
+        c, during, after, text, store = run(go())
+    finally:
+        memory.reset()
+    claim = "Paint the shed teal. (decided by Logan) (settles t1/q1)"
+    (fact,) = [f for f in during if f["claim"] == claim]
+    assert fact["about"] == ["Logan"]
+    assert [f["claim"] for f in after].count(claim) == 1 and not [
+        f for f in after if "goes teal" in f["claim"]
+    ]
+    assert "Order the teal paint by Friday" in {f["claim"] for f in after}
+    assert c.gemini.recorded == ["1. Paint the shed teal."]
+    (folder,) = store.iterdir()
+    assert json.loads((folder / "summary.json").read_text())["decisions"] == [
+        "Paint the shed teal.", "Order the teal paint by Friday"]  # fmt: skip
+    assert "Paint the shed teal." in (folder / "notes.md").read_text()
+    assert (
+        f"- Paint the shed teal. (fact {fact['fact']})" in text
+        and "- Order the teal paint by Friday (fact " in text
+    )
+    assert "The shed goes teal" not in text
+
+
+def test_a_decision_whose_fact_failed_in_the_call_is_written_at_its_end(dsn, team, quick, monkeypatch):
+    """A fact write that fails mid-call leaves the decision in the state
+    with no fact; the end writes it with the summary's others."""
+    from core import memory
+
+    real, calls = memory.fact_write, []
+
+    async def flaky(conn, spec, writes, **kw):
+        calls.append([w["claim"] for w in writes])
+        if len(calls) == 1:
+            raise memory.Unavailable("the memory store could not be reached (down)")
+        return await real(conn, spec, writes, **kw)
+
+    monkeypatch.setattr(memory, "fact_write", flaky)
+    notes = {"topic": "Gate", "summary": "s", "markdown": "m", "actions": [], "decisions": []}
+
+    async def go():
+        c = await in_call(dsn, team, gemini=Gemini(notes=notes))
+        await push(c.session, audio(), said("Noted."),
+                   tool("settle", readback="Fix the gate hinge first.", by=["Tom Counsell"]), done())  # fmt: skip
+        assert await until(lambda: len(calls) == 1)
+        await settle(c.the)
+        await finish(c)
+        rows = await bridges.rows(dsn, c.brief.id)
+        (ended,) = [r["payload"] for r in rows if r["type"] == "child.reported"
+                    and r["payload"]["about_key"].endswith(":ended")]  # fmt: skip
+        return c, ended["text"]
+
+    memory.reset()
+    try:
+        c, text = run(go())
+    finally:
+        memory.reset()
+    assert calls == [["Fix the gate hinge first. (decided by Tom Counsell)"]] * 2
+    assert (
+        c.the.decided[0]["fact"] and f"- Fix the gate hinge first. (fact {c.the.decided[0]['fact']})" in text
+    )
+
+
+def test_a_state_waits_out_valors_turn_and_is_not_told_twice(dsn, team, quick):
+    """A whole state noted mid-reply ended one early (1 of 4 in the live
+    tests, 2026-11-25): a state that changes while Live's turn runs is
+    noted once that turn completes, asking no reply; one unchanged is not
+    noted again. A turn Valor spoke asks for an update."""
+    updates = []
+
+    async def preparer(prompt):
+        updates.append(prompt)
+        return "Topics: the shed, then the gate."
+
+    async def go():
+        starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        c = await in_call(dsn, team, preparer=preparer, starts=starts)
+        assert await until(lambda: c.the.topics)
+        await settle(c.the)
+        await push(c.session, audio(), said("Teal, then."), tool("settle", readback="Paint the shed teal."))
+        await settle(c.the)
+        mid = [t for t, _ in _prepared(c.session) if "teal" in t]
+        await push(c.session, done())
+        assert await until(lambda: [t for t, _ in _prepared(c.session) if "teal" in t])
+        await settle(c.the)
+        await push(c.session, audio(), said("Anything else?"), done())
+        assert await until(lambda: len(updates) >= 3)
+        await settle(c.the)
+        await finish(c)
+        return c, mid
+
+    c, mid = run(go())
+    assert mid == []  # not while the turn ran
+    states = [t for t, complete in _prepared(c.session) if not complete]
+    assert len(states) == len(set(states)) and "- Paint the shed teal." in states[-1]
+    assert len([t for t in states if "teal" in t]) == 1
+
+
+def test_a_long_state_reaches_a_fresh_session_whole(dsn, team, quick):
+    """A state over a quarter of `CALL_SO_FAR` is in a fresh session's
+    instruction whole, beside the call so far."""
+    topics = (
+        "\n".join(f"- Topic {i}: open; " + "detail " * 40 for i in range(60)) + "\n- The last topic: open."
+    )
+    assert len(topics) > call.CALL_SO_FAR // 4
+
+    async def preparer(prompt):
+        return topics
+
+    async def go():
+        starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        c = await in_call(dsn, team, preparer=preparer, starts=starts)
+        assert await until(lambda: c.the.topics == topics)
+        await push(c.session, heard("Valor, where are we?"), audio(), said("On the shed."), done())
+        await settle(c.the)
+        await push(c.session, go_away())  # no handle: a fresh session
+        assert await until(lambda: len(c.gemini.sessions) == 2 and c.the.session is c.gemini.sessions[1])
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    c = run(go())
+    told = c.gemini.configs[-1].system_instruction
+    assert topics in told and "On the shed." in told
+
+
 def test_with_memory_off_the_report_lists_what_the_call_decided_as_not_recorded(
     dsn, team, quick, monkeypatch
 ):
@@ -2019,7 +2193,8 @@ def test_the_summary_uploads_the_recording_and_sends_it_with_the_transcript(tmp_
     assert files.file == str(audio_file) and files.deleted == ["files/1"]
     assert models.model == "gemini-3.1-pro-preview" and models.contents[0].name == "files/1"
     assert models.contents[1].endswith(
-        "before the call:\nThe launch.\n\nThe transcript:\n[0:01] Logan (spoke): hi"
+        "before the call:\nThe launch.\n\nDecided and recorded during the call, numbered:\n(none)\n\n"
+        "The transcript:\n[0:01] Logan (spoke): hi"
     )
     assert notes["markdown"] == "m" and usage == {"prompt_token_count": 10}
 
@@ -3046,9 +3221,11 @@ def test_an_invited_call_posts_no_link_and_reads_nothing(dsn, team, quick):
 
 def test_the_reading_reaches_the_open_call_once_as_a_note_never_posted(dsn, team, quick):
     """P-033: while the worker reads up, Live is told it is still reading;
-    the reading is noted once with no reply asked, never posted, and added
-    to the notes, so a fresh session starts with it and is not noted again.
-    A question asked meanwhile waits for it on the one worker lane."""
+    the reading is the state's first topics, noted once with no reply
+    asked, never posted, and a fresh session starts from the state, not
+    noted it again. It is not added to the notes before the call, where it
+    would sit stale beside the state (P-041). A question asked meanwhile
+    waits for it on the one worker lane."""
     gate, order = asyncio.Event(), []
 
     async def reader():
@@ -3078,12 +3255,13 @@ def test_the_reading_reaches_the_open_call_once_as_a_note_never_posted(dsn, team
     first, second = c.gemini.configs[0].system_instruction, c.gemini.configs[1].system_instruction
     assert "still reading up" in first and "moved to Friday" not in first
     assert "still reading up" not in second and "moved to Friday" in second
-    noted = [t for t, complete in c.gemini.sessions[0].contents() if "reading for this call is in" in t]
+    noted = [t for t, complete in c.gemini.sessions[0].contents() if "The meeting now" in t]
     assert len(noted) == 1 and "moved to Friday" in noted[0]
     assert all(not complete for t, complete in c.gemini.sessions[0].contents() if t.startswith("[note]"))
-    assert not [t for t, _ in c.gemini.sessions[1].contents() if "reading for this call" in t]
+    assert not [t for t, _ in c.gemini.sessions[1].contents() if "The meeting now" in t]
+    assert "The meeting now" in second and "two decisions open" not in second  # the state, not the old notes
     assert not [p for p in c.page.posts if "moved to Friday" in p]
-    assert "moved to Friday" in c.the.info["prep"] and c.the.info["prep"].startswith("The launch")
+    assert "moved to Friday" not in c.the.info["prep"]
 
 
 def test_a_reading_done_while_live_opens_is_noted_once(dsn, team, quick):
@@ -3117,7 +3295,7 @@ def test_a_reading_done_while_live_opens_is_noted_once(dsn, team, quick):
 
     gemini = run(go())
     assert "still reading up" in gemini.configs[0].system_instruction
-    noted = [t for t, _ in gemini.sessions[0].contents() if "reading for this call is in" in t]
+    noted = [t for t, _ in gemini.sessions[0].contents() if "The meeting now" in t]
     assert len(noted) == 1 and "Logan owns QA." in noted[0]
 
 
@@ -3137,7 +3315,11 @@ def test_a_reading_that_fails_says_so_and_leaves_no_question_unanswered(dsn, tea
         return c
 
     c = run(go())
-    assert (f"[note] {call.READ_NONE}", False) in c.session.contents()
+    assert [
+        t
+        for t, complete in c.session.contents()
+        if t.startswith("[note] The meeting now") and call.READ_NONE in t and not complete
+    ]
     assert not c.the.dropped and c.the.info["prep"].startswith("The launch")
 
 
@@ -3205,9 +3387,11 @@ def test_a_task_given_in_a_call_is_ordinary_work_and_only_people_decisions_go_to
 def test_the_reading_note_takes_back_the_still_reading_line():
     """Call pxz-exmv-icy, #122072: after its reading came in (#122065) the
     call still said "I am still reading up"; its instruction cannot change
-    mid-session, so the note says it no longer applies."""
-    note = call.READ_IN.format(notes="n")
-    assert "you are no longer reading up, so never say you are" in note
+    mid-session, so the line itself says the state note ends it."""
+    assert (
+        "Once a note opening 'The meeting now' comes, your reading is in: never say you are still reading up."
+        in (" ".join(call.READING_LINE.split()))
+    )
 
 
 def test_the_tasks_from_a_call_reach_the_chat_session_in_its_report(dsn, team, quick):
@@ -3347,23 +3531,23 @@ def test_a_stakeholder_is_asked_only_what_is_theirs_once_and_after_it_is_explain
         "say which only carry out what was already decided (status, no ask), and ask once for each that needs their answer, after explaining it"
         in told
     )
-    for prompt in (call.READ_UP, call.PREPARE):
+    for prompt in (call.READ_UP, call.UPDATE):
         flat_prompt = " ".join(prompt.split())
         assert (
             "whether it only carries out what was already decided (status, no question) or needs their answer"
             in flat_prompt
         )
         assert "what it is and what it changes, in the person's terms" in flat_prompt
-    assert "Name each decision once, under the label the call uses." in call.PREPARE
-    assert "Settled in this call (leave each out, under any name):\n{settled}" in call.PREPARE
+    assert "Name each decision once, under the label the call uses." in call.UPDATE
+    assert "Decided in this call (each stays decided, under any name):\n{decided}" in call.UPDATE
     converse = " ".join((Path(__file__).parents[1] / "skills/sdlc/converse.md").read_text().split())
     assert "never as a bare yes or no with the detail still to come" in converse
     assert (
         "listed as status, following that decision, never as a question (**Status or question**)" in converse
     )
     assert "a project rule goes into its instruction at the reach it was given, never widened" in converse
-    assert 'A note opening "Your worker prepared" is depth on items still to come' in told
-    assert call.PREPARED.startswith("Your worker prepared")
+    assert 'A note opening "The meeting now" is the call\'s one record of what is open and decided' in told
+    assert call.STATE.startswith("The meeting now")
     from core import __main__ as kernel
 
     source = " ".join(inspect.getsource(kernel._call).replace('"\n', "").replace('"', "").split())
@@ -3373,13 +3557,15 @@ def test_a_stakeholder_is_asked_only_what_is_theirs_once_and_after_it_is_explain
     )
     assert "never the same answer" in source and "preparer=turn" in source
     worker = " ".join((Path(__file__).parent.parent / "skills/sdlc/call.md").read_text().split())
-    assert "A turn that asks you to prepare ahead is not a question" in worker and "never posted" in worker
+    assert (
+        "A turn that asks you to update the state of the call is not a question" in worker
+        and "never posted" in worker
+    )
 
 
 def _prepared(session) -> list[tuple[str, bool]]:
-    return [
-        (t, complete) for t, complete in session.contents() if t.startswith("[note] Your worker prepared")
-    ]
+    """The state notes the session was given."""
+    return [(t, complete) for t, complete in session.contents() if t.startswith("[note] The meeting now")]
 
 
 def test_the_worker_prepares_after_the_reading_as_a_note_never_posted(dsn, team, quick):
@@ -3394,34 +3580,38 @@ def test_the_worker_prepares_after_the_reading_as_a_note_never_posted(dsn, team,
 
     async def preparer(prompt):
         order.append("prep")
-        assert "next two items or open questions" in prompt and "The call so far:" in prompt
+        assert "next two open topics" in prompt and "The call so far:" in prompt
         return "Dossiers: 14 people recorded, 3 internal (ledger, 2026-11-16)."
 
     async def go():
         c = await in_call(dsn, team, reader=reader, preparer=preparer)
-        assert await until(lambda: _prepared(c.session))
+        assert await until(lambda: "14 people" in c.the.topics)
         await settle(c.the)
         await finish(c)
         return c
 
     c = run(go())
     assert order == ["read", "prep"]
-    ((text, complete),) = _prepared(c.session)
-    assert "14 people recorded" in text and complete is False
+    # The session has the newest state, in its config or as a note asking no reply.
+    given = [
+        c.gemini.configs[0].system_instruction,
+        *(t for t, complete in _prepared(c.session) if not complete),
+    ]
+    assert "14 people recorded" in given[-1] and "The meeting now (replaces" in given[-1]
     assert not [p for p in c.page.posts if "14 people" in p]
 
 
-def test_prep_runs_on_the_queue_moving_not_on_talk_and_questions_go_first(dsn, team, quick):
-    """Preps come on events (an invited call's start, `settle`, `backlog`,
-    `open_decisions`), in a group call too, never because the call talked
-    on; events during a prep are one more prep; a question asked meanwhile
-    is answered first, posted and noted as ever. "nothing ahead" notes
-    nothing. A prep under way when Tom settles an item is dropped, and the
-    next lists each read-back of the call as settled, whatever has scrolled
-    out of its window (2026-11-25: a prep written before Tom's no relisted
-    the item, and it was asked again)."""
+def test_the_state_updates_on_the_queue_moving_and_a_settle_overtakes_one_under_way(dsn, team, quick):
+    """Updates come on events (an invited call's start, `settle`, `backlog`,
+    `open_decisions`, a turn Valor spoke), in a group call too, never
+    because others talked on; events during one are one more. "no change"
+    changes nothing. A decision is in the state the moment it is settled,
+    before any update; an update under way when Tom settles is dropped, and
+    the next lists each decision of the call, whatever has scrolled out of
+    its window (2026-11-25: notes written before Tom's no relisted the item,
+    and it was asked again)."""
     gate, order, prompts = asyncio.Event(), [], []
-    replies = iter(["nothing ahead", "Item two: 0.4 percent of imports fail.", "Item three: blocked on QA."])
+    replies = iter(["no change", "Item two: 0.4 percent of imports fail.", "Item three: blocked on QA."])
 
     async def preparer(prompt):
         order.append("prep")
@@ -3430,13 +3620,9 @@ def test_prep_runs_on_the_queue_moving_not_on_talk_and_questions_go_first(dsn, t
             await gate.wait()
         return next(replies)
 
-    async def worker(question):
-        order.append(question)
-        return "Tuesday."
-
     async def go():
         starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
-        c = await in_call(dsn, team, worker=worker, preparer=preparer, starts=starts)
+        c = await in_call(dsn, team, preparer=preparer, starts=starts)
         assert await until(lambda: order == ["prep"])
         await settle(c.the)
         c.the.present = {"d1", "d2"}  # a group call
@@ -3445,37 +3631,71 @@ def test_prep_runs_on_the_queue_moving_not_on_talk_and_questions_go_first(dsn, t
         await asyncio.sleep(0.3)
         talked = list(order)
         await push(c.session, tool("settle", ids=["t1/q1"], readback="Ship Monday."), done())
-        assert await until(lambda: len(order) == 2)  # the second prep, held at the gate
+        assert await until(lambda: len(order) == 2)  # the second update, held at the gate
+        assert await until(lambda: any("- Ship Monday." in t for t, _ in _prepared(c.session)))
         await push(c.session, tool("open_decisions"), done())
         await push(c.session, tool("settle", ids=["t2/q2"], readback="Drop IE."), done())
-        await push(c.session, tool("ask", question="When did the import ship?"), done())
-        # Tool calls are handled in order: once the question is taken, so are the two before it.
-        assert await until(lambda: "when did the import ship" in c.the.asked)
+        assert await until(lambda: len(c.the.decided) == 2)
         gate.set()
-        assert await until(lambda: len(order) == 4)
+        assert await until(lambda: len(order) == 3 and "QA" in c.the.topics)
         await settle(c.the)
-        assert await until(lambda: any("asked aloud" in t for t, _ in c.session.contents()))
         await finish(c)
         return c, talked
 
     c, talked = run(go())
-    assert talked == ["prep"]  # talk alone starts no prep, and "nothing ahead" was noted as nothing
-    assert order == ["prep", "prep", "When did the import ship?", "prep"]
+    assert talked == ["prep"]  # talk alone starts no update, and "no change" was noted as nothing
+    assert order == ["prep", "prep", "prep"]
     notes = [t for t, _ in _prepared(c.session)]
-    assert len(notes) == 1 and "blocked on QA" in notes[0]  # the prep a settle overtook is never noted
-    assert "Settled in this call (leave each out, under any name):\n(nothing yet)" in prompts[0]
+    assert not [t for t in notes if "0.4 percent" in t]  # the update a settle overtook is never shown
+    assert "blocked on QA" in notes[-1] and "- Ship Monday." in notes[-1] and "- Drop IE." in notes[-1]
+    assert "Decided in this call (each stays decided, under any name):\n(nothing yet)" in prompts[0]
     assert "- Ship Monday.\n" in prompts[1] and "Drop IE." not in prompts[1]
     assert "- Ship Monday.\n- Drop IE.\n" in prompts[2]
-    assert not [p for p in c.page.posts if "0.4 percent" in p or "nothing ahead" in p]
+    assert not [p for p in c.page.posts if "0.4 percent" in p or "no change" in p]
+
+
+def test_a_question_stops_an_update_under_way_and_the_update_runs_after_its_answer(dsn, team, quick):
+    """A lookup never waits on an update (P-041): asked while one runs, the
+    update is stopped, the question answered, posted and noted, and the
+    update asked again after it."""
+    order, first = [], asyncio.Event()
+
+    async def preparer(prompt):
+        order.append("prep")
+        if len(order) == 1:
+            first.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                order.append("stopped")
+                raise
+        return "Topics after the answer."
+
+    async def worker(question):
+        order.append(question)
+        return "Tuesday."
+
+    async def go():
+        starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
+        c = await in_call(dsn, team, worker=worker, preparer=preparer, starts=starts)
+        assert await until(lambda: first.is_set())
+        await push(c.session, tool("ask", question="When did the import ship?"), done())
+        assert await until(lambda: "after the answer" in c.the.topics)
+        await settle(c.the)
+        await finish(c)
+        return c
+
+    c = run(go())
+    assert order == ["prep", "stopped", "When did the import ship?", "prep"]
     assert any("Tuesday." in p for p in c.page.posts)
     say = call.SAY_ANSWER.format(question="When did the import ship?", answer="Tuesday.")
     assert (f"[note] {say}", False) in c.session.contents()  # asked aloud: noted, asking no turn
 
 
-def test_a_prep_done_while_no_session_is_open_is_noted_once_to_the_next(dsn, team, quick):
-    """A prep that lands before Live is open (the call joining, or between
-    sessions) waits for the next session to open, is noted to it once with
-    no reply asked, and not again to a session after."""
+def test_a_state_done_while_no_session_is_open_is_noted_once_to_the_next(dsn, team, quick):
+    """A state that lands before Live is open (the call joining, or between
+    sessions) is noted once to the next session to open, with no reply
+    asked; a fresh session after has it in its config, not noted again."""
     opening, asked = asyncio.Event(), asyncio.Event()
 
     class SlowGemini(Gemini):
@@ -3495,7 +3715,7 @@ def test_a_prep_done_while_no_session_is_open_is_noted_once_to_the_next(dsn, tea
         starts = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
         _brief, the = await a_call_of(dsn, team, Page(), gemini, preparer=preparer, starts=starts)
         running = asyncio.create_task(the.run())
-        assert await until(lambda: the.pending)
+        assert await until(lambda: the.topics)
         opening.set()
         assert await until(lambda: the.session is not None and _prepared(the.session))
         await settle(the)
@@ -3506,7 +3726,7 @@ def test_a_prep_done_while_no_session_is_open_is_noted_once_to_the_next(dsn, tea
         await asyncio.wait_for(running, 15)
         return the, gemini
 
-    the, gemini = run(go())
+    _the, gemini = run(go())
     ((text, complete),) = _prepared(gemini.sessions[0])
     assert "0.4 percent" in text and complete is False
-    assert not _prepared(gemini.sessions[1]) and not the.pending
+    assert not _prepared(gemini.sessions[1]) and "0.4 percent" in gemini.configs[1].system_instruction

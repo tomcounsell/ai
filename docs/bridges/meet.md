@@ -49,35 +49,52 @@ against a new Meet with a second device of Valor's account
   Gemini Live session (`settings.call_model`, voice `settings.call_voice`,
   the key in `google-key`), with notes that ask for no reply: who is
   speaking, who is here (with one other person, all they say is to Valor),
-  the worker's answers, the call's steers and, for a call asked for in a chat, the worker's
-  reading once it is in (until then the instruction says it is still
-  reading up, while asking the worker and taking tasks go on as usual;
-  the note bringing the reading says it no longer is), and the worker's
-  prep on the items still to come: one after the reading (or as an
-  invited call starts) and one after each `settle`, `backlog` or
-  `open_decisions`, never on a timer, a question asked meanwhile going
-  first (`Call.prepare`; Tom, 2026-11-17, P-038). The prep leaves out what
-  the call has settled, read-backs and catches on it included, and Live is
-  told a settled item stays settled, whatever a note lists (twice a prep
-  note's catch on a settled item had Valor raise it again, 2026-11-19). Each
-  prep is given Tom's read-backs so far in the call, so a decision stays out
-  after it scrolls out of the prep's 40-line window, and a prep under way
-  when Tom settles something is dropped for the one that settle queues
-  (2026-11-25: a prep written before Tom's no relisted the item under
-  another label, and Valor asked it three more times). The reading and the
-  prep give each item what it is and what it changes, in the person's
-  terms, and whether it only carries out a decision (status) or needs an
-  answer, each decision named once. With one other person,
+  the worker's answers, the call's steers, and the call's one live state
+  (P-041; Tom, 2026-11-25: "I'd rather the interaction be slow than have
+  to repeat myself"). The state is what the call decided, each decision
+  the moment it is settled, then the worker's topics: each once under the
+  label the call uses, open, decided or parked, what it touches and what a
+  decision changed, with depth on the next two (`Call.state`). Each state
+  note replaces the last and the notes before the call; Live is told to
+  speak on a topic from the newest, in any order, and never to ask a
+  decided one again. A state that changes while Live's turn runs waits for
+  the turn's end (a whole state noted mid-reply ended one early, 1 of 4 in
+  the live tests, 2026-11-25); an unchanged one is not noted again. A
+  session opened fresh has the state in its instruction in place of the
+  notes before the call. For a call asked for in a chat, the worker's
+  reading is the state's first topics, never added to those notes (until
+  it is in, the instruction says Valor is still reading up, while asking
+  the worker and taking tasks go on as usual). The worker updates the
+  topics (`UPDATE`) after the reading (or as an invited call starts),
+  after each turn Valor spoke, and after each `settle`, `backlog` or
+  `open_decisions`, never on a timer, coalesced (`Call.prepare`; P-038).
+  Each update is given the call's decisions, so one stays decided after it
+  scrolls out of the 40-line window; one under way when a decision is
+  settled is dropped for the one that settle queues (2026-11-25: notes
+  written before Tom's no relisted the item under another label, and
+  Valor asked it three more times); a question asked while one runs stops
+  it, is answered, and the update runs again after, so a lookup never
+  waits on an update. An update took 14 to 17 s in three timed runs
+  (2026-11-25), between replies, never in one; in the live tests a reply
+  came 1.1 to 1.2 s after the question with the state and without, so the
+  state adds no measurable delay. The reading and the update give each
+  item what it is and what it changes, in the person's terms, and whether
+  it only carries out a decision (status) or needs an answer, each
+  decision named once. With one other person,
   Valor leads: a settled item's read-back opens the next; with more, the
   who-is-here note says the next item waits until someone asks for it. Live decides when Valor is addressed and
   speaks; its tools ask the worker (a fresh `call` turn in the session's
   checkout, on the call's gateway), post, read the open decisions,
-  record Tom's read-backs (`settle`: its ids as `open_decisions` gives
+  record each decision as it is made (`settle`: the read-back, `by` who
+  decided, in a 1:1 the other person when left out, and its ids as `open_decisions` gives
   them, or a bare question id, or a task id with one open question,
   matched against the board's open questions; an id that matches none is
   said back to Live, so it is never told "recorded" for nothing, and the
-  read-back is posted and kept for the prep either way; 2026-11-25, ids
-  of another form were dropped) and, when the project's spec names a backlog
+  read-back is posted and in the state either way; 2026-11-25, ids
+  of another form were dropped; the decision is written at once as a
+  dated `decision` fact of the project citing the open decisions it
+  settles, about who decided, and one whose write fails is written at the
+  end, with the same source, so it is the same fact) and, when the project's spec names a backlog
   Sheet in its rooms, read it (`backlog`: `sheet.py lookup` on how
   someone described an item, or the whole Queue in order), and look a
 person up (`person`: their dossier on the call's project, by name or loose
@@ -138,8 +155,8 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   before the next opens. A resume that fails to open (Live refusing its
   handle as still connected, or not found or expired) opens a fresh
   session, told that Valor is already in the call,
-  who is here, the newest of the worker's answers, the steers and the
-  newest prep (a quarter of `CALL_SO_FAR`), and the newest of the
+  who is here, the state whole, the newest of the worker's answers and
+  the steers (a quarter of `CALL_SO_FAR`), and the newest of the
   transcript in the rest; one kept while no session was open is noted to
   the next to open.
   Two failed fresh opens post one line and leave. Nothing ends a call at a
@@ -194,7 +211,7 @@ saying anything about someone). Each Live turn is one `meet.say`, its audio
   lines beside it. The summary's actions (each task given or taken in the
   call, with the one to do it) are listed in the call's report as tasks
   for the asking session to take, hand on or decline; with no summary, the
-  report points at the transcript for them (P-034). `valor-record call <code>` reads the transcript; `valor-record call --search "<words>"` finds a line or summary across the project's calls. Each decision in the summary is written as a `decision` fact of the project, citing the call, and listed in the report.
+  report points at the transcript for them (P-034). `valor-record call <code>` reads the transcript; `valor-record call --search "<words>"` finds a line or summary across the project's calls. Gemini is told the decisions the call recorded as it went and lists only others (one that restates a recorded one gives its number, `restates`, and is left out); the recorded ones and the others are the decisions in `notes.md`, `summary.json` and the report, each a `decision` fact of the project citing the call, written once. With no summary, the report still lists what the call recorded.
 
 ## Setup per Mac
 

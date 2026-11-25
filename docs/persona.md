@@ -529,7 +529,7 @@ So **Lead a 1:1; wait in a group**: with one other person, the reply that
 settles an item opens the next, never asking which; with more, it ends at
 the read-back ("Short and plain" no longer says not to steer). And **More
 detail means more** quotes the present skill's teaching lines, drawing on
-the notes the call's worker prepares ahead (`Call.prepare`).
+the depth the call's worker prepares ahead in the call's state (`Call.prepare`, P-041).
 A group call of 2026-11-18 showed the voice taking side talk as its own:
 it jumped in twice, said a stray "Yes?", and asked what happened to a
 request it had missed, answered "I'm here" and promised a lookup it never
