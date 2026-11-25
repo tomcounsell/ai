@@ -174,7 +174,8 @@ def test_topics_out_of_order_a_decision_is_recorded_before_the_reply_kept_and_ch
         )
         for seen in (nexts, asked):
             assert not asked_about(seen["said"], r"launch|monday|thursday"), seen
-            assert not [n for n, _ in seen["tools"] if n == "settle"], seen  # not settled again
+            again = [a["readback"] for n, a in seen["tools"] if n == "settle"]  # not settled again
+            assert not [r for r in again if not re.search(r"pricing|copy", r, re.IGNORECASE)], seen
         assert re.search(r"thursday", asked["said"], re.IGNORECASE) and re.search(
             r"pricing|copy", asked["said"], re.IGNORECASE
         ), asked

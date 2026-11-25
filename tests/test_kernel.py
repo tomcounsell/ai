@@ -1095,7 +1095,9 @@ def test_a_chat_session_that_kept_failing_on_a_message_hands_it_on_until_it_is_a
     assert again and '("Can this be used?")' in again[0]["text"]
     assert handed["text"].startswith("The session before you in this chat failed 4 times in a row on message")
     assert '("Can this be used?")' in handed["text"] and handed["text"].endswith("answer it.")
-    assert [p.get("quiet") for p in bridges.typed(answered_rows, "child.reported") if p["from"] == answered] == [True]
+    assert [
+        p.get("quiet") for p in bridges.typed(answered_rows, "child.reported") if p["from"] == answered
+    ] == [True]
 
 
 def test_a_session_ended_after_its_pick_gives_way_to_a_new_one(dsn, dm):
@@ -1537,7 +1539,9 @@ def test_a_chat_session_gets_the_converse_channel_and_only_stop_counts(dsn, team
     assert "`yudame-dev:ask-me`" in text and "Anything I missed? If not, I'll go ahead." in text
     assert "one at a time in a live chat" in text and "One batch from a task" in text
     flat = " ".join(text.split())
-    assert "Otherwise raise only the rest in the chat" in flat and "pass one `valor-record act answer`" in flat
+    assert (
+        "Otherwise raise only the rest in the chat" in flat and "pass one `valor-record act answer`" in flat
+    )
     assert "only the items left for Tom" in flat and "one line naming where it was asked" in flat
     # A chat session sets a wake on each question: silence is never go on a real question,
     # five quiet minutes are go on the read-back, and a quiet task is checked on.
@@ -1687,7 +1691,8 @@ def test_the_persona_runs_projects_and_writes_for_how_technical_the_reader_is():
         assert method in flat
     product = " ".join(tasks.role_text("product").split())
     assert (
-        'persona\'s "How product decisions are made"' in product and "Jobs to be Done, as the inclusion test" not in product
+        'persona\'s "How product decisions are made"' in product
+        and "Jobs to be Done, as the inclusion test" not in product
     )
     # Waiting on someone: a day of their working day, a reminder, the next best person;
     # a two-way door goes ahead on its default, a one-way door waits (Tom, 2026-11-06).
@@ -1710,7 +1715,7 @@ def test_only_decisions_the_person_holds_reach_a_call_or_the_board():
         "your own work (a Sheet row, a ranking, a draft) is done before the call and listed as done" in chat
     )
     assert "a blocker on someone else is status, with who and since when" in chat
-    assert "Open holds only what Tom holds" in chat and '(`valor-record act answer`, `--by valor`)' in chat
+    assert "Open holds only what Tom holds" in chat and "(`valor-record act answer`, `--by valor`)" in chat
     product = " ".join(tasks.role_text("product").split())
     assert "You draft them from what the people who own the product have said, set them" in product
     assert "they correct or override them, and their word replaces yours" in product

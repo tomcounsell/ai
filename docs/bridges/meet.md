@@ -103,7 +103,12 @@ against a new Meet with a second device of Valor's account
   whose write fails is written at the end, with the same source), read the
   backlog Sheet where the project's spec names one in its rooms
   (`backlog`), look a person up (`person`, docs/memory.md, People), and
-  leave. Lookups run as they are called. What a turn does in the world
+  leave. Lookups run as they are called; a question the call has settled
+  is left out of `open_decisions` (it is answered only once the call
+  ends, and the list raised one Tom had settled, the live tests,
+  2026-11-25). The mind writes its reply in the same answer as `settle`,
+  `ask`, `post` or `leave`, and then needs no round more; a lookup's
+  answer comes back to it first (each round is a model call of 2 to 4 s). What a turn does in the world
   (`settle`, `ask`, `post`, `leave`) is acknowledged at once and done when
   the turn commits: at its first sound, a decision first, so the state has
   it before Valor speaks of it; or, saying nothing, when the mind is done.

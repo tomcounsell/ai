@@ -757,6 +757,30 @@ def test_a_call_repeated_in_a_turn_is_done_once_and_its_last_round_writes_words(
     assert said_texts(done_) == ["Ship Monday, then."]
 
 
+def test_words_written_with_only_acts_called_end_the_turn_and_a_lookup_comes_back_first(dsn, team, quick):
+    """Each round is a model call of 2-4 s (the live tests, 2026-11-25): a
+    reply written beside `settle` needs no round more; a lookup's answer is
+    given back first."""
+
+    async def go():
+        c = await in_call(dsn, team, alone())
+        c.gemini.minds += [[("settle", {"readback": "Ship Monday."}), "Monday it is."], ["Never written."]]
+        await says(c, TOMS, "Ship it Monday.")
+        await settle(c.the)
+        unread, c.gemini.minds = (
+            list(c.gemini.minds),
+            [[("person", {"about": "Logan"}), "One moment."], ["Logan owns QA."]],
+        )
+        await says(c, TOMS, "Who is Logan?")
+        await settle(c.the)
+        await finish(c)
+        return unread, await effects(dsn, c.the.id)
+
+    unread, done_ = run(go())
+    assert unread == [["Never written."]]  # no round after the words
+    assert said_texts(done_) == ["Monday it is.", "One moment. Logan owns QA."]
+
+
 def test_a_newer_turn_drops_one_not_yet_said_and_waits_out_one_that_is(dsn, team, quick):
     async def go():
         page = Page()

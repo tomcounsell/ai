@@ -94,7 +94,9 @@ def test_the_task_page_shows_the_newest_rows_with_payloads_cut(fresh):
     async def go():
         async with await db.connect(fresh) as conn:
             task = await tasks.start(conn, tasks.Brief(instruction="long task"))
-            await ledger.append(conn, task, "turn.started", {"turn_id": "t1", "state": "build", "argv": ["x" * 5000]})
+            await ledger.append(
+                conn, task, "turn.started", {"turn_id": "t1", "state": "build", "argv": ["x" * 5000]}
+            )
             for i in range(300):
                 await ledger.append(conn, task, "message.heard", {"text": f"row-{i}"})
         return await _get(fresh, f"/task/{task}", f"/task/{task}?all=1")

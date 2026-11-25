@@ -638,7 +638,7 @@ class Recording:
 INSTRUCTIONS = (
     "You are {name}, in a live Google Meet call as yourself, on the {project} project. You are an AI "
     "coworker; everyone in the call knows. What you write is spoken aloud in your voice, word for word "
-    "(posted in the call's chat instead when you answer a typed line): plain spoken sentences, one to three "
+    "(posted instead when answering a typed line): plain spoken sentences, one to three "
     "short ones, never lists, markdown, ids or symbols. When nothing is yours to answer, write nothing at "
     "all: you stay silent.\n\n"
     '- When to speak is "In a call" below. With only one other person here, everything they say is to '
@@ -656,6 +656,7 @@ INSTRUCTIONS = (
     "it needs one; with none open there, ask what they want to take next. With more people here, it ends with "
     "the read-back: the next item waits until someone asks for it.\n"
     "- Never name a topic, figure or person that the meeting now, the call or a tool does not hold.\n"
+    "- Write your reply with any `settle`, `ask`, `post` or `leave` call, in the same answer.\n"
     "- For anything you would have to look up (code, records, documents, figures), call `ask` and say you "
     "will check: your worker answers in the call's chat, and you are told. Never guess a fact.\n{backlog}"
     "- Call `person` only when someone asks about a person, or before you say what a person asked for, "
@@ -671,8 +672,8 @@ INSTRUCTIONS = (
     "relationship (pricing, terms, hiring or pay) is one line: it is for Tom.\n"
     "- Call `post` only for what the room should read (a link, a figure, a list), never for a read-back.\n"
     '- Call `leave` when anyone in the call asks you to leave (`why` "asked"), or when everyone has wrapped up '
-    'and said goodbye (`why` "wrapped up"); say goodbye in your reply. Never leave because the meeting\'s '
-    "scheduled time has passed: stay while people are still talking.\n\n"
+    'and said goodbye (`why` "wrapped up"); say goodbye. Never leave because the meeting\'s '
+    "scheduled time has passed.\n\n"
     "How you work, from your persona:\n\n{conduct}\n\n{process}"
 )
 TURN = "{here}\n\n{state}\n\n{kept}{reading}The call so far:\n{so_far}\n\nNow: {now}"
@@ -711,6 +712,7 @@ TOOLS = [
 # sound) or, saying nothing, until the mind is done: speech from the person answered before then drops
 # the turn and what it held, and it is written again from what they went on to say (the transcriber
 # ends some turns in a pause; P-042).
+ACTS = ("settle", "ask", "post", "leave")  # the tools whose effects wait for the turn's first sound
 ASKED = "asked: the answer will be posted in the chat and given to you"
 POSTING = "posting in the chat"
 MIND_ROUNDS = 4  # rounds of tool calls in one turn
@@ -1571,7 +1573,7 @@ class Call:
             tools = [*TOOLS, *([BACKLOG] if self.sheet else [])]
             written, left, done = "", "", set()
             for n in range(MIND_ROUNDS):
-                parts, calls = [], []
+                parts, calls, wrote = [], [], ""
                 # The last round writes: Flash-Lite called `settle` round after round and said nothing (2026-11-25).
                 last = n == MIND_ROUNDS - 1
                 async for got in self.gemini.think(self.instruction, contents, tools, words_only=last):
@@ -1582,12 +1584,14 @@ class Call:
                     if "call" in got:
                         calls.append(got["call"])
                         continue
-                    written += got["text"]
+                    wrote += got["text"]
                     said, left = sentences(left + got["text"])
                     for sentence in said:
                         await self._sentence(t, sentence)
-                if not calls:
-                    break
+                written = f"{written} {wrote}" if written and wrote else written + wrote
+                if left.strip():  # a round's end ends its sentence
+                    await self._sentence(t, left.strip())
+                left = ""
                 results = []
                 for (
                     name,
@@ -1600,6 +1604,10 @@ class Call:
                         else await self._tool(t, name, args)
                     )
                     done.add(key)
+                # Words written with only acts called need no round more: each one is a model call, 2-4 s
+                # (the live tests, 2026-11-25).
+                if not calls or (wrote.strip() and all(name in ACTS for name, _ in calls)):
+                    break
                 contents += [{"role": "model", "parts": parts}, {"role": "user", "parts": [
                     {"function_response": {"name": n, "response": {"result": r}}}
                     for (n, _), r in zip(calls, results, strict=True)]}]  # fmt: skip
