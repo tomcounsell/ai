@@ -26,10 +26,10 @@ the worker answers that came after leaving and the questions left
 unanswered), `task.ended` unless the session was stopped, the decisions
 the call settled, `effect.refused` for each `meet.say` or
 `meet.send_message` never delivered (a thread copy still goes), and the
-report. Meet names people by display name only, which anyone with an open Meet's link can set, so Tom's read-backs (a
-post's `settles`) go to his Slack DM's session,
-which posts them and answers each on his 👍 with its question id
-(`confirms`), refused unless it is still the task's open question. The call's own process writes the end; a kernel
+report. Tom's read-backs (a post's `settles`) count as said in the call, 1:1 or group, with no 👍 in chat (Tom,
+2026-11-25: "Meets display name is trustworthy enough for our purposes"): the report has the asking chat's
+session answer each with its question id (`settles`), refused unless it is still the task's open question, act
+on it, and post the read-backs in the thread as a notice. The call's own process writes the end; a kernel
 wake writes it for a call whose process died (`sweep`).
 
 **The call's process** (`python -m core call SESSION`, `run`) holds
@@ -382,7 +382,7 @@ async def end(
             await ledger.append(
                 conn, session_id, "task.ended", {"kind": "call", "by": "valor", "reason": reason}
             )
-        settled = await _settle(conn, session_id, rows)
+        settled, answerable = await _settle(conn, session_id, rows)
         dropped = await _leftovers(conn, session_id, rows, stopped)
         call = await marker(conn, session_id) or {}
         code, thread = call.get("code"), f"reply_to {(call.get('asked_by') or {}).get('reply_to')}"
@@ -417,13 +417,17 @@ async def end(
         ]
         lines += [f"Asked of your worker and never answered: {q}" for q in unanswered]
         lines += dropped
-        await report(conn, session_id, "ended", "\n".join(lines))
+        await report(conn, session_id, "ended", "\n".join(lines), settles=answerable)
     return True
 
 
-async def _settle(conn, session_id: str, rows: list[dict[str, Any]]) -> list[str]:
-    """Answer the questions Tom's read-backs settle (module docstring);
-    each answer and refusal as a line of the report."""
+async def _settle(
+    conn, session_id: str, rows: list[dict[str, Any]]
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Tom's read-backs (module docstring), the latest `done` one per
+    question: the report's lines telling the asking chat's session to
+    answer each and act, and the list it may answer (`settles`). Only Tom
+    settles in a call (INSTRUCTIONS), so each is answered `--by tom`."""
     held = {r["payload"]["effect_id"]: r["payload"] for r in rows if r["type"] == "effect.held"}
     readbacks: dict[tuple[str, str], str] = {}
     for r in rows:
@@ -438,44 +442,27 @@ async def _settle(conn, session_id: str, rows: list[dict[str, Any]]) -> list[str
         for q in (action.get("payload") or {}).get("settles") or []:
             readbacks[(q["task_id"], q["question_id"])] = action["payload"]["text"]
     if not readbacks:
-        return []
-    return await _confirm(conn, session_id, readbacks)
-
-
-async def _confirm(conn, session_id: str, readbacks: dict[tuple[str, str], str]) -> list[str]:
-    """Meet gives display names only, which anyone with an open Meet's link
-    can set, so no word in a call is proven Tom's: the read-backs go to his
-    Slack DM's session, which asks his 👍 on each (Tom, 2026-10-27: by
-    account, else by 👍 in his DM)."""
-    dm = await intake.operator_session(conn) if settings.operator_channel == "slack" else None
-    if dm is None:
-        return [
-            f"Not answered: Tom has no Slack DM here to confirm by 👍: {t} ({text})"
-            for (t, _), text in readbacks.items()
-        ]
-    confirm = [{"task_id": t, "question_id": q, "text": text} for (t, q), text in readbacks.items()]
+        return [], []
+    settles = [{"task_id": t, "question_id": q, "text": text} for (t, q), text in readbacks.items()]
     head = (
-        "Tom settled these in a Meet call, which shows display names only. Post each to him here and, on his 👍 on its post, "
-        'answer it with `valor-record act answer` (`--via "meet call"`, its `--question-id`):'
+        "Tom settled these in the call; each counts as said, with no 👍 asked. Answer each now with "
+        '`valor-record act answer TASK --text "<its read-back>" --by tom --via "meet call" --question-id Q`, '
+        "carry it out, and post the read-backs in the thread the call was asked in as one notice of what is "
+        "now being done, asking nothing:"
     )
-    text = "\n".join(
-        [head, *(f"- task {c['task_id']}, question {c['question_id']}: {c['text']}" for c in confirm)]
-    )
-    channel, chat_id = settings.operator_channel, settings.operator_chat
-    project = (await tasks.brief(conn, session_id)).project
-    await to_session(
-        conn, channel, chat_id, f"call:{session_id}:confirm", text, project=project, confirm=confirm
-    )
-    return [f"Sent to Tom's Slack DM to confirm by 👍: task {c['task_id']}: {c['text']}" for c in confirm]
+    return [
+        head,
+        *(f"- task {c['task_id']}, question {c['question_id']}: {c['text']}" for c in settles),
+    ], settles
 
 
-async def confirms(conn, dm_session: str, task_id: str) -> bool:
-    """Whether a call sent `task_id`'s read-back to this session to confirm."""
+async def settles(conn, session_id: str, task_id: str) -> bool:
+    """Whether a call's report gave this session `task_id`'s read-back to answer."""
     row = await (
         await conn.execute(
             "SELECT 1 FROM events WHERE task_id = %s AND type = 'child.reported' AND payload->>'kind' = 'call' "
-            "AND payload->'confirm' @> %s::jsonb",
-            (dm_session, json.dumps([{"task_id": task_id}])),
+            "AND payload->'settles' @> %s::jsonb",
+            (session_id, json.dumps([{"task_id": task_id}])),
         )
     ).fetchone()
     return row is not None
@@ -2385,7 +2372,7 @@ class Call:
         head = (
             "Decided in the call, now facts of the project (kind decision): carry each that changes a backlog "
             "item or an open question to where it lives (its Sheet row, the task waiting on it); an open "
-            "question is still answered only on Tom's 👍:"
+            "question Tom settled is answered as the lines on his read-backs say:"
         )
         return [head, *(f"- {t} (fact {names[str(n)]})" for n, t in enumerate(texts, 1))]
 

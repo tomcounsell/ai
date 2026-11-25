@@ -21,7 +21,7 @@ against a new Meet with a second device of Valor's account
 | `meet.join` offered to group chats only; the call has the asking chat's project, room and ceiling | Tom's scope (2026-10-27): anyone in a chat group, never a DM, with that chat's access |
 | Every word said or posted is a `meet.say` or `meet.send_message` effect on the call's session; each written answer's thread copy is the chat's own send | Constraint "Bounded authority, metered spending"; Tom (2026-10-31): written answers in the call and in the thread |
 | The call's end written once, by its process or by the kernel's sweep | Constraint "Reliable stop, recovery, and correction" |
-| Tom's read-backs answer his decisions on his 👍 in his Slack DM, since Meet gives display names only (live run, 2026-10-31) | Tom's answers of 2026-10-27 |
+| Tom's read-backs answer his decisions through the asking chat's session, with no 👍 in chat, 1:1 or group | Tom, 2026-11-25: "Meets display name is trustworthy enough for our purposes" (after a 1:1 call's 👍 held a build 28 minutes) |
 
 ## The pieces
 

@@ -32,8 +32,8 @@ own; each refuses a task that does not report to its session
 but a project's board chat session answers any of the project's tasks
 waiting on a question (`board.answers`), since every decision for Tom on
 that project is on its board, however he answers it; it stops any of
-them (`board.covers`), which is how a stale one is closed; and Tom's DM's
-session answers a question a call sent it to confirm (`call.confirms`).
+them (`board.covers`), which is how a stale one is closed; and the chat
+session a call reported to answers a question Tom settled in it (`call.settles`).
 A call's session (`core/call.py`) takes a steer while the call is open,
 posted in the call's chat, and refuses one once the call has ended.
 `lookup` reads the ledger, which is how a dangling intent is reconciled:
@@ -166,7 +166,7 @@ class TaskAnswer(_ChatTask):
         try:
             return await super()._child(conn, task_id)
         except ValueError:
-            if not await board.answers(conn, self.session, task_id) and not await call.confirms(
+            if not await board.answers(conn, self.session, task_id) and not await call.settles(
                 conn, self.session, task_id
             ):
                 raise
