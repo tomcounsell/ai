@@ -21,7 +21,8 @@ task's workspace, read when the turn ends.
   compaction's instructions.
 - `.valor/wake.md`: from a chat session's turn, a request to be stepped
   again after a delay, watching one post: a delay (`20m`), optionally
-  `post: <effect file or message id>`, then a note to itself.
+  `post: <effect file or message id>`, or `outcome post: <effect file>`
+  (stepped once that effect has its outcome), then a note to itself.
 - `.valor/screens/<name>.png|.html`: what `look` kept of a page, recorded
   as evidence (name and size) and never as a signal.
 - `.valor/effects/<name>.json`: one request for an effect beyond the

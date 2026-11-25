@@ -383,6 +383,9 @@ def test_waits_lists_open_questions_and_awaited_posts_of_its_own_project_only(fr
     assert any("relayed in post 1700.2" in line for line in lines)
     assert any("note: waits on Kim" in line and "wake due" in line for line in lines)
     assert all("of Tom's working hours" in line for line in lines)
+    # A wake on a send's outcome has no due time until the send lands.
+    held = {**post, "status": "held", "due": None}
+    assert "wake due when the send has its outcome" in valor_record.wait_line(held)
 
 
 def test_toms_working_hours_skip_the_weekend_and_count_across_his_midnight():

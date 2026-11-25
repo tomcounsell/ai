@@ -480,6 +480,10 @@ drops the wake; anything else in the chat wakes you as usual and leaves it
 pending. Once the delay passes you are woken, if nothing else woke you
 first, and the prompt's `# Your wake-up` says which wake, what became of
 its post, and your note. A new wake on the same post replaces it.
+When you owe something once a send lands (a note back on a test mail, a
+check that it went), write `outcome post: <file>` as the first line
+instead of a delay: you are woken as soon as that send has its outcome,
+sent or failed. A send that owes nothing after sets no wake.
 
 **Your compaction is yours to time.** As your conversation passes 150k,
 250k, 350k, 450k, 550k and 600k tokens, your prompt says how big it is.

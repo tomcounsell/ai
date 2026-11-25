@@ -406,7 +406,9 @@ ask to be woken after a delay (`.valor/wake.md`, watching one of its
 posts): if no reply to that post or message in its thread comes first, the
 kernel steps it once the delay passes, with no new message
 (`session.wake_due`), so a question it asked can end in "Anything I
-missed? If not, I'll go ahead" when Tom stays silent. That holds for
+missed? If not, I'll go ahead" when Tom stays silent. With `outcome
+post: <file>` it is stepped instead once that send has its outcome, for a
+note it owes after the send lands. That holds for
 work it builds, never for a send: a draft goes back as text in the
 asker's voice, and a send outside the chat goes only when the asker says
 send or on a standing say-so from Tom

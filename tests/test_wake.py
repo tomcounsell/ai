@@ -202,3 +202,116 @@ def test_a_chat_session_sets_a_wake_is_woken_by_it_and_spends_it(dsn, tmp_path):
     assert "lunch?" in woken
     (one, two) = [r["payload"] for r in rows if r["type"] == "turn.collected"]
     assert two["woke"] == [one["turn_id"]] and session.wakes(rows) == [] and not session.wake_due(rows)
+
+
+# A wake on a send's outcome (`outcome post: <file>`): due when the send lands.
+
+MAIL = {"file": "mail.json", "effect_id": "e1", "kind": "released", "error": None}
+
+
+def outcome(post="mail.json", note=None) -> dict:
+    return {"after_s": None, "post": post, "note": note}
+
+
+def test_outcome_post_is_a_wake_on_this_turns_effect_file_only():
+    assert session._wake("outcome post: mail.json\nNote back to #valor-dev.") == (
+        {"after_s": None, "post": "mail.json", "note": "Note back to #valor-dev."}, None)  # fmt: skip
+    for bad in ("outcome", "outcome post: 100.1"):
+        wake, why = session._wake(bad)
+        assert wake is None and "`outcome post: <this turn's effect file>`; not set" in why
+
+
+def test_an_outcome_wake_is_due_when_its_send_lands_and_not_before():
+    base = [collected("t1", outcome(), [MAIL])]
+    (w,) = session.wakes(rows_of(*base))
+    assert w["status"] == "held" and w["due"] is None
+    far = T0 + timedelta(days=30)
+    assert not session.owed(rows_of(*base), far) and not session.wake_due(rows_of(*base), far)
+    landed = T0 + timedelta(minutes=1)
+    rows = rows_of(*base, (*sent("e1", {"message_id": "<m1@x>"})[:2], landed))
+    (w,) = session.wakes(rows)
+    assert (w["status"], w["due"]) == ("sent", landed)
+    assert not session.wake_due(rows, T0) and session.wake_due(rows, landed)
+    # A finished turn whose prompt gave it spends it.
+    assert session.wakes([*rows, {"id": 9, "type": "turn.collected", "at": landed,
+                                  "payload": {"turn_id": "t2", "verdict": "idle", "woke": ["t1"]}}]) == []  # fmt: skip
+
+
+def test_an_outcome_before_the_turn_was_collected_makes_it_due_at_once():
+    """An inline performer writes the outcome while the turn is collected."""
+    rows = rows_of(sent("e1", {"message_id": "<m1@x>"}), collected("t1", outcome(), [MAIL]))
+    (w,) = session.wakes(rows)
+    assert (w["status"], w["due"]) == ("sent", T0) and session.wake_due(rows, T0)
+
+
+def test_a_send_that_fails_is_refused_or_never_went_wakes_at_once_and_says_so():
+    failed = rows_of(collected("t1", outcome(), [MAIL]), sent("e1", kind="failed", error="535 auth"))
+    refused = rows_of(collected("t1", outcome(), [MAIL]), ("effect.refused", {"effect_id": "e1",
+                      "reason": "over the ceiling"}, T0))  # fmt: skip
+    declined = rows_of(
+        collected("t1", outcome(), [{"file": "mail.json", "error": "no such email to reply to"}])
+    )
+    missing = rows_of(collected("t1", outcome("nope.json"), [MAIL]))
+    for rows, why in ((failed, "535 auth"), (refused, "over the ceiling"),
+                      (declined, "no such email to reply to"), (missing, "the turn requested no nope.json")):  # fmt: skip
+        (w,) = session.wakes(rows)
+        assert (w["status"], w["why"], w["due"]) == ("gone", why, T0) and session.wake_due(rows, T0)
+        assert f"it never went out ({why})" in session._wake_report(session.owed(rows, T0))
+
+
+def test_a_done_outcome_that_sent_no_message_is_reported_done():
+    rows = rows_of(collected("t1", outcome("make.json"), [{**MAIL, "file": "make.json"}]),
+                   ("effect.outcome", {"effect_id": "e1", "kind": "done", "result": {}}, T0))  # fmt: skip
+    (w,) = session.wakes(rows)
+    assert w["status"] == "done" and "watching your post (make.json): it is done." in session._wake_report(
+        [w]
+    )
+
+
+def test_a_reply_to_the_send_before_its_outcome_drops_the_wake():
+    rows = rows_of(collected("t1", outcome(), [MAIL]), sent("e1", {"message_id": "<m1@x>"}),
+                   msg("message.heard", "<m1@x>"))  # fmt: skip
+    assert session.wakes(rows) == []
+
+
+def test_a_send_with_no_wake_adds_no_turn_when_it_lands():
+    rows = rows_of(collected("t1", None, [MAIL]), sent("e1", {"message_id": "<m1@x>"}))
+    assert session.wakes(rows) == [] and not session.wake_due(rows, T0 + timedelta(days=1))
+
+
+def test_the_24_nov_mastery_case_the_note_back_follows_the_test_mail(dsn, tmp_path):
+    """2026-11-24, the Captain's #mastery-dev session: handed a message from
+    the #valor-dev session asking for a test mail and a note back, its turn
+    requested the mail and ended owing the note. Its outcome now steps it,
+    with nothing else arriving, and the prompt says the mail went out."""
+    ws, _ = scripted.workspace(tmp_path)
+    mail = {"action_type": "email.send", "target": "valor@example.com",
+            "payload": {"to": ["valor@example.com"], "subject": "Test: mailbox send", "body": "test"}}  # fmt: skip
+    note = "Note back to #valor-dev (hand-on 5d9f14be6623): did the test mail go?"
+    scripted.steer(ws, chat=[{"wake.md": f"outcome post: mail.json\n{note}", "mail": mail}, {}])
+
+    async def go():
+        chat = {"channel": "slack", "chat_id": f"T1/C{uuid.uuid4().int % 10**9}"}
+        task = await scripted.start(dsn, ws, chat=chat)
+        await say(dsn, task, "From #valor-dev: send a test mail and tell me when it has gone.", 1)
+        first = await wake(dsn, task)
+        rows = await bridges.rows(dsn, task)
+        (entry,) = [e for r in rows if r["type"] == "turn.collected" for e in r["payload"]["effects"]]
+        before = session.wake_due(rows, datetime.now(UTC) + timedelta(days=1))
+        async with await db.connect(dsn) as conn:
+            await ledger.append(conn, task, "effect.outcome", {"effect_id": entry["effect_id"], "kind": "done",
+                                "result": {"sent": [{"channel": "email", "message_id": "<m1@x>"}]},
+                                "error": None})  # fmt: skip
+        due = session.wake_due(await bridges.rows(dsn, task))
+        second = await wake(dsn, task)
+        return entry, first, before, due, second, await bridges.rows(dsn, task)
+
+    entry, first, before, due, second, rows = asyncio.run(go())
+    assert entry["error"] is None and first["status"] == second["status"] == "listening"
+    assert not before and due
+    woken = turns(ws)[1]["prompt"]
+    assert (
+        "# Your wake-up" in woken and "once mail.json, from your turn" in woken and "had its outcome" in woken
+    )
+    assert "watching your post <m1@x>" in woken and f"Your note: {note}" in woken
+    assert not session.wakes(rows) and not session.wake_due(rows)

@@ -52,7 +52,9 @@ next prompt leaves out what the turn took. It answers by requesting sends; `stop
 and no other signal counts. A turn ends the run `listening`: it is
 stepped again only when a message wakes it, a report that is not quiet
 arrives (`chat_waiting`), or a wake it asked for is due (`wake_due`), never on its
-own effects' outcomes. A turn's `wake.md` asks to be woken after a delay,
+own effects' outcomes unless it asked. A turn's `wake.md` asks to be
+woken after a delay, or once one of its sends has its outcome (`outcome
+post: <file>`, for a turn that owes something once the send lands),
 watching a post (`wakes`): a reply to the post, or a message in its
 thread, drops the wake; anything else leaves it pending, and the turn
 after it is due opens with `# Your wake-up` (`_wake_report`). Before each turn
@@ -444,19 +446,25 @@ def compact_prompt(text: str) -> str:
     return "/compact" if text == "(empty compact.md)" else f"/compact {text}"
 
 
-WAKE = re.compile(r"(\d+)\s*([smh]?)(?:\s+post:\s*(\S+))?")
+WAKE = re.compile(r"(?:(\d+)\s*([smh]?)|(outcome))(?:\s+post:\s*(\S+))?")
 UNITS = {"s": 1, "": 60, "m": 60, "h": 3600}
 
 
 def _wake(text: str) -> tuple[dict[str, Any] | None, str | None]:
     """A `wake.md`'s request, or why it is not one: a first line that is a
     delay (`90s`, `20m`, `2h`, or minutes) and optionally `post: <the
-    turn's effect file, or an earlier post's message id>`, then a note."""
+    turn's effect file, or an earlier post's message id>`, or `outcome
+    post: <the turn's effect file>` (`after_s` None: due when that effect
+    has its outcome), then a note."""
     first, _, note = text.partition("\n")
     m = WAKE.fullmatch(first.strip())
-    if m is None:
-        return None, "wake.md's first line is not a delay such as `20m` (then `post: <file or id>`); not set"
-    return {"after_s": int(m[1]) * UNITS[m[2]], "post": m[3], "note": note.strip() or None}, None
+    if m is None or (m[3] and not (m[4] or "").endswith(".json")):
+        return None, (
+            "wake.md's first line is not a delay such as `20m` (then `post: <file or id>`) "
+            "or `outcome post: <this turn's effect file>`; not set"
+        )
+    after = None if m[3] else int(m[1]) * UNITS[m[2]]
+    return {"after_s": after, "post": m[4], "note": note.strip() or None}, None
 
 
 def wakes(rows: list[dict]) -> list[dict[str, Any]]:
@@ -467,12 +475,20 @@ def wakes(rows: list[dict]) -> list[dict[str, Any]]:
     lists the parts sent; or an earlier post's message id. A
     `message.steered` or `message.heard` replying to one of the post's
     parts or its thread drops it, and a finished turn whose prompt gave it
-    (`woke`) spends it. `status` is `sent`, `held` (no outcome yet), or
-    `gone`, with `why`; `due` is when it is owed."""
+    (`woke`) spends it. `status` is `sent`, `done` (an outcome that sent
+    no message), `held` (no outcome yet), or `gone`, with `why`; `due` is
+    when it is owed. A wake on its post's outcome (`after_s` None) is due when that effect's first outcome or
+    refusal row was written, wherever it sits in the ledger (an inline
+    performer writes it before the turn is collected), but not before the
+    turn was; at once when the post is gone at collection, since no outcome
+    will come; and None until then."""
     sent: dict[str, list[dict]] = {}
     gone: dict[str, str] = {}
+    landed: dict[str, datetime] = {}
     for r in rows:
         p = r["payload"]
+        if r["type"] in ("effect.outcome", "effect.refused"):
+            landed.setdefault(p.get("effect_id"), r["at"])
         if r["type"] == "effect.outcome" and isinstance((p.get("result") or {}).get("sent"), list):
             sent[p.get("effect_id")] = [s for s in p["result"]["sent"] if isinstance(s, dict)]
         if r["type"] == "effect.outcome" and p.get("kind") in ("failed", "refused"):
@@ -494,18 +510,24 @@ def wakes(rows: list[dict]) -> list[dict[str, Any]]:
         asked = p.get("wake")
         if not isinstance(asked, dict):
             continue
+        after = asked.get("after_s")
         w = {**asked, "turn_id": p.get("turn_id"), "set_at": r["at"], "ids": set(), "status": "sent",
-             "why": None, "due": r["at"] + timedelta(seconds=asked["after_s"])}  # fmt: skip
+             "why": None, "due": None if after is None else r["at"] + timedelta(seconds=after)}  # fmt: skip
         ref, key = asked.get("post"), None
         entry = next((e for e in p.get("effects") or [] if ref and e.get("file") == ref), None)
         if entry is not None:
             got = sent.get(entry.get("effect_id"), [])
             w["ids"] = {str(x) for s in got for x in (s.get("message_id"), s.get("thread_ts")) if x}
             w["why"] = entry.get("error") or gone.get(entry.get("effect_id"))
-            w["status"] = "gone" if w["why"] else "sent" if w["ids"] else "held"
+            done = entry.get("effect_id") in landed
+            w["status"] = "gone" if w["why"] else "sent" if w["ids"] else "done" if done else "held"
             key = str(got[0].get("message_id")) if got else f"{w['turn_id']}/{ref}"
+            if after is None and (entry.get("error") or entry.get("effect_id") in landed):
+                w["due"] = max(r["at"], landed.get(entry.get("effect_id"), r["at"]))
         elif ref and ref.endswith(".json"):
             w["status"], w["why"], key = "gone", f"the turn requested no {ref}", f"{w['turn_id']}/{ref}"
+            if after is None:
+                w["due"] = r["at"]
         elif ref:
             same = [s for s in parts if str(s.get("message_id")) == ref]
             w["ids"] = {ref, *(str(s["thread_ts"]) for s in same if s.get("thread_ts"))}
@@ -519,7 +541,7 @@ def wakes(rows: list[dict]) -> list[dict[str, Any]]:
 def owed(rows: list[dict], now: datetime) -> list[dict[str, Any]]:
     """The pending wakes whose delay has passed at `now`: the next turn's
     prompt gives them (`_wake_report`)."""
-    return [w for w in wakes(rows) if now >= w["due"]]
+    return [w for w in wakes(rows) if w["due"] is not None and now >= w["due"]]
 
 
 def wake_due(rows: list[dict], now: datetime | None = None) -> bool:
@@ -573,10 +595,16 @@ def _wake_report(owed_wakes: list[dict[str, Any]]) -> str:
     """`# Your wake-up`: each owed wake, what became of its post, and its note."""
     lines = []
     for w in owed_wakes:
-        line = f"- You asked to be woken {_delay(w['after_s'])} after your turn that ended at {_when(w['set_at'])}"
+        line = (
+            f"- You asked to be woken once {w['post']}, from your turn that ended at {_when(w['set_at'])}, "
+            "had its outcome"
+            if w["after_s"] is None
+            else f"- You asked to be woken {_delay(w['after_s'])} after your turn that ended at {_when(w['set_at'])}"
+        )
         if w.get("post"):
             line += {
                 "sent": f", watching your post {w['key']}: nothing has replied to it or come in its thread since.",
+                "done": f", watching your post ({w['post']}): it is done.",
                 "held": f", watching your post ({w['post']}): it has not gone out yet.",
                 "gone": f", watching your post ({w['post']}): it never went out ({w['why']}).",
             }[w["status"]]

@@ -120,6 +120,10 @@ def _age(w: dict) -> str:
     return f"{w['hours']}h ({w['tom_working_hours']}h of Tom's working hours)"
 
 
+def _due(w: dict) -> str:
+    return "when the send has its outcome" if w.get("due") is None else _when(w["due"])
+
+
 def wait_line(w: dict) -> str:
     if w["kind"] == "question":
         where = w["asked_in"] + (f" ({w['room']})" if w.get("room") else "")
@@ -129,12 +133,12 @@ def wait_line(w: dict) -> str:
         )
         if w.get("relayed"):
             r = w["relayed"]
-            out += f"\n    relayed in post {r['post']} ({r['status']}), wake due {_when(r['due'])}"
+            out += f"\n    relayed in post {r['post']} ({r['status']}), wake due {_due(r)}"
         return out
     where = w["chat"] + (f" ({w['room']})" if w.get("room") else "")
     return (
         f"post {w['post']} in {where} ({w['status']}), set {_when(w['since'])}, waiting {_age(w)}, "
-        f"wake due {_when(w['due'])}\n    note: {(w.get('note') or '(none: who it waits on is unknown)')[:300]}"
+        f"wake due {_due(w)}\n    note: {(w.get('note') or '(none: who it waits on is unknown)')[:300]}"
     )
 
 
