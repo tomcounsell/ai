@@ -204,7 +204,7 @@ CUT=~/valor-retired/cutover-$(date +%F); mkdir -p $CUT
    machine's, not the old system's.
 9. **The jobs.** First the voice models, once per Mac (about 1 GB:
    Parakeet and Silero VAD into `~/.cache/huggingface`, Kokoro, which the
-   present skill's `tts.py` speaks with, into `~/.cache/kokoro-onnx`):
+   present skill's `tts.py` speaks with when a turn has no Gemini key, into `~/.cache/kokoro-onnx`):
    `$PY -m tools.voice fetch`.
    Yudame Tools downloads its own models (granite4.1:3b in Ollama, its
    speech and speaker models) on its Setup page. Every model a Mac needs,
