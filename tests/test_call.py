@@ -242,6 +242,7 @@ def ended(text="") -> list[types.LiveServerMessage]:
 def quick(monkeypatch):
     monkeypatch.setattr(call, "STATE_S", 0.05)
     monkeypatch.setattr(call, "MIX_S", 0.02)
+    monkeypatch.setattr(call, "ACKS", ())  # the acknowledgement's own tests set them
 
 
 async def until(check, s=5.0):
@@ -309,9 +310,10 @@ async def push(ears, *messages):
     await asyncio.sleep(0.1)
 
 
-async def says(c, who, text, seconds=0.4):
-    """`who` speaks `text` and the transcriber ends their turn."""
+async def says(c, who, text, seconds=0.4, quiet=0.0):
+    """`who` speaks `text` and the transcriber ends their turn, `quiet` later."""
     await talk(c.the, who, seconds)
+    await asyncio.sleep(quiet)
     await push(c.ears, *ended(text))
 
 
@@ -3390,3 +3392,71 @@ def test_valors_name_is_heard_as_transcripts_write_it_and_not_in_other_words(dsn
     assert not any(
         named.search(x) for x in ("the value of it", "a valid point", "Valerie, coffee", "valorous")
     )
+
+
+# -- the spoken acknowledgement (Tom, 2026-11-27) -------------------------------------
+
+
+@pytest.fixture
+def acks(monkeypatch):
+    monkeypatch.setattr(call, "ACKS", ("Ok.", "Sure."))
+
+
+def test_a_turn_valor_answers_is_acknowledged_at_once_on_the_one_voice_path_and_the_answer_follows(
+    dsn, team, quick, acks
+):
+    async def go():
+        page = Page()
+        c = await in_call(dsn, team, page)
+        assert await until(lambda: len(c.the.acks) == 2)
+        c.gemini.think_gate = asyncio.Event()
+        c.gemini.minds.append(["Monday."])
+        await says(c, LOGAN, "Valor, when do we ship?", quiet=0.5)
+        assert await until(lambda: page.streams)
+        acked = (len(page.streams), list(c.gemini.prompts))
+        c.gemini.think_gate.set()
+        await settle(c.the)
+        await says(c, TOMS, "Logan, lunch after?", quiet=0.5)  # not to Valor: no acknowledgement
+        await settle(c.the)
+        await finish(c)
+        return c, acked, await effects(dsn, c.the.id)
+
+    c, (streams, prompts), done_ = run(go())
+    assert streams == 1  # said while the mind was still writing
+    assert said_texts(done_) == ["Ok.", "Monday."]
+    assert prompts[0].endswith(call.ACKED.format(ack="Ok."))
+    assert c.gemini.spoken[:2] == ["Ok.", "Sure."]  # made once, as the call started
+
+
+def test_no_acknowledgement_over_someone_speaking_and_none_for_typed_lines(dsn, team, quick, acks):
+    async def go():
+        c = await in_call(dsn, team, alone())
+        assert await until(lambda: len(c.the.acks) == 2)
+        c.gemini.minds += [["Monday."], ["Tuesday."]]
+        c.the.chat(TOMS, "When do we ship?")
+        await settle(c.the)
+        await talk(c.the, TOMS, 0.4)
+        await push(c.ears, *ended("And the emails?"))  # still speaking when the turn ended
+        await settle(c.the)
+        await finish(c)
+        return await effects(dsn, c.the.id)
+
+    assert "Ok." not in said_texts(run(go()))
+
+
+def test_the_person_going_on_cuts_the_acknowledgement_and_drops_the_turn(dsn, team, quick, acks):
+    async def go():
+        page = Page()
+        page.ahead, page.played = 30.0, 0.2
+        c = await in_call(dsn, team, page)
+        assert await until(lambda: len(c.the.acks) == 2)
+        c.gemini.think_gate = asyncio.Event()
+        await says(c, LOGAN, "Valor, let's go with A", quiet=0.5)
+        assert await until(lambda: c.the.out is not None)
+        await talk(c.the, LOGAN, 0.6)  # they go on
+        c.gemini.think_gate.set()
+        await asyncio.sleep(0.3)
+        return c
+
+    c = run(go())
+    assert c.page.stops == 1 and c.the.turn.dropped

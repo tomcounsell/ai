@@ -713,6 +713,11 @@ TOOLS = [
 # sound) or, saying nothing, until the mind is done: speech from the person answered before then drops
 # the turn and what it held, and it is written again from what they went on to say (the transcriber
 # ends some turns in a pause; P-042).
+# Said as soon as a turn Valor will answer ends, while the mind writes (Tom, 2026-11-27: "During the
+# 7s of “thinking time” can we get a spoken “ok” at least?"), in his voice, made as the call starts.
+ACKS = ("Ok.", "Sure.", "One sec.")
+ACKED = " You have already said “{ack}” aloud: now answer it; never leave it at that."
+ACK_QUIET_S = 0.3  # no acknowledgement over anyone who spoke this recently
 ACTS = ("settle", "ask", "post", "leave")  # the tools whose effects wait for the turn's first sound
 ASKED = "asked: the answer will be posted in the chat and given to you"
 POSTING = "posting in the chat"
@@ -1255,6 +1260,7 @@ class Turn:
     committed: bool = False
     dropped: bool = False
     task: asyncio.Task | None = None
+    ack: Reply | None = None  # the acknowledgement said for it (`ACKS`)
 
     def done(self) -> bool:
         return (self.task is None or self.task.done()) and (
@@ -1374,7 +1380,9 @@ class Call:
         self.replies: dict[str, Reply] = {}  # each reply whose `meet.say` is not settled
         self.out: Reply | None = None  # the reply whose audio is playing
         self.answering: str | None = None  # whose words the reply playing answers
-        self.went_on: str | None = None  # who went on speaking before Valor's first sound, dropping his turn
+        self.went_on: str | None = None
+        self.acks: list[tuple[str, bytes]] = []  # `ACKS` in Valor's voice (`_voice_acks`)
+        self.acked = 0  # who went on speaking before Valor's first sound, dropping his turn
         self.barge = 0.0
         self.playing_until = 0.0
         self.posts: asyncio.Queue = asyncio.Queue()
@@ -1506,9 +1514,11 @@ class Call:
         if self.leaving.is_set() or who is None:
             return
         if alone:
-            self._answer(NOW_SPOKEN.format(name=name), who)
+            self._answer(NOW_SPOKEN.format(name=name), who, ack=True)
         elif self.named.search(text) or follows:
-            self._answer(NOW_GROUP.format(name=name), who)
+            # A group's follow-on may be to someone else, and the mind silent on it: "Sure." then nothing
+            # on "Logan, lunch after?" (the tests, 2026-11-27). Acknowledged only when he is named.
+            self._answer(NOW_GROUP.format(name=name), who, ack=bool(self.named.search(text)))
 
     async def _heard(self, who: str, name: str, text: str, via: str) -> None:
         async with await self._connect() as conn:
@@ -1612,17 +1622,53 @@ class Call:
 
     # -- the mind --
 
-    def _answer(self, now: str, who: str | None, *, typed: bool = False) -> None:
-        """A turn of the mind answering `now`; a turn before it not yet said
-        is dropped, what it held with it: the newer has all it heard."""
+    def _answer(self, now: str, who: str | None, *, typed: bool = False, ack: bool = False) -> None:
+        """A turn of the mind answering `now`, with an acknowledgement said at
+        once when `ack` (`_acknowledge`); a turn before it not yet said is
+        dropped, what it held with it: the newer has all it heard."""
         if self.turn is not None and not self.turn.committed and not self.turn.dropped:
             self._drop(self.turn, "a newer turn")
         t = Turn(ledger.new_id(), now, typed, who, after=self.turn)
         t.reply = Reply(t.id)
         self.turn = t
+        if ack:
+            self._acknowledge(t)
         t.task = asyncio.create_task(self._turn(t))
         self.jobs.add(t.task)
         t.task.add_done_callback(self.jobs.discard)
+
+    def _acknowledge(self, t: Turn) -> None:
+        """One of `ACKS`, said now as a reply of its own, on the one voice
+        path (its `meet.say`, the same playback and cut-off), for a turn
+        Valor will answer: not while he is still speaking, nor over anyone
+        who spoke in the last `ACK_QUIET_S`. The mind is told it was said, so
+        the turn is answered; its first sentence waits for it (`_commit`)."""
+        if (
+            not self.acks or self.out is not None or (t.after is not None and not t.after.done())
+            or self.now() - self.last_voice < ACK_QUIET_S
+        ):  # fmt: skip
+            return
+        text, pcm = self.acks[self.acked % len(self.acks)]
+        self.acked += 1
+        t.ack = Reply(ledger.new_id(), text=text, generated=True)
+        self.replies[t.ack.id], self.answering = t.ack, t.answering
+        t.now += ACKED.format(ack=text)
+        self._spawn(self._audio(t.ack, pcm))
+
+    async def _voice_acks(self) -> None:
+        """`ACKS` in Valor's voice, made once as the call starts."""
+        for text in ACKS:
+            pcm = b""
+            try:
+                async for got in self.gemini.speak(text):
+                    if isinstance(got, dict):
+                        await self._meter(settings.call_voice_model, got["usage"])
+                    else:
+                        pcm += got
+            except Exception as exc:  # noqa: BLE001  a turn with none is answered without one
+                _log(f"call {self.id}: the acknowledgement {text!r} was not made: {exc!r}")
+            if pcm:
+                self.acks.append((text, pcm))
 
     def _drop(self, t: Turn, why: str) -> None:
         """A turn not yet said, dropped with what it held; the person's next
@@ -1719,6 +1765,8 @@ class Call:
                 self.posts.put_nowait(Post(t.id, written.strip(), True))
             if written.strip():
                 self.prepare()  # an exchange: the worker updates the state (P-041)
+            elif t.ack is not None:  # told it had acknowledged, it still wrote nothing
+                _log(f"call {self.id}: turn {t.id} said {t.ack.text!r} and then nothing")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001  a turn that fails says nothing, and the call goes on
@@ -1753,7 +1801,9 @@ class Call:
         it before Valor speaks of it. An answer it opened with is given."""
         if t.committed:
             return
-        while t.after is not None and not t.after.done():
+        while (t.after is not None and not t.after.done()) or (
+            t.ack is not None and not t.ack.dropped and (t.ack.over is None or not t.ack.over.done())
+        ):
             await asyncio.sleep(0.05)
         t.committed, self.answering = True, t.answering
         for name, args in sorted(t.held, key=lambda h: h[0] != "settle"):
@@ -1917,6 +1967,9 @@ class Call:
         t = self.turn
         if t is not None and t.reply is reply and t.task is not None and not t.task.done():
             t.task.cancel()
+        elif t is not None and t.ack is reply and not t.committed and not t.dropped:
+            self._drop(t, "they went on over its acknowledgement")
+            self.went_on = t.answering
 
     async def _say(self, payload: dict[str, Any]) -> dict[str, Any]:
         """`meet.say`, released: the reply's held audio plays, and the say
@@ -2656,6 +2709,7 @@ class Call:
                     (m[1] for t in (spec.rooms.values() if spec else []) if (m := SHEET_URL.search(t))), None
                 )
                 self.instruction = system(self.project or "", bool(self.sheet))
+                self._spawn(self._voice_acks())
                 lanes += [self._lane(c) for c in (self.listen(), self.mix(), self.watch())]
                 await self.leaving.wait()
         except Exception as exc:  # noqa: BLE001  the call ends, saying why

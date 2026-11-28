@@ -136,6 +136,16 @@ against a new Meet with a second device of Valor's account
   after round and said nothing, the live tests, 2026-11-25). A `leave`
   waits for the goodbye to be said. A newer turn drops one not yet said,
   and waits out one that is. An empty reply is silence.
+  A turn Valor will answer is acknowledged at once, while the mind
+  writes (Tom, 2026-11-27: "During the 7s of “thinking time” can we get a
+  spoken “ok” at least?"): one of `ACKS` ("Ok.", "Sure.", "One sec."),
+  made in his voice as the call starts, said as a reply of its own on the
+  same path (its `meet.say`, playback and cut-off); in a 1:1 for every
+  turn, in a group only when he is named (a follow-on may be to someone
+  else, and the mind silent on it); never while he is speaking, nor over
+  anyone who spoke in the last `ACK_QUIET_S`. The mind is told it was
+  said, so it answers; the answer's first sound waits for it. Cut by the
+  person going on, it drops the turn.
   Each whole sentence goes to the voice as it is written
   (`settings.call_voice_model`, voice `settings.call_voice`); a turn is
   one `meet.say`, requested at its first sound, its audio held until

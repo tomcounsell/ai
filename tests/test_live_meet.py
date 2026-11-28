@@ -129,7 +129,14 @@ def test_valor_speaks_from_one_mind_in_a_real_call(dsn, tmp_path, monkeypatch):
                 seen["notice"] = call.JOIN_LINE in seen["chat"]
                 await asyncio.sleep(5)
                 gaps = seen["gaps"]
-                gaps["hello"] = await a.ask(kokoro, "Hello.")
+                seen["ends"] = {}
+
+                async def ask(key, text):
+                    gap = await a.ask(kokoro, text)
+                    seen["ends"][key] = a.last_end
+                    return gap
+
+                gaps["hello"] = await ask("hello", "Hello.")
                 # A thought with a pause in it: no sound of Valor's before it is done (the step-1 rule).
                 seen["pauses"] = []
                 for pause in (1.0, 1.4):
@@ -137,17 +144,17 @@ def test_valor_speaks_from_one_mind_in_a_real_call(dsn, tmp_path, monkeypatch):
                                                         pause, "whether we launch on Monday or on Thursday."))  # fmt: skip
                 await asyncio.sleep(4)
                 # P-041's acceptance: three topics out of order, a decision that changes another, the stale note.
-                gaps["rota"] = await a.ask(kokoro, "Valor, let's take the support rota first.")
-                gaps["pricing"] = await a.ask(kokoro, "Hold that. Where is the pricing page copy?")
-                gaps["decide"] = await a.ask(kokoro, DECIDE)
+                gaps["rota"] = await ask("rota", "Valor, let's take the support rota first.")
+                gaps["pricing"] = await ask("pricing", "Hold that. Where is the pricing page copy?")
+                gaps["decide"] = await ask("decide", DECIDE)
                 seen["decide_at"] = time.time()
                 await asyncio.sleep(3)  # the worker's update, listing the launch date as open, lands
-                gaps["next"] = await a.ask(kokoro, "Okay. What's next?")
+                gaps["next"] = await ask("next", "Okay. What's next?")
                 seen["asked_at"] = time.time()
-                gaps["asked"] = await a.ask(kokoro, ASK)
+                gaps["asked"] = await ask("asked", ASK)
                 seen["typed"] = await a.typed("Valor, can you post the launch date here?")
-                gaps["lookup"] = await a.ask(
-                    kokoro, "Valor, please have your worker look up the import's error rate in the code."
+                gaps["lookup"] = await ask(
+                    "lookup", "Valor, please have your worker look up the import's error rate in the code."
                 )
                 for _ in range(60):
                     if any(LOOKED_UP in t for t in seen["chat"]):
@@ -173,7 +180,7 @@ def test_valor_speaks_from_one_mind_in_a_real_call(dsn, tmp_path, monkeypatch):
                 await b.leave()
                 while time.time() - a.joined_at < call.EARS_S + 20:  # past the transcriber's reopen
                     await asyncio.sleep(5)
-                gaps["after_reopen"] = await a.ask(kokoro, "Valor, are you still with us?")
+                gaps["after_reopen"] = await ask("after_reopen", "Valor, are you still with us?")
                 await asyncio.sleep(6)
                 await a.ask(kokoro, "Thanks everyone, that's all for today, we're done. Goodbye!", wait=False)
                 reason = await asyncio.wait_for(calling, 300)
@@ -200,6 +207,22 @@ def test_valor_speaks_from_one_mind_in_a_real_call(dsn, tmp_path, monkeypatch):
                       "says": says, "reason": reason, "report": report,
                       "reopened": [x for x in seen["log"] if "reopening the transcriber" in x],
                       "dropped": [x for x in seen["log"] if "dropped before its first sound" in x]}, indent=1))  # fmt: skip
+    # The spoken acknowledgement (Tom, 2026-11-27): when it began and when the answer did, after each
+    # question; and any said while others talked to each other.
+    starts = [(x["at"] - x["played_s"], x["spoken_text"] in call.ACKS) for x in says]
+    timing = {}
+    for key, end in seen["ends"].items():
+        acked = min((t for t, ack in starts if ack and t > end), default=None)
+        answered = min((t for t, ack in starts if not ack and t > end), default=None)
+        timing[key] = {"ok": acked and round(acked - end, 2), "answer": answered and round(answered - end, 2)}
+    stray = [t for t, ack in starts if ack and any(a0 <= t <= a1 for a0, a1 in seen.get("not_to_valor", []))]
+    oks = sorted(v["ok"] for v in timing.values() if v["ok"])
+    answers = sorted(v["answer"] for v in timing.values() if v["answer"])
+    print(json.dumps({"timing": timing, "stray_oks": len(stray)}, indent=1))
+    print(f"live: ok after {statistics.median(oks):.2f} s median, {oks[int(0.9 * (len(oks) - 1))]:.2f} s p90; answer "
+          f"after {statistics.median(answers):.2f} s median, {answers[int(0.9 * (len(answers) - 1))]:.2f} s p90; "
+          f"{len(stray)} oks on talk not meant for Valor")  # fmt: skip
+    assert not stray, stray
     d = sorted(g for g in gaps.values() if g != float("inf"))
     print(f"live: delay per reply (end of question to first sound at the asker), {len(d)} replies: median "
           f"{statistics.median(d):.2f} s, p90 {d[int(0.9 * (len(d) - 1))]:.2f} s, max {d[-1]:.2f} s")  # fmt: skip
@@ -285,6 +308,7 @@ class Device:
         """The seconds from the end of `text` to Valor's first sound here."""
         await self.quiet()
         end = await self.say(kokoro, text)
+        self.last_end = end
         if not wait:
             return 0.0
         for _ in range(120):
@@ -368,9 +392,10 @@ class Device:
     async def side(self, kokoro, text: str, listener) -> int:
         """Say `text`, not to Valor; how many of Valor's frames `listener` heard in the next 10 s."""
         listener.others.add(self.me)
-        heard = len(listener.voice)
+        heard, start = len(listener.voice), time.time()
         end = await self.say(kokoro, text)
         await asyncio.sleep(max(0.0, end - time.time()) + 10)
+        self.seen.setdefault("not_to_valor", []).append((start, time.time()))
         return len(listener.voice) - heard
 
     async def leave(self) -> None:
