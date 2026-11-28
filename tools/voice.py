@@ -14,8 +14,9 @@ One process holds the model, so the three bridges share one copy
 The engine is `listen`: a new model is a setting, a new engine is one
 function. The model loads on first use and stays loaded; inference runs on
 one thread, one request at a time. Speech out is not here: a turn speaks
-with the yudame present skill's `tts.py` (Kokoro, the old system's engine),
-from Kokoro's files in `settings.tts_model_dir` in `settings.tts_voice`.
+with the yudame present skill's `tts.py` in the call's voice
+(`settings.call_voice`, on Gemini), Kokoro's files in `settings.tts_model_dir`
+its fallback with no Gemini key.
 `fetch` downloads Parakeet and those files, the step each Mac runs once.
 """
 

@@ -307,11 +307,11 @@ def _reading_env(b: tasks.Brief) -> dict[str, str]:
     """What `valor-telegram read`, `valor-slack read` and a spoken reply
     need: the bridges' read ports, `VALOR_CHAT` (the session's own chat,
     else the chat whose session started the task, else the project's first), and the voice the present skill's `tts.py`
-    speaks in, `KOKORO_MODELS_DIR` and `VALOR_TTS_VOICE`."""
+    speaks in, the call's (`YUDAME_TTS_VOICE`), with `KOKORO_MODELS_DIR` for its fallback."""
     env = {"VALOR_TELEGRAM_READ_PORT": str(settings.telegram_read_port),
            "VALOR_SLACK_READ_PORT": str(settings.slack_read_port),
            "KOKORO_MODELS_DIR": str(Path(settings.tts_model_dir).expanduser()),
-           "VALOR_TTS_VOICE": settings.tts_voice}  # fmt: skip
+           "YUDAME_TTS_VOICE": settings.call_voice}  # fmt: skip
     if b.chat:
         return {**env, "VALOR_CHAT": f"{b.chat['channel']}:{b.chat['chat_id']}"}
     if (b.project or {}).get("chat"):

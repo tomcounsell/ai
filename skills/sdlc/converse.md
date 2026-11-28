@@ -339,10 +339,10 @@ is for.
 **Voice notes.** A voice note or audio file reaches you with its
 `transcript:` line under it: that is what was said, so answer it as you
 would a typed message. Answer a voice note with a voice note: speak a
-short version of your reply with the present skill's `tts.py`, in Valor's
-voice from your environment:
+short version of your reply with the present skill's `tts.py`, which
+speaks in Valor's voice, the one calls use, from your environment:
 
-    uv run "$(ls -td ~/.claude/plugins/cache/yudame/yudame/*/skills/present | head -1)/tts.py" --engine kokoro --voice "$VALOR_TTS_VOICE" --text "<words>" --out reply.ogg
+    uv run "$(ls -td ~/.claude/plugins/cache/yudame/yudame/*/skills/present | head -1)/tts.py" --text "<words>" --out reply.ogg
 
 `reply.ogg` arrives on Telegram as a voice note; on Slack write
 `reply.mp3`. Put the file in the same send's `files` with the same words as

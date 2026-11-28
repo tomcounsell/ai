@@ -651,11 +651,12 @@ labelled the same way and likewise never in a fresh session's Brief.
 ## Speaking a reply
 
 A chat session answers a voice note with one ([skills/sdlc/converse.md](../skills/sdlc/converse.md)),
-spoken by the yudame present skill's `tts.py` (Kokoro, local, no key) into
-an `.ogg`, which Telegram receives as a voice note, or an `.mp3` for Slack.
-The kernel sets `KOKORO_MODELS_DIR` and `VALOR_TTS_VOICE` in every turn's
-env from `settings.tts_model_dir` and `settings.tts_voice`, so every reply
-has the one voice ([tools/README.md](../tools/README.md), Voice).
+spoken by the yudame present skill's `tts.py` into an `.ogg`, which
+Telegram receives as a voice note, or an `.mp3` for Slack. The kernel sets
+`YUDAME_TTS_VOICE` in every turn's env to `settings.call_voice`, which
+`tts.py` speaks on Gemini with the turn's `GEMINI_API_KEY`, so replies,
+narrated videos and calls have the one voice; with no key it speaks Kokoro
+from `KOKORO_MODELS_DIR` (`settings.tts_model_dir`) ([tools/README.md](../tools/README.md), Voice).
 
 ## Steering mid-turn
 

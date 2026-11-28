@@ -36,7 +36,7 @@ Installed into every turn's `bin/` (`core/workspace.py` `WORKSPACE_TOOLS`, befor
 
 The engine is the function `listen`: another model is a setting (`VALOR_ASR_MODEL`), another engine is one function.
 
-Speech out is the yudame present skill's `tts.py`, which a turn runs itself: Kokoro v1.0, the old system's engine and voice. Its files sit in `settings.tts_model_dir` (`~/.cache/kokoro-onnx`) and its voice is `settings.tts_voice` (`am_michael`); the kernel puts both in every turn's env (`KOKORO_MODELS_DIR`, `VALOR_TTS_VOICE`), so another voice is the setting `VALOR_TTS_VOICE`. `fetch` downloads Parakeet and Silero VAD into the Hugging Face cache and Kokoro's two files from the kokoro-onnx release; every model a Mac keeps is [docs/local-models.md](../docs/local-models.md).
+Speech out is the yudame present skill's `tts.py`, which a turn runs itself, in the call's voice: `settings.call_voice` (`Alnilam`, `VALOR_CALL_VOICE`) on Google's Gemini TTS with the turn's `GEMINI_API_KEY`, so a voice note, a narrated video and a call sound the same (P-044). With no Gemini key it falls back to Kokoro v1.0 (its default `am_michael`), whose files sit in `settings.tts_model_dir` (`~/.cache/kokoro-onnx`). The kernel puts both in every turn's env (`YUDAME_TTS_VOICE`, `KOKORO_MODELS_DIR`), so another voice is the one setting `VALOR_CALL_VOICE`. `fetch` downloads Parakeet and Silero VAD into the Hugging Face cache and Kokoro's two files from the kokoro-onnx release; every model a Mac keeps is [docs/local-models.md](../docs/local-models.md).
 
 ## Judgement legs
 

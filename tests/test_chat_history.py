@@ -378,14 +378,15 @@ def test_each_turn_installs_the_tools_and_names_its_chat(tmp_path, monkeypatch):
     )
     (projects / "bare.toml").write_text(bridges.VALOR_SPEC.replace("valor", "bare"))
     with bridges.configure(
-        projects_dir=str(projects), telegram_read_port=9101, tts_voice="bf_alice", tts_model_dir="~/k"
+        projects_dir=str(projects), telegram_read_port=9101, call_voice="Kore", tts_model_dir="~/k"
     ):
         session = turn_env(tmp_path, mirror=mirror, chat={"channel": "telegram", "chat_id": "-1009"})
         task = turn_env(tmp_path, mirror=mirror, project={"name": "flowers"})
         bare = turn_env(tmp_path, mirror=mirror, project={"name": "bare"})
         unprovisioned = turn_env(tmp_path, project={"name": "flowers"})
     assert session["VALOR_CHAT"] == "telegram:-1009" and session["VALOR_TELEGRAM_READ_PORT"] == "9101"
-    assert session["VALOR_TTS_VOICE"] == task["VALOR_TTS_VOICE"] == "bf_alice"
+    # One voice: a voice note or video speaks in the call's (P-044).
+    assert session["YUDAME_TTS_VOICE"] == task["YUDAME_TTS_VOICE"] == "Kore"
     assert session["KOKORO_MODELS_DIR"] == str(Path.home() / "k")
     assert task["VALOR_CHAT"] == "slack:T0ABC/C0F"
     assert "VALOR_CHAT" not in bare and "VALOR_CHAT" not in unprovisioned
