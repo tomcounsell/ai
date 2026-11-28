@@ -201,7 +201,9 @@ def test_valor_speaks_from_one_mind_in_a_real_call(dsn, tmp_path, monkeypatch):
     for step in ("barge_at", "over_at"):
         w = seen[step]
         w["cut"] = any(x["cut"] for x in says if w["over"] <= x["at"] <= w["over"] + 6)
-    said = lambda after: next((x["spoken_text"] for x in says if x["at"] > after), "")
+    said = lambda after: next(
+        (x["spoken_text"] for x in says if x["at"] > after and x["spoken_text"] not in call.ACKS), ""
+    )
     gaps = seen["gaps"]
     print(json.dumps({"gaps": gaps, "pauses": seen["pauses"], "both": seen["both"], "typed": seen["typed"],
                       "says": says, "reason": reason, "report": report,
