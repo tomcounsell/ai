@@ -1,34 +1,97 @@
-# One voice: only a chat session speaks as Valor
+# One voice for Valor (P-044)
 
-**Why.** On 2026-10-31 the nightly Sentry routine's report went to Tom's Slack DM as kernel text, not from Valor's session there. Tom replied twice in its thread ("Why did you send me this big mess?", "Why are you telling me this? I didn't ask for this."); each reply bound as feedback, reopened the run, and it re-sent a shorter report. Nobody answered him. He asked for this path rewritten from scratch.
+Tom, #valor-product, 2026-11-27: "I'd like to consider unifying Valor's voice
+across the present skill and the calls on Google meet. Let's use what we are
+doing with Google for the voice presentations." Job: anyone who hears Valor (a
+call, a narrated presentation, a voice note) hears the same person.
 
-**Grant (capability removal, rule 3).** Tom, Slack DM, 2026-11-01, 04:22-04:30 UTC: "If I were you, I'd be very jealous and protective about what systems are writing messages. No routine or system should be impersonating you." "It's truly a matter of trust. How can I trust anything coming from you if something else might be able to speak for you without your permission." "How will we prevent new features from impersonating you? Do we need a slack Bot account for other types of logs and reports? I personally prefer [it] didn't come through Slack, but I don't have a better idea for the destination of routines reports." Instance: the kernel's send effects are removed from every turn that is not a chat session's. Incident: the report above. Mission item 6 (Tom's attention). Ledgered with a ninety-day expiry. No bot account, no second channel. Tom confirmed the grant at 04:34 UTC with a :+1: on my post 1793507471.811279, which set out this design (only chat sessions send; tasks and routines have no send action and report to the record; no bot account) and named these messages as the grant.
+## Premises (observed 2026-11-28)
 
-**Causes.** (1) `notices.reports_to` gives a session only a session's child or a root; a routine run is a child of its objective, so its `ended` fell to `home()` and the bridge posted it. The same direct path carries `TOMS` (credential, binding, rollout), disk-low, send-in-doubt, `/update` replies and a session's own `ended`. (2) Any `act` task may request a send. (3) In Tom's own chat a reply under a non-session task's notice binds as feedback. (4) A session never sees the post a reply is under.
-
-**The rule.** Every message the kernel sends under Valor's name is one a chat session wrote and sent. Tools a turn holds as a developer would (`gws` mail with Valor's Google account, `gh` comments) are not kernel sends; developer parity keeps them, and the delivery names them for Tom as the paths still open (Tom's steer: fix what is the same mechanism, name the rest).
+- Calls speak Gemini's `Alnilam` (`settings.call_voice`, `VALOR_CALL_VOICE`).
+- Voice notes and narrated videos go through the yudame plugin's
+  `skills/present/tts.py` (plugin commit 2517a77): Kokoro, then macOS `say`.
+  `skills/sdlc/converse.md:345` pins `--engine kokoro --voice "$VALOR_TTS_VOICE"`
+  (`am_michael`, `settings.tts_voice`, set per turn in `core/__main__.py`
+  `_reading_env`). Videos pass no `--voice`, so they get Kokoro's default.
+- A turn's env is the operator's less the kernel's secrets
+  (`core/workspace.py` `environment`); `GEMINI_API_KEY` is in it (seen in this turn).
+- The plugin's source is `yudame/skills` (public, Valor has maintain; Valor
+  opens and merges its own PRs there, #6-#10). The kernel cannot merge there.
+- P-042's `core/call.py` `speak` calls `gemini-3.8-flash-tts` with a prebuilt
+  voice; the response is 24 kHz 16-bit mono PCM.
 
 ## What is built
 
-1. **Sends belong to sessions.** `__main__._performers` adds the declared bridge types (`*.send_message`, `email.send`, `slack.write_canvas`) only for a Brief with `chat`; a task's turn is neither offered them nor can request them (unknown type). Push and merge stay. A session's send may attach a file from its own workspace or from the workspace of a task in `tasks.reporting(session)` (`bridge._size_refusal` takes the roots from the session's Brief at refusal), so a task's PDF, deck or export reaches a chat through the session it reports to.
-2. **One report path.** `notices.request` writes one `child.reported` row on a session; nothing a bridge sends. Payload `from`, `kind`, `about_key`, `text`, and `child_id` = `from` only for question, ended and report, so `tasks.reporting` and `stop` reach what they do today. Once per (`from`, `about_key`): a unique index, written in a savepoint as `events_one_notice` was; a legacy `notice.requested` of the same task and key counts as done, so cutover re-reports nothing. Which session: nearest chat-session ancestor; a `/update` reply, its room's session (`open_session` when none); else `intake.operator_session`. A session's own `ended` goes to its chat's next session only when it left a message unanswered; that session holds it as a report, so its own end reports nothing further. No session: the row stays on the reporting task. `chat_prompt` renders by `from` ("Your task X reports"; a stream, "The kernel reports (updates)"). Deleted: `TOMS`, `home()`, the `report` notice for sends, writes of `notice.requested`/`notice.sent`/`notice.undeliverable` and their indexes, `NoticeDue` and every bridge's `notice()`. Old rows stay readable (`_replied`, `_SENT`, the local page).
-3. **Routine results are the record.** A background report (`tasks.background`) other than a `question` carries `quiet: true`, read by `ledger.quiet` and `session.chat_waiting` as `message.heard` is: no turn, no unpark. Its next prompt labels it "a routine result, held in the record"; later sessions find it with `valor-record tasks --search` (every task routine is under `valor`). A routine whose work is sends (`invoices`) sets `wakes = true` in its toml: its run runs `mercury.py remind` in its own workspace and stops with each drafted `email.send` (PDF paths in that workspace) in its `Done:`; the report wakes the session, which writes them as its own effects. The instruction and the mercury skill (notice too) say so.
-4. **Tom's own chat is the session's, whole.** Every message of his there binds to its session; `stop` stays immediate. A reply stores `replying_to` {`task_id`, `text`}; `chat_line` quotes the text (500 characters), and the bind links the task into `tasks.reporting` when it is not, so `task.answer`/`task.steer` reach legacy tasks too. No project for the chat: a task starts. The reply table's feedback, answer and merged/stopped rows go.
-5. **Words.** Sentry toml drops "Send Tom nothing."; `converse.md` and the chat-session text; `core/notices.py`, `core/intake.py` docstrings; `docs/routines.md`, `docs/bridges/*.md`, `docs/architecture.md`, `docs/data.md`.
+**yudame/skills, one PR (`present: a Google voice`):**
 
-## Decisions Tom may want to change
+1. `tts.py` gets a `Gemini` engine: one `generateContent` POST to
+   `gemini-3.8-flash-tts` over stdlib `urllib` (no new dependency), the voice as
+   `prebuiltVoiceConfig`, the base64 PCM written as a 24 kHz WAV with `wave`; the
+   existing `to_format` makes ogg/mp3/m4a as now. Key: `GEMINI_API_KEY`, else
+   `GOOGLE_API_KEY`.
+2. Engine choice: `--engine gemini` added. Under `auto`, a voice that is one of
+   Gemini's prebuilt voice names (the published list, a constant) tries Gemini
+   first; without a key it falls to Kokoro with Kokoro's default voice, then
+   `say`, saying so on stderr as today. Kokoro voices (`_` in the name) and every
+   other name behave exactly as now, so a plugin user who sets nothing hears no
+   change.
+3. `--voice` defaults to `$YUDAME_TTS_VOICE` when set, so an environment picks a
+   voice for every clip, voice notes and videos alike, without each command
+   passing it.
+4. Rate limits on a long video: a 429 or 5xx, or a reply with no audio, is
+   retried up to 3 times, waiting the server's `retryDelay` when it gives one.
+   No switch to another engine mid-run: one video, one voice.
+5. Names: LEXICON is Kokoro phonemes and does not carry. The builder speaks
+   "Valor Engels", "Yudame" and "yuda.me" in Alnilam, transcribes each clip back
+   (`tools/voice.py`'s transcriber), and where Gemini says one wrong adds a plain
+   respelling to a second, Gemini-only table applied to the text it is sent
+   (captions and manifest keep the real spelling), retested the same way.
+   Engels as in Friedrich Engels, Yudame stressed first (YOO-dah-meh), as the
+   Kokoro lexicon says them (product room steer, 2026-11-28; Tom raised both).
+6. The JSON printed and the scenes manifest name the engine and voice used, the
+   Gemini voice included (as Kokoro's do today).
+7. SKILL.md and VIDEO.md say the Google engine, its key, its cost (paid per
+   clip) and `YUDAME_TTS_VOICE`; the README's test line names the new checks.
 
-Disk-low, mixed rollout, credential and send-in-doubt reach Tom only through a session turn, which those faults can stop. Invoice reminders and notices now leave from the operator session after the run reports. `gws` mail and `gh` stay open to task turns (developer parity); closing them is a further grant. Out of scope: emoji reactions; the Sentry routine still cannot start fix tasks.
+**tomcounsell/ai, this branch (safe to land before the PR merges):**
 
-## Tests (incident first)
+8. One setting: `settings.tts_voice` and `VALOR_TTS_VOICE` are removed; the turn
+   env sets `YUDAME_TTS_VOICE = settings.call_voice` beside `KOKORO_MODELS_DIR`.
+9. `converse.md`'s voice-note command drops `--engine kokoro --voice ...`. With
+   today's plugin it still speaks Kokoro `am_michael` (auto, no voice: unchanged
+   behaviour); with the new plugin it speaks Alnilam.
+10. Docs naming `VALOR_TTS_VOICE`/`tts_voice` follow (`tools/README.md`,
+   `core/README.md`, `docs/harnesses.md`, `docs/local-models.md`, settings comment).
 
-- Incident: a sentry run ends `Done: filed #N`; no bridge item, a quiet report, no step scheduled, next prompt labels it. Tom's two thread replies under the legacy report bind `steer` to his DM's session, whose prompt quotes it; no feedback, no re-delivery.
-- A routine or other non-session task's turn is not offered and cannot request any send or canvas type; a session can.
-- Reply under a legacy question notice: the session's `task.answer` answers it. Cutover: legacy `notice.requested` writes no `child.reported`; two concurrent requests write one row.
-- With no operator session open, a quiet routine report opens one and no step is scheduled. New session finds the run's summary via `record.task_list`.
-- Invoices: the run's report wakes the session; its `email.send` naming the run's PDF is not refused; a file in a task not reporting to it is.
-- Question, foreground `ended`, merge report, credential, rollout, disk-low, send-in-doubt each wake; none renders "None".
-- `/update` with no room session opens one, reports once over ticks. Chain ends after one hop. `stop` after stream and credential reports stops only what it did before.
-- No bridge yields a notice item; tests on `notice.requested` move to `child.reported`. Suite under 5 minutes; `test_bloat` green.
+## Out of scope
 
-Stakes: kernel binding, report rows and turn capabilities, so 2 critique rounds and 1 review round. Governance: the send removal above, under Tom's grant; nothing else.
+The call voice and P-042; choosing another voice; removing Kokoro or `say`;
+audio formats (ogg for Telegram, mp3 for Slack, as now); the call's own
+pronunciation (P-042's). No new check, gate or guard.
+
+## Tests
+
+- yudame/skills `tests/check_tts.py` (its style, no network, `urllib` and
+  `time.sleep` stubbed): Gemini voice + key gives Gemini; Gemini voice, no key
+  gives Kokoro with `am_michael` (Kokoro stubbed), Kokoro missing gives `say`
+  with `Daniel`; a Kokoro voice never reaches Gemini; a `say` voice name
+  (`Daniel`) never reaches Gemini; `YUDAME_TTS_VOICE` is the default and
+  `--voice` overrides it; `GOOGLE_API_KEY` alone works; the request carries the
+  model and voice and the WAV is 24 kHz mono of the returned PCM; a 429 with
+  `retryDelay` waits it and succeeds; three failures exit non-zero without
+  another engine.
+- ai `tests/test_chat_history.py:388`: a turn's env has `YUDAME_TTS_VOICE` equal
+  to `settings.call_voice` (and `VALOR_CALL_VOICE` moves both), and no
+  `VALOR_TTS_VOICE`. The full suite.
+- `check_tts.py`: the Gemini respelling reaches the request and not the
+  manifest's `text`.
+- Live, on this Mac with the real key: Alnilam is accepted by
+  `gemini-3.8-flash-tts` (the 2026-11-25 test and P-042 used it; confirmed again
+  here); each name clip transcribed back before and after any respelling, the
+  transcripts reported; a Telegram voice note (`reply.ogg`), a
+  Slack one (`reply.mp3`) and a three-scene `--scenes` run each report
+  `engine: gemini, voice: Alnilam`; the same with both keys unset reports
+  `kokoro`. After the PR merges, the plugin cache on this Mac is updated and the
+  converse command, run as written, speaks Alnilam. The sample `.ogg` and a short
+  narrated video are left in `.valor/` for the chat session to send Tom: done is
+  Tom hearing it.
