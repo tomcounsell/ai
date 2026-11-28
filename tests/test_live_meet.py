@@ -242,7 +242,9 @@ def test_valor_speaks_from_one_mind_in_a_real_call(dsn, tmp_path, monkeypatch):
     for x in says:
         for q in re.split(r"(?<=[.?!])\s+", x["spoken_text"]):
             if q.endswith("?") and x["at"] > seen["decide_at"]:
-                assert not re.search(r"launch date|monday|thursday", q, re.IGNORECASE), x
+                assert not re.search(r"launch date|monday", q, re.IGNORECASE), (
+                    x
+                )  # Thursday, decided, may be named
     asked = said(seen["asked_at"])
     assert re.search(r"thursday", asked, re.IGNORECASE) and re.search(
         r"pricing|copy", asked, re.IGNORECASE
@@ -385,15 +387,15 @@ class Device:
         return {"chat": self.seen["chat"][before:], "frames": len(self.voice) - heard}
 
     async def cut_in(self, kokoro, ask: str, over: str, *, by=None) -> dict:
-        """Ask for a long answer, and 1.5 s into it say `over` (from `by`);
-        when `over` began, for the say it cut, if any."""
+        """Ask for a long answer, and 2 s into it, past a short "Ok."
+        (`call.ACKS`), say `over` (from `by`); when `over` began, for the say
+        it cut, if any."""
         await self.quiet()
         end = await self.say(kokoro, ask)
-        for _ in range(120):
+        for _ in range(240):
             await asyncio.sleep(0.25)
-            if self.voice and self.voice[-1] > end:
+            if sum(1 for t in self.voice if t > end) * 0.01 > 3.0:
                 break
-        await asyncio.sleep(1.5)
         start = time.time()
         spoke = await (by or self).say(kokoro, over)
         await asyncio.sleep(max(0.0, spoke - time.time()) + 2.5)
