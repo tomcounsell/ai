@@ -3412,13 +3412,13 @@ def test_a_turn_valor_answers_is_acknowledged_once_all_are_quiet_on_the_one_voic
         assert await until(lambda: len(c.the.acks) == 2)
         c.gemini.think_gate = asyncio.Event()
         c.gemini.minds.append(["Monday."])
-        await says(c, LOGAN, "Valor, when do we ship?")
+        await says(c, LOGAN, "Valor, when do we ship?", quiet=0.5)  # its end of turn comes after the quiet
         assert await until(lambda: page.streams)
         acked = (len(page.streams), list(c.gemini.prompts))
         c.gemini.think_gate.set()
         await settle(c.the)
         c.gemini.minds.append(["Noted."])
-        await says(c, TOMS, "Logan, lunch after?")  # straight on from his answer, but not naming him
+        await says(c, TOMS, "Logan, lunch after?", quiet=0.5)  # straight on from his answer, not naming him
         await asyncio.sleep(0.6)
         await settle(c.the)
         await finish(c)
@@ -3432,7 +3432,7 @@ def test_a_turn_valor_answers_is_acknowledged_once_all_are_quiet_on_the_one_voic
 
 
 def test_no_acknowledgement_when_someone_speaks_before_it_is_due_or_the_answer_is_ready(
-    dsn, team, quick, acks
+    dsn, team, quick, acks, monkeypatch
 ):
     """Said 1.6 s after the last word, it sounded inside a mid-thought pause
     the transcriber had ended a turn in (the live Meet test, 2026-11-28)."""
@@ -3448,6 +3448,7 @@ def test_no_acknowledgement_when_someone_speaks_before_it_is_due_or_the_answer_i
         c.gemini.think_gate.set()
         await settle(c.the)
         c.gemini.think_gate = None
+        monkeypatch.setattr(call, "ACK_AFTER_S", 1.5)
         await says(c, LOGAN, "Valor, and the emails?")  # answered before it is due
         await settle(c.the)
         c.the.chat(TOMS, "Valor, the date?")  # typed: never

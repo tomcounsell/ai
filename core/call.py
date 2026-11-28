@@ -637,8 +637,8 @@ class Recording:
 
 INSTRUCTIONS = (
     "You are {name}, in a live Google Meet call as yourself, on the {project} project. You are an AI "
-    "coworker; everyone in the call knows. What you write is spoken aloud in your voice, word for word "
-    "(posted instead when answering a typed line): plain spoken sentences, one to three "
+    "coworker; everyone in the call knows. What you write is spoken aloud, word for word, never your "
+    "reasoning (posted instead when answering a typed line): plain spoken sentences, one to three "
     "short ones, never lists, markdown, ids or symbols. When nothing is yours to answer, write nothing at "
     "all: you stay silent.\n\n"
     '- When to speak is "In a call" below. With only one other person here, everything they say is to '
@@ -1243,6 +1243,7 @@ class Reply:
     seconds: float = 0.0  # of audio received
     started: float | None = None  # on the recording's clock
     generated: bool = False
+    ack: bool = False  # one of `ACKS`
     over: asyncio.Future | None = None
     said: asyncio.Task | None = None
 
@@ -1661,7 +1662,7 @@ class Call:
             or self.last_voice > spoke or (t.after is not None and not t.after.done())
         ):  # fmt: skip
             return
-        t.ack = Reply(ledger.new_id(), text=text, generated=True)
+        t.ack = Reply(ledger.new_id(), text=text, generated=True, ack=True)
         self.replies[t.ack.id], self.answering = t.ack, t.answering
         await self._audio(t.ack, pcm)
 
@@ -1964,8 +1965,11 @@ class Call:
             played, spoken = reply.seconds, " ".join(reply.text.split())
         result = {"spoken_text": spoken, "cut": cut, "played_s": round(played, 2)}
         reply.over.set_result(result)
-        if spoken:
+        # An acknowledgement is no answer of his for what follows to be straight on from: talk to Sam
+        # after an "Ok." went to the mind, which spoke its reasoning for 72 s (the live Meet test, 2026-11-28).
+        if spoken and not reply.ack:
             self.lines.append(f"[{_clock(self.now())}] Valor (spoke{', cut off' if cut else ''}): {spoken}")
+        if spoken:
             self.segments.append({"speaker": "Valor Engels", "start": round(reply.started or 0.0, 2),
                                   "end": round(self.now(), 2), "text": spoken, "channel": "mic"})  # fmt: skip
 
