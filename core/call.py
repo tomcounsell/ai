@@ -716,8 +716,11 @@ TOOLS = [
 # Said as soon as a turn Valor will answer ends, while the mind writes (Tom, 2026-11-27: "During the
 # 7s of “thinking time” can we get a spoken “ok” at least?"), in his voice, made as the call starts.
 ACKS = ("Ok.", "Sure.", "One sec.")
-ACKED = " You have already said “{ack}” aloud: now answer it; never leave it at that."
-ACK_QUIET_S = 0.3  # no acknowledgement over anyone who spoke this recently
+ACKED = " A short “{ack}” may already have been said aloud for you: do not say it again; answer it."
+# It waits this long after anyone last spoke, and is not said if anyone spoke since: said 1.6 s after
+# the last word it sounded inside a mid-thought pause of 1.4 s the transcriber had ended a turn in
+# (the live Meet test, 2026-11-28); step 1 found no such cut-off with Valor's first sound 2.6 s on.
+ACK_AFTER_S = 2.0
 ACTS = ("settle", "ask", "post", "leave")  # the tools whose effects wait for the turn's first sound
 ASKED = "asked: the answer will be posted in the chat and given to you"
 POSTING = "posting in the chat"
@@ -1638,22 +1641,29 @@ class Call:
         t.task.add_done_callback(self.jobs.discard)
 
     def _acknowledge(self, t: Turn) -> None:
-        """One of `ACKS`, said now as a reply of its own, on the one voice
-        path (its `meet.say`, the same playback and cut-off), for a turn
-        Valor will answer: not while he is still speaking, nor over anyone
-        who spoke in the last `ACK_QUIET_S`. The mind is told it was said, so
-        the turn is answered; its first sentence waits for it (`_commit`)."""
-        if (
-            not self.acks or self.out is not None or (t.after is not None and not t.after.done())
-            or self.now() - self.last_voice < ACK_QUIET_S
-        ):  # fmt: skip
+        """One of `ACKS` for a turn Valor will answer, said as a reply of its
+        own on the one voice path (its `meet.say`, the same playback and
+        cut-off) once `ACK_AFTER_S` has passed since anyone spoke, unless
+        someone spoke since, Valor is speaking, or the answer has begun. The
+        mind is told one may have been said, so the turn is answered; its
+        first sound waits for one that is playing (`_commit`)."""
+        if not self.acks:
             return
         text, pcm = self.acks[self.acked % len(self.acks)]
         self.acked += 1
+        t.now += ACKED.format(ack=text)
+        self._spawn(self._ack_when_quiet(t, text, pcm, self.last_voice))
+
+    async def _ack_when_quiet(self, t: Turn, text: str, pcm: bytes, spoke: float) -> None:
+        await asyncio.sleep(max(0.0, spoke + ACK_AFTER_S - self.now()))
+        if (
+            t.dropped or t.committed or t.reply.said is not None or self.out is not None
+            or self.last_voice > spoke or (t.after is not None and not t.after.done())
+        ):  # fmt: skip
+            return
         t.ack = Reply(ledger.new_id(), text=text, generated=True)
         self.replies[t.ack.id], self.answering = t.ack, t.answering
-        t.now += ACKED.format(ack=text)
-        self._spawn(self._audio(t.ack, pcm))
+        await self._audio(t.ack, pcm)
 
     async def _voice_acks(self) -> None:
         """`ACKS` in Valor's voice, made once as the call starts."""

@@ -142,10 +142,13 @@ against a new Meet with a second device of Valor's account
   made in his voice as the call starts, said as a reply of its own on the
   same path (its `meet.say`, playback and cut-off); in a 1:1 for every
   turn, in a group only when he is named (a follow-on may be to someone
-  else, and the mind silent on it); never while he is speaking, nor over
-  anyone who spoke in the last `ACK_QUIET_S`. The mind is told it was
-  said, so it answers; the answer's first sound waits for it. Cut by the
-  person going on, it drops the turn.
+  else, and the mind silent on it). It waits until `ACK_AFTER_S` (2 s)
+  has passed since anyone last spoke and is not said if anyone spoke
+  since, Valor is speaking, or the answer has begun (said 1.6 s after the
+  last word it sounded inside a 1.4 s mid-thought pause the transcriber
+  had ended a turn in, the live Meet test, 2026-11-28). The mind is told
+  one may have been said, so it answers; the answer's first sound waits
+  for one playing. Cut by the person going on, it drops the turn.
   Each whole sentence goes to the voice as it is written
   (`settings.call_voice_model`, voice `settings.call_voice`); a turn is
   one `meet.say`, requested at its first sound, its audio held until

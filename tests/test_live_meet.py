@@ -316,8 +316,18 @@ class Device:
             if self.voice and self.voice[-1] > end:
                 break
         later = [t for t in self.voice if t > end]
-        await self.quiet()
+        await self.answered(end)
         return (later[0] - end) if later else float("inf")
+
+    async def answered(self, end: float) -> None:
+        """Until Valor's answer after `end` is over: past a short "Ok." (`call.ACKS`), more than a second
+        of his voice (each frame here 10 ms), then quiet. A person told "Ok" waits for the answer; on
+        quiet alone the asker spoke over it (the live run, 2026-11-28)."""
+        for _ in range(240):
+            if sum(1 for t in self.voice if t > end) * 0.01 > 1.0:
+                break
+            await asyncio.sleep(0.25)
+        await self.quiet()
 
     async def pause(self, kokoro, first: str, pause_s: float, then: str) -> dict:
         """`first`, `pause_s` of quiet, then `then`, one stream: whether
@@ -336,7 +346,7 @@ class Device:
                 break
         early = [t for t in self.voice if start + len(one) / rate < t < end]
         later = [t for t in self.voice if t > end]
-        await self.quiet()
+        await self.answered(end)
         return {
             "pause_s": pause_s,
             "cut_off": bool(early),
@@ -354,7 +364,7 @@ class Device:
             if self.voice and self.voice[-1] > end:
                 break
         later = [t for t in self.voice if t > end]
-        await self.quiet()
+        await self.answered(end)
         return {"gap": (later[0] - end) if later else float("inf")}
 
     async def quiet(self, s: float = 2.0) -> None:
