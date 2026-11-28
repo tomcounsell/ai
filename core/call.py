@@ -1384,9 +1384,9 @@ class Call:
         self.replies: dict[str, Reply] = {}  # each reply whose `meet.say` is not settled
         self.out: Reply | None = None  # the reply whose audio is playing
         self.answering: str | None = None  # whose words the reply playing answers
-        self.went_on: str | None = None
+        self.went_on: str | None = None  # who went on speaking before Valor's first sound, dropping his turn
         self.acks: list[tuple[str, bytes]] = []  # `ACKS` in Valor's voice (`_voice_acks`)
-        self.acked = 0  # who went on speaking before Valor's first sound, dropping his turn
+        self.acked = 0  # acknowledgements said, for the next of `ACKS`
         self.barge = 0.0
         self.playing_until = 0.0
         self.posts: asyncio.Queue = asyncio.Queue()
@@ -1600,7 +1600,7 @@ class Call:
         """Until the transcriber is to be reopened: at a quiet moment in the
         last `EARS_EARLY_S` before `EARS_S`, between turns, or at `EARS_S`."""
         while True:
-            await asyncio.sleep(min(0.2, STATE_S))
+            await asyncio.sleep(0.2)
             age = self.clock() - self.ears_at
             quiet = self.now() - self.last_voice >= EARS_QUIET_S and not self.heard and self.heard_at is None
             if age >= EARS_S or (age >= EARS_S - EARS_EARLY_S and quiet):

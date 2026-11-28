@@ -179,9 +179,7 @@ def test_every_notice_names_the_work_by_its_request_and_carries_no_internals(dsn
             # No Brief (a failed binding names the channel): no empty quote.
             assert await notices.headline(conn, "telegram") is None
             unread = await intake._unread(
-                conn,
-                None,
-                {"text": "do the thing", "channel": "telegram", "message_id": "9", "sender_name": "Kim"},
+                conn, None, {"text": "do the thing", "channel": "telegram", "message_id": "9", "sender_name": "Kim"}
             )
             assert unread.startswith('Kim\'s message 9 on telegram ("do the thing") was not acted on')
 

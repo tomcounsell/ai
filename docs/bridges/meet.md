@@ -148,7 +148,11 @@ against a new Meet with a second device of Valor's account
   last word it sounded inside a 1.4 s mid-thought pause the transcriber
   had ended a turn in, the live Meet test, 2026-11-28). The mind is told
   one may have been said, so it answers; the answer's first sound waits
-  for one playing. Cut by the person going on, it drops the turn.
+  for one playing. Cut by the person going on, it drops the turn. It is
+  kept in the call's transcript but not in the call so far the mind
+  reads: taken there as an answer of his, the next words to someone else
+  counted as following on from it, and the mind spoke its reasoning for
+  72 s (the live Meet test, 2026-11-28).
   Each whole sentence goes to the voice as it is written
   (`settings.call_voice_model`, voice `settings.call_voice`); a turn is
   one `meet.say`, requested at its first sound, its audio held until

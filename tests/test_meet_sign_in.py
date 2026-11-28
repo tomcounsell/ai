@@ -813,9 +813,7 @@ def login(monkeypatch, quick):
     from bridges.meet import google
 
     monkeypatch.setattr(google.asyncio, "sleep", lambda _s, sleep=asyncio.sleep: sleep(0))
-    monkeypatch.setattr(
-        google, "secret", lambda field, account=None: {"password": "pw-1", "otp": "123456"}[field]
-    )
+    monkeypatch.setattr(google, "secret", lambda field, account=None: {"password": "pw-1", "otp": "123456"}[field])
     return google
 
 
@@ -867,16 +865,7 @@ def test_the_login_is_read_from_1password_by_the_items_name(monkeypatch):
     monkeypatch.setattr(credentials, "op", lambda args, vault_env: asked.append(args) or "v")
     assert google.secret("password") == google.secret("otp") == "v"
     assert asked == [
-        [
-            "item",
-            "get",
-            "Google valor@yuda.me",
-            "--vault",
-            "m-valor",
-            "--fields",
-            "label=password",
-            "--reveal",
-        ],
+        ["item", "get", "Google valor@yuda.me", "--vault", "m-valor", "--fields", "label=password", "--reveal"],
         ["item", "get", "Google valor@yuda.me", "--vault", "m-valor", "--otp"],
     ]
 
@@ -904,9 +893,7 @@ def test_a_page_for_another_account_signs_in_as_it_with_its_own_login(login, mon
     from bridges.meet.google import Account
 
     asked = []
-    monkeypatch.setattr(
-        login, "secret", lambda field, account=None: asked.append((field, account.email)) or "v"
-    )
+    monkeypatch.setattr(login, "secret", lambda field, account=None: asked.append((field, account.email)) or "v")
     meet_page = meet.Page("unused", account=Account("valor@client.example"))
     meet_page.page = Google([f"{ACC}/identifier?x", f"{ACC}/challenge/pwd?x", f"{ACC}/challenge/totp?x", URL])
     assert asyncio.run(meet_page.renew(URL)) is True

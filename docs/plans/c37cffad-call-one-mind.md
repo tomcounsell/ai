@@ -57,7 +57,7 @@ decision, unbuilt.
   stretches (`_speakers`, `_close_stretch`, `call.heard`, who is answered, barge-in cut). Reopened at a
   quiet moment before its 10-minute limit and on a drop, with no audio lost across the switch.
 - **Mind.** On each turn end, one streamed call to `settings.call_mind_model` (default
-  `gemini-3.5-flash-lite`; `gemini-3.8-flash` as the value. Claude is cut from this change: it needs a
+  `gemini-3.8-flash`, after Flash-Lite recorded a decision no one made in the live Meet test, 2026-11-25. Claude is cut from this change: it needs a
   per-call gateway token, the Anthropic SDK and a second tool format; built if Gemini fails acceptance):
   system prompt from today's `INSTRUCTIONS` and "In a call" rules, P-041's `state()` read fresh
   each turn, the transcript so far; tools the existing `ask`, `post`, `settle`, `open_decisions`,
