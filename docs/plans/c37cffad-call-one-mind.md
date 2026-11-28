@@ -106,6 +106,11 @@ decision, unbuilt.
   first): each round asked twice at once, first answer taken; a 429 or 5xx round asked again. Cache,
   thinking off, first clause and an early start on the words so far measured, no gain, not kept.
 
+- **A spoken "ok"** (Tom, 2026-11-27: "During the 7s of thinking time can we get a spoken ok at least?"):
+  one of `ACKS`, made in Alnilam as the call starts, a reply of its own on the one voice path, 2 s after
+  anyone last spoke (at 1.6 s it sounded inside a 1.4 s pause), only for a turn Valor answers (in a group
+  only when named), never over anyone, not once the answer has begun; kept out of the lines the mind reads.
+
 ## Tests
 
 Fake ears, mind and voice in `tests/test_call.py`: one test per rule in the bullets above (each
